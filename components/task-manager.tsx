@@ -9,15 +9,17 @@ import {
   useRef,
   useState,
 } from "react";
+import { upload } from "@vercel/blob/client";
 import type { Campaign } from "@/lib/types";
 import type { PartnerId } from "@/lib/partners";
 import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, TrashIcon, XIcon } from "./icons";
 
-// ---------- stages (mirror the events emitted by /api/launch) ----------
+// ---------- stages ("upload" is client→Blob; the rest mirror /api/launch events) ----------
 
 const STAGES = [
+  { key: "upload", label: "Uploading video" },
   { key: "gcm", label: "Reserving code" },
-  { key: "video", label: "Uploading video" },
+  { key: "video", label: "Registering video" },
   { key: "processing", label: "Processing video" },
   { key: "campaign", label: "Creating campaign" },
   { key: "adset", label: "Creating ad set" },
@@ -208,20 +210,30 @@ export function TaskManagerProvider({ children }: { children: React.ReactNode })
       const input = inputs.current.get(id);
       if (!input) return;
       const startedAt = Date.now();
-      patch(id, { status: "running", stage: "gcm", startedAt, error: undefined });
-      saveRemote(id, { status: "running", stage: "gcm", started_at: startedAt });
+      patch(id, { status: "running", stage: "upload", startedAt, error: undefined });
+      saveRemote(id, { status: "running", stage: "upload", started_at: startedAt });
       try {
         // Recover the video bytes from the (session-lived) object URL captured at enqueue.
         const blob = await fetch(input.videoUrl).then((r) => r.blob());
         const file = new File([blob], input.videoName || "creative.mp4", {
           type: blob.type || "video/mp4",
         });
-        const fd = new FormData();
-        fd.set("partnerId", input.partnerId);
-        fd.set("campaign", JSON.stringify(input.campaign));
-        fd.set("video", file);
 
-        const res = await fetch("/api/launch", { method: "POST", body: fd });
+        // Upload the creative straight to Vercel Blob — this bypasses the serverless request-body
+        // limit (~4.5MB) entirely. The launch route then gets just the URL and FB pulls the video
+        // from it via file_url.
+        const safeName = (file.name || "creative.mp4").replace(/[^\w.-]+/g, "_");
+        const { url: videoUrl } = await upload(`creatives/${id}-${safeName}`, file, {
+          access: "public",
+          contentType: file.type || "video/mp4",
+          handleUploadUrl: "/api/blob-upload",
+        });
+
+        const res = await fetch("/api/launch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ partnerId: input.partnerId, campaign: input.campaign, videoUrl }),
+        });
 
         let final: Record<string, unknown> | null = null;
         const handle = (line: string) => {

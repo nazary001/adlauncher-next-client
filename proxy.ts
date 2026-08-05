@@ -22,8 +22,10 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  // Exclude /api/launch: it carries the multi-MB video upload, and the proxy buffers request
-  // bodies (capped) — that upload gates itself inline instead. `api/launch(?!-)` keeps
-  // /api/launch-tasks proxied.
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|login|api/auth|api/launch(?!-)).*)"],
+  // Excluded from the proxy (they gate themselves):
+  //   • api/launch      — video is now a small JSON URL, but it still auth-checks inline.
+  //   • api/blob-upload — Blob's server-to-server "upload completed" callback carries no cookie;
+  //                       the route enforces auth in onBeforeGenerateToken instead.
+  // `api/launch(?!-)` keeps /api/launch-tasks proxied.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|login|api/auth|api/launch(?!-)|api/blob-upload).*)"],
 };

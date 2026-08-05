@@ -9,6 +9,7 @@ import {
   creativePayload,
 } from "@/lib/fb-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
+import { del } from "@vercel/blob";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -59,17 +60,11 @@ class FbError extends Error {
 
 // ---------- video upload + processing ----------
 
-async function uploadVideo(accountId: string, file: File, name: string): Promise<string> {
-  const form = new FormData();
-  form.set("name", name);
-  form.set("source", file, file.name || "creative.mp4");
-  const res = await fetch(`${FB}/act_${accountId}/advideos`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${TOKEN}` },
-    body: form,
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok || !body?.id) throw new FbError(body?.error?.message ?? "video upload failed", body);
+/** Register the creative with FB by URL — FB fetches the bytes from the (public) Blob URL itself,
+ *  so the video never passes through this function. */
+async function uploadVideo(accountId: string, fileUrl: string, name: string): Promise<string> {
+  const body = await fbPost(`act_${accountId}/advideos`, { name, file_url: fileUrl });
+  if (!body?.id) throw new FbError("video upload failed", body);
   return String(body.id);
 }
 
@@ -190,13 +185,12 @@ export async function POST(req: Request) {
 
   let campaign: Campaign;
   let partnerId: PartnerId;
-  let video: File | null = null;
+  let videoUrl = "";
   try {
-    const fd = await req.formData();
-    campaign = JSON.parse(String(fd.get("campaign") ?? "{}")) as Campaign;
-    partnerId = String(fd.get("partnerId") ?? "in") as PartnerId;
-    const v = fd.get("video");
-    if (v instanceof File) video = v;
+    const j = (await req.json()) as { campaign?: Campaign; partnerId?: string; videoUrl?: string };
+    campaign = (j.campaign ?? {}) as Campaign;
+    partnerId = String(j.partnerId ?? "in") as PartnerId;
+    videoUrl = typeof j.videoUrl === "string" ? j.videoUrl : "";
   } catch (e) {
     return NextResponse.json({ ok: false, stage: "parse", error: String(e) }, { status: 400 });
   }
@@ -211,13 +205,12 @@ export async function POST(req: Request) {
   if (!binds.accountId || !binds.pageId) {
     return NextResponse.json({ ok: false, stage: "config", error: "partner_not_launchable" }, { status: 400 });
   }
-  if (!video) {
+  if (!videoUrl) {
     return NextResponse.json({ ok: false, stage: "media", error: "video_required" }, { status: 400 });
   }
 
   const name = `${campaign.namePrefix}${campaign.name}`.trim();
   const conversions = campaign.optimization === "conversions";
-  const vid = video; // narrowed non-null
 
   // Stream NDJSON stage events so the Task Manager can show live per-stage progress.
   const encoder = new TextEncoder();
@@ -238,12 +231,14 @@ export async function POST(req: Request) {
         const link = fullLandingUrl(partner, campaign.landing, gcm, conversions);
         if (!link) throw new FbError("no landing selected — cannot build destination link", {});
 
-        // 2) upload the creative video and wait for processing
+        // 2) register the creative (FB pulls it from the Blob URL) and wait for processing
         send({ stage: "video" });
-        const videoId = await uploadVideo(binds.accountId, vid, `${name} · video`);
+        const videoId = await uploadVideo(binds.accountId, videoUrl, `${name} · video`);
         created.video_id = videoId;
         send({ stage: "processing" });
         await waitForVideo(videoId);
+        // FB has the bytes now — drop the temporary blob (best-effort, never blocks the launch).
+        void del(videoUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
         const thumbUrl = await videoThumb(videoId);
         const localeIds = await resolveLocales(campaign.locales);
 
