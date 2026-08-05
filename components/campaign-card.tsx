@@ -274,6 +274,7 @@ export function CampaignCard({
                         spellCheck={false}
                         value={c.name}
                         onChange={(e) => patch({ name: e.target.value })}
+                        maxLength={Math.max(1, 400 - c.namePrefix.length)}
                         placeholder="suffix — e.g. Auto | vd-01"
                         className="h-full min-w-0 flex-1 bg-transparent px-3 text-[13px] text-ink placeholder:text-faint outline-none"
                       />
@@ -282,6 +283,7 @@ export function CampaignCard({
                     <TextInput
                       value={c.name}
                       onChange={(e) => patch({ name: e.target.value })}
+                      maxLength={400}
                       placeholder="ZA | Cars | vd-01"
                     />
                   )}
@@ -427,6 +429,7 @@ export function CampaignCard({
                     <TextArea
                       value={c.title}
                       onChange={(e) => patch({ title: e.target.value })}
+                      maxLength={255}
                       placeholder="Ad title"
                       className="min-h-[56px]"
                       rows={2}
@@ -436,6 +439,7 @@ export function CampaignCard({
                     <TextArea
                       value={c.copy}
                       onChange={(e) => patch({ copy: e.target.value })}
+                      maxLength={2000}
                       placeholder="Primary text"
                       rows={3}
                     />
@@ -547,6 +551,7 @@ export function CampaignCard({
                       <TextInput
                         value={c.link}
                         onChange={(e) => patch({ link: e.target.value })}
+                        maxLength={2000}
                         placeholder="https://…"
                         className="font-mono text-[12px]"
                       />
@@ -556,6 +561,7 @@ export function CampaignCard({
                     <TextInput
                       value={c.headline}
                       onChange={(e) => patch({ headline: e.target.value })}
+                      maxLength={255}
                       placeholder="Headline"
                     />
                   </Field>
