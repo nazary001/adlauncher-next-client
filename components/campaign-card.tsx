@@ -2,7 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 import type { Campaign } from "@/lib/types";
-import { fullName, isReady } from "@/lib/types";
+import { bidAmountMissing, fullName, isReady } from "@/lib/types";
 import {
   AGES,
   BID_STRATEGIES,
@@ -390,9 +390,10 @@ export function CampaignCard({
                   />
                 </Field>
                 <Field
-                  label="Bid cap"
+                  label={bidCapEnabled ? "Bid cap *" : "Bid cap"}
                   className="col-span-6"
                   hint={bidCapEnabled ? undefined : "Lowest cost bids automatically"}
+                  error={bidAmountMissing(c) ? "Required for this bid strategy" : undefined}
                 >
                   <MoneyInput
                     value={c.bidCap}

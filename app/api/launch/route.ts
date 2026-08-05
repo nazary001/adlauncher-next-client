@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import type { Campaign } from "@/lib/types";
+import { type Campaign, bidAmountMissing } from "@/lib/types";
 import { partnerConfig, fullLandingUrl, type PartnerId } from "@/lib/partners";
 import {
   type LaunchBinds,
@@ -311,6 +311,12 @@ export async function POST(req: Request) {
   }
   if (!videoUrl) {
     return NextResponse.json({ ok: false, stage: "media", error: "video_required" }, { status: 400 });
+  }
+  if (bidAmountMissing(campaign)) {
+    return NextResponse.json(
+      { ok: false, stage: "config", error: "Bid amount required for the selected bid strategy" },
+      { status: 400 },
+    );
   }
 
   const name = `${campaign.namePrefix}${campaign.name}`.trim();

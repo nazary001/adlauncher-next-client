@@ -88,6 +88,13 @@ export function parseMoney(v: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+/** Cap-based bid strategies (bid cap / cost cap) need a positive bid amount; without it Meta
+ *  rejects the ad set ("Bid amount required for the bid strategy provided"). Lowest-cost bids
+ *  automatically and needs none. */
+export function bidAmountMissing(c: Campaign): boolean {
+  return c.bidStrategy !== "LOWEST_COST_WITHOUT_CAP" && parseMoney(c.bidCap) <= 0;
+}
+
 export function isReady(
   c: Campaign,
   opts: { landing?: boolean; profile?: boolean } = {},
@@ -96,6 +103,7 @@ export function isReady(
   if (!c.name.trim() || c.countries.length === 0) return false;
   if (profile && !c.profile) return false;
   if (landing && !c.landing) return false;
+  if (bidAmountMissing(c)) return false;
   return true;
 }
 

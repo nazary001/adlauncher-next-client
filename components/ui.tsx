@@ -24,11 +24,14 @@ export function Field({
   children,
   className = "",
   hint,
+  error,
 }: {
   label: string;
   children: ReactElement<{ id?: string }>;
   className?: string;
   hint?: string;
+  /** When set, shown in place of the hint in a warning tone — the reason the field blocks launch. */
+  error?: string;
 }) {
   const id = useId();
   return (
@@ -40,7 +43,11 @@ export function Field({
         {label}
       </label>
       {cloneElement(children, { id })}
-      {hint ? <p className="text-[11px] leading-snug text-faint">{hint}</p> : null}
+      {error ? (
+        <p className="text-[11px] leading-snug text-warn">{error}</p>
+      ) : hint ? (
+        <p className="text-[11px] leading-snug text-faint">{hint}</p>
+      ) : null}
     </div>
   );
 }
