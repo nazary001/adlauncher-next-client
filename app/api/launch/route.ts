@@ -58,6 +58,37 @@ class FbError extends Error {
   }
 }
 
+/**
+ * Create the ad set, self-healing the regional "universal ads" declarations Meta requires for
+ * regulated locations (Taiwan, Singapore, …) when the audience includes them — e.g. worldwide
+ * targeting. Meta surfaces one region per error ("...use the following value ...: TAIWAN_UNIVERSAL"),
+ * so we add each demanded value to regional_regulated_categories and retry. Pre-seeded from the
+ * payload (worldwide sends the known pair up front); this catches anything further Meta adds.
+ */
+async function createAdset(path: string, payload: Json): Promise<Json> {
+  const seed = payload.regional_regulated_categories;
+  const cats = new Set<string>(Array.isArray(seed) ? (seed as string[]) : []);
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const body: Json = cats.size ? { ...payload, regional_regulated_categories: [...cats] } : payload;
+    try {
+      return await fbPost(path, body);
+    } catch (e) {
+      const detail = (e as FbError).detail as
+        | { error?: { error_user_title?: string; error_user_msg?: string } }
+        | undefined;
+      const text = `${detail?.error?.error_user_title ?? ""} ${detail?.error?.error_user_msg ?? ""}`;
+      const m = /([A-Z][A-Z_]*_UNIVERSAL)/.exec(text);
+      if (m && !cats.has(m[1])) {
+        cats.add(m[1]);
+        continue; // Meta named a new required declaration → add it and retry
+      }
+      throw e; // unrelated failure — surface it
+    }
+  }
+  // Exhausted retries — one last attempt so a genuine failure propagates with its detail.
+  return fbPost(path, { ...payload, regional_regulated_categories: [...cats] });
+}
+
 // ---------- video upload + processing ----------
 
 /** Register the creative with FB by URL — FB fetches the bytes from the (public) Blob URL itself,
@@ -248,7 +279,7 @@ export async function POST(req: Request) {
         created.campaign_id = String(camp.id);
 
         send({ stage: "adset" });
-        const adset = await fbPost(
+        const adset = await createAdset(
           `act_${binds.accountId}/adsets`,
           adsetPayload(campaign, name, String(camp.id), binds, localeIds),
         );

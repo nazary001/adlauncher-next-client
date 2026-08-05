@@ -110,7 +110,20 @@ export function adsetPayload(
     p.promoted_object = promoted;
   }
 
+  // Worldwide reach includes regulated locations (Taiwan, Singapore) that each require a self-
+  // declared "universal ads" category, or Meta rejects the ad set with "Invalid parameter". The
+  // launch route self-heals any further regions Meta may demand.
+  const declarations = regionalDeclarations(c);
+  if (declarations.length) p.regional_regulated_categories = declarations;
+
   return p;
+}
+
+/** Self-declared "universal ads" categories Meta requires for regulated locations in the audience.
+ *  Only worldwide reaches them by default; specific-country runs that happen to include one are
+ *  covered by the launch route's self-healing retry. */
+export function regionalDeclarations(c: Campaign): string[] {
+  return c.countries.includes("WW") ? ["TAIWAN_UNIVERSAL", "SINGAPORE_UNIVERSAL"] : [];
 }
 
 /** POST /act_<id>/adcreatives — video creative with CTA pointing at the tracking link. */
