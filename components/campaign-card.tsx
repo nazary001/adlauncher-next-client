@@ -104,7 +104,6 @@ export function CampaignCard({
   index,
   partner,
   adCount,
-  flying,
   onPatch,
   onToggleCollapse,
   onDuplicate,
@@ -116,8 +115,6 @@ export function CampaignCard({
   partner: PartnerConfig;
   /** Live ads-running-or-in-review count on the bound fanpage (Indians). null = unavailable. */
   adCount?: number | null;
-  /** Playing the fly-to-Task-Manager exit animation after launch. */
-  flying?: boolean;
   onPatch: (id: string, patch: Partial<Campaign>) => void;
   onToggleCollapse: (id: string) => void;
   onDuplicate: (id: string) => void;
@@ -176,7 +173,7 @@ export function CampaignCard({
         "group/card relative rounded-2xl border border-line bg-surface " +
         "transition-[border-color,box-shadow] duration-200 hover:border-line2 " +
         "hover:shadow-[0_12px_44px_rgba(0,0,0,0.35)] " +
-        (flying ? "animate-fly-out pointer-events-none" : leaving ? "animate-card-out" : "animate-card-in")
+        (leaving ? "animate-card-out" : "animate-card-in")
       }
     >
       {/* header */}

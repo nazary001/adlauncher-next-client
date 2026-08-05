@@ -17,12 +17,15 @@ export function LaunchRail({
   campaigns,
   partner,
   previewed,
+  justQueued,
   onPreview,
   onLaunch,
 }: {
   campaigns: Campaign[];
   partner: PartnerConfig;
   previewed: boolean;
+  /** Count just sent to the Task Manager — shows a brief confirmation; campaigns stay on the board. */
+  justQueued: number;
   onPreview: () => void;
   onLaunch: () => void;
 }) {
@@ -162,11 +165,17 @@ export function LaunchRail({
             </button>
           ) : null}
 
-          <p className="text-center text-[10.5px] leading-relaxed text-faint">
-            {readyCount > 0
-              ? "Queued to Task Manager · creates paused"
-              : `${partner.launchNote} · needs a video creative`}
-          </p>
+          {justQueued > 0 ? (
+            <p className="animate-pop-in text-center text-[11px] font-medium leading-relaxed text-launch2">
+              ✓ {justQueued} sent to Task Manager · still here to tweak &amp; relaunch
+            </p>
+          ) : (
+            <p className="text-center text-[10.5px] leading-relaxed text-faint">
+              {readyCount > 0
+                ? "Queued to Task Manager · creates paused"
+                : `${partner.launchNote} · needs a video creative`}
+            </p>
+          )}
         </div>
       </div>
     </aside>

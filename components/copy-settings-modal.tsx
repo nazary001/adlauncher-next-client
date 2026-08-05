@@ -35,8 +35,9 @@ const optLabel = (arr: { value: string; label: string }[], v: string) =>
 const list = (arr: string[], n = 3) =>
   arr.length ? arr.slice(0, n).join(", ") + (arr.length > n ? ` +${arr.length - n}` : "") : "—";
 
-/** Every campaign setting the first card can push onto the others (never gcm/name/id). */
+/** Every campaign setting the first card can push onto the others (never gcm/id — each keeps its own). */
 const FIELDS: Field[] = [
+  { key: "name", label: "Name", group: "Setup", preview: (c) => c.name || "—" },
   { key: "profile", label: "Profile", group: "Setup", when: (p) => p.usesProfile, preview: (c) => c.profile || "—" },
   { key: "account", label: "Account", group: "Setup", when: (p) => !p.lockedAccount, preview: (c) => c.account || "—" },
   { key: "page", label: "Page", group: "Setup", when: (p) => !p.lockedAccount, preview: (c) => c.page || "—" },

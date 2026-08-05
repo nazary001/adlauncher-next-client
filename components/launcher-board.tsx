@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Campaign, FileItem } from "@/lib/types";
 import { firstVideo, fullName, isLaunchable, makeCampaign } from "@/lib/types";
+import { spinCopy } from "@/lib/rephrase";
 import { countryName } from "@/lib/catalog";
 import {
   type PartnerConfig,
@@ -54,8 +55,9 @@ function LauncherInner({ user }: { user?: SessionUser }) {
   const [reserved, setReserved] = useState<Set<string> | null>(null);
   // Live ads-running-or-in-review count on the bound fanpage. null = unavailable/not loaded.
   const [adCount, setAdCount] = useState<number | null>(null);
-  // Ids currently playing the fly-to-Task-Manager animation before removal.
-  const [flying, setFlying] = useState<Set<string>>(new Set());
+  // Count just sent to the Task Manager, shown as a brief confirmation (campaigns stay on the board).
+  const [justQueued, setJustQueued] = useState(0);
+  const queuedTimer = useRef<number | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>(() =>
     normalize([makeCampaign("c1", namePrefixFor(partnerConfig("in"), todayDDMM()))], partnerConfig("in"), null),
   );
@@ -134,6 +136,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
     // Reserve every code we're launching right now (optimistic — the tasks fire in the background),
     // so any card built next never re-previews a code that's already on its way into the registry.
     const nextReserved = reserved ? new Set(reserved) : null;
+    const launched = new Set<string>();
     for (const c of launchable) {
       const video = firstVideo(c);
       if (!video) continue;
@@ -148,23 +151,21 @@ function LauncherInner({ user }: { user?: SessionUser }) {
         geo: geoShort(c),
         budget: c.budget,
       });
+      launched.add(c.id);
     }
     if (nextReserved) setReserved(nextReserved);
-
-    const ids = new Set(launchable.map((c) => c.id));
-    setFlying(ids);
     setPreviewed(false);
-    window.setTimeout(() => {
-      setFlying(new Set());
-      setCampaigns((cs) => {
-        const remaining = cs.filter((c) => !ids.has(c.id));
-        const base = remaining.length
-          ? remaining
-          : [makeCampaign(`c${nextId.current++}`, namePrefixFor(partner, todayDDMM()))];
-        return normalize(base, partner, nextReserved);
-      });
-      loadVolume();
-    }, 340);
+
+    // Keep the campaigns on the board so you can tweak them and relaunch — only clear the gcm of the
+    // ones just sent (their codes are now taken) so normalize hands them fresh codes for the next wave.
+    setCampaigns((cs) =>
+      normalize(cs.map((c) => (launched.has(c.id) ? { ...c, gcm: "" } : c)), partner, nextReserved),
+    );
+
+    setJustQueued(launched.size);
+    if (queuedTimer.current) window.clearTimeout(queuedTimer.current);
+    queuedTimer.current = window.setTimeout(() => setJustQueued(0), 3500);
+    loadVolume();
   }
 
   function mutate(fn: (cs: Campaign[]) => Campaign[]) {
@@ -194,13 +195,14 @@ function LauncherInner({ user }: { user?: SessionUser }) {
       const i = cs.findIndex((c) => c.id === id);
       if (i === -1) return cs;
       const src = cs[i];
-      const copy: Campaign = {
+      const clone: Campaign = {
         ...src,
         id: `c${nextId.current++}`,
         collapsed: false,
         gcm: "", // each ad claims its own code — re-assigned by assignGcmCodes
+        copy: spinCopy(src.copy), // vary the primary text so clones aren't identical ads
       };
-      return [...cs.slice(0, i + 1), copy, ...cs.slice(i + 1)];
+      return [...cs.slice(0, i + 1), clone, ...cs.slice(i + 1)];
     });
 
   const remove = (id: string) => mutate((cs) => cs.filter((c) => c.id !== id));
@@ -225,15 +227,15 @@ function LauncherInner({ user }: { user?: SessionUser }) {
 
   const MAX_CARDS = 100;
 
-  /** Wave builder: grow every card to `n` identical copies (fresh gcm each). Clones collapse
-   *  so a big wave stays scannable. `n` is the total-per-card multiplier. */
+  /** Wave builder: grow every card to `n` copies (fresh gcm + a varied copy each). Clones open
+   *  expanded so you can review them right away. `n` is the total-per-card multiplier. */
   const duplicateAll = (n: number) =>
     mutate((cs) => {
       const out: Campaign[] = [];
       for (const c of cs) {
         out.push(c);
         for (let k = 1; k < n && out.length < MAX_CARDS; k++) {
-          out.push({ ...c, id: `c${nextId.current++}`, collapsed: true, gcm: "" });
+          out.push({ ...c, id: `c${nextId.current++}`, collapsed: false, gcm: "", copy: spinCopy(c.copy) });
         }
       }
       return out.slice(0, MAX_CARDS);
@@ -338,7 +340,6 @@ function LauncherInner({ user }: { user?: SessionUser }) {
                 index={i}
                 partner={partner}
                 adCount={adCount}
-                flying={flying.has(c.id)}
                 onPatch={patch}
                 onToggleCollapse={toggleCollapse}
                 onDuplicate={duplicate}
@@ -366,6 +367,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
             campaigns={campaigns}
             partner={partner}
             previewed={previewed}
+            justQueued={justQueued}
             onPreview={() => setPreviewed(true)}
             onLaunch={launch}
           />
