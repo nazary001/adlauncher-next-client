@@ -33,14 +33,70 @@ function fbErrorMessage(body: Json, fallback: string): string {
   return typeof e.message === "string" ? e.message : fallback;
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Meta throttles the whole app with (#4)/(#17)/(#613) or is_transient errors when call volume
+// spikes (a big launch wave polls a lot). These are temporary, so instead of failing the launch we
+// back off and retry the SAME call — resources already created upstream aren't touched, so no dup
+// campaigns. This also self-paces the sequential queue under the limit.
+const RATE_LIMIT_CODES = new Set([4, 17, 613, 80004, 80014]);
+function isRateLimited(body: Json): boolean {
+  const e = (body?.error ?? {}) as { code?: number; is_transient?: boolean };
+  return RATE_LIMIT_CODES.has(e.code ?? -1) || e.is_transient === true;
+}
+const RATE_RETRIES = 5;
+const rateBackoff = (attempt: number) => Math.min(4000 * 2 ** attempt, 30000); // 4→8→16→30→30s
+
+// Meta reports rolling ads rate-limit usage in x-business-use-case-usage (per BM/account:
+// call_count/total_time are 0–100% of the limit; estimated_time_to_regain_access is minutes until a
+// throttle lifts). As usage nears the ceiling we pause so the sequential queue paces itself under
+// the limit instead of slamming into (#4). Kept light so a single launch stays within maxDuration.
+type UsageStat = {
+  call_count?: number;
+  total_cputime?: number;
+  total_time?: number;
+  estimated_time_to_regain_access?: number;
+};
+async function throttle(res: Response): Promise<void> {
+  const raw = res.headers.get("x-business-use-case-usage") ?? res.headers.get("x-app-usage") ?? "";
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const stats: UsageStat[] = [];
+    if (typeof (parsed as UsageStat).call_count === "number") stats.push(parsed as UsageStat); // flat x-app-usage
+    for (const v of Object.values(parsed)) if (Array.isArray(v)) for (const o of v) if (o && typeof o === "object") stats.push(o as UsageStat);
+    let pct = 0;
+    let regainMin = 0;
+    for (const s of stats) {
+      pct = Math.max(pct, s.call_count ?? 0, s.total_cputime ?? 0, s.total_time ?? 0);
+      regainMin = Math.max(regainMin, s.estimated_time_to_regain_access ?? 0);
+    }
+    if (regainMin > 0) await sleep(Math.min(regainMin * 60_000, 30_000)); // throttled → wait (cap 30s)
+    else if (pct >= 95) await sleep(8000);
+    else if (pct >= 90) await sleep(4000);
+    else if (pct >= 80) await sleep(1500);
+  } catch {
+    /* malformed header — ignore */
+  }
+}
+
 async function fbGet(path: string): Promise<Json> {
-  const res = await fetch(`${FB}/${path}`, {
-    headers: { Authorization: `Bearer ${TOKEN}` },
-    cache: "no-store",
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new FbError(fbErrorMessage(body, `GET ${path} failed`), body);
-  return body;
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`${FB}/${path}`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+      cache: "no-store",
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.ok) {
+      await throttle(res);
+      return body;
+    }
+    if (attempt < RATE_RETRIES && isRateLimited(body)) {
+      await sleep(rateBackoff(attempt));
+      continue;
+    }
+    throw new FbError(fbErrorMessage(body, `GET ${path} failed`), body);
+  }
 }
 
 /** POST with form-encoding; nested objects/arrays are JSON-stringified (Marketing API convention). */
@@ -50,14 +106,23 @@ async function fbPost(path: string, params: Json): Promise<Json> {
     if (v === undefined || v === null) continue;
     form.set(k, typeof v === "object" ? JSON.stringify(v) : String(v));
   }
-  const res = await fetch(`${FB}/${path}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/x-www-form-urlencoded" },
-    body: form,
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new FbError(fbErrorMessage(body, `POST ${path} failed`), body);
-  return body;
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`${FB}/${path}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/x-www-form-urlencoded" },
+      body: form,
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.ok) {
+      await throttle(res);
+      return body;
+    }
+    if (attempt < RATE_RETRIES && isRateLimited(body)) {
+      await sleep(rateBackoff(attempt));
+      continue;
+    }
+    throw new FbError(fbErrorMessage(body, `POST ${path} failed`), body);
+  }
 }
 
 class FbError extends Error {
@@ -108,8 +173,6 @@ async function uploadVideo(accountId: string, fileUrl: string, name: string): Pr
   if (!body?.id) throw new FbError("video upload failed", body);
   return String(body.id);
 }
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Wait until the uploaded video finishes processing (or throw on error/timeout). */
 async function waitForVideo(videoId: string, timeoutMs = 180_000): Promise<void> {
