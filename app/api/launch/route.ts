@@ -23,13 +23,23 @@ const STRAPI_TOKEN = process.env.STRAPI_TOKEN ?? "";
 
 type Json = Record<string, unknown>;
 
+/** Meta's most actionable error text: prefer the user-facing title/message ("Advertiser is
+ *  missing: Provide a verified advertiser…") over the generic "Invalid parameter". */
+function fbErrorMessage(body: Json, fallback: string): string {
+  const e = (body?.error ?? {}) as Record<string, unknown>;
+  const title = typeof e.error_user_title === "string" ? e.error_user_title : "";
+  const msg = typeof e.error_user_msg === "string" ? e.error_user_msg : "";
+  if (title || msg) return [title, msg].filter(Boolean).join(": ");
+  return typeof e.message === "string" ? e.message : fallback;
+}
+
 async function fbGet(path: string): Promise<Json> {
   const res = await fetch(`${FB}/${path}`, {
     headers: { Authorization: `Bearer ${TOKEN}` },
     cache: "no-store",
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new FbError(body?.error?.message ?? `GET ${path} failed`, body);
+  if (!res.ok) throw new FbError(fbErrorMessage(body, `GET ${path} failed`), body);
   return body;
 }
 
@@ -46,7 +56,7 @@ async function fbPost(path: string, params: Json): Promise<Json> {
     body: form,
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new FbError(body?.error?.message ?? `POST ${path} failed`, body);
+  if (!res.ok) throw new FbError(fbErrorMessage(body, `POST ${path} failed`), body);
   return body;
 }
 
