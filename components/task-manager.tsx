@@ -10,7 +10,7 @@ import {
   useState,
 } from "react";
 import { upload } from "@vercel/blob/client";
-import type { Campaign } from "@/lib/types";
+import { type Campaign, moneyLabel } from "@/lib/types";
 import type { PartnerId } from "@/lib/partners";
 import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, TrashIcon, XIcon } from "./icons";
 
@@ -706,7 +706,7 @@ function TaskRow({
             {task.name || "Untitled campaign"}
           </p>
           <p className="mt-0.5 truncate font-mono text-[10.5px] text-faint">
-            gcm {task.gcm || "—"} · {task.geo} · ${task.budget}
+            gcm {task.gcm || "—"} · {task.geo} · ${moneyLabel(task.budget)}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">

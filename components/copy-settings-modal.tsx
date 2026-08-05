@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { Campaign } from "@/lib/types";
+import { type Campaign, moneyLabel } from "@/lib/types";
 import type { PartnerConfig } from "@/lib/partners";
 import {
   AGES,
@@ -47,8 +47,8 @@ const FIELDS: Field[] = [
   { key: "optimization", label: "Optimization", group: "Delivery", preview: (c) => optLabel(OPTIMIZATIONS, c.optimization) },
   { key: "bidStrategy", label: "Bid strategy", group: "Delivery", preview: (c) => optLabel(BID_STRATEGIES, c.bidStrategy) },
   { key: "conversionEvent", label: "Conversion event", group: "Delivery", preview: (c) => optLabel(CONVERSION_EVENTS, c.conversionEvent) },
-  { key: "budget", label: "Daily budget", group: "Delivery", preview: (c) => `$${c.budget || "0"}` },
-  { key: "bidCap", label: "Bid cap", group: "Delivery", preview: (c) => (c.bidCap ? `$${c.bidCap}` : "—") },
+  { key: "budget", label: "Daily budget", group: "Delivery", preview: (c) => `$${moneyLabel(c.budget)}` },
+  { key: "bidCap", label: "Bid cap", group: "Delivery", preview: (c) => (c.bidCap ? `$${moneyLabel(c.bidCap)}` : "—") },
 
   { key: "landing", label: "Landing", group: "Creative", when: (p) => p.usesGcm, preview: (c) => c.landing || "—" },
   { key: "link", label: "Destination link", group: "Creative", when: (p) => !p.usesGcm, preview: (c) => c.link || "—" },

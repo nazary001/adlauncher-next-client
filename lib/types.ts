@@ -57,7 +57,7 @@ export function makeCampaign(id: string, namePrefix = ""): Campaign {
     bidStrategy: "LOWEST_COST_WITHOUT_CAP",
     conversionEvent: "PURCHASE",
     optimization: "conversions",
-    budget: "10,00",
+    budget: "10",
     bidCap: "",
     title: "",
     copy: "",
@@ -86,6 +86,14 @@ export function fullName(c: Campaign): string {
 export function parseMoney(v: string): number {
   const n = parseFloat(v.replace(/\s/g, "").replace(",", "."));
   return Number.isFinite(n) ? n : 0;
+}
+
+/** Money for display — whole amounts show as a plain integer ("10"); fractional keep their value
+ *  ("0,5"). No trailing ",00" cents anywhere in the UI. */
+export function moneyLabel(v: string | number): string {
+  const n = typeof v === "number" ? v : parseMoney(v);
+  if (!Number.isFinite(n)) return "0";
+  return Number.isInteger(n) ? String(n) : String(n).replace(".", ",");
 }
 
 /** Cap-based bid strategies (bid cap / cost cap) need a positive bid amount; without it Meta

@@ -1,7 +1,7 @@
 "use client";
 
 import type { Campaign } from "@/lib/types";
-import { fullName, isLaunchable, parseMoney } from "@/lib/types";
+import { fullName, isLaunchable, moneyLabel, parseMoney } from "@/lib/types";
 import { CONVERSION_EVENTS, countryName } from "@/lib/catalog";
 import type { PartnerConfig } from "@/lib/partners";
 import { CheckIcon, EyeIcon, RocketIcon } from "./icons";
@@ -104,7 +104,7 @@ export function LaunchRail({
                     </span>
                   </span>
                   <span className="shrink-0 font-mono text-[11.5px] tabular-nums text-dim">
-                    ${c.budget || "0"}
+                    ${moneyLabel(c.budget)}
                   </span>
                   {previewed && ready ? (
                     <CheckIcon className="h-3.5 w-3.5 shrink-0 text-launch2" />
@@ -139,7 +139,7 @@ export function LaunchRail({
               Total / day
             </span>
             <span className="font-mono text-[22px] font-medium leading-none tabular-nums text-ink">
-              ${total.toFixed(2).replace(".", ",")}
+              ${moneyLabel(total)}
             </span>
           </div>
           <p className="mt-1 text-right text-[10.5px] text-faint">

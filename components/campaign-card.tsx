@@ -2,7 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 import type { Campaign } from "@/lib/types";
-import { bidAmountMissing, fullName, isReady } from "@/lib/types";
+import { bidAmountMissing, fullName, isReady, moneyLabel } from "@/lib/types";
 import {
   AGES,
   BID_STRATEGIES,
@@ -212,7 +212,7 @@ export function CampaignCard({
                 gcm {c.gcm}
               </span>
             ) : null}
-            <span className="font-mono">${c.budget || "0"}</span>
+            <span className="font-mono">${moneyLabel(c.budget)}</span>
             <span>·</span>
             <span>{geoSummary}</span>
             <span>·</span>
@@ -397,7 +397,7 @@ export function CampaignCard({
                   <MoneyInput
                     value={c.budget}
                     onChange={(e) => patch({ budget: e.target.value })}
-                    placeholder="10,00"
+                    placeholder="10"
                   />
                 </Field>
                 <Field
