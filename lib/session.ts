@@ -25,6 +25,20 @@ export function signSession(data: Omit<Session, "exp">, ttlSec = DEFAULT_TTL): s
   return `${body}.${sign(body)}`;
 }
 
+/** Read + verify the session straight from a request's Cookie header. Used by routes that are
+ *  excluded from the proxy (e.g. the large-body /api/launch upload) so they gate themselves. */
+export function sessionFromCookieHeader(cookieHeader: string | null): Session | null {
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() === SESSION_COOKIE) {
+      return verifySession(decodeURIComponent(part.slice(eq + 1).trim()));
+    }
+  }
+  return null;
+}
+
 /** Verify signature + expiry; returns the session, or null if missing/tampered/expired. */
 export function verifySession(token: string | undefined | null): Session | null {
   if (!token || !SECRET) return null;

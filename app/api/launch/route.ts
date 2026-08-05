@@ -8,6 +8,7 @@ import {
   campaignPayload,
   creativePayload,
 } from "@/lib/fb-launch";
+import { sessionFromCookieHeader } from "@/lib/session";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -181,6 +182,10 @@ async function resolveLocales(names: string[]): Promise<number[]> {
 // ---------- orchestration ----------
 
 export async function POST(req: Request) {
+  // This route is excluded from the proxy (large body), so it authenticates itself.
+  if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
+    return NextResponse.json({ ok: false, stage: "auth", error: "unauthorized" }, { status: 401 });
+  }
   if (!TOKEN) return NextResponse.json({ ok: false, stage: "config", error: "no_fb_token" }, { status: 500 });
 
   let campaign: Campaign;

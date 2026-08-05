@@ -22,5 +22,8 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|login|api/auth).*)"],
+  // Exclude /api/launch: it carries the multi-MB video upload, and the proxy buffers request
+  // bodies (capped) — that upload gates itself inline instead. `api/launch(?!-)` keeps
+  // /api/launch-tasks proxied.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|login|api/auth|api/launch(?!-)).*)"],
 };
