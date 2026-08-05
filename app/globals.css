@@ -207,7 +207,14 @@ body {
     box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 0%, transparent);
   }
 }
-.animate-highlight-card {
+/* On a pseudo-element so the glow's `animation` never collides with the card's own card-in
+   entrance animation (which would otherwise replay — a jump — when the highlight is removed). */
+.highlight-glow::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
   animation: highlight-card 1.5s cubic-bezier(0.22, 1, 0.36, 1);
 }
 

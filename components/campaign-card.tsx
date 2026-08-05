@@ -177,7 +177,7 @@ export function CampaignCard({
       className={
         "group/card relative scroll-mt-24 rounded-2xl border bg-surface " +
         "transition-[border-color,box-shadow] duration-200 hover:shadow-[0_12px_44px_rgba(0,0,0,0.35)] " +
-        (highlight ? "border-accent/60 animate-highlight-card " : "border-line hover:border-line2 ") +
+        (highlight ? "border-accent/60 highlight-glow " : "border-line hover:border-line2 ") +
         (leaving ? "animate-card-out" : "animate-card-in")
       }
     >
