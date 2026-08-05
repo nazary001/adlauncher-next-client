@@ -143,14 +143,18 @@ export function Dropzone({
   id,
   files,
   onChange,
+  maxFiles,
 }: {
   id?: string;
   files: FileItem[];
   onChange: (files: FileItem[]) => void;
+  /** Cap on creatives (Indians = 1). Undefined = unlimited. */
+  maxFiles?: number;
 }) {
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const counter = useRef(0);
+  const atMax = maxFiles != null && files.length >= maxFiles;
 
   function addFiles(list: FileList | null) {
     if (!list || list.length === 0) return;
@@ -161,7 +165,8 @@ export function Dropzone({
       kind: f.type.startsWith("image/") ? "image" : f.type.startsWith("video/") ? "video" : "other",
       url: URL.createObjectURL(f),
     }));
-    onChange([...files, ...added]);
+    const merged = [...files, ...added];
+    onChange(maxFiles != null ? merged.slice(0, maxFiles) : merged);
   }
 
   const browse = () => inputRef.current?.click();
@@ -185,7 +190,7 @@ export function Dropzone({
       id={id}
       ref={inputRef}
       type="file"
-      multiple
+      multiple={maxFiles !== 1}
       accept="image/*,video/*"
       className="sr-only"
       onChange={(e) => {
@@ -263,7 +268,7 @@ export function Dropzone({
             <CreativeCard file={f} large={single} onRemove={() => remove(f.id)} />
           </div>
         ))}
-        {!single ? (
+        {!single && !atMax ? (
           <button
             type="button"
             onClick={browse}
@@ -279,7 +284,7 @@ export function Dropzone({
         ) : null}
       </div>
 
-      {single ? (
+      {single && !atMax ? (
         <button
           type="button"
           onClick={browse}

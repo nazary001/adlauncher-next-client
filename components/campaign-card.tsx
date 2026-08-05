@@ -563,7 +563,7 @@ export function CampaignCard({
 
                 <Field label="Creatives" className="col-span-12 lg:col-span-5">
                   <div className="flex flex-col gap-2">
-                    <Dropzone files={c.files} onChange={(files) => patch({ files })} />
+                    <Dropzone files={c.files} onChange={(files) => patch({ files })} maxFiles={partner.maxCreatives} />
                     {onApplyFilesToAll && c.files.length > 0 ? (
                       <button
                         type="button"

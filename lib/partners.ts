@@ -43,6 +43,8 @@ export type PartnerConfig = {
   /** Meta's per-Page ad-limit tier for the bound fanpage. The Graph API returns the live
    *  "ads running or in review" count but not this ceiling, so it's configured. Default = 250. */
   pageAdLimit?: number;
+  /** Max creatives per campaign card. Indians = 1 (one video per ad). Undefined = unlimited. */
+  maxCreatives?: number;
 };
 
 // MK Learn guides = the landings paid traffic is sent to. Slug → /guides/<slug>.
@@ -99,6 +101,7 @@ export const PARTNERS: PartnerConfig[] = [
     lockedPage: MAGICOFFERS_PAGE,
     launchNote: "Submits directly via Graph API",
     pageAdLimit: 250,
+    maxCreatives: 1,
   },
   {
     id: "us",
