@@ -1,26 +1,339 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@theme {
+  --color-bg: #07080b;
+  --color-surface: #0e1016;
+  --color-surface2: #141722;
+  --color-raise: #1a1e2c;
+  --color-line: #1f2431;
+  --color-line2: #2b3244;
+  --color-ink: #e9ebf2;
+  --color-dim: #9aa3b7;
+  --color-faint: #5d6579;
+  --color-accent: #3d7fff;
+  --color-accent2: #7c5cff;
+  --color-launch: #10b981;
+  --color-launch2: #34d399;
+  --color-danger: #f87171;
+  --color-warn: #fbbf24;
+  --color-fb: #1877f2;
+}
+
+html {
+  color-scheme: dark;
+}
+
+/* Tailwind v4 preflight sets buttons to cursor:default — restore pointer affordance
+   for every enabled control; disabled ones keep their cursor-not-allowed utility. */
+@layer base {
+  button:not(:disabled):not([aria-disabled="true"]),
+  [role="button"]:not([aria-disabled="true"]),
+  [role="option"],
+  select:not(:disabled),
+  input[type="file"] {
+    cursor: pointer;
   }
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 30%, transparent);
+}
+
+/* ---------- scrollbars ---------- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line2) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-line2);
+  border-radius: 8px;
+  border: 2px solid var(--color-bg);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- motion ---------- */
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-card-in {
+  animation: card-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes card-out {
+  to {
+    opacity: 0;
+    transform: translateY(4px) scale(0.97);
+  }
+}
+.animate-card-out {
+  animation: card-out 0.16s ease-in both;
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-pop-in {
+  animation: pop-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes row-in {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-row-in {
+  animation: row-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes drop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-drop-in {
+  animation: drop-in 0.15s ease-out both;
+  transform-origin: top;
+}
+
+@keyframes drop-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-drop-in-up {
+  animation: drop-in-up 0.15s ease-out both;
+  transform-origin: bottom;
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.8);
+  }
+}
+.animate-pulse-soft {
+  animation: pulse-soft 2.2s ease-in-out infinite;
+}
+
+/* copy-to-clipboard: the check strokes itself in, and an emerald ring pulses out */
+@keyframes check-draw {
+  from {
+    stroke-dashoffset: 26;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+.animate-check path {
+  stroke-dasharray: 26;
+  animation: check-draw 0.34s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes copy-flash {
+  from {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-launch) 55%, transparent);
+  }
+  to {
+    box-shadow: 0 0 0 8px color-mix(in srgb, var(--color-launch) 0%, transparent);
+  }
+}
+.animate-copy-flash {
+  animation: copy-flash 0.55s ease-out;
+}
+
+/* task manager: drawer, backdrop, launched-card fly-away, badge pop */
+@keyframes drawer-in {
+  from {
+    transform: translateX(28px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+.animate-drawer-in {
+  animation: drawer-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.animate-fade-in {
+  animation: fade-in 0.2s ease-out both;
+}
+
+@keyframes fly-out {
+  to {
+    transform: translateY(-26px) scale(0.93);
+    opacity: 0;
+  }
+}
+.animate-fly-out {
+  animation: fly-out 0.34s cubic-bezier(0.4, 0, 1, 1) both;
+}
+
+@keyframes badge-pop {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.4);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+.animate-badge-pop {
+  animation: badge-pop 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* smooth expand/collapse via grid rows */
+.collapse-grid {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.collapse-grid.is-collapsed {
+  grid-template-rows: 0fr;
+}
+.collapse-grid > div {
+  overflow: hidden;
+  min-height: 0;
+}
+/* once fully expanded, stop clipping so field dropdowns can escape the card */
+.collapse-grid.is-open > div {
+  overflow: visible;
+}
+
+/* ---------- css tooltip ---------- */
+.tip {
+  position: relative;
+}
+.tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  translate: -50% 4px;
+  white-space: nowrap;
+  background: var(--color-raise);
+  border: 1px solid var(--color-line2);
+  color: var(--color-ink);
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  padding: 6px 8px;
+  border-radius: 7px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.15s ease-out,
+    translate 0.15s ease-out;
+  z-index: 60;
+}
+.tip::before {
+  content: "";
+  position: absolute;
+  bottom: calc(100% + 3px);
+  left: 50%;
+  translate: -50% 4px;
+  border: 5px solid transparent;
+  border-top-color: var(--color-line2);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.15s ease-out,
+    translate 0.15s ease-out;
+  z-index: 60;
+}
+.tip:hover::after,
+.tip:focus-visible::after,
+.tip:hover::before,
+.tip:focus-visible::before {
+  opacity: 1;
+  translate: -50% 0;
+}
+
+/* bottom-side variant for elements at the top edge of the viewport */
+.tip-b::after {
+  bottom: auto;
+  top: calc(100% + 8px);
+  translate: -50% -4px;
+}
+.tip-b::before {
+  bottom: auto;
+  top: calc(100% + 3px);
+  border-top-color: transparent;
+  border-bottom-color: var(--color-line2);
+  translate: -50% -4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
