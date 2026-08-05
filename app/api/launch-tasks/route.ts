@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { sessionFromCookieHeader } from "@/lib/session";
 
 // Server-only: the Strapi token never reaches the browser.
 const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
@@ -7,6 +8,8 @@ const TOKEN = process.env.STRAPI_TOKEN ?? "";
 const H = () => ({ Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" });
 
 // Fields persisted per task (Strapi attribute names). Wire format matches this 1:1.
+// `owner` is intentionally NOT here — it is always stamped server-side from the session,
+// never taken from the request body.
 const FIELDS = [
   "task_id",
   "name",
@@ -62,23 +65,31 @@ function pickFields(body: Record<string, unknown>): Row {
   return out;
 }
 
-async function findByTaskId(taskId: string): Promise<{ documentId: string } | null> {
+/** The caller's identity. Tasks are scoped per user — every handler resolves this first. */
+function callerOf(req: Request): string | null {
+  const session = sessionFromCookieHeader(req.headers.get("cookie"));
+  return session?.username ? String(session.username) : null;
+}
+
+async function findByTaskId(taskId: string): Promise<{ documentId: string; owner: string | null } | null> {
   const res = await fetch(
-    `${STRAPI}/api/launch-tasks?filters[task_id][$eq]=${encodeURIComponent(taskId)}&fields[0]=task_id&pagination[pageSize]=1`,
+    `${STRAPI}/api/launch-tasks?filters[task_id][$eq]=${encodeURIComponent(taskId)}&fields[0]=task_id&fields[1]=owner&pagination[pageSize]=1`,
     { headers: H(), cache: "no-store" },
   );
   if (!res.ok) return null;
   const body = await res.json().catch(() => ({}));
   const row = body?.data?.[0];
-  return row?.documentId ? { documentId: row.documentId } : null;
+  return row?.documentId ? { documentId: row.documentId, owner: row.owner ? String(row.owner) : null } : null;
 }
 
-/** GET → recent tasks (newest first) for restore on page load. */
-export async function GET() {
+/** GET → the caller's recent tasks (newest first) for restore on page load. */
+export async function GET(req: Request) {
+  const user = callerOf(req);
+  if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   if (!STRAPI || !TOKEN) return NextResponse.json({ ok: false, tasks: [] });
   try {
     const res = await fetch(
-      `${STRAPI}/api/launch-tasks?sort[0]=queued_at:desc&pagination[pageSize]=100`,
+      `${STRAPI}/api/launch-tasks?filters[owner][$eq]=${encodeURIComponent(user)}&sort[0]=queued_at:desc&pagination[pageSize]=100`,
       { headers: H(), cache: "no-store" },
     );
     if (!res.ok) return NextResponse.json({ ok: false, tasks: [], status: res.status });
@@ -90,16 +101,25 @@ export async function GET() {
   }
 }
 
-/** POST → upsert by task_id (create if new, update if the row already exists). */
+/** POST → upsert by task_id (create if new, update if the row already exists).
+ *  Rows belong to the session user: creates are stamped, foreign updates are refused. */
 export async function POST(req: Request) {
+  const user = callerOf(req);
+  if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   if (!STRAPI || !TOKEN) return NextResponse.json({ ok: false, reason: "not_configured" }, { status: 500 });
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
   const taskId = String(body.task_id ?? "");
   if (!taskId) return NextResponse.json({ ok: false, reason: "no_task_id" }, { status: 400 });
 
+  // Owner is always the session user. Pre-owner rows (owner=null) are adopted on update so a
+  // task that was mid-flight during the rollout keeps persisting instead of erroring forever.
   const data = pickFields(body);
+  data.owner = user;
   try {
     const existing = await findByTaskId(taskId);
+    if (existing && existing.owner && existing.owner !== user) {
+      return NextResponse.json({ ok: false, reason: "forbidden" }, { status: 403 });
+    }
     const res = existing
       ? await fetch(`${STRAPI}/api/launch-tasks/${existing.documentId}`, {
           method: "PUT",
@@ -121,8 +141,10 @@ export async function POST(req: Request) {
   }
 }
 
-/** DELETE ?taskId=X (or ?taskIds=a,b,c) → remove the row(s). */
+/** DELETE ?taskId=X (or ?taskIds=a,b,c) → remove the caller's row(s); foreign rows are skipped. */
 export async function DELETE(req: Request) {
+  const user = callerOf(req);
+  if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   if (!STRAPI || !TOKEN) return NextResponse.json({ ok: false, reason: "not_configured" }, { status: 500 });
   const url = new URL(req.url);
   const ids = (url.searchParams.get("taskIds") ?? url.searchParams.get("taskId") ?? "")
@@ -134,7 +156,7 @@ export async function DELETE(req: Request) {
   try {
     for (const id of ids) {
       const found = await findByTaskId(id);
-      if (found) {
+      if (found && found.owner === user) {
         await fetch(`${STRAPI}/api/launch-tasks/${found.documentId}`, { method: "DELETE", headers: H() });
       }
     }

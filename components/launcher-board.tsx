@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Campaign, FileItem } from "@/lib/types";
 import { firstVideo, fullName, isLaunchable, makeCampaign } from "@/lib/types";
 import { spinCopy } from "@/lib/rephrase";
@@ -42,7 +42,7 @@ function geoShort(c: Campaign): string {
 
 export function LauncherBoard({ user }: { user?: SessionUser }) {
   return (
-    <TaskManagerProvider>
+    <TaskManagerProvider user={user}>
       <LauncherInner user={user} />
     </TaskManagerProvider>
   );
@@ -74,25 +74,40 @@ function LauncherInner({ user }: { user?: SessionUser }) {
   const partner = partnerConfig(partnerId);
   const anyExpanded = campaigns.some((c) => !c.collapsed);
 
-  // Pull the live registry once, then (re)assign gcm codes above whatever is already used.
+  // Latest partner for callbacks that must not re-subscribe on partner switch.
+  const partnerRef = useRef(partner);
   useEffect(() => {
-    let alive = true;
+    partnerRef.current = partner;
+  }, [partner]);
+
+  // Pull the live registry and (re)assign gcm codes above whatever is already used. Runs on
+  // mount and again when the window regains focus (≥15s apart): with several accounts working
+  // at once another user may claim a previewed code — the claim itself is atomic server-side,
+  // this just keeps the optimistic previews close to reality.
+  const lastGcmFetch = useRef(0);
+  const refreshGcm = useCallback(() => {
+    if (Date.now() - lastGcmFetch.current < 15_000) return;
+    lastGcmFetch.current = Date.now();
     fetch("/api/gcm")
       .then((r) => r.json())
       .then((d) => {
-        if (!alive || !Array.isArray(d.used)) return;
+        if (!Array.isArray(d.used)) return;
         const set = new Set<string>(d.used);
         setReserved(set);
-        setCampaigns((cs) => normalize(cs, partner, set));
+        setCampaigns((cs) => normalize(cs, partnerRef.current, set));
       })
       .catch(() => {
-        /* registry unreachable — leave reserved null so no possibly-taken code is handed out */
+        /* registry unreachable — keep the previous reserved set (null on first load =
+           no possibly-taken code is handed out) */
       });
-    return () => {
-      alive = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    refreshGcm();
+    const onFocus = () => refreshGcm();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshGcm]);
 
   // Fold every code an actually-completed launch claimed back into the reserved set. The server is
   // the source of truth for the real code (it may differ from the optimistic preview if the mount

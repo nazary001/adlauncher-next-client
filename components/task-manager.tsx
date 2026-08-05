@@ -12,6 +12,7 @@ import {
 import { upload } from "@vercel/blob/client";
 import { type Campaign, moneyLabel } from "@/lib/types";
 import type { PartnerId } from "@/lib/partners";
+import type { SessionUser } from "./user-menu";
 import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, TrashIcon, XIcon } from "./icons";
 
 // ---------- stages ("upload" is client→Blob; the rest mirror /api/launch events) ----------
@@ -93,7 +94,10 @@ function asRestored(t: LaunchTask): LaunchTask {
   };
 }
 
-const LS_KEY = "adlauncher.tasks";
+// Per-account key: several people share machines/browsers, and the fallback snapshot must not
+// leak one account's queue into another. The bare legacy key predates scoping and gets dropped.
+const LS_BASE = "adlauncher.tasks";
+const lsKeyFor = (user?: SessionUser) => (user?.username ? `${LS_BASE}.${user.username}` : LS_BASE);
 
 export type EnqueueArgs = LaunchInput & { name: string; gcm: string; geo: string; budget: string };
 
@@ -120,7 +124,8 @@ export function useTaskManager(): TaskManagerValue {
 
 // ---------- provider (single-concurrency worker) ----------
 
-export function TaskManagerProvider({ children }: { children: React.ReactNode }) {
+export function TaskManagerProvider({ children, user }: { children: React.ReactNode; user?: SessionUser }) {
+  const lsKey = lsKeyFor(user);
   const [tasks, setTasks] = useState<LaunchTask[]>([]);
   const [open, setOpen] = useState(false);
   const inputs = useRef(new Map<string, LaunchInput>());
@@ -169,8 +174,10 @@ export function TaskManagerProvider({ children }: { children: React.ReactNode })
   useEffect(() => {
     let localSnap: LaunchTask[] = [];
     try {
-      const raw = localStorage.getItem(LS_KEY);
+      const raw = localStorage.getItem(lsKey);
       if (raw) localSnap = JSON.parse(raw) as LaunchTask[];
+      // Pre-scoping snapshot was account-agnostic — drop it so it can't surface for the wrong user.
+      if (lsKey !== LS_BASE) localStorage.removeItem(LS_BASE);
     } catch {
       /* ignore */
     }
@@ -200,18 +207,18 @@ export function TaskManagerProvider({ children }: { children: React.ReactNode })
     return () => {
       alive = false;
     };
-  }, []);
+  }, [lsKey]);
 
   // Mirror to localStorage after the initial load (guard prevents the empty first render from
   // wiping the stored snapshot before restore reads it).
   useEffect(() => {
     if (!loadedRef.current) return;
     try {
-      localStorage.setItem(LS_KEY, JSON.stringify(tasks));
+      localStorage.setItem(lsKey, JSON.stringify(tasks));
     } catch {
       /* quota / disabled — Strapi still holds the durable copy */
     }
-  }, [tasks]);
+  }, [tasks, lsKey]);
 
   const runTask = useCallback(
     async (id: string) => {
@@ -285,6 +292,9 @@ export function TaskManagerProvider({ children }: { children: React.ReactNode })
             status: "done",
             stage: "ad",
             finishedAt,
+            // The server may have claimed a different code than the optimistic preview (it walks
+            // forward on conflict — routine when several users launch at once): show the real one.
+            ...(typeof f.gcm === "string" && f.gcm ? { gcm: f.gcm } : {}),
             result: {
               campaignId: f.campaign_id as string,
               adsetId: f.adset_id as string,
