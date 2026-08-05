@@ -62,7 +62,11 @@ function LauncherInner({ user }: { user?: SessionUser }) {
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const hlTimer = useRef<number | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>(() =>
-    normalize([makeCampaign("c1", namePrefixFor(partnerConfig("in"), todayDDMM()))], partnerConfig("in"), null),
+    normalize(
+      [makeCampaign("c1", namePrefixFor(partnerConfig("in"), todayDDMM()), user?.username ?? "")],
+      partnerConfig("in"),
+      null,
+    ),
   );
   const [previewed, setPreviewed] = useState(false);
   const [copyOpen, setCopyOpen] = useState(false);
@@ -202,7 +206,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
 
   const add = () => {
     const prefix = namePrefixFor(partner, todayDDMM());
-    mutate((cs) => [...cs, makeCampaign(`c${nextId.current++}`, prefix)]);
+    mutate((cs) => [...cs, makeCampaign(`c${nextId.current++}`, prefix, user?.username ?? "")]);
   };
 
   const duplicate = (id: string) =>
@@ -260,7 +264,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
     setCampaigns((cs) => cs.map((c) => ({ ...c, collapsed })));
 
   const removeAll = () =>
-    mutate(() => [makeCampaign(`c${nextId.current++}`, namePrefixFor(partner, todayDDMM()))]);
+    mutate(() => [makeCampaign(`c${nextId.current++}`, namePrefixFor(partner, todayDDMM()), user?.username ?? "")]);
 
   /** Copy one card's creatives onto every card — build a wave, drop the video once, apply to all. */
   const applyFilesToAll = (files: FileItem[]) => mutate((cs) => cs.map((c) => ({ ...c, files })));

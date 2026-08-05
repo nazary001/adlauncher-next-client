@@ -42,13 +42,13 @@ export type Campaign = {
   files: FileItem[];
 };
 
-/** Team default: LION FB launches run at $10/day unless told otherwise. */
-export function makeCampaign(id: string, namePrefix = ""): Campaign {
+/** A fresh campaign. `name` = the editable suffix, defaulted to the launching user's username. */
+export function makeCampaign(id: string, namePrefix = "", name = ""): Campaign {
   return {
     id,
     collapsed: false,
     namePrefix,
-    name: "",
+    name,
     profile: "",
     account: "",
     page: "",
