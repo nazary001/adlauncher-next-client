@@ -60,7 +60,7 @@ export const CONVERSION_EVENTS: Option[] = [
   { value: "COMPLETE_REGISTRATION", label: "CompleteRegistration" },
   { value: "ADD_TO_CART", label: "AddToCart" },
   { value: "ADD_PAYMENT_INFO", label: "AddPaymentInfo" },
-  { value: "INITIATE_CHECKOUT", label: "InitiateCheckout" },
+  { value: "INITIATED_CHECKOUT", label: "InitiateCheckout" },
   { value: "SCHEDULE", label: "Schedule" },
   { value: "START_TRIAL", label: "StartTrial" },
   { value: "ADD_TO_WISHLIST", label: "AddToWishlist" },
@@ -69,6 +69,19 @@ export const CONVERSION_EVENTS: Option[] = [
   { value: "DONATE", label: "Donate" },
   { value: "FIND_LOCATION", label: "FindLocation" },
 ];
+
+/** Pixel events Meta actually allows per objective (empirically mapped against the Graph API
+ *  2026-08-05). Filtering the dropdown by objective prevents "Conversion event unavailable"
+ *  ad-set rejections; events valid for neither (e.g. CustomizeProduct) never surface. */
+export const EVENTS_BY_OBJECTIVE: Record<string, string[]> = {
+  OUTCOME_SALES: ["PURCHASE", "CONTENT_VIEW", "ADD_TO_CART", "INITIATED_CHECKOUT", "ADD_PAYMENT_INFO", "ADD_TO_WISHLIST", "COMPLETE_REGISTRATION", "SUBSCRIBE", "START_TRIAL", "SEARCH", "DONATE"],
+  OUTCOME_LEADS: ["LEAD", "SUBMIT_APPLICATION", "SCHEDULE", "CONTACT", "FIND_LOCATION", "COMPLETE_REGISTRATION", "SUBSCRIBE", "START_TRIAL", "CONTENT_VIEW", "SEARCH"],
+};
+
+export function conversionEventsFor(objective: string): Option[] {
+  const allowed = new Set(EVENTS_BY_OBJECTIVE[objective] ?? EVENTS_BY_OBJECTIVE.OUTCOME_SALES);
+  return CONVERSION_EVENTS.filter((e) => allowed.has(e.value));
+}
 
 export const CTAS: Option[] = [
   { value: "LEARN_MORE", label: "Learn More" },
@@ -110,7 +123,8 @@ export const CATEGORIES: Option[] = [
   { value: "FINANCIAL_PRODUCTS_SERVICES", label: "Financial products" },
   { value: "HOUSING", label: "Housing" },
   { value: "EMPLOYMENT", label: "Employment" },
-  { value: "ISSUES_ELECTIONS_POLITICS", label: "Politics / elections" },
+  // ISSUES_ELECTIONS_POLITICS omitted: it always fails on this account (Meta requires separate
+  // "social issues, elections or politics" advertiser authorization we don't hold).
 ];
 
 export const PLACEMENTS: Option[] = [

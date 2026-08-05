@@ -8,6 +8,7 @@ import {
   BID_STRATEGIES,
   CATEGORIES,
   CONVERSION_EVENTS,
+  conversionEventsFor,
   COUNTRIES,
   COUNTRY_PRESETS,
   CTAS,
@@ -348,7 +349,16 @@ export function CampaignCard({
                 <Field label="Objective" className="col-span-6 md:col-span-3">
                   <Select
                     value={c.objective}
-                    onChange={(e) => patch({ objective: e.target.value })}
+                    onChange={(e) => {
+                      const objective = e.target.value;
+                      // Events are objective-specific — keep the current one if still valid, else
+                      // fall back to the first event allowed for the new objective.
+                      const allowed = conversionEventsFor(objective);
+                      const conversionEvent = allowed.some((o) => o.value === c.conversionEvent)
+                        ? c.conversionEvent
+                        : allowed[0]?.value ?? c.conversionEvent;
+                      patch({ objective, conversionEvent });
+                    }}
                     options={OBJECTIVES}
                   />
                 </Field>
@@ -376,7 +386,7 @@ export function CampaignCard({
                   <Select
                     value={c.conversionEvent}
                     onChange={(e) => patch({ conversionEvent: e.target.value })}
-                    options={CONVERSION_EVENTS}
+                    options={conversionEventsFor(c.objective)}
                   />
                 </Field>
                 <Field label="Daily budget" className="col-span-6">

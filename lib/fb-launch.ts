@@ -39,17 +39,21 @@ function placementBits(placement: string) {
 /** Targeting spec from geo / age / gender / placement / OS / resolved locales. */
 export function targeting(c: Campaign, localeIds: number[]): Record<string, unknown> {
   const t: Record<string, unknown> = {};
+  // Any special ad category (finance/housing/employment/politics) forbids custom age & gender —
+  // Meta rejects the ad set otherwise ("Custom age/gender selection is unavailable…").
+  const special = c.category !== "";
 
   t.geo_locations = c.countries.includes("WW")
     ? { location_types: ["home", "recent"], country_groups: ["worldwide"] }
     : { location_types: ["home", "recent"], countries: c.countries };
 
-  t.age_min = parseInt(c.ageMin || "18", 10) || 18;
+  const ageMin = special ? 18 : parseInt(c.ageMin || "18", 10) || 18;
+  t.age_min = ageMin;
   t.age_max = 65;
 
   const { male, female, compliance } = placementBits(c.placement);
-  if (male) t.genders = [1];
-  else if (female) t.genders = [2];
+  const gendered = !special && (male || female);
+  if (gendered) t.genders = male ? [1] : [2];
 
   if (compliance) {
     // Restricted-niche safe set: feeds only.
@@ -65,6 +69,13 @@ export function targeting(c: Campaign, localeIds: number[]): Record<string, unkn
   }
 
   if (localeIds.length) t.locales = localeIds;
+
+  // Once gender or age is narrowed, Meta requires an explicit Advantage-audience decision, else it
+  // rejects with "Advantage Audience Flag Required". Narrowed = respect it exactly (no expansion);
+  // broad (18+, all genders) keeps Meta's default Advantage+ behaviour.
+  if (gendered || ageMin > 18) {
+    t.targeting_automation = { advantage_audience: 0 };
+  }
 
   return t;
 }
@@ -103,11 +114,11 @@ export function adsetPayload(
   const bid = bidAmountCents(c);
   if (bid !== undefined) p.bid_amount = bid;
 
-  // OUTCOME_SALES needs a promoted pixel; conversions also name the event.
+  // The promoted pixel needs its event for BOTH conversions and clicks — LINK_CLICKS with a
+  // pixel-only promoted_object is an invalid combination. optimization_goal already encodes
+  // whether we optimize for conversions or clicks.
   if (binds.pixelId) {
-    const promoted: Record<string, unknown> = { pixel_id: binds.pixelId };
-    if (c.optimization === "conversions") promoted.custom_event_type = c.conversionEvent;
-    p.promoted_object = promoted;
+    p.promoted_object = { pixel_id: binds.pixelId, custom_event_type: c.conversionEvent };
   }
 
   // Worldwide reach includes regulated locations (Taiwan, Singapore) that each require a self-
