@@ -193,7 +193,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
     setCampaigns((cs) => cs.map((c) => (c.id === id && c.collapsed ? { ...c, collapsed: false } : c)));
     setHighlightId(null); // reset so re-clicking the same card re-triggers the pulse
     window.setTimeout(() => {
-      document.getElementById(`card-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      document.getElementById(`card-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
       setHighlightId(id);
     }, 60);
     if (hlTimer.current) window.clearTimeout(hlTimer.current);
