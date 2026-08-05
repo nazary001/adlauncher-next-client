@@ -193,6 +193,24 @@ body {
   animation: copy-flash 0.55s ease-out;
 }
 
+/* launch bay → click a row to jump to its card + focus-pulse it */
+@keyframes highlight-card {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 0%, transparent);
+  }
+  10% {
+    box-shadow:
+      0 0 0 3px color-mix(in srgb, var(--color-accent) 55%, transparent),
+      0 16px 54px color-mix(in srgb, var(--color-accent) 40%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 0%, transparent);
+  }
+}
+.animate-highlight-card {
+  animation: highlight-card 1.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 /* task manager: drawer, backdrop, launched-card fly-away, badge pop */
 @keyframes drawer-in {
   from {

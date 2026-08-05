@@ -18,6 +18,7 @@ export function LaunchRail({
   partner,
   previewed,
   justQueued,
+  onJump,
   onPreview,
   onLaunch,
 }: {
@@ -26,6 +27,8 @@ export function LaunchRail({
   previewed: boolean;
   /** Count just sent to the Task Manager — shows a brief confirmation; campaigns stay on the board. */
   justQueued: number;
+  /** Jump the page to a campaign card and focus-pulse it. */
+  onJump: (id: string) => void;
   onPreview: () => void;
   onLaunch: () => void;
 }) {
@@ -66,12 +69,15 @@ export function LaunchRail({
               const eventLabel =
                 CONVERSION_EVENTS.find((e) => e.value === c.conversionEvent)?.label ?? "";
               return (
-                <div
+                <button
                   key={c.id}
+                  type="button"
+                  onClick={() => onJump(c.id)}
+                  title="Jump to this campaign"
                   style={{ animationDelay: `${i * 45}ms` }}
-                  className="animate-row-in flex items-center gap-2.5 rounded-lg px-2 py-2 transition-colors duration-150 hover:bg-raise/60"
+                  className="group animate-row-in flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors duration-150 hover:bg-raise/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 >
-                  <span className="w-5 shrink-0 font-mono text-[10.5px] text-faint">
+                  <span className="w-5 shrink-0 font-mono text-[10.5px] text-faint transition-colors group-hover:text-[#9db8ff]">
                     {String(i + 1).padStart(2, "0")}
                   </span>
                   <span className="min-w-0 flex-1">
@@ -109,7 +115,19 @@ export function LaunchRail({
                       }
                     />
                   )}
-                </div>
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                    className="h-3.5 w-3.5 shrink-0 -translate-x-1 text-faint opacity-0 transition-all duration-150 group-hover:translate-x-0 group-hover:opacity-100 group-hover:text-[#9db8ff]"
+                  >
+                    <path d="m9 18 6-6-6-6" />
+                  </svg>
+                </button>
               );
             })}
           </div>

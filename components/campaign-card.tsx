@@ -105,6 +105,7 @@ export function CampaignCard({
   index,
   partner,
   adCount,
+  highlight,
   onPatch,
   onToggleCollapse,
   onDuplicate,
@@ -116,6 +117,8 @@ export function CampaignCard({
   partner: PartnerConfig;
   /** Live ads-running-or-in-review count on the bound fanpage (Indians). null = unavailable. */
   adCount?: number | null;
+  /** Focus-pulse this card after a jump from the Launch bay. */
+  highlight?: boolean;
   onPatch: (id: string, patch: Partial<Campaign>) => void;
   onToggleCollapse: (id: string) => void;
   onDuplicate: (id: string) => void;
@@ -170,10 +173,11 @@ export function CampaignCard({
 
   return (
     <article
+      id={`card-${c.id}`}
       className={
-        "group/card relative rounded-2xl border border-line bg-surface " +
-        "transition-[border-color,box-shadow] duration-200 hover:border-line2 " +
-        "hover:shadow-[0_12px_44px_rgba(0,0,0,0.35)] " +
+        "group/card relative scroll-mt-24 rounded-2xl border bg-surface " +
+        "transition-[border-color,box-shadow] duration-200 hover:shadow-[0_12px_44px_rgba(0,0,0,0.35)] " +
+        (highlight ? "border-accent/60 animate-highlight-card " : "border-line hover:border-line2 ") +
         (leaving ? "animate-card-out" : "animate-card-in")
       }
     >

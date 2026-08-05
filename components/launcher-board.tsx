@@ -58,6 +58,9 @@ function LauncherInner({ user }: { user?: SessionUser }) {
   // Count just sent to the Task Manager, shown as a brief confirmation (campaigns stay on the board).
   const [justQueued, setJustQueued] = useState(0);
   const queuedTimer = useRef<number | null>(null);
+  // Card that a Launch-bay row jumped to (focus-pulses briefly).
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const hlTimer = useRef<number | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>(() =>
     normalize([makeCampaign("c1", namePrefixFor(partnerConfig("in"), todayDDMM()))], partnerConfig("in"), null),
   );
@@ -184,6 +187,18 @@ function LauncherInner({ user }: { user?: SessionUser }) {
 
   const toggleCollapse = (id: string) =>
     setCampaigns((cs) => cs.map((c) => (c.id === id ? { ...c, collapsed: !c.collapsed } : c)));
+
+  /** Launch-bay row click → expand the card, smooth-scroll the page to it, then focus-pulse it. */
+  const jumpTo = (id: string) => {
+    setCampaigns((cs) => cs.map((c) => (c.id === id && c.collapsed ? { ...c, collapsed: false } : c)));
+    setHighlightId(null); // reset so re-clicking the same card re-triggers the pulse
+    window.setTimeout(() => {
+      document.getElementById(`card-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      setHighlightId(id);
+    }, 60);
+    if (hlTimer.current) window.clearTimeout(hlTimer.current);
+    hlTimer.current = window.setTimeout(() => setHighlightId(null), 1800);
+  };
 
   const add = () => {
     const prefix = namePrefixFor(partner, todayDDMM());
@@ -340,6 +355,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
                 index={i}
                 partner={partner}
                 adCount={adCount}
+                highlight={highlightId === c.id}
                 onPatch={patch}
                 onToggleCollapse={toggleCollapse}
                 onDuplicate={duplicate}
@@ -368,6 +384,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
             partner={partner}
             previewed={previewed}
             justQueued={justQueued}
+            onJump={jumpTo}
             onPreview={() => setPreviewed(true)}
             onLaunch={launch}
           />
