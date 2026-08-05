@@ -406,7 +406,9 @@ export async function POST(req: Request) {
         send({ ok: false, stage: "error", error: err.message ?? String(e), detail: err.detail ?? null, created });
       } finally {
         // Drop the temporary Blob whether the launch succeeded or failed — never orphan the upload.
-        void del(videoUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
+        // Awaited (not fire-and-forget) so it completes before the stream closes and Vercel can
+        // freeze the function. The "done"/"error" event was already sent, so this adds no visible wait.
+        await del(videoUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
         controller.close();
       }
     },
