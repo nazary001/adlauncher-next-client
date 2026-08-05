@@ -48,7 +48,7 @@ export function LauncherBoard({ user }: { user?: SessionUser }) {
 }
 
 function LauncherInner({ user }: { user?: SessionUser }) {
-  const { enqueue } = useTaskManager();
+  const { enqueue, tasks } = useTaskManager();
   const [partnerId, setPartnerId] = useState<PartnerId>("in");
   // Codes already taken in the Strapi gcm registry. null = not loaded yet → assign nothing.
   const [reserved, setReserved] = useState<Set<string> | null>(null);
@@ -85,6 +85,25 @@ function LauncherInner({ user }: { user?: SessionUser }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Fold every code an actually-completed launch claimed back into the reserved set. The server is
+  // the source of truth for the real code (it may differ from the optimistic preview if the mount
+  // snapshot was stale), so later batches never re-preview a code already taken this session. Stays
+  // null while the registry hasn't loaded (→ keep assigning nothing).
+  useEffect(() => {
+    setReserved((prev) => {
+      if (!prev) return prev;
+      let set: Set<string> | null = null;
+      for (const t of tasks) {
+        const g = t.status === "done" ? t.result?.gcm : undefined;
+        if (g && !prev.has(g)) {
+          set = set ?? new Set(prev);
+          set.add(g);
+        }
+      }
+      return set ?? prev;
+    });
+  }, [tasks]);
+
   // Bound fanpage's live ad usage for the "N / limit" badge; re-runs on partner change + after launch.
   function loadVolume() {
     const acct = partner.lockedAccount?.id;
@@ -112,9 +131,13 @@ function LauncherInner({ user }: { user?: SessionUser }) {
     const launchable = campaigns.filter((c) => isLaunchable(c, opts));
     if (launchable.length === 0) return;
 
+    // Reserve every code we're launching right now (optimistic — the tasks fire in the background),
+    // so any card built next never re-previews a code that's already on its way into the registry.
+    const nextReserved = reserved ? new Set(reserved) : null;
     for (const c of launchable) {
       const video = firstVideo(c);
       if (!video) continue;
+      if (nextReserved && c.gcm) nextReserved.add(c.gcm);
       enqueue({
         partnerId,
         campaign: c,
@@ -126,6 +149,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
         budget: c.budget,
       });
     }
+    if (nextReserved) setReserved(nextReserved);
 
     const ids = new Set(launchable.map((c) => c.id));
     setFlying(ids);
@@ -137,7 +161,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
         const base = remaining.length
           ? remaining
           : [makeCampaign(`c${nextId.current++}`, namePrefixFor(partner, todayDDMM()))];
-        return normalize(base, partner, reserved);
+        return normalize(base, partner, nextReserved);
       });
       loadVolume();
     }, 340);
