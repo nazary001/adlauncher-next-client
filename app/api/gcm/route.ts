@@ -3,7 +3,8 @@ import { NextResponse } from "next/server";
 // Server-only: the Strapi token never reaches the browser.
 const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
 const TOKEN = process.env.STRAPI_TOKEN ?? "";
-const POOL_MAX = 100;
+// 2-digit codes only (01–99) — the buy-link contract is gcm=NN, so never emit "100".
+const POOL_MAX = 99;
 
 const pad = (n: number) => String(n).padStart(2, "0");
 

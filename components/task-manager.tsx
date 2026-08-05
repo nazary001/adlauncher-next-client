@@ -175,16 +175,24 @@ export function TaskManagerProvider({ children }: { children: React.ReactNode })
       /* ignore */
     }
     let alive = true;
+    // Keep anything enqueued while this fetch was in flight (add restored rows not already present),
+    // so a launch fired before restore resolves isn't clobbered off the board.
+    const mergeRestored = (restored: LaunchTask[]) =>
+      setTasks((cur) => {
+        if (cur.length === 0) return restored;
+        const curIds = new Set(cur.map((t) => t.id));
+        return [...cur, ...restored.filter((r) => !curIds.has(r.id))];
+      });
     fetch("/api/launch-tasks")
       .then((r) => r.json())
       .then((d) => {
         if (!alive) return;
         const rows: LaunchTask[] =
           d?.ok && Array.isArray(d.tasks) ? (d.tasks as Record<string, unknown>[]).map(fromRemote) : localSnap;
-        setTasks(rows.map(asRestored));
+        mergeRestored(rows.map(asRestored));
       })
       .catch(() => {
-        if (alive) setTasks(localSnap.map(asRestored));
+        if (alive) mergeRestored(localSnap.map(asRestored));
       })
       .finally(() => {
         loadedRef.current = true;
@@ -410,7 +418,9 @@ export function TaskManagerProvider({ children }: { children: React.ReactNode })
   }, []);
 
   const retryAll = useCallback(() => {
-    for (const t of tasksRef.current) if (t.status === "error") retry(t.id);
+    // Only local tasks (created this session) can retry — restored ones lost their video and would
+    // otherwise get stuck in "queued" forever (runTask bails without an input).
+    for (const t of tasksRef.current) if (t.status === "error" && t.local) retry(t.id);
   }, [retry]);
 
   /** Dismiss every finished task (done + error) in one go. */
@@ -540,6 +550,9 @@ function TaskManagerPanel() {
 
   if (!open) return null;
 
+  // Only local errors can actually retry (restored tasks lost their video); match retryAll.
+  const retryable = tasks.filter((t) => t.status === "error" && t.local).length;
+
   const shown = tasks.filter((t) =>
     filter === "all"
       ? true
@@ -633,14 +646,14 @@ function TaskManagerPanel() {
             {counts.running > 0 ? "Processing…" : counts.active > 0 ? "Waiting in queue" : "Idle"}
           </span>
           <div className="flex items-center gap-1.5">
-            {counts.error > 0 ? (
+            {retryable > 0 ? (
               <button
                 type="button"
                 onClick={retryAll}
                 className="flex items-center gap-1.5 rounded-md border border-danger/30 px-2 py-1 text-[11.5px] font-medium text-danger transition-colors hover:bg-danger/10"
               >
                 <RetryIcon className="h-3.5 w-3.5" />
-                Retry failed ({counts.error})
+                Retry failed ({retryable})
               </button>
             ) : null}
             <button

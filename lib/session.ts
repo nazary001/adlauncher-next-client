@@ -33,7 +33,14 @@ export function sessionFromCookieHeader(cookieHeader: string | null): Session | 
     const eq = part.indexOf("=");
     if (eq < 0) continue;
     if (part.slice(0, eq).trim() === SESSION_COOKIE) {
-      return verifySession(decodeURIComponent(part.slice(eq + 1).trim()));
+      const raw = part.slice(eq + 1).trim();
+      let token = raw;
+      try {
+        token = decodeURIComponent(raw);
+      } catch {
+        /* malformed %-escape → treat the raw value as the token (verify will just reject it) */
+      }
+      return verifySession(token);
     }
   }
   return null;

@@ -99,6 +99,10 @@ function LauncherInner({ user }: { user?: SessionUser }) {
   // snapshot was stale), so later batches never re-preview a code already taken this session. Stays
   // null while the registry hasn't loaded (→ keep assigning nothing).
   useEffect(() => {
+    // Safe setState-in-effect: the functional updater returns the SAME reference when nothing new is
+    // added, so it never re-renders (let alone cascades); it only grows `reserved` when a launch
+    // actually completes with a new claimed code.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setReserved((prev) => {
       if (!prev) return prev;
       let set: Set<string> | null = null;
@@ -127,7 +131,9 @@ function LauncherInner({ user }: { user?: SessionUser }) {
   }
 
   useEffect(() => {
-    setAdCount(null);
+    // loadVolume() sets adCount from the fetch result (async for the live Indians partner; the
+    // synchronous null-set only applies to a bound-account-less partner, which isn't selectable).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadVolume();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [partnerId]);

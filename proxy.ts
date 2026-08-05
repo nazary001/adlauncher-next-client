@@ -27,5 +27,5 @@ export const config = {
   //   • api/blob-upload — Blob's server-to-server "upload completed" callback carries no cookie;
   //                       the route enforces auth in onBeforeGenerateToken instead.
   // `api/launch(?!-)` keeps /api/launch-tasks proxied.
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|login|api/auth|api/launch(?!-)|api/blob-upload).*)"],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|login|api/auth|api/launch(?![\\w-])|api/blob-upload).*)"],
 };

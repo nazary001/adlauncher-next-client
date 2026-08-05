@@ -95,8 +95,10 @@ export function CopySettingsModal({
   const fields = useMemo(() => FIELDS.filter((f) => !f.when || f.when(partner)), [partner]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
-  // Default to everything checked each time the modal opens (one-click full replicate).
+  // Default to everything checked each time the modal opens (one-click full replicate). Safe reset-
+  // on-open — only fires when `open` flips to true, no cascade.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (open) setSelected(new Set(fields.map((f) => f.key as string)));
   }, [open, fields]);
 

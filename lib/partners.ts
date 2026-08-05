@@ -185,7 +185,7 @@ export function assignGcmCodes<T extends { landing: string; gcm: string }>(
   const next = rows.map((r) => {
     if (!r.landing || r.gcm) return r;
     let code = "";
-    for (let n = 1; n <= 100; n++) {
+    for (let n = 1; n <= 99; n++) {
       const c = String(n).padStart(2, "0");
       if (!used.has(c)) {
         code = c;

@@ -222,8 +222,9 @@ async function claimGcm(
 ): Promise<{ gcm: string; documentId: string | null }> {
   const used = await strapiUsedCodes();
   const candidates: string[] = [];
-  const start = /^\d{1,2}$/.test(desired) ? parseInt(desired, 10) : 1;
-  for (let n = start; n <= 100; n++) if (!used.has(String(n).padStart(2, "0"))) candidates.push(String(n).padStart(2, "0"));
+  // Codes are 2-digit (01–99): the buy-link contract is gcm=NN, so never hand out "100".
+  const start = /^\d{1,2}$/.test(desired) ? Math.min(parseInt(desired, 10) || 1, 99) : 1;
+  for (let n = start; n <= 99; n++) if (!used.has(String(n).padStart(2, "0"))) candidates.push(String(n).padStart(2, "0"));
   for (let n = 1; n < start; n++) if (!used.has(String(n).padStart(2, "0"))) candidates.push(String(n).padStart(2, "0"));
 
   for (const gcm of candidates) {
@@ -242,7 +243,7 @@ async function claimGcm(
       throw new FbError(`gcm claim failed (${res.status})`, body);
     }
   }
-  throw new FbError("gcm pool exhausted — no free code 01–100", {});
+  throw new FbError("gcm pool exhausted — no free code 01–99", {});
 }
 
 async function backfillGcm(documentId: string | null, patch: Json): Promise<void> {
@@ -251,6 +252,15 @@ async function backfillGcm(documentId: string | null, patch: Json): Promise<void
     method: "PUT",
     headers: { Authorization: `Bearer ${STRAPI_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({ data: patch }),
+  }).catch(() => {});
+}
+
+/** Release a claimed gcm code (delete the registry row) — used when a launch fails before any FB
+ *  resource is created, so failed attempts don't permanently drain the 01–99 pool. */
+async function deleteGcm(documentId: string): Promise<void> {
+  await fetch(`${STRAPI}/api/gcm-maps/${documentId}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${STRAPI_TOKEN}` },
   }).catch(() => {});
 }
 
@@ -266,7 +276,9 @@ async function resolveLocales(names: string[]): Promise<number[]> {
         const body = await fbGet(`search?type=adlocale&limit=25&q=${encodeURIComponent(raw.replace(/[()]/g, " ").trim())}`);
         const data = (body?.data as Array<{ key?: number; name?: string }> | undefined) ?? [];
         const norm = (s: string) => s.toLowerCase().replace(/[^a-z]/g, "");
-        const hit = data.find((d) => d.name && norm(d.name) === norm(raw)) ?? data[0];
+        // Only accept an exact normalized-name match — never fall back to data[0], which would
+        // silently target an arbitrary wrong language.
+        const hit = data.find((d) => d.name && norm(d.name) === norm(raw));
         localeCache.set(raw, typeof hit?.key === "number" ? hit.key : null);
       } catch {
         localeCache.set(raw, null);
@@ -347,8 +359,6 @@ export async function POST(req: Request) {
         created.video_id = videoId;
         send({ stage: "processing" });
         await waitForVideo(videoId);
-        // FB has the bytes now — drop the temporary blob (best-effort, never blocks the launch).
-        void del(videoUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
         const thumbUrl = await videoThumb(videoId);
         const localeIds = await resolveLocales(campaign.locales);
 
@@ -385,9 +395,18 @@ export async function POST(req: Request) {
         send({ ok: true, stage: "done", gcm, link, page_id: binds.pageId, ...created });
       } catch (e) {
         const err = e as FbError;
-        if (claim) await backfillGcm(claim.documentId, { status: "failed", notes: `launch failed: ${err.message}` });
+        // Free the gcm code when nothing was created on FB (early failures like a rate limit or a
+        // video error) so the 01–99 pool never leaks; keep the row (marked failed) once a campaign
+        // exists so the orphaned PAUSED campaign stays traceable.
+        if (claim?.documentId) {
+          if (created.campaign_id)
+            await backfillGcm(claim.documentId, { status: "failed", notes: `launch failed: ${err.message}` });
+          else await deleteGcm(claim.documentId);
+        }
         send({ ok: false, stage: "error", error: err.message ?? String(e), detail: err.detail ?? null, created });
       } finally {
+        // Drop the temporary Blob whether the launch succeeded or failed — never orphan the upload.
+        void del(videoUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
         controller.close();
       }
     },

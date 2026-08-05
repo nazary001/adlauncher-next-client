@@ -6,27 +6,28 @@ export const runtime = "nodejs";
 // Same users as amazon-tools: the "tools" Strapi (users-permissions /api/auth/local).
 const TOOLS = (process.env.STRAPI_TOOLS_URL ?? "").replace(/\/+$/, "");
 
-// Best-effort in-memory brute-force throttle (per IP). Resets on restart.
+// Best-effort in-memory brute-force throttle (per IP, counting FAILED attempts only — so a shared
+// office/VPN NAT IP isn't locked out by successful logins). Resets on restart.
 const hits = new Map<string, { n: number; resetAt: number }>();
 const WINDOW = 15 * 60 * 1000;
 const MAX = 10;
-function throttled(ip: string): boolean {
+function overLimit(ip: string): boolean {
+  const rec = hits.get(ip);
+  return !!rec && rec.resetAt >= Date.now() && rec.n >= MAX;
+}
+function recordFailure(ip: string): void {
   const now = Date.now();
   const rec = hits.get(ip);
-  if (!rec || rec.resetAt < now) {
-    hits.set(ip, { n: 1, resetAt: now + WINDOW });
-    return false;
-  }
-  rec.n += 1;
-  return rec.n > MAX;
+  if (!rec || rec.resetAt < now) hits.set(ip, { n: 1, resetAt: now + WINDOW });
+  else rec.n += 1;
 }
 
 export async function POST(req: Request) {
   if (!TOOLS) return NextResponse.json({ ok: false, error: "auth_not_configured" }, { status: 500 });
 
   const ip = (req.headers.get("x-forwarded-for") ?? "local").split(",")[0].trim();
-  if (throttled(ip)) {
-    return NextResponse.json({ ok: false, error: "Too many attempts — try again later." }, { status: 429 });
+  if (overLimit(ip)) {
+    return NextResponse.json({ ok: false, error: "Too many failed attempts — try again later." }, { status: 429 });
   }
 
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
@@ -45,8 +46,10 @@ export async function POST(req: Request) {
     });
     const data = (await res.json().catch(() => ({}))) as { user?: Record<string, unknown> };
     if (!res.ok || !data?.user) {
+      recordFailure(ip);
       return NextResponse.json({ ok: false, error: "Invalid username or password." }, { status: 401 });
     }
+    hits.delete(ip); // successful login clears the failure counter
 
     const u = data.user;
     const username = String(u.username ?? identifier);

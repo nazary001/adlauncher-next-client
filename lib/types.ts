@@ -84,7 +84,7 @@ export function fullName(c: Campaign): string {
 }
 
 export function parseMoney(v: string): number {
-  const n = parseFloat(v.replace(/\s/g, "").replace(",", "."));
+  const n = parseFloat(String(v ?? "").replace(/\s/g, "").replace(",", "."));
   return Number.isFinite(n) ? n : 0;
 }
 
