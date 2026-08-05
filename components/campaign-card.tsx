@@ -2,7 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 import type { Campaign } from "@/lib/types";
-import { bidAmountMissing, fullName, isReady, moneyLabel } from "@/lib/types";
+import { bidAmountMissing, fullName, isReady, limitMoney, moneyLabel } from "@/lib/types";
 import {
   AGES,
   BID_STRATEGIES,
@@ -396,8 +396,9 @@ export function CampaignCard({
                 <Field label="Daily budget" className="col-span-6">
                   <MoneyInput
                     value={c.budget}
-                    onChange={(e) => patch({ budget: e.target.value })}
-                    placeholder="10"
+                    onChange={(e) => patch({ budget: limitMoney(e.target.value, 10000) })}
+                    placeholder="7"
+                    maxLength={8}
                   />
                 </Field>
                 <Field
@@ -408,9 +409,10 @@ export function CampaignCard({
                 >
                   <MoneyInput
                     value={c.bidCap}
-                    onChange={(e) => patch({ bidCap: e.target.value })}
+                    onChange={(e) => patch({ bidCap: limitMoney(e.target.value, 1000) })}
                     placeholder="0,50"
                     disabled={!bidCapEnabled}
+                    maxLength={7}
                   />
                 </Field>
               </div>

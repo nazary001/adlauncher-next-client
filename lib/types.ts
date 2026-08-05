@@ -57,7 +57,7 @@ export function makeCampaign(id: string, namePrefix = ""): Campaign {
     bidStrategy: "LOWEST_COST_WITHOUT_CAP",
     conversionEvent: "PURCHASE",
     optimization: "conversions",
-    budget: "10",
+    budget: "7",
     bidCap: "",
     title: "",
     copy: "",
@@ -94,6 +94,22 @@ export function moneyLabel(v: string | number): string {
   const n = typeof v === "number" ? v : parseMoney(v);
   if (!Number.isFinite(n)) return "0";
   return Number.isInteger(n) ? String(n) : String(n).replace(".", ",");
+}
+
+/** Keep a money field sane: strip junk to digits + a single decimal separator (≤2 places), and
+ *  clamp to `max` so absurd amounts (e.g. $100000000) can't be entered. */
+export function limitMoney(raw: string, max: number): string {
+  const cleaned = raw.replace(/[^\d.,]/g, "");
+  const sep = cleaned.search(/[.,]/);
+  let s: string;
+  if (sep === -1) {
+    s = cleaned;
+  } else {
+    const int = cleaned.slice(0, sep).replace(/[.,]/g, "");
+    const dec = cleaned.slice(sep + 1).replace(/[.,]/g, "").slice(0, 2);
+    s = `${int},${dec}`;
+  }
+  return parseMoney(s) > max ? moneyLabel(max) : s;
 }
 
 /** Cap-based bid strategies (bid cap / cost cap) need a positive bid amount; without it Meta
