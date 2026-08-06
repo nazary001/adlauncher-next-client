@@ -18,24 +18,74 @@ export type SourceDetail = {
   bidStrategy: string;
   optimizationGoal: string;
   conversionEvent: string;
-  videoData: Json; // source ad's object_story_spec.video_data (video_id/message/title/cta/image)
+  videoData: Json; // reusable video_data (video_id/message/title/cta/image) from the source ad's
+  //                  inline object_story_spec.video_data, or collapsed from its asset_feed_spec.
 };
 
 const SRC_FIELDS = [
   "objective",
   "special_ad_categories",
   "adsets.limit(1){bid_strategy,optimization_goal,promoted_object}",
-  "ads.limit(1){creative{object_story_spec}}",
+  // Read several ads + both places a video can live: inline video_data, and the asset_feed_spec that
+  // Advantage+/flexible ads use instead (this is how ads built by hand in Ads Manager usually look).
+  "ads.limit(5){creative{object_story_spec,asset_feed_spec}}",
 ].join(",");
 
-/** Pull the source campaign's objective + first ad set's delivery + first ad's creative story. */
+/**
+ * Advantage+ / flexible-media ads keep their video + copy in asset_feed_spec, not in
+ * object_story_spec.video_data. Collapse the first video + first body/title/description/CTA/link into
+ * a video_data-shaped object so the clone rebuilds a plain single-video creative (the gcm is swapped
+ * into the link downstream). Null when there's no reusable video there.
+ */
+function videoDataFromAssetFeed(afs: Json): Json | null {
+  const videos = Array.isArray(afs.videos) ? (afs.videos as Json[]) : [];
+  const vid = videos.find((v) => v && typeof (v as Json).video_id === "string" && (v as Json).video_id);
+  if (!vid) return null;
+  const firstOf = (arr: unknown): Json | undefined => (Array.isArray(arr) && arr.length ? (arr[0] as Json) : undefined);
+  const textOf = (o: Json | undefined): string | undefined =>
+    o && typeof o.text === "string" && o.text ? o.text : undefined;
+
+  const vd: Json = { video_id: (vid as Json).video_id };
+  const thumb = (vid as Json).thumbnail_url;
+  if (typeof thumb === "string" && thumb) vd.image_url = thumb;
+  const message = textOf(firstOf(afs.bodies));
+  if (message) vd.message = message;
+  const title = textOf(firstOf(afs.titles));
+  if (title) vd.title = title;
+  const description = textOf(firstOf(afs.descriptions));
+  if (description) vd.link_description = description;
+  const ctaType = Array.isArray(afs.call_to_action_types) ? afs.call_to_action_types[0] : undefined;
+  if (typeof ctaType === "string" && ctaType) {
+    const link = firstOf(afs.link_urls)?.website_url;
+    vd.call_to_action = { type: ctaType, value: typeof link === "string" && link ? { link } : {} };
+  }
+  return vd;
+}
+
+/** A reusable video_data for one fetched ad — inline object_story_spec.video_data first, then the
+ *  asset_feed_spec fallback. Null when neither carries a video. */
+function videoDataFromAd(ad: Json): Json | null {
+  const creative = (ad.creative ?? {}) as Json;
+  const inline = (((creative.object_story_spec ?? {}) as Json).video_data ?? {}) as Json;
+  if (typeof inline.video_id === "string" && inline.video_id) return inline;
+  const afs = creative.asset_feed_spec as Json | undefined;
+  return afs ? videoDataFromAssetFeed(afs) : null;
+}
+
+/** Pull the source campaign's objective + first ad set's delivery + first reusable ad video. */
 export async function fetchSourceDetail(campaignId: string): Promise<SourceDetail> {
   const obj = await fbGet(`${campaignId}?fields=${encodeURIComponent(SRC_FIELDS)}`);
   const adset = (((obj.adsets as { data?: Json[] } | undefined)?.data?.[0] ?? {}) as Json);
-  const ad = (((obj.ads as { data?: Json[] } | undefined)?.data?.[0] ?? {}) as Json);
-  const creative = (ad.creative ?? {}) as Json;
-  const oss = (creative.object_story_spec ?? {}) as Json;
-  const videoData = (oss.video_data ?? {}) as Json;
+  const ads = ((obj.ads as { data?: Json[] } | undefined)?.data ?? []) as Json[];
+  // Scan the campaign's ads for the first with a reusable video (inline video_data or asset_feed_spec).
+  let videoData: Json = {};
+  for (const ad of ads) {
+    const vd = videoDataFromAd(ad);
+    if (vd) {
+      videoData = vd;
+      break;
+    }
+  }
   const promoted = (adset.promoted_object ?? {}) as Json;
   const cats = obj.special_ad_categories as string[] | undefined;
 
