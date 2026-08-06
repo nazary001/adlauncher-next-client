@@ -41,6 +41,7 @@ const num = (v: unknown): number | undefined => {
 function toClient(r: Row): Row {
   return {
     id: r.task_id,
+    owner: r.owner ?? null,
     name: r.name ?? "",
     partner: r.partner ?? null,
     gcm: r.gcm ?? "",
@@ -82,14 +83,19 @@ async function findByTaskId(taskId: string): Promise<{ documentId: string; owner
   return row?.documentId ? { documentId: row.documentId, owner: row.owner ? String(row.owner) : null } : null;
 }
 
-/** GET → the caller's recent tasks (newest first) for restore on page load. */
+/**
+ * GET → the whole team's recent tasks (newest first) for restore on page load / live refresh.
+ * Every logged-in user sees everyone's launches and clones (visibility is shared); mutations
+ * (POST/DELETE) stay owner-scoped, so you can still only change your own rows. The `owner` field
+ * rides along so the client can label who launched each task and gate its own actions.
+ */
 export async function GET(req: Request) {
   const user = callerOf(req);
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   if (!STRAPI || !TOKEN) return NextResponse.json({ ok: false, tasks: [] });
   try {
     const res = await fetch(
-      `${STRAPI}/api/launch-tasks?filters[owner][$eq]=${encodeURIComponent(user)}&sort[0]=queued_at:desc&pagination[pageSize]=100`,
+      `${STRAPI}/api/launch-tasks?sort[0]=queued_at:desc&pagination[pageSize]=200`,
       { headers: H(), cache: "no-store" },
     );
     if (!res.ok) return NextResponse.json({ ok: false, tasks: [], status: res.status });

@@ -12,12 +12,17 @@ import {
 import { upload } from "@vercel/blob/client";
 import { type Campaign, moneyLabel } from "@/lib/types";
 import type { PartnerId } from "@/lib/partners";
+import type { CloneEdit } from "@/lib/clone";
 import type { SessionUser } from "./user-menu";
 import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, TrashIcon, XIcon } from "./icons";
 
-// ---------- stages ("upload" is client→Blob; the rest mirror /api/launch events) ----------
+// ---------- stages (per task kind) ----------
 
-const STAGES = [
+type TaskKind = "launch" | "clone";
+type StageDef = { key: string; label: string };
+
+// Launch pipeline ("upload" is client→Blob; the rest mirror /api/launch events).
+const LAUNCH_STAGES: readonly StageDef[] = [
   { key: "upload", label: "Uploading video" },
   { key: "gcm", label: "Reserving code" },
   { key: "video", label: "Registering video" },
@@ -26,35 +31,64 @@ const STAGES = [
   { key: "adset", label: "Creating ad set" },
   { key: "creative", label: "Building creative" },
   { key: "ad", label: "Publishing ad" },
-] as const;
-type StageKey = (typeof STAGES)[number]["key"];
-const STAGE_INDEX: Record<string, number> = Object.fromEntries(STAGES.map((s, i) => [s.key, i]));
+];
+
+// Clone pipeline — mirrors /api/clone/run events; the source video is reused, so no upload.
+const CLONE_STAGES: readonly StageDef[] = [
+  { key: "source", label: "Reading source" },
+  { key: "gcm", label: "Reserving code" },
+  { key: "campaign", label: "Creating campaign" },
+  { key: "adset", label: "Creating ad set" },
+  { key: "creative", label: "Building creative" },
+  { key: "ad", label: "Publishing ad" },
+];
+
+function stagesFor(kind: TaskKind): readonly StageDef[] {
+  return kind === "clone" ? CLONE_STAGES : LAUNCH_STAGES;
+}
+function stageIndexFor(kind: TaskKind, stage: string | null): number {
+  if (!stage) return 0;
+  const i = stagesFor(kind).findIndex((s) => s.key === stage);
+  return i < 0 ? 0 : i;
+}
 
 // ---------- task model ----------
 
 type TaskStatus = "queued" | "running" | "done" | "error";
 
 type LaunchInput = {
+  kind: "launch";
   partnerId: PartnerId;
   campaign: Campaign;
   videoUrl: string;
   videoName: string;
 };
 
+type CloneInput = {
+  kind: "clone";
+  partnerId: PartnerId;
+  edit: CloneEdit;
+};
+
+type TaskInput = LaunchInput | CloneInput;
+
 export type LaunchTask = {
   id: string;
+  kind: TaskKind;
+  /** Username that launched/cloned this. Shared view shows everyone's; mutations stay owner-scoped. */
+  owner?: string | null;
   name: string;
   gcm: string;
   geo: string;
   budget: string;
   status: TaskStatus;
-  stage: StageKey | null;
+  stage: string | null;
   result?: { campaignId?: string; adsetId?: string; adId?: string; gcm?: string; link?: string };
   error?: string;
   queuedAt: number;
   startedAt?: number;
   finishedAt?: number;
-  /** Created this session (has its video → can be retried). Restored rows are false. */
+  /** Created this session (has its input → can be retried). Restored rows are false. */
   local?: boolean;
 };
 
@@ -62,14 +96,18 @@ export type LaunchTask = {
 function fromRemote(r: Record<string, unknown>): LaunchTask {
   const n = (v: unknown) => (v == null || v === "" ? undefined : Number(v));
   const s = (v: unknown) => (v == null ? undefined : String(v));
+  const name = s(r.name) ?? "";
   return {
     id: String(r.id ?? r.task_id ?? ""),
-    name: s(r.name) ?? "",
+    // Strapi doesn't store the kind; infer it from the "(CLONE)" name stamp for restore rendering.
+    kind: /\(clone\)/i.test(name) ? "clone" : "launch",
+    owner: s(r.owner) ?? null,
+    name,
     gcm: s(r.gcm) ?? "",
     geo: s(r.geo) ?? "",
     budget: s(r.budget) ?? "",
     status: (s(r.status) ?? "queued") as TaskStatus,
-    stage: (s(r.stage) ?? null) as StageKey | null,
+    stage: s(r.stage) ?? null,
     result:
       r.campaign_id || r.ad_id || r.link
         ? { campaignId: s(r.campaign_id), adsetId: s(r.adset_id), adId: s(r.ad_id), gcm: s(r.gcm), link: s(r.link) }
@@ -81,10 +119,12 @@ function fromRemote(r: Record<string, unknown>): LaunchTask {
   };
 }
 
-/** On restore, anything not terminal was cut off by the reload → mark interrupted (shown as a
- *  non-retryable error). Restored tasks lose their video, so `local` is always false. */
-function asRestored(t: LaunchTask): LaunchTask {
+/** On restore, my own non-terminal task was cut off by this reload → mark interrupted (non-retryable
+ *  after restore, since the input is gone). Another user's still-active task is live on their
+ *  machine, so keep its state. Restored rows are never `local`. */
+function asRestored(t: LaunchTask, me: string | null): LaunchTask {
   if (t.status === "done" || t.status === "error") return { ...t, local: false };
+  if (me && t.owner && t.owner !== me) return { ...t, local: false };
   return {
     ...t,
     status: "error",
@@ -94,19 +134,53 @@ function asRestored(t: LaunchTask): LaunchTask {
   };
 }
 
+/** Merge a freshly-fetched shared list into the current in-memory list. My own in-flight tasks stay
+ *  authoritative (never clobbered by a stale Strapi row); everyone else's come from the fetch.
+ *  Newest first. */
+function mergeShared(cur: LaunchTask[], fetched: LaunchTask[], me: string | null): LaunchTask[] {
+  const byId = new Map<string, LaunchTask>();
+  for (const f of fetched) byId.set(f.id, f);
+  for (const c of cur) {
+    const mine = c.local || (!!me && c.owner === me);
+    if (mine && (c.local || c.status === "running" || c.status === "queued")) byId.set(c.id, c);
+    else if (!byId.has(c.id)) byId.set(c.id, c);
+  }
+  return [...byId.values()].sort((a, b) => b.queuedAt - a.queuedAt);
+}
+
 // Per-account key: several people share machines/browsers, and the fallback snapshot must not
 // leak one account's queue into another. The bare legacy key predates scoping and gets dropped.
 const LS_BASE = "adlauncher.tasks";
 const lsKeyFor = (user?: SessionUser) => (user?.username ? `${LS_BASE}.${user.username}` : LS_BASE);
 
-export type EnqueueArgs = LaunchInput & { name: string; gcm: string; geo: string; budget: string };
+export type EnqueueArgs = {
+  partnerId: PartnerId;
+  campaign: Campaign;
+  videoUrl: string;
+  videoName: string;
+  name: string;
+  gcm: string;
+  geo: string;
+  budget: string;
+};
+
+export type CloneEnqueueArgs = {
+  partnerId: PartnerId;
+  edit: CloneEdit;
+  name: string;
+  geo: string;
+  budget: string;
+};
 
 type TaskManagerValue = {
   tasks: LaunchTask[];
   counts: { queued: number; running: number; done: number; error: number; active: number; total: number };
+  /** The current user — used to label task owners and gate own-only actions in the shared view. */
+  me: string | null;
   open: boolean;
   setOpen: (v: boolean) => void;
   enqueue: (args: EnqueueArgs) => void;
+  enqueueClone: (args: CloneEnqueueArgs) => void;
   retry: (id: string) => void;
   retryAll: () => void;
   remove: (id: string) => void;
@@ -126,9 +200,10 @@ export function useTaskManager(): TaskManagerValue {
 
 export function TaskManagerProvider({ children, user }: { children: React.ReactNode; user?: SessionUser }) {
   const lsKey = lsKeyFor(user);
+  const me = user?.username ?? null;
   const [tasks, setTasks] = useState<LaunchTask[]>([]);
   const [open, setOpen] = useState(false);
-  const inputs = useRef(new Map<string, LaunchInput>());
+  const inputs = useRef(new Map<string, TaskInput>());
   const queue = useRef<string[]>([]);
   const working = useRef(false);
   const tasksRef = useRef<LaunchTask[]>([]);
@@ -169,8 +244,20 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
     );
   }, []);
 
-  // Restore once on mount: Strapi wins; localStorage is the offline fallback. Snapshot local
-  // synchronously first so the persist effect below can't clobber it before we read it.
+  // Pull the whole team's tasks and merge them in (my in-flight tasks stay authoritative). Used for
+  // the live refreshes on window focus and while the drawer is open.
+  const loadRemote = useCallback(() => {
+    fetch("/api/launch-tasks")
+      .then((r) => r.json())
+      .then((d) => {
+        if (!d?.ok || !Array.isArray(d.tasks)) return;
+        const fetched = (d.tasks as Record<string, unknown>[]).map(fromRemote).map((t) => asRestored(t, me));
+        setTasks((cur) => mergeShared(cur, fetched, me));
+      })
+      .catch(() => {});
+  }, [me]);
+
+  // Restore once on mount: the team's Strapi list wins; localStorage is the offline fallback.
   useEffect(() => {
     let localSnap: LaunchTask[] = [];
     try {
@@ -182,24 +269,16 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
       /* ignore */
     }
     let alive = true;
-    // Keep anything enqueued while this fetch was in flight (add restored rows not already present),
-    // so a launch fired before restore resolves isn't clobbered off the board.
-    const mergeRestored = (restored: LaunchTask[]) =>
-      setTasks((cur) => {
-        if (cur.length === 0) return restored;
-        const curIds = new Set(cur.map((t) => t.id));
-        return [...cur, ...restored.filter((r) => !curIds.has(r.id))];
-      });
     fetch("/api/launch-tasks")
       .then((r) => r.json())
       .then((d) => {
         if (!alive) return;
         const rows: LaunchTask[] =
           d?.ok && Array.isArray(d.tasks) ? (d.tasks as Record<string, unknown>[]).map(fromRemote) : localSnap;
-        mergeRestored(rows.map(asRestored));
+        setTasks((cur) => mergeShared(cur, rows.map((t) => asRestored(t, me)), me));
       })
       .catch(() => {
-        if (alive) mergeRestored(localSnap.map(asRestored));
+        if (alive) setTasks((cur) => mergeShared(cur, localSnap.map((t) => asRestored(t, me)), me));
       })
       .finally(() => {
         loadedRef.current = true;
@@ -207,7 +286,21 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
     return () => {
       alive = false;
     };
-  }, [lsKey]);
+  }, [lsKey, me]);
+
+  // Live shared view: refresh on window focus, and — while the drawer is open — on open + every 15s.
+  useEffect(() => {
+    const onFocus = () => loadRemote();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [loadRemote]);
+
+  useEffect(() => {
+    if (!open) return;
+    loadRemote();
+    const iv = window.setInterval(loadRemote, 15000);
+    return () => window.clearInterval(iv);
+  }, [open, loadRemote]);
 
   // Mirror to localStorage after the initial load (guard prevents the empty first render from
   // wiping the stored snapshot before restore reads it).
@@ -220,10 +313,8 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
     }
   }, [tasks, lsKey]);
 
-  const runTask = useCallback(
-    async (id: string) => {
-      const input = inputs.current.get(id);
-      if (!input) return;
+  const runLaunchTask = useCallback(
+    async (id: string, input: LaunchInput) => {
       const startedAt = Date.now();
       patch(id, { status: "running", stage: "upload", startedAt, error: undefined });
       saveRemote(id, { status: "running", stage: "upload", started_at: startedAt });
@@ -262,7 +353,7 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
             final = ev;
             return;
           }
-          if (typeof ev.stage === "string") patch(id, { stage: ev.stage as StageKey });
+          if (typeof ev.stage === "string") patch(id, { stage: ev.stage });
         };
 
         if (res.body) {
@@ -328,6 +419,105 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
     [patch, saveRemote],
   );
 
+  const runCloneTask = useCallback(
+    async (id: string, input: CloneInput) => {
+      const startedAt = Date.now();
+      patch(id, { status: "running", stage: "source", startedAt, error: undefined });
+      saveRemote(id, { status: "running", stage: "source", started_at: startedAt });
+      try {
+        const res = await fetch("/api/clone/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ partnerId: input.partnerId, edits: [input.edit] }),
+        });
+
+        // Stream mirrors /api/clone/run: per-clone {idx,stage} progress, a per-clone {ok,...} final,
+        // then a {stage:"batch-done"} summary we ignore (this task carries a single clone).
+        let final: Record<string, unknown> | null = null;
+        const handle = (line: string) => {
+          let ev: Record<string, unknown>;
+          try {
+            ev = JSON.parse(line);
+          } catch {
+            return;
+          }
+          if (ev.stage === "batch-done") return;
+          if (ev.ok === true || ev.ok === false) {
+            final = ev;
+            return;
+          }
+          if (typeof ev.stage === "string" && ev.stage !== "start") patch(id, { stage: ev.stage });
+        };
+
+        if (res.body) {
+          const reader = res.body.getReader();
+          const dec = new TextDecoder();
+          let buf = "";
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            let nl: number;
+            while ((nl = buf.indexOf("\n")) >= 0) {
+              const line = buf.slice(0, nl).trim();
+              buf = buf.slice(nl + 1);
+              if (line) handle(line);
+            }
+          }
+          if (buf.trim()) handle(buf.trim());
+        } else {
+          final = await res.json().catch(() => null);
+        }
+
+        const f = final as Record<string, unknown> | null;
+        if (f && f.ok === true) {
+          const finishedAt = Date.now();
+          patch(id, {
+            status: "done",
+            stage: "ad",
+            finishedAt,
+            ...(typeof f.gcm === "string" && f.gcm ? { gcm: f.gcm } : {}),
+            result: {
+              campaignId: f.campaign_id as string,
+              adsetId: f.adset_id as string,
+              adId: f.ad_id as string,
+              gcm: f.gcm as string,
+            },
+          });
+          saveRemote(id, {
+            status: "done",
+            stage: "ad",
+            finished_at: finishedAt,
+            campaign_id: f.campaign_id,
+            adset_id: f.adset_id,
+            ad_id: f.ad_id,
+            gcm: f.gcm,
+          });
+        } else {
+          const finishedAt = Date.now();
+          const msg = (f && ((f.error as string) || (f.stage as string))) || `HTTP ${res.status}`;
+          patch(id, { status: "error", finishedAt, error: msg });
+          saveRemote(id, { status: "error", finished_at: finishedAt, error: msg });
+        }
+      } catch (e) {
+        const finishedAt = Date.now();
+        patch(id, { status: "error", finishedAt, error: String(e) });
+        saveRemote(id, { status: "error", finished_at: finishedAt, error: String(e) });
+      }
+    },
+    [patch, saveRemote],
+  );
+
+  const runTask = useCallback(
+    async (id: string) => {
+      const input = inputs.current.get(id);
+      if (!input) return;
+      if (input.kind === "clone") await runCloneTask(id, input);
+      else await runLaunchTask(id, input);
+    },
+    [runLaunchTask, runCloneTask],
+  );
+
   const pump = useCallback(async () => {
     if (working.current) return;
     working.current = true;
@@ -347,6 +537,7 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
         (globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)) + Date.now().toString(36);
       const queuedAt = Date.now();
       inputs.current.set(id, {
+        kind: "launch",
         partnerId: args.partnerId,
         campaign: args.campaign,
         videoUrl: args.videoUrl,
@@ -364,6 +555,8 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
       setTasks((ts) => [
         {
           id,
+          kind: "launch",
+          owner: me,
           name: args.name,
           gcm: args.gcm,
           geo: args.geo,
@@ -379,7 +572,46 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
       queue.current.push(id);
       void pump();
     },
-    [pump, saveRemote],
+    [pump, saveRemote, me],
+  );
+
+  const enqueueClone = useCallback(
+    (args: CloneEnqueueArgs) => {
+      const id =
+        (globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)) + Date.now().toString(36);
+      const queuedAt = Date.now();
+      // No video upload — the clone reuses the source's video by id (server-side). gcm is assigned
+      // by the run and filled in on completion.
+      inputs.current.set(id, { kind: "clone", partnerId: args.partnerId, edit: args.edit });
+      meta.current.set(id, {
+        name: args.name,
+        partner: args.partnerId,
+        gcm: "",
+        geo: args.geo,
+        budget: args.budget,
+        queued_at: queuedAt,
+      });
+      setTasks((ts) => [
+        {
+          id,
+          kind: "clone",
+          owner: me,
+          name: args.name,
+          gcm: "",
+          geo: args.geo,
+          budget: args.budget,
+          status: "queued",
+          stage: null,
+          queuedAt,
+          local: true,
+        },
+        ...ts,
+      ]);
+      saveRemote(id, { status: "queued" });
+      queue.current.push(id);
+      void pump();
+    },
+    [pump, saveRemote, me],
   );
 
   const retry = useCallback(
@@ -433,20 +665,21 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
     for (const t of tasksRef.current) if (t.status === "error" && t.local) retry(t.id);
   }, [retry]);
 
-  /** Dismiss every finished task (done + error) in one go. */
+  /** Dismiss every finished task (done + error) I own — others' rows aren't mine to delete (the API
+   *  refuses them and they'd reappear on the next shared refresh anyway). */
   const clearFinished = useCallback(() => {
-    // Snapshot the ids synchronously — the setTasks updater runs later, so collecting inside it
-    // would leave `gone` empty when deleteRemote fires.
-    const gone = tasksRef.current
-      .filter((t) => t.status === "done" || t.status === "error")
-      .map((t) => t.id);
+    const gone = new Set(
+      tasksRef.current
+        .filter((t) => (t.status === "done" || t.status === "error") && (t.local || (!!me && t.owner === me)))
+        .map((t) => t.id),
+    );
     gone.forEach((id) => {
       inputs.current.delete(id);
       meta.current.delete(id);
     });
-    setTasks((ts) => ts.filter((t) => t.status === "queued" || t.status === "running"));
-    deleteRemote(gone);
-  }, [deleteRemote]);
+    setTasks((ts) => ts.filter((t) => !gone.has(t.id)));
+    deleteRemote([...gone]);
+  }, [deleteRemote, me]);
 
   const counts = useMemo(() => {
     let queued = 0,
@@ -465,9 +698,11 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
   const value: TaskManagerValue = {
     tasks,
     counts,
+    me,
     open,
     setOpen,
     enqueue,
+    enqueueClone,
     retry,
     retryAll,
     remove,
@@ -532,6 +767,7 @@ export function TaskManagerButton() {
 // ---------- drawer panel ----------
 
 type Filter = "all" | "active" | "done" | "error";
+type KindFilter = "all" | "launch" | "clone";
 
 function fmtElapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -539,8 +775,9 @@ function fmtElapsed(ms: number): string {
 }
 
 function TaskManagerPanel() {
-  const { tasks, counts, open, setOpen, retry, retryAll, remove, clearFinished } = useTaskManager();
+  const { tasks, counts, me, open, setOpen, retry, retryAll, remove, clearFinished } = useTaskManager();
   const [filter, setFilter] = useState<Filter>("all");
+  const [kindFilter, setKindFilter] = useState<KindFilter>("all");
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -560,10 +797,20 @@ function TaskManagerPanel() {
 
   if (!open) return null;
 
-  // Only local errors can actually retry (restored tasks lost their video); match retryAll.
+  // Only local errors can actually retry (restored tasks lost their input); match retryAll.
   const retryable = tasks.filter((t) => t.status === "error" && t.local).length;
 
-  const shown = tasks.filter((t) =>
+  // Split by kind first (New launches vs Duplicates), then filter by status within that split.
+  const kindTasks = kindFilter === "all" ? tasks : tasks.filter((t) => t.kind === kindFilter);
+  const kc = { queued: 0, running: 0, done: 0, error: 0 };
+  for (const t of kindTasks) {
+    if (t.status === "queued") kc.queued++;
+    else if (t.status === "running") kc.running++;
+    else if (t.status === "done") kc.done++;
+    else kc.error++;
+  }
+
+  const shown = kindTasks.filter((t) =>
     filter === "all"
       ? true
       : filter === "active"
@@ -571,11 +818,17 @@ function TaskManagerPanel() {
         : t.status === filter,
   );
 
+  const kinds: { key: KindFilter; label: string; icon: React.ReactNode; n: number }[] = [
+    { key: "all", label: "All", icon: null, n: tasks.length },
+    { key: "launch", label: "Launches", icon: <RocketIcon className="h-3.5 w-3.5" />, n: tasks.filter((t) => t.kind === "launch").length },
+    { key: "clone", label: "Duplicates", icon: <CopyIcon className="h-3.5 w-3.5" />, n: tasks.filter((t) => t.kind === "clone").length },
+  ];
+
   const tabs: { key: Filter; label: string; n: number }[] = [
-    { key: "all", label: "All", n: counts.total },
-    { key: "active", label: "Active", n: counts.active },
-    { key: "done", label: "Done", n: counts.done },
-    { key: "error", label: "Failed", n: counts.error },
+    { key: "all", label: "All", n: kindTasks.length },
+    { key: "active", label: "Active", n: kc.queued + kc.running },
+    { key: "done", label: "Done", n: kc.done },
+    { key: "error", label: "Failed", n: kc.error },
   ];
 
   return (
@@ -590,7 +843,7 @@ function TaskManagerPanel() {
             </span>
             <div className="leading-none">
               <h2 className="text-[14px] font-semibold text-ink">Task Manager</h2>
-              <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-faint">Launch queue</p>
+              <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-faint">Launch &amp; clone queue</p>
             </div>
           </div>
           <button
@@ -603,12 +856,33 @@ function TaskManagerPanel() {
           </button>
         </div>
 
-        {/* summary strip */}
+        {/* split — New launches vs Duplicates */}
+        <div className="flex items-center gap-1 border-b border-line px-3 py-2.5">
+          {kinds.map((k) => (
+            <button
+              key={k.key}
+              type="button"
+              onClick={() => setKindFilter(k.key)}
+              className={
+                "flex flex-1 items-center justify-center gap-1.5 rounded-lg border px-1.5 py-1.5 text-[12px] font-medium transition-colors duration-150 " +
+                (kindFilter === k.key
+                  ? "border-accent/40 bg-accent/15 text-[#9db8ff]"
+                  : "border-line bg-surface2/40 text-faint hover:border-line2 hover:text-dim")
+              }
+            >
+              {k.icon}
+              <span>{k.label}</span>
+              <span className="font-mono text-[10.5px] opacity-70">{k.n}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* summary strip — reflects the selected split */}
         <div className="flex items-center gap-1.5 border-b border-line px-4 py-2.5">
-          <Stat label="Queued" n={counts.queued} tone="text-dim" />
-          <Stat label="Running" n={counts.running} tone="text-[#9db8ff]" />
-          <Stat label="Done" n={counts.done} tone="text-launch2" />
-          <Stat label="Failed" n={counts.error} tone="text-danger" />
+          <Stat label="Queued" n={kc.queued} tone="text-dim" />
+          <Stat label="Running" n={kc.running} tone="text-[#9db8ff]" />
+          <Stat label="Done" n={kc.done} tone="text-launch2" />
+          <Stat label="Failed" n={kc.error} tone="text-danger" />
         </div>
 
         {/* filter tabs */}
@@ -638,13 +912,13 @@ function TaskManagerPanel() {
               </span>
               <p className="text-[13px] font-medium text-dim">Nothing here yet</p>
               <p className="max-w-[240px] text-[11.5px] leading-relaxed text-faint">
-                Launched campaigns land here and build one at a time. Keep working — the queue runs on its own.
+                Launched and cloned campaigns land here and build one at a time. Keep working — the queue runs on its own.
               </p>
             </div>
           ) : (
             <div className="flex flex-col gap-2">
               {shown.map((t) => (
-                <TaskRow key={t.id} task={t} now={now} onRetry={() => retry(t.id)} onRemove={() => remove(t.id)} />
+                <TaskRow key={t.id} task={t} me={me} now={now} onRetry={() => retry(t.id)} onRemove={() => remove(t.id)} />
               ))}
             </div>
           )}
@@ -692,27 +966,34 @@ function Stat({ label, n, tone }: { label: string; n: number; tone: string }) {
 
 function TaskRow({
   task,
+  me,
   now,
   onRetry,
   onRemove,
 }: {
   task: LaunchTask;
+  me: string | null;
   now: number;
   onRetry: () => void;
   onRemove: () => void;
 }) {
-  const idx = task.stage ? STAGE_INDEX[task.stage] ?? 0 : 0;
+  const mine = task.local || (!!me && task.owner === me);
+  const owner = mine ? "you" : task.owner || "—";
+  const stages = stagesFor(task.kind);
+  const idx = stageIndexFor(task.kind, task.stage);
   const done = task.status === "done";
   const error = task.status === "error";
   const running = task.status === "running";
   const elapsed = task.startedAt ? (task.finishedAt ?? now) - task.startedAt : 0;
 
   const statusLabel = done
-    ? "Launched · paused"
+    ? task.kind === "clone"
+      ? "Duplicated · paused"
+      : "Launched · paused"
     : error
       ? task.error || "Failed"
       : running
-        ? STAGES[idx]?.label ?? "Working…"
+        ? stages[idx]?.label ?? "Working…"
         : "Queued";
 
   return (
@@ -729,7 +1010,8 @@ function TaskRow({
             {task.name || "Untitled campaign"}
           </p>
           <p className="mt-0.5 truncate font-mono text-[10.5px] text-faint">
-            gcm {task.gcm || "—"} · {task.geo} · ${moneyLabel(task.budget)}
+            gcm {task.gcm || "—"} · {task.geo} · ${moneyLabel(task.budget)} ·{" "}
+            <span className={mine ? "text-dim" : "text-[#9db8ff]"}>{owner}</span>
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
@@ -745,7 +1027,7 @@ function TaskRow({
               <RetryIcon className="h-3.5 w-3.5" />
             </button>
           ) : null}
-          {!running && task.status !== "queued" ? (
+          {mine && !running && task.status !== "queued" ? (
             <button
               type="button"
               onClick={onRemove}
@@ -761,7 +1043,7 @@ function TaskRow({
 
       {/* segmented stage bar */}
       <div className="mt-2.5 flex gap-1">
-        {STAGES.map((s, i) => {
+        {stages.map((s, i) => {
           const cls = done
             ? "bg-launch"
             : error && i === idx
