@@ -665,12 +665,12 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
     for (const t of tasksRef.current) if (t.status === "error" && t.local) retry(t.id);
   }, [retry]);
 
-  /** Dismiss every finished task (done + error) I own — others' rows aren't mine to delete (the API
-   *  refuses them and they'd reappear on the next shared refresh anyway). */
+  /** Dismiss my FAILED tasks. Successful (done) tasks are a permanent record and cannot be removed —
+   *  only errors are dismissable. Others' rows aren't mine to delete either. */
   const clearFinished = useCallback(() => {
     const gone = new Set(
       tasksRef.current
-        .filter((t) => (t.status === "done" || t.status === "error") && (t.local || (!!me && t.owner === me)))
+        .filter((t) => t.status === "error" && (t.local || (!!me && t.owner === me)))
         .map((t) => t.id),
     );
     gone.forEach((id) => {
@@ -799,6 +799,8 @@ function TaskManagerPanel() {
 
   // Only local errors can actually retry (restored tasks lost their input); match retryAll.
   const retryable = tasks.filter((t) => t.status === "error" && t.local).length;
+  // Failed tasks I can dismiss (mine). Successful ones are a permanent record — not removable.
+  const clearable = tasks.filter((t) => t.status === "error" && (t.local || (!!me && t.owner === me))).length;
 
   // Split by kind first (New launches vs Duplicates), then filter by status within that split.
   const kindTasks = kindFilter === "all" ? tasks : tasks.filter((t) => t.kind === kindFilter);
@@ -943,10 +945,10 @@ function TaskManagerPanel() {
             <button
               type="button"
               onClick={clearFinished}
-              disabled={counts.done + counts.error === 0}
+              disabled={clearable === 0}
               className="rounded-md px-2 py-1 text-[11.5px] font-medium text-dim transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
             >
-              Clear finished
+              Clear failed
             </button>
           </div>
         </div>
@@ -1027,7 +1029,7 @@ function TaskRow({
               <RetryIcon className="h-3.5 w-3.5" />
             </button>
           ) : null}
-          {mine && !running && task.status !== "queued" ? (
+          {mine && error ? (
             <button
               type="button"
               onClick={onRemove}

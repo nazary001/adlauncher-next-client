@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { CheckIcon, SearchIcon, XIcon } from "./icons";
 import type { RichOption } from "@/lib/catalog";
 
@@ -22,23 +23,42 @@ export function SearchSelect({
   disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const [openUp, setOpenUp] = useState(false);
+  const [pos, setPos] = useState<{ left: number; width: number; top: number; up: boolean } | null>(null);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  /* flip the list above the field when the viewport below is too short for it */
-  function openList() {
+  // The list renders in a portal so it's never clipped by a modal's overflow. Position it in
+  // viewport coords under the field (or above it when the space below is short).
+  const computePos = () => {
     const r = rootRef.current?.getBoundingClientRect();
-    if (r) {
-      const spaceBelow = window.innerHeight - r.bottom;
-      setOpenUp(spaceBelow < 280 && r.top > spaceBelow);
-    }
+    if (!r) return;
+    const spaceBelow = window.innerHeight - r.bottom;
+    const up = spaceBelow < 280 && r.top > spaceBelow;
+    setPos({ left: r.left, width: r.width, top: up ? r.top : r.bottom, up });
+  };
+
+  function openList() {
+    computePos();
     setOpen(true);
     setActive(0);
   }
+
+  // Keep the portaled list glued to the field while open (scroll, resize).
+  useEffect(() => {
+    if (!open) return;
+    window.addEventListener("scroll", computePos, true);
+    window.addEventListener("resize", computePos);
+    const ro = new ResizeObserver(computePos);
+    if (rootRef.current) ro.observe(rootRef.current);
+    return () => {
+      window.removeEventListener("scroll", computePos, true);
+      window.removeEventListener("resize", computePos);
+      ro.disconnect();
+    };
+  }, [open]);
 
   const opts: RichOption[] = options.map((o) =>
     typeof o === "string" ? { value: o, label: o } : o,
@@ -135,14 +155,23 @@ export function SearchSelect({
         </button>
       ) : null}
 
-      {open ? (
-        <div
-          className={
-            "absolute left-0 right-0 z-30 overflow-hidden rounded-xl border border-line2 bg-surface shadow-[0_16px_40px_rgba(0,0,0,0.55)] " +
-            (openUp ? "animate-drop-in-up bottom-full mb-1.5" : "animate-drop-in top-full mt-1.5")
-          }
-        >
-          <div ref={listRef} className="max-h-56 overflow-y-auto p-1">
+      {open && pos
+        ? createPortal(
+            <div
+              onMouseDown={(e) => e.preventDefault()}
+              style={{
+                position: "fixed",
+                left: pos.left,
+                width: pos.width,
+                ...(pos.up ? { bottom: window.innerHeight - pos.top + 6 } : { top: pos.top + 6 }),
+                zIndex: 120,
+              }}
+              className={
+                "overflow-hidden rounded-xl border border-line2 bg-surface shadow-[0_16px_40px_rgba(0,0,0,0.55)] " +
+                (pos.up ? "animate-drop-in-up" : "animate-drop-in")
+              }
+            >
+              <div ref={listRef} className="max-h-56 overflow-y-auto p-1">
             {filtered.length === 0 ? (
               <p className="px-3 py-3 text-[12px] text-faint">{emptyHint}</p>
             ) : (
@@ -173,8 +202,10 @@ export function SearchSelect({
               ))
             )}
           </div>
-        </div>
-      ) : null}
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }
