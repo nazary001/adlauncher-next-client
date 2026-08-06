@@ -8,6 +8,7 @@ import {
   type HighOfferConfig,
   defaultSettings,
   flattenPreview,
+  fullCloneName,
   loadCloneSources,
   loadSampleSources,
   makeCloneRow,
@@ -297,7 +298,8 @@ function CloneInner({
     let queued = 0;
     for (const r of rows) {
       for (let k = 1; k <= total; k++) {
-        const name = total > 1 ? `${r.name} (${k})` : r.name;
+        const full = fullCloneName(r);
+        const name = total > 1 ? `${full} (${k})` : full;
         const edit: CloneEdit = {
           campaignId: r.source.campaignId,
           name,
@@ -539,13 +541,20 @@ function CloneInner({
                           </span>
                         </td>
 
-                        {/* name */}
+                        {/* name — fixed prefix (locked) + editable remainder */}
                         <td className="px-3 py-3.5">
+                          <span
+                            className="mb-1 flex items-center gap-1 truncate font-mono text-[10.5px] text-faint"
+                            title={`${r.namePrefix.trim()} — fixed, not editable`}
+                          >
+                            <LockIcon className="h-2.5 w-2.5 shrink-0" />
+                            {r.namePrefix.trim()}
+                          </span>
                           <AutoTextarea
                             value={r.name}
                             onChange={(v) => patchRow(r.id, { name: v })}
                             maxLength={400}
-                            ariaLabel="Campaign name"
+                            ariaLabel="Campaign name (editable part)"
                             className="block w-full resize-none overflow-hidden rounded-lg border border-line bg-surface2 px-2.5 py-2 text-[12.5px] leading-relaxed text-ink outline-none transition-colors duration-150 hover:border-line2 focus:border-accent/60 focus:bg-surface2/80 focus:ring-2 focus:ring-accent/15"
                           />
                           <div className="mt-1.5">

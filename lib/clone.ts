@@ -47,7 +47,8 @@ export type HighOfferConfig = {
 export type CloneRow = {
   id: string; // local row id (not a FB id)
   source: CloneSource;
-  name: string; // generated, editable
+  namePrefix: string; // fixed, non-editable prefix: "[DD.MM] (CLONE) - (tier) - "
+  name: string; // editable remainder; full name = namePrefix + name
   countries: string[];
   locales: string[];
   category: string;
@@ -125,24 +126,36 @@ export function defaultSettings(partner: PartnerId): CloneSettings {
   return { targetId: t.id, userOs: "all", copies: 1 };
 }
 
-/** Refresh a leading `[dd/mm]` / `[dd.mm]` date token to today and stamp `(CLONE)` once. */
-export function cloneName(name: string, ddmm: string): string {
-  let out = name.trim();
-  out = out.replace(/^\[\s*\d{1,2}[./]\d{1,2}\s*\]/, `[${ddmm}]`);
-  if (!/\(clone\)/i.test(out)) {
-    out = /^\[[^\]]*\]/.test(out)
-      ? out.replace(/^(\[[^\]]*\])\s*/, `$1 (CLONE) `)
-      : `[${ddmm}] (CLONE) - ${out}`;
-  }
-  return out;
+/**
+ * Split a source campaign name into the FIXED clone prefix (non-editable: today's date, the (CLONE)
+ * marker, and the tier) and the EDITABLE remainder. E.g.
+ *   "[05.08] - (t1) - [ES] - MKDIGITAL - Tima …"
+ *   → { prefix: "[06.08] (CLONE) - (t1) - ", name: "[ES] - MKDIGITAL - Tima …" }
+ */
+export function splitCloneName(sourceName: string, ddmm: string): { prefix: string; name: string } {
+  let s = (sourceName ?? "").trim();
+  s = s.replace(/^\[[^\]]*\]\s*-?\s*/, ""); // drop the leading [date] and its separator
+  s = s.replace(/^\(clone\)\s*-?\s*/i, ""); // drop a leading (CLONE) if the source is itself a clone
+  const tierM = s.match(/^\(([^)]*)\)\s*-?\s*/); // capture + drop a leading (tier) like (t1)
+  const tier = tierM ? tierM[1] : "";
+  if (tierM) s = s.slice(tierM[0].length);
+  const prefix = tier ? `[${ddmm}] (CLONE) - (${tier}) - ` : `[${ddmm}] (CLONE) - `;
+  return { prefix, name: s.trim() };
+}
+
+/** Full campaign name a clone is created with = fixed prefix + the editable remainder. */
+export function fullCloneName(row: CloneRow): string {
+  return `${row.namePrefix}${row.name}`;
 }
 
 /** Build an editable clone row from a fetched source, prefilled with the source's own values. */
 export function makeCloneRow(source: CloneSource, ddmm: string, rowId: string): CloneRow {
+  const { prefix, name } = splitCloneName(source.name, ddmm);
   return {
     id: rowId,
     source,
-    name: cloneName(source.name, ddmm),
+    namePrefix: prefix,
+    name,
     countries: [...source.countries],
     locales: [...source.locales],
     category: source.category,
@@ -178,7 +191,7 @@ export function flattenPreview(rows: CloneRow[], copies: number): ClonePreviewIt
         rowId: r.id,
         copyIndex: k,
         total,
-        name: total > 1 ? `${r.name} · ${k}/${total}` : r.name,
+        name: total > 1 ? `${fullCloneName(r)} · ${k}/${total}` : fullCloneName(r),
         budget: r.budget,
         roasGoal: r.roasGoal,
         countries: r.countries,
