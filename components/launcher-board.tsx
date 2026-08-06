@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Campaign, FileItem } from "@/lib/types";
 import { firstVideo, fullName, isLaunchable, makeCampaign } from "@/lib/types";
-import { spinCopy } from "@/lib/rephrase";
 import { countryName } from "@/lib/catalog";
 import {
   type PartnerConfig,
@@ -240,7 +239,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
         id: `c${nextId.current++}`,
         collapsed: false,
         gcm: "", // each ad claims its own code — re-assigned by assignGcmCodes
-        copy: spinCopy(src.copy), // vary the primary text so clones aren't identical ads
+        // primary text carried over verbatim from the source (see the spread above)
       };
       return [...cs.slice(0, i + 1), clone, ...cs.slice(i + 1)];
     });
@@ -267,15 +266,15 @@ function LauncherInner({ user }: { user?: SessionUser }) {
 
   const MAX_CARDS = 100;
 
-  /** Wave builder: grow every card to `n` copies (fresh gcm + a varied copy each). Clones open
-   *  expanded so you can review them right away. `n` is the total-per-card multiplier. */
+  /** Wave builder: grow every card to `n` copies (fresh gcm each; primary text copied verbatim).
+   *  Clones open expanded so you can review them right away. `n` is the total-per-card multiplier. */
   const duplicateAll = (n: number) =>
     mutate((cs) => {
       const out: Campaign[] = [];
       for (const c of cs) {
         out.push(c);
         for (let k = 1; k < n && out.length < MAX_CARDS; k++) {
-          out.push({ ...c, id: `c${nextId.current++}`, collapsed: false, gcm: "", copy: spinCopy(c.copy) });
+          out.push({ ...c, id: `c${nextId.current++}`, collapsed: false, gcm: "" });
         }
       }
       return out.slice(0, MAX_CARDS);
