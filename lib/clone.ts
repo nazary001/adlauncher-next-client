@@ -148,14 +148,42 @@ export function fullCloneName(row: CloneRow): string {
   return `${row.namePrefix}${row.name}`;
 }
 
-/** Build an editable clone row from a fetched source, prefilled with the source's own values. */
-export function makeCloneRow(source: CloneSource, ddmm: string, rowId: string): CloneRow {
+/**
+ * The owner tag a clone's name ends with by default: " - <Username>" (first letter capitalized to
+ * match the team's naming convention — "Tima", "Nazar"). Blank/empty username → no tag.
+ */
+export function ownerTag(username?: string | null): string {
+  const u = (username ?? "").trim();
+  return u ? u.charAt(0).toUpperCase() + u.slice(1) : "";
+}
+
+/**
+ * Append " - <Username>" to a clone's editable name so it defaults to whoever is making the clone.
+ * Skips if the name already ends with that exact tag, so re-cloning your own clone doesn't stack
+ * "- Nazar - Nazar".
+ */
+export function withOwner(name: string, username?: string | null): string {
+  const tag = ownerTag(username);
+  const base = (name ?? "").trim();
+  if (!tag) return base;
+  const suffix = ` - ${tag}`;
+  return base.toLowerCase().endsWith(suffix.toLowerCase()) ? base : `${base}${suffix}`;
+}
+
+/** Build an editable clone row from a fetched source, prefilled with the source's own values. The
+ *  editable name defaults to end with " - <Username>" of whoever is making the clone. */
+export function makeCloneRow(
+  source: CloneSource,
+  ddmm: string,
+  rowId: string,
+  username?: string | null,
+): CloneRow {
   const { prefix, name } = splitCloneName(source.name, ddmm);
   return {
     id: rowId,
     source,
     namePrefix: prefix,
-    name,
+    name: withOwner(name, username),
     countries: [...source.countries],
     locales: [...source.locales],
     category: source.category,

@@ -202,6 +202,8 @@ function CloneInner({
   const partner = partnerConfig(partnerId);
   const target = targetById(settings.targetId);
   const targets = targetsFor(partnerId);
+  // Whoever is signed in — clone names default to end with " - <Username>".
+  const me = user?.username ?? null;
 
   /** (Re)load real sources for a set of ids from Facebook. Used by the Retry button — an event
    *  handler, so the synchronous loading/error flips are fine here. */
@@ -218,7 +220,7 @@ function CloneInner({
       const ddmm = todayDDMM();
       loadCloneSources(ids, partnerId)
         .then((sources) => {
-          setRows(sources.map((s) => makeCloneRow(s, ddmm, `r${nextRowId.current++}`)));
+          setRows(sources.map((s) => makeCloneRow(s, ddmm, `r${nextRowId.current++}`, me)));
           setPreviewed(false);
         })
         .catch((e) => {
@@ -227,7 +229,7 @@ function CloneInner({
         })
         .finally(() => setLoading(false));
     },
-    [partnerId],
+    [partnerId, me],
   );
 
   /** Load local mock sources for the "Load sample" button — no Facebook call. */
@@ -237,7 +239,7 @@ function CloneInner({
     const ddmm = todayDDMM();
     loadSampleSources()
       .then((sources) => {
-        setRows(sources.map((s) => makeCloneRow(s, ddmm, `r${nextRowId.current++}`)));
+        setRows(sources.map((s) => makeCloneRow(s, ddmm, `r${nextRowId.current++}`, me)));
         setPreviewed(false);
       })
       .finally(() => setLoading(false));
@@ -253,7 +255,7 @@ function CloneInner({
     loadCloneSources(initialIds, partnerId)
       .then((sources) => {
         if (!alive) return;
-        setRows(sources.map((s) => makeCloneRow(s, ddmm, `r${nextRowId.current++}`)));
+        setRows(sources.map((s) => makeCloneRow(s, ddmm, `r${nextRowId.current++}`, me)));
         setPreviewed(false);
       })
       .catch((e) => {
