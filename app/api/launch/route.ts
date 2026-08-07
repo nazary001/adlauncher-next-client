@@ -386,6 +386,8 @@ export async function POST(req: Request) {
 
         send({ stage: "ad" });
         const ad = await fbPost(`act_${binds.accountId}/ads`, adPayload(name, String(adset.id), String(creative.id)));
+        // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
+        if (!ad.id) throw new FbError("ad create returned no id", ad);
         created.ad_id = String(ad.id);
 
         // 4) record the FB ids against the claimed gcm (best-effort)
@@ -403,7 +405,15 @@ export async function POST(req: Request) {
         // exists so the orphaned PAUSED campaign stays traceable.
         if (claim?.documentId) {
           if (created.campaign_id)
-            await backfillGcm(claim.documentId, { status: "failed", notes: `launch failed: ${err.message}` });
+            // "retired" — the registry's status enum is active|retired; "failed" is rejected by
+            // Strapi (the whole PUT 400s and backfillGcm swallows it, losing the note AND the ids).
+            await backfillGcm(claim.documentId, {
+              status: "retired",
+              notes: `launch failed: ${err.message}`,
+              // Record what DID get created so the orphaned PAUSED campaign is traceable by code.
+              campaign_id: created.campaign_id,
+              ...(created.adset_id ? { adset_id: created.adset_id } : {}),
+            });
           else await deleteGcm(claim.documentId);
         }
         send({ ok: false, stage: "error", error: err.message ?? String(e), detail: err.detail ?? null, created });

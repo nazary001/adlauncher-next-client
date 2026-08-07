@@ -43,6 +43,10 @@ const CLONE_STAGES: readonly StageDef[] = [
   { key: "ad", label: "Publishing ad" },
 ];
 
+// A Blob upload has no server-side deadline — a hung connection would otherwise spin the task (and
+// block the one-at-a-time queue) forever. Seen live 08-07: a task stuck at "Uploading video" 30+ min.
+const UPLOAD_TIMEOUT_MS = 5 * 60_000;
+
 function stagesFor(kind: TaskKind): readonly StageDef[] {
   return kind === "clone" ? CLONE_STAGES : LAUNCH_STAGES;
 }
@@ -318,6 +322,9 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
       const startedAt = Date.now();
       patch(id, { status: "running", stage: "upload", startedAt, error: undefined });
       saveRemote(id, { status: "running", stage: "upload", started_at: startedAt });
+      // Track the furthest stage actually reached so an error is recorded against the stage that
+      // failed (previously Strapi kept the initial "upload" even for FB-side failures).
+      let lastStage = "upload";
       try {
         // Recover the video bytes from the (session-lived) object URL captured at enqueue.
         const blob = await fetch(input.videoUrl).then((r) => r.blob());
@@ -327,13 +334,26 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
 
         // Upload the creative straight to Vercel Blob — this bypasses the serverless request-body
         // limit (~4.5MB) entirely. The launch route then gets just the URL and FB pulls the video
-        // from it via file_url.
+        // from it via file_url. Bounded by UPLOAD_TIMEOUT_MS so a hung connection fails the task
+        // (retryable) instead of spinning forever and blocking the queue.
         const safeName = (file.name || "creative.mp4").replace(/[^\w.-]+/g, "_");
-        const { url: videoUrl } = await upload(`creatives/${id}-${safeName}`, file, {
-          access: "public",
-          contentType: file.type || "video/mp4",
-          handleUploadUrl: "/api/blob-upload",
-        });
+        const uploadAbort = new AbortController();
+        const uploadTimer = window.setTimeout(() => uploadAbort.abort(), UPLOAD_TIMEOUT_MS);
+        let videoUrl: string;
+        try {
+          ({ url: videoUrl } = await upload(`creatives/${id}-${safeName}`, file, {
+            access: "public",
+            contentType: file.type || "video/mp4",
+            handleUploadUrl: "/api/blob-upload",
+            abortSignal: uploadAbort.signal,
+          }));
+        } catch (e) {
+          throw uploadAbort.signal.aborted
+            ? new Error(`video upload timed out after ${UPLOAD_TIMEOUT_MS / 60_000} min — check the connection and retry`)
+            : e;
+        } finally {
+          window.clearTimeout(uploadTimer);
+        }
 
         const res = await fetch("/api/launch", {
           method: "POST",
@@ -353,7 +373,10 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
             final = ev;
             return;
           }
-          if (typeof ev.stage === "string") patch(id, { stage: ev.stage });
+          if (typeof ev.stage === "string") {
+            lastStage = ev.stage;
+            patch(id, { stage: ev.stage });
+          }
         };
 
         if (res.body) {
@@ -406,14 +429,26 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
           });
         } else {
           const finishedAt = Date.now();
-          const msg = (f && ((f.error as string) || (f.stage as string))) || `HTTP ${res.status}`;
-          patch(id, { status: "error", finishedAt, error: msg });
-          saveRemote(id, { status: "error", finished_at: finishedAt, error: msg });
+          const msg = f
+            ? (f.error as string) || (f.stage as string) || `HTTP ${res.status}`
+            : "stream ended unexpectedly — the server may have timed out mid-launch; check Ads Manager before retrying";
+          // Record which stage actually failed + whatever FB objects were created before the
+          // failure, so the orphaned campaign stays traceable from the task row.
+          const created = ((f?.created ?? {}) as Record<string, unknown>) || {};
+          patch(id, { status: "error", stage: lastStage, finishedAt, error: msg });
+          saveRemote(id, {
+            status: "error",
+            stage: lastStage,
+            finished_at: finishedAt,
+            error: msg,
+            ...(created.campaign_id ? { campaign_id: String(created.campaign_id) } : {}),
+            ...(created.adset_id ? { adset_id: String(created.adset_id) } : {}),
+          });
         }
       } catch (e) {
         const finishedAt = Date.now();
-        patch(id, { status: "error", finishedAt, error: String(e) });
-        saveRemote(id, { status: "error", finished_at: finishedAt, error: String(e) });
+        patch(id, { status: "error", stage: lastStage, finishedAt, error: String(e) });
+        saveRemote(id, { status: "error", stage: lastStage, finished_at: finishedAt, error: String(e) });
       }
     },
     [patch, saveRemote],
@@ -424,6 +459,7 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
       const startedAt = Date.now();
       patch(id, { status: "running", stage: "source", startedAt, error: undefined });
       saveRemote(id, { status: "running", stage: "source", started_at: startedAt });
+      let lastStage = "source";
       try {
         const res = await fetch("/api/clone/run", {
           method: "POST",
@@ -446,7 +482,10 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
             final = ev;
             return;
           }
-          if (typeof ev.stage === "string" && ev.stage !== "start") patch(id, { stage: ev.stage });
+          if (typeof ev.stage === "string" && ev.stage !== "start") {
+            lastStage = ev.stage;
+            patch(id, { stage: ev.stage });
+          }
         };
 
         if (res.body) {
@@ -495,14 +534,24 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
           });
         } else {
           const finishedAt = Date.now();
-          const msg = (f && ((f.error as string) || (f.stage as string))) || `HTTP ${res.status}`;
-          patch(id, { status: "error", finishedAt, error: msg });
-          saveRemote(id, { status: "error", finished_at: finishedAt, error: msg });
+          const msg = f
+            ? (f.error as string) || (f.stage as string) || `HTTP ${res.status}`
+            : "stream ended unexpectedly — the server may have timed out mid-clone; check Ads Manager before retrying";
+          const created = ((f?.created ?? {}) as Record<string, unknown>) || {};
+          patch(id, { status: "error", stage: lastStage, finishedAt, error: msg });
+          saveRemote(id, {
+            status: "error",
+            stage: lastStage,
+            finished_at: finishedAt,
+            error: msg,
+            ...(created.campaign_id ? { campaign_id: String(created.campaign_id) } : {}),
+            ...(created.adset_id ? { adset_id: String(created.adset_id) } : {}),
+          });
         }
       } catch (e) {
         const finishedAt = Date.now();
-        patch(id, { status: "error", finishedAt, error: String(e) });
-        saveRemote(id, { status: "error", finished_at: finishedAt, error: String(e) });
+        patch(id, { status: "error", stage: lastStage, finishedAt, error: String(e) });
+        saveRemote(id, { status: "error", stage: lastStage, finished_at: finishedAt, error: String(e) });
       }
     },
     [patch, saveRemote],
