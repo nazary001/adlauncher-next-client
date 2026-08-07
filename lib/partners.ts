@@ -72,7 +72,7 @@ const MAGICOFFERS_FANPAGES = ["Marisel8"];
 export const PARTNERS: PartnerConfig[] = [
   {
     id: "br",
-    label: "Brazilians",
+    label: "Бразики HS",
     Flag: BrazilFlag,
     usesGcm: false,
     usesProfile: true,
@@ -86,7 +86,7 @@ export const PARTNERS: PartnerConfig[] = [
   },
   {
     id: "in",
-    label: "Indians",
+    label: "Индусы MO",
     Flag: IndiaFlag,
     usesGcm: true,
     usesProfile: false,
@@ -105,7 +105,7 @@ export const PARTNERS: PartnerConfig[] = [
   },
   {
     id: "us",
-    label: "Americans",
+    label: "США - AIF",
     Flag: UsaFlag,
     usesGcm: false,
     usesProfile: true,
