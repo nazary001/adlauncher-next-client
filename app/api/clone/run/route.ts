@@ -51,8 +51,9 @@ async function createAdset(path: string, payload: Json): Promise<Json> {
  * POST /api/clone/run  — body: { partnerId, edits: CloneEdit[] } (rows × copies, already flattened).
  *
  * Creates each clone on Facebook as a faithful PAUSED duplicate of its source: reuses the source's
- * video + copy/title/CTA (only the gcm in the tracking link is swapped for a freshly-claimed code),
- * rebuilds targeting/bid/budget from the buyer's edits, all through the launch payload builders.
+ * media — video or static image — plus copy/title/CTA (only the gcm in the tracking link is swapped
+ * for a freshly-claimed code), rebuilds targeting/bid/budget from the buyer's edits, all through the
+ * launch payload builders.
  * Streams NDJSON per-clone/per-stage progress. Gated by the proxy (session required).
  */
 export async function POST(req: Request) {
@@ -102,7 +103,8 @@ export async function POST(req: Request) {
             src = await fetchSourceDetail(edit.campaignId);
             detailCache.set(edit.campaignId, src);
           }
-          if (!src.videoData.video_id) throw new FbError("source ad has no reusable video", src.videoData);
+          const media = src.media;
+          if (!media) throw new FbError("source ad has no reusable video or image", { campaignId: edit.campaignId });
 
           send({ idx, stage: "gcm" });
           claim = await claimGcm("", { campaign_name: edit.name, notes: "claimed via adlauncher clone" });
@@ -125,7 +127,7 @@ export async function POST(req: Request) {
           send({ idx, stage: "creative" });
           const creative = await fbPost(
             `act_${binds.accountId}/adcreatives`,
-            cloneCreativePayload(edit.name, binds.pageId, src.videoData, gcm),
+            cloneCreativePayload(edit.name, binds.pageId, media, gcm),
           );
           created.creative_id = String(creative.id);
 

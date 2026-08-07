@@ -87,7 +87,9 @@ async function fbGet(path: string): Promise<Json> {
       cache: "no-store",
     });
     const body = await res.json().catch(() => ({}));
-    if (res.ok) {
+    // Meta can ship an error body WITH HTTP 200 (seen live: the account-checkpoint error 31 on
+    // POST /ads) — trusting res.ok alone turns those into silent failures, so check both.
+    if (res.ok && !body.error) {
       await throttle(res);
       return body;
     }
@@ -113,7 +115,8 @@ async function fbPost(path: string, params: Json): Promise<Json> {
       body: form,
     });
     const body = await res.json().catch(() => ({}));
-    if (res.ok) {
+    // Same as fbGet: an error body can arrive with HTTP 200 — never treat those as success.
+    if (res.ok && !body.error) {
       await throttle(res);
       return body;
     }
