@@ -77,55 +77,18 @@ export type CloneEdit = {
   pageId: string;
 };
 
-/**
- * A creation target: the account + page + pixel clones are built on. Indians are pinned to one
- * bind today; this array is the multi-account seam — add entries and the Settings selector lights
- * up, no restructuring.
- */
-export type CloneTarget = {
-  id: string;
-  partner: PartnerId;
-  label: string;
-  accountId: string; // digits only, no act_ prefix
-  accountName: string;
-  pixelId: string;
-  pixelName: string;
-};
-
-// The fanpage is NOT part of the target anymore — it's picked per batch from the launch token's
-// own page list (/api/fanpages) in the board settings.
-export const CLONE_TARGETS: CloneTarget[] = [
-  {
-    id: "in-magicoffers",
-    partner: "in",
-    label: "GC-Magicoffers-BR-1500",
-    accountId: "1297336295903991",
-    accountName: "GC-Magicoffers-BR-1500",
-    pixelId: "3288799954641310",
-    pixelName: "HS-Pixel-FARM-1",
-  },
-];
-
-export function targetsFor(partner: PartnerId): CloneTarget[] {
-  return CLONE_TARGETS.filter((t) => t.partner === partner);
-}
-
-export function targetById(id: string): CloneTarget | undefined {
-  return CLONE_TARGETS.find((t) => t.id === id);
-}
-
-/** Global settings applied to every clone. */
+/** Global settings applied to every clone. The account + pixel are NOT settings — each clone is
+ *  built in its SOURCE campaign's own account with the source's own pixel (reused media is an
+ *  account-library asset), derived server-side. Only the fanpage + copies are chosen here. */
 export type CloneSettings = {
-  targetId: string;
   /** The PICKED fanpage (id) every clone in the batch advertises with. Empty = not picked yet. */
   pageId: string;
   userOs: "all" | "android";
   copies: number;
 };
 
-export function defaultSettings(partner: PartnerId): CloneSettings {
-  const t = targetsFor(partner)[0] ?? CLONE_TARGETS[0];
-  return { targetId: t.id, pageId: "", userOs: "all", copies: 1 };
+export function defaultSettings(_partner: PartnerId): CloneSettings {
+  return { pageId: "", userOs: "all", copies: 1 };
 }
 
 /**

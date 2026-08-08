@@ -24,11 +24,17 @@ export type SourceDetail = {
   bidStrategy: string;
   optimizationGoal: string;
   conversionEvent: string;
+  /** The source's OWN ad account (digits) — a clone MUST be built here: its reused media
+   *  (video_id / image_hash) is an account-library asset, invalid in any other account. */
+  accountId: string;
+  /** The source adset's promoted pixel (empty when it optimizes for clicks / has none). */
+  pixelId: string;
   /** First reusable media found on the source's ads (video preferred), null when none. */
   media: SourceMedia | null;
 };
 
 const SRC_FIELDS = [
+  "account_id",
   "objective",
   "special_ad_categories",
   "adsets.limit(1){bid_strategy,optimization_goal,promoted_object}",
@@ -153,6 +159,8 @@ export async function fetchSourceDetail(campaignId: string): Promise<SourceDetai
     bidStrategy: typeof adset.bid_strategy === "string" ? adset.bid_strategy : "LOWEST_COST_WITHOUT_CAP",
     optimizationGoal: typeof adset.optimization_goal === "string" ? adset.optimization_goal : "OFFSITE_CONVERSIONS",
     conversionEvent: typeof promoted.custom_event_type === "string" ? promoted.custom_event_type : "PURCHASE",
+    accountId: String(obj.account_id ?? "").replace(/^act_/, ""),
+    pixelId: typeof promoted.pixel_id === "string" ? promoted.pixel_id : "",
     media,
   };
 }

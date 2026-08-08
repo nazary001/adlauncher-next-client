@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { partnerConfig, type PartnerId } from "@/lib/partners";
-import { FbError, fbPost, isAdvertisablePage } from "@/lib/fb-graph";
+import { FbError, fbPost, isAdvertisablePage, isTokenAccount } from "@/lib/fb-graph";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import type { CloneEdit } from "@/lib/clone";
 import {
@@ -70,15 +70,12 @@ export async function POST(req: Request) {
   if (edits.length > 200) return NextResponse.json({ ok: false, error: "too_many", max: 200 }, { status: 400 });
 
   const partner = partnerConfig(partnerId);
-  // Enforce the locked binds server-side — never trust the client for account/pixel. The fanka is
-  // the buyer's PICK (edit.pageId), accepted only when it's on the launch token's own page list.
-  const binds: Omit<LaunchBinds, "pageId"> = {
-    accountId: (partner.lockedAccount?.id ?? "").replace(/^act_/, ""),
-    pixelId: partner.lockedPixel?.id ?? "",
-  };
-  if (!binds.accountId || !partner.fanpagesFromToken) {
+  if (!partner.fanpagesFromToken) {
     return NextResponse.json({ ok: false, error: "partner_not_launchable" }, { status: 400 });
   }
+  // A clone is built in its SOURCE's own account (media is account-local) — the account/pixel are
+  // derived per source below, NOT picked. Only the fanka is the buyer's PICK, validated here
+  // against the launch token's own page list before any FB work starts.
   const pageIds = [...new Set(edits.map((e) => String(e.pageId ?? "").trim()))];
   if (pageIds.some((p) => !/^\d{5,}$/.test(p))) {
     return NextResponse.json(
@@ -128,6 +125,17 @@ export async function POST(req: Request) {
           }
           const media = src.media;
           if (!media) throw new FbError("source ad has no reusable video or image", { campaignId: edit.campaignId });
+          // A clone lives in its source's OWN account (reused video_id / image_hash is an
+          // account-library asset). Guard it's still a token account before writing there.
+          if (!/^\d{5,}$/.test(src.accountId)) throw new FbError("source account unknown — cannot clone", { campaignId: edit.campaignId });
+          if (!(await isTokenAccount(src.accountId))) {
+            throw new FbError(`source account act_${src.accountId} is not available to the launch token`, { campaignId: edit.campaignId });
+          }
+          const editBinds: LaunchBinds = {
+            accountId: src.accountId,
+            pixelId: src.pixelId, // the source's own promoted pixel (empty for click-optimized sources)
+            pageId: String(edit.pageId).trim(),
+          };
 
           send({ idx, stage: "gcm" });
           claim = await claimGcm("", { campaign_name: edit.name, notes: "claimed via adlauncher clone" });
@@ -135,30 +143,27 @@ export async function POST(req: Request) {
 
           const campaign = cloneToCampaign(edit, src);
           const localeIds = await resolveLocales(edit.locales);
-          // The validated pick for THIS clone (batches are single-page today, but the shape allows
-          // per-row pages tomorrow without another contract change).
-          const editBinds: LaunchBinds = { ...binds, pageId: String(edit.pageId).trim() };
 
           send({ idx, stage: "campaign" });
-          const camp = await fbPost(`act_${binds.accountId}/campaigns`, campaignPayload(campaign, edit.name));
+          const camp = await fbPost(`act_${editBinds.accountId}/campaigns`, campaignPayload(campaign, edit.name));
           created.campaign_id = String(camp.id);
 
           send({ idx, stage: "adset" });
           const adset = await createAdset(
-            `act_${binds.accountId}/adsets`,
+            `act_${editBinds.accountId}/adsets`,
             adsetPayload(campaign, edit.name, String(camp.id), editBinds, localeIds),
           );
           created.adset_id = String(adset.id);
 
           send({ idx, stage: "creative" });
           const creative = await fbPost(
-            `act_${binds.accountId}/adcreatives`,
+            `act_${editBinds.accountId}/adcreatives`,
             cloneCreativePayload(edit.name, editBinds.pageId, media, gcm),
           );
           created.creative_id = String(creative.id);
 
           send({ idx, stage: "ad" });
-          const ad = await fbPost(`act_${binds.accountId}/ads`, adPayload(edit.name, String(adset.id), String(creative.id)));
+          const ad = await fbPost(`act_${editBinds.accountId}/ads`, adPayload(edit.name, String(adset.id), String(creative.id)));
           // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
           if (!ad.id) throw new FbError("ad create returned no id", ad);
           created.ad_id = String(ad.id);

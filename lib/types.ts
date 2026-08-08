@@ -121,24 +121,28 @@ export function bidAmountMissing(c: Campaign): boolean {
   return c.bidStrategy !== "LOWEST_COST_WITHOUT_CAP" && parseMoney(c.bidCap) <= 0;
 }
 
-export function isReady(
-  c: Campaign,
-  opts: { landing?: boolean; profile?: boolean; page?: boolean } = {},
-): boolean {
-  const { landing = false, profile = true, page = false } = opts;
+type ReadyOpts = {
+  landing?: boolean;
+  profile?: boolean;
+  page?: boolean;
+  account?: boolean;
+  pixel?: boolean;
+};
+
+export function isReady(c: Campaign, opts: ReadyOpts = {}): boolean {
+  const { landing = false, profile = true, page = false, account = false, pixel = false } = opts;
   if (!c.name.trim() || c.countries.length === 0) return false;
   if (profile && !c.profile) return false;
   if (landing && !c.landing) return false;
   if (page && !c.page) return false;
+  if (account && !c.account) return false;
+  if (pixel && !c.pixel) return false;
   if (bidAmountMissing(c)) return false;
   return true;
 }
 
 /** A campaign can actually fire only if it's ready AND carries a video creative. */
-export function isLaunchable(
-  c: Campaign,
-  opts: { landing?: boolean; profile?: boolean; page?: boolean } = {},
-): boolean {
+export function isLaunchable(c: Campaign, opts: ReadyOpts = {}): boolean {
   return isReady(c, opts) && c.files.some((f) => f.kind === "video");
 }
 

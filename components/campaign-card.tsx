@@ -26,6 +26,7 @@ import {
 } from "@/lib/catalog";
 import { type PartnerConfig, fullLandingUrl, launchReadyOpts } from "@/lib/partners";
 import type { FanpageOption } from "./use-fanpages";
+import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-adaccounts";
 import { Field, MoneyInput, Select, TextArea, TextInput, IconButton } from "./ui";
 import { SearchSelect } from "./search-select";
 import { MultiSelect } from "./multi-select";
@@ -79,6 +80,7 @@ export function CampaignCard({
   index,
   partner,
   fanpages,
+  adAccounts,
   highlight,
   onPatch,
   onToggleCollapse,
@@ -92,6 +94,8 @@ export function CampaignCard({
   /** Token fanpages for the picker (value = page id, adCount = live ads-running-or-in-review
    *  count on that page). null = loading/unavailable. */
   fanpages?: FanpageOption[] | null;
+  /** Token ad accounts (value = account_id digits, with their pixels). null = loading. */
+  adAccounts?: AdAccountOption[] | null;
   /** Focus-pulse this card after a jump from the Launch bay. */
   highlight?: boolean;
   onPatch: (id: string, patch: Partial<Campaign>) => void;
@@ -273,8 +277,23 @@ export function CampaignCard({
                     />
                   </Field>
                 ) : null}
-                <Field label="Account" className={setupCol}>
-                  {partner.lockedAccount ? (
+                <Field
+                  label="Account"
+                  className={setupCol}
+                  error={partner.accountsFromToken && !c.account ? "Pick an account" : undefined}
+                >
+                  {partner.accountsFromToken ? (
+                    <SearchSelect
+                      value={c.account}
+                      onChange={(v) =>
+                        patch({ account: v, pixel: defaultPixelFor(adAccounts ?? null, v, partner.preferredPixel) })
+                      }
+                      options={adAccounts ?? []}
+                      placeholder="Search account"
+                      emptyHint={adAccounts ? "No accounts on the token" : "Loading accounts…"}
+                      metaWhenClosed
+                    />
+                  ) : partner.lockedAccount ? (
                     <LockedField value={partner.lockedAccount.name} hint="only" />
                   ) : (
                     <SearchSelect
@@ -312,8 +331,25 @@ export function CampaignCard({
                     />
                   )}
                 </Field>
-                <Field label="Pixel" className={setupCol}>
-                  {partner.lockedPixel ? (
+                <Field
+                  label="Pixel"
+                  className={setupCol}
+                  error={partner.accountsFromToken && c.account && !c.pixel ? "Pick a pixel" : undefined}
+                >
+                  {partner.accountsFromToken ? (
+                    <SearchSelect
+                      value={c.pixel}
+                      onChange={(v) => patch({ pixel: v })}
+                      options={pixelOptionsOf(adAccounts ?? null, c.account).map((p) => ({
+                        value: p.id,
+                        label: p.name,
+                        meta: p.id,
+                      }))}
+                      placeholder="Search pixel"
+                      emptyHint={c.account ? "No pixels on this account" : "Pick an account first"}
+                      metaWhenClosed
+                    />
+                  ) : partner.lockedPixel ? (
                     <LockedField value={partner.lockedPixel.id} hint="auto" mono />
                   ) : (
                     <SearchSelect

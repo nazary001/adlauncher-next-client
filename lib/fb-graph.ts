@@ -147,6 +147,159 @@ export async function isAdvertisablePage(pageId: string): Promise<boolean> {
   return pages.some((p) => p.id === pageId);
 }
 
+// ---------- ad accounts of the launch token (with their pixels) ----------
+
+export type TokenAdAccount = { id: string; name: string; pixels: { id: string; name: string }[] };
+
+/** Shared row shape (app-cache key `token-adaccounts`). */
+type AccountsState = { accounts: TokenAdAccount[]; expiresAt: number };
+
+const ACCOUNTS_KEY = "token-adaccounts";
+const ACCOUNTS_OK_TTL_MS = 15 * 60_000;
+const ACCOUNTS_FAIL_TTL_MS = 5 * 60_000;
+const ACCOUNTS_CLAIM_TTL_MS = 2 * 60_000;
+
+let accountsL1: { readAt: number; hasL2: boolean; state: AccountsState } | null = null;
+let accountsInflight: Promise<TokenAdAccount[]> | null = null;
+
+/**
+ * Every ACTIVE ad account the launch token can use, each with its pixel list (pixels gate the
+ * launch validation AND the per-account pixel picker). Same shared-cache discipline as the
+ * fanpage volume sweep: one Strapi row for all instances, claim before refreshing, stale beats
+ * empty, and the per-account pixel sweep aborts on the first rate-limit error.
+ */
+export async function tokenAdAccounts(): Promise<TokenAdAccount[]> {
+  const now = Date.now();
+  if (
+    accountsL1 &&
+    now < accountsL1.state.expiresAt &&
+    accountsL1.state.accounts.length > 0 &&
+    (accountsL1.hasL2 ? now < accountsL1.readAt + VOLUME_L1_MS : true)
+  ) {
+    return accountsL1.state.accounts;
+  }
+  if (accountsInflight) return accountsInflight;
+  accountsInflight = resolveAccounts().finally(() => {
+    accountsInflight = null;
+  });
+  return accountsInflight;
+}
+
+async function resolveAccounts(): Promise<TokenAdAccount[]> {
+  const now = Date.now();
+  const row = await readAppCache<AccountsState>(ACCOUNTS_KEY);
+  const shared = row?.value && Array.isArray(row.value.accounts) ? row.value : null;
+  const hasL2 = row !== null;
+
+  if (shared && now < shared.expiresAt && shared.accounts.length > 0) {
+    accountsL1 = { readAt: now, hasL2, state: shared };
+    return shared.accounts;
+  }
+
+  // Claim the refresh so parallel instances serve the stale list instead of refetching too.
+  const claim: AccountsState = { accounts: shared?.accounts ?? [], expiresAt: now + ACCOUNTS_CLAIM_TTL_MS };
+  const claimedId = (await writeAppCache(ACCOUNTS_KEY, claim, row?.documentId ?? null)) ?? row?.documentId ?? null;
+
+  try {
+    // Account list — one or two paginated calls (fbGet retries are fine at this size).
+    const accounts: TokenAdAccount[] = [];
+    let after = "";
+    for (let i = 0; i < 10; i++) {
+      const body = await fbGet(
+        `me/adaccounts?fields=account_id,name,account_status&limit=100${after ? `&after=${encodeURIComponent(after)}` : ""}`,
+      );
+      const data = (body.data as Array<{ account_id?: string; name?: string; account_status?: number }> | undefined) ?? [];
+      for (const a of data) {
+        if (a?.account_id && a.name && a.account_status === 1) {
+          accounts.push({ id: String(a.account_id), name: String(a.name), pixels: [] });
+        }
+      }
+      const paging = body.paging as { cursors?: { after?: string }; next?: string } | undefined;
+      const next = paging?.next ? paging.cursors?.after ?? "" : "";
+      if (!next || next === after) break;
+      after = next;
+    }
+    accounts.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+
+    // Pixels per account — gentle single-shot sweep, aborts once the account quota pushes back.
+    let next = 0;
+    let throttled = false;
+    const prevPixels = new Map((shared?.accounts ?? []).map((a) => [a.id, a.pixels]));
+    const worker = async () => {
+      while (!throttled) {
+        const i = next++;
+        if (i >= accounts.length) return;
+        const acct = accounts[i];
+        try {
+          const res = await fetch(`${FB}/act_${acct.id}/adspixels?fields=id,name&limit=50`, {
+            headers: { Authorization: `Bearer ${TOKEN}` },
+            cache: "no-store",
+          });
+          const body = (await res.json().catch(() => ({}))) as Json;
+          const err = body.error as { code?: number } | undefined;
+          if (err && RATE_LIMIT_CODES.has(err.code ?? -1)) {
+            throttled = true;
+            return;
+          }
+          const data = (body.data as Array<{ id?: string; name?: string }> | undefined) ?? [];
+          acct.pixels = data
+            .filter((p) => p?.id)
+            .map((p) => ({ id: String(p.id), name: String(p.name ?? p.id) }));
+        } catch {
+          /* leave pixels unknown for this account */
+        }
+        await pause(COUNTS_STAGGER_MS);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(COUNTS_CONCURRENCY, accounts.length) }, worker));
+
+    // Unknown pixel lists inherit the previous refresh's data (stale beats empty).
+    for (const a of accounts) {
+      if (a.pixels.length === 0) {
+        const prev = prevPixels.get(a.id);
+        if (prev?.length) a.pixels = prev;
+      }
+    }
+
+    const complete = !throttled && accounts.length > 0;
+    const state: AccountsState = {
+      accounts,
+      expiresAt: Date.now() + (complete ? ACCOUNTS_OK_TTL_MS : ACCOUNTS_FAIL_TTL_MS),
+    };
+    await writeAppCache(ACCOUNTS_KEY, state, claimedId);
+    accountsL1 = { readAt: Date.now(), hasL2, state };
+    return accounts;
+  } catch (e) {
+    // Total failure (rate limit / transport): keep serving the stale list when there is one.
+    if (shared && shared.accounts.length > 0) {
+      const state: AccountsState = { accounts: shared.accounts, expiresAt: Date.now() + ACCOUNTS_FAIL_TTL_MS };
+      await writeAppCache(ACCOUNTS_KEY, state, claimedId);
+      accountsL1 = { readAt: Date.now(), hasL2, state };
+      return shared.accounts;
+    }
+    throw e;
+  }
+}
+
+/** Server-side guard: only accounts from the token's own list are accepted for a launch/clone. */
+export async function isTokenAccount(accountId: string): Promise<boolean> {
+  if (!/^\d{5,}$/.test(accountId)) return false;
+  const accounts = await tokenAdAccounts();
+  return accounts.some((a) => a.id === accountId);
+}
+
+/** Pixels of one token account; falls back to a direct read when the cached sweep missed it. */
+export async function accountPixels(accountId: string): Promise<{ id: string; name: string }[]> {
+  const accounts = await tokenAdAccounts();
+  const acct = accounts.find((a) => a.id === accountId);
+  if (acct && acct.pixels.length > 0) return acct.pixels;
+  const body = await fbGet(`act_${accountId}/adspixels?fields=id,name&limit=50`);
+  const data = (body.data as Array<{ id?: string; name?: string }> | undefined) ?? [];
+  const pixels = data.filter((p) => p?.id).map((p) => ({ id: String(p.id), name: String(p.name ?? p.id) }));
+  if (acct) acct.pixels = pixels; // enrich the L1 view for subsequent calls
+  return pixels;
+}
+
 // ---------- per-fanpage ad volume ----------
 
 // Meta returns the "ads running or in review" count per page only via one ads_volume call PER

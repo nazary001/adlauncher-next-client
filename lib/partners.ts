@@ -34,6 +34,14 @@ export type PartnerConfig = {
    *  per campaign/clone (stored as the page ID in `Campaign.page` / `CloneEdit.pageId`), and the
    *  server validates the id against the same token list. Indians since the system-user token. */
   fanpagesFromToken?: boolean;
+  /** Ad accounts are the launch token's own ACTIVE accounts (GET /api/adaccounts) — the buyer
+   *  PICKS one per campaign (`Campaign.account` stores the account_id digits); the pixel field
+   *  offers that account's own pixels. Server-validated against the same token data. */
+  accountsFromToken?: boolean;
+  /** Prefill for token-account partners: the account new cards default to (when still on the
+   *  token) and the pixel auto-picked when the chosen account carries it. */
+  defaultAccount?: Bound;
+  preferredPixel?: Bound;
   /** When set, the flow is pinned to a single account/pixel — fields render locked. */
   lockedAccount?: Bound;
   lockedPixel?: Bound;
@@ -62,10 +70,13 @@ const MKLEARN_LANDINGS: Landing[] = [
   { slug: "retiree-health-coverage", title: "Retiree Health Coverage", lang: "EN" },
 ];
 
-// The Indians flow is pinned to one account + pixel. Verified live on the system-user launch
-// token 2026-08-08: act_1297336295903991 (GC-Magicoffers-BR-1500) is visible and writable, and
-// the token carries ~60 assigned fanpages (ADVERTISE task) — the fanka is PICKED per campaign
-// from /api/fanpages, no longer bound to the account (Marisel8 belonged to the old user token).
+// Indians defaults (verified live on the system-user token 2026-08-08): the token sees 16 ACTIVE
+// GC-Magicoffers-BR-* accounts — the ACCOUNT is picked per campaign (/api/adaccounts), defaulting
+// to BR-1500. ⚠️ The MK Learn tracking pixel HS-Pixel-FARM-1 (the one the landing actually fires;
+// last_fired confirmed) is shared ONLY to BR-1500 today — the other 15 accounts carry just the
+// never-fired "GC for MO Pixel", so conversion launches there optimize blind until the partner
+// shares FARM-1 wider. The pixel field therefore offers the chosen account's own pixels and
+// auto-picks FARM-1 whenever it's present.
 const MAGICOFFERS_ACCOUNT: Bound = { id: "1297336295903991", name: "GC-Magicoffers-BR-1500" };
 const MAGICOFFERS_PIXEL: Bound = { id: "3288799954641310", name: "HS-Pixel-FARM-1" };
 
@@ -97,8 +108,9 @@ export const PARTNERS: PartnerConfig[] = [
     pagePlaceholder: "Search fanpage",
     fanpages: [],
     fanpagesFromToken: true,
-    lockedAccount: MAGICOFFERS_ACCOUNT,
-    lockedPixel: MAGICOFFERS_PIXEL,
+    accountsFromToken: true,
+    defaultAccount: MAGICOFFERS_ACCOUNT,
+    preferredPixel: MAGICOFFERS_PIXEL,
     launchNote: "Submits directly via Graph API",
     pageAdLimit: 250,
     maxCreatives: 1,
@@ -124,9 +136,22 @@ export function partnerConfig(id: PartnerId): PartnerConfig {
 }
 
 /** Readiness requirements for a partner — single source for the card dot, the Launch bay and the
- *  launch filter, so a campaign can never count as "ready" while missing a required fanka. */
-export function launchReadyOpts(p: PartnerConfig): { landing: boolean; profile: boolean; page: boolean } {
-  return { landing: p.usesGcm, profile: p.usesProfile, page: Boolean(p.fanpagesFromToken) };
+ *  launch filter, so a campaign can never count as "ready" while missing a required fanka,
+ *  account or pixel. */
+export function launchReadyOpts(p: PartnerConfig): {
+  landing: boolean;
+  profile: boolean;
+  page: boolean;
+  account: boolean;
+  pixel: boolean;
+} {
+  return {
+    landing: p.usesGcm,
+    profile: p.usesProfile,
+    page: Boolean(p.fanpagesFromToken),
+    account: Boolean(p.accountsFromToken),
+    pixel: Boolean(p.accountsFromToken),
+  };
 }
 
 /** Fixed naming prefix for a new campaign, e.g. "[04.08] - (t1) - ". Empty when the partner has no tier. */

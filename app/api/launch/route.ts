@@ -9,7 +9,7 @@ import {
   creativePayload,
 } from "@/lib/fb-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { isAdvertisablePage } from "@/lib/fb-graph";
+import { accountPixels, isAdvertisablePage, isTokenAccount } from "@/lib/fb-graph";
 import { del } from "@vercel/blob";
 
 export const runtime = "nodejs";
@@ -316,41 +316,77 @@ export async function POST(req: Request) {
   }
 
   const partner = partnerConfig(partnerId);
-  // Enforce the locked binds server-side — never trust client for account/pixel. The fanka is the
-  // buyer's PICK (campaign.page carries the page ID), but only ids from the launch token's own
-  // page list are accepted — so the client still can't smuggle in an arbitrary page.
+  // The account, fanka and pixel are the buyer's PICKS, but every id is validated against the
+  // launch token's own data server-side — the client can't smuggle in arbitrary destinations.
   const pickedPage = partner.fanpagesFromToken ? String(campaign.page ?? "").trim() : "";
+  const pickedAccount = partner.accountsFromToken
+    ? String(campaign.account ?? "").trim().replace(/^act_/, "")
+    : (partner.lockedAccount?.id ?? "").replace(/^act_/, "");
+  const pickedPixel = partner.accountsFromToken
+    ? String(campaign.pixel ?? "").trim()
+    : partner.lockedPixel?.id ?? "";
   const binds: LaunchBinds = {
-    accountId: (partner.lockedAccount?.id ?? "").replace(/^act_/, ""),
+    accountId: pickedAccount,
     pageId: partner.fanpagesFromToken ? pickedPage : "",
-    pixelId: partner.lockedPixel?.id ?? "",
+    pixelId: pickedPixel,
   };
-  if (!binds.accountId) {
+  if (!binds.accountId && !partner.accountsFromToken) {
     return NextResponse.json({ ok: false, stage: "config", error: "partner_not_launchable" }, { status: 400 });
   }
-  if (partner.fanpagesFromToken) {
-    if (!/^\d{5,}$/.test(pickedPage)) {
-      return NextResponse.json(
-        { ok: false, stage: "config", error: "fanpage_required — pick a fanpage on the campaign card" },
-        { status: 400 },
-      );
+  try {
+    if (partner.accountsFromToken) {
+      if (!/^\d{5,}$/.test(pickedAccount)) {
+        return NextResponse.json(
+          { ok: false, stage: "config", error: "account_required — pick an ad account on the campaign card" },
+          { status: 400 },
+        );
+      }
+      if (!(await isTokenAccount(pickedAccount))) {
+        return NextResponse.json(
+          { ok: false, stage: "config", error: "account_not_allowed — the launch token cannot use this ad account" },
+          { status: 400 },
+        );
+      }
+      if (!/^\d{5,}$/.test(pickedPixel)) {
+        return NextResponse.json(
+          { ok: false, stage: "config", error: "pixel_required — pick a pixel on the campaign card" },
+          { status: 400 },
+        );
+      }
+      const pixels = await accountPixels(pickedAccount);
+      if (!pixels.some((p) => p.id === pickedPixel)) {
+        return NextResponse.json(
+          {
+            ok: false,
+            stage: "config",
+            error: "pixel_not_on_account — this ad account does not carry the picked pixel (share it in BM first)",
+          },
+          { status: 400 },
+        );
+      }
     }
-    try {
+    if (partner.fanpagesFromToken) {
+      if (!/^\d{5,}$/.test(pickedPage)) {
+        return NextResponse.json(
+          { ok: false, stage: "config", error: "fanpage_required — pick a fanpage on the campaign card" },
+          { status: 400 },
+        );
+      }
       if (!(await isAdvertisablePage(pickedPage))) {
         return NextResponse.json(
           { ok: false, stage: "config", error: "fanpage_not_allowed — the launch token cannot advertise with this page" },
           { status: 400 },
         );
       }
-    } catch (e) {
-      const err = e as { message?: string };
-      return NextResponse.json(
-        { ok: false, stage: "config", error: `fanpage check failed: ${err.message ?? String(e)}` },
-        { status: 502 },
-      );
+    } else if (!binds.pageId) {
+      return NextResponse.json({ ok: false, stage: "config", error: "partner_not_launchable" }, { status: 400 });
     }
-  } else if (!binds.pageId) {
-    return NextResponse.json({ ok: false, stage: "config", error: "partner_not_launchable" }, { status: 400 });
+  } catch (e) {
+    const err = e as { message?: string };
+    return NextResponse.json(
+      { ok: false, stage: "config", error: `destination check failed: ${err.message ?? String(e)}` },
+      { status: 502 },
+    );
   }
   if (!videoUrl) {
     return NextResponse.json({ ok: false, stage: "media", error: "video_required" }, { status: 400 });

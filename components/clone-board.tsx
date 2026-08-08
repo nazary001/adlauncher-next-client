@@ -12,8 +12,6 @@ import {
   loadCloneSources,
   loadSampleSources,
   makeCloneRow,
-  targetById,
-  targetsFor,
 } from "@/lib/clone";
 import { moneyLabel } from "@/lib/types";
 import { OS_OPTIONS, countryName } from "@/lib/catalog";
@@ -202,8 +200,6 @@ function CloneInner({
   const queuedTimer = useRef<number | null>(null);
 
   const partner = partnerConfig(partnerId);
-  const target = targetById(settings.targetId);
-  const targets = targetsFor(partnerId);
   // Token fanpages for the batch fanka picker (with live N/limit fill tags). null while loading.
   const fanpages = useFanpages(Boolean(partner.fanpagesFromToken), partner.pageAdLimit ?? 250);
   const fanpageMissing = Boolean(partner.fanpagesFromToken) && !settings.pageId;
@@ -345,21 +341,10 @@ function CloneInner({
           <section className="flex flex-col gap-4 lg:sticky lg:top-[88px]">
             <SectionHeading>Settings</SectionHeading>
 
-            {/* destination — locked to one account today, multi-account ready */}
+            {/* destination — the fanpage is picked; account + pixel follow each source campaign */}
             <div className="flex flex-col gap-2">
               <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Destination</span>
               <div className="flex flex-col gap-0.5 rounded-xl border border-line bg-surface2/40 p-1.5">
-                {targets.length > 1 ? (
-                  <div className="p-0.5">
-                    <Select
-                      value={settings.targetId}
-                      onChange={(e) => patchSettings({ targetId: e.target.value })}
-                      options={targets.map((t) => ({ value: t.id, label: t.label }))}
-                    />
-                  </div>
-                ) : (
-                  <LockedRow label="Account" value={target?.accountName ?? "—"} />
-                )}
                 {partner.fanpagesFromToken ? (
                   <div className="flex flex-col gap-1 px-1.5 py-1">
                     <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Fanpage</span>
@@ -373,12 +358,13 @@ function CloneInner({
                     />
                   </div>
                 ) : null}
-                <LockedRow label="Pixel" value={target?.pixelName ?? "—"} />
+                <LockedRow label="Account" value="From each source" />
+                <LockedRow label="Pixel" value="From each source" />
               </div>
               <p className="px-0.5 text-[10.5px] leading-relaxed text-faint">
-                Clones are created on the {partner.label} account
-                {partner.fanpagesFromToken ? " with the fanpage picked above (applies to every clone in the batch)" : ""}.
-                More accounts unlock the selector automatically.
+                Each clone is created in its source campaign&apos;s own ad account (its video/image lives there),
+                with the source&apos;s pixel. Only the fanpage
+                {partner.fanpagesFromToken ? " above" : ""} is chosen — it applies to every clone in the batch.
               </p>
             </div>
 

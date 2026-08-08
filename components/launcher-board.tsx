@@ -16,6 +16,7 @@ import {
 import { Header } from "./header";
 import { CampaignCard } from "./campaign-card";
 import { useFanpages } from "./use-fanpages";
+import { type AdAccountOption, defaultPixelFor, useAdAccounts } from "./use-adaccounts";
 import { LaunchRail } from "./launch-rail";
 import { CopySettingsModal } from "./copy-settings-modal";
 import { ChevronsIcon, CopyIcon, PlusIcon } from "./icons";
@@ -32,6 +33,35 @@ function todayDDMM(): string {
 function normalize(rows: Campaign[], partner: PartnerConfig, reserved: Set<string> | null): Campaign[] {
   const withGcm = partner.usesGcm ? assignGcmCodes(rows, reserved) : rows;
   return applyPartnerLocks(withGcm, partner);
+}
+
+/** Token-account partners: fill an empty/invalid account with the partner default (else the first
+ *  token account) and keep the pixel on something the chosen account actually carries. Pure —
+ *  returns the SAME array when nothing changes. */
+function fillAccountDefaults(
+  rows: Campaign[],
+  partner: PartnerConfig,
+  adAccounts: AdAccountOption[] | null,
+): Campaign[] {
+  if (!partner.accountsFromToken || !adAccounts || adAccounts.length === 0) return rows;
+  let changed = false;
+  const next = rows.map((c) => {
+    let account = c.account;
+    if (!account || !adAccounts.some((a) => a.value === account)) {
+      account = adAccounts.some((a) => a.value === partner.defaultAccount?.id)
+        ? partner.defaultAccount!.id
+        : adAccounts[0].value;
+    }
+    let pixel = c.pixel;
+    const pixels = adAccounts.find((a) => a.value === account)?.pixels ?? [];
+    if (!pixel || !pixels.some((p) => p.id === pixel)) {
+      pixel = defaultPixelFor(adAccounts, account, partner.preferredPixel);
+    }
+    if (account === c.account && pixel === c.pixel) return c;
+    changed = true;
+    return { ...c, account, pixel };
+  });
+  return changed ? next : rows;
 }
 
 function geoShort(c: Campaign): string {
@@ -74,12 +104,29 @@ function LauncherInner({ user }: { user?: SessionUser }) {
   const anyExpanded = campaigns.some((c) => !c.collapsed);
   // Token fanpages for the per-card fanka picker (Indians), each with its live N/limit fill tag.
   const fanpages = useFanpages(Boolean(partner.fanpagesFromToken), partner.pageAdLimit ?? 250);
+  // Token ad accounts (with their pixels) for the account/pixel pickers.
+  const adAccounts = useAdAccounts(Boolean(partner.accountsFromToken), partner.preferredPixel);
 
   // Latest partner for callbacks that must not re-subscribe on partner switch.
   const partnerRef = useRef(partner);
   useEffect(() => {
     partnerRef.current = partner;
   }, [partner]);
+
+  // Latest accounts for the mutate() wrapper (defaults fill on every board change).
+  const adAccountsRef = useRef<AdAccountOption[] | null>(null);
+  useEffect(() => {
+    adAccountsRef.current = adAccounts;
+  }, [adAccounts]);
+
+  // When the account list ARRIVES, backfill defaults (BR-1500 + its preferred pixel) into cards
+  // created while it was loading. Functional updater returns the same reference when nothing
+  // changes, so this never cascades.
+  useEffect(() => {
+    if (!adAccounts || adAccounts.length === 0) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCampaigns((cs) => fillAccountDefaults(cs, partnerRef.current, adAccounts));
+  }, [adAccounts]);
 
   // Pull the live registry and (re)assign gcm codes above whatever is already used. Runs on
   // mount and again when the window regains focus (≥15s apart): with several accounts working
@@ -176,7 +223,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
   }
 
   function mutate(fn: (cs: Campaign[]) => Campaign[]) {
-    setCampaigns((cs) => normalize(fn(cs), partner, reserved));
+    setCampaigns((cs) => fillAccountDefaults(normalize(fn(cs), partner, reserved), partner, adAccountsRef.current));
     setPreviewed(false);
   }
 
@@ -359,6 +406,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
                 index={i}
                 partner={partner}
                 fanpages={fanpages}
+                adAccounts={adAccounts}
                 highlight={highlightId === c.id}
                 onPatch={patch}
                 onToggleCollapse={toggleCollapse}
