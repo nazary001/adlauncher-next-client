@@ -3,9 +3,12 @@ export type RichOption = {
   value: string;
   label: string;
   meta?: string;
-  /** Right-aligned status tag on the option row (e.g. fanka fill "12/250"); not searched. */
+  /** When set, the option renders on TWO lines: label on top, this muted line below (e.g. an
+   *  account's id). The tag then sits at the right of the second line. */
+  subLabel?: string;
+  /** Right-aligned status tag on the option row (e.g. fanka fill "12/250", "FARM"); not searched. */
   tag?: string;
-  tagTone?: "dim" | "warn" | "danger";
+  tagTone?: "dim" | "ok" | "warn" | "danger";
 };
 export type Country = { code: string; name: string };
 export type CountryPreset = { label: string; codes: string[] };

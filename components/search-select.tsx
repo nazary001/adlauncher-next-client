@@ -89,7 +89,13 @@ export function SearchSelect({
     : opts;
 
   const toneCls = (tone?: RichOption["tagTone"]) =>
-    tone === "danger" ? "text-danger" : tone === "warn" ? "text-warn" : "text-dim";
+    tone === "danger"
+      ? "text-danger"
+      : tone === "warn"
+        ? "text-warn"
+        : tone === "ok"
+          ? "text-launch2"
+          : "text-dim";
 
   useEffect(() => {
     if (!open) return;
@@ -211,36 +217,69 @@ export function SearchSelect({
             {filtered.length === 0 ? (
               <p className="px-3 py-3 text-[12px] text-faint">{emptyHint}</p>
             ) : (
-              filtered.map((o, i) => (
-                <div
-                  key={o.value}
-                  data-idx={i}
-                  role="option"
-                  aria-selected={o.value === value}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    pick(o);
-                  }}
-                  onMouseEnter={() => setActive(i)}
-                  className={
-                    "flex cursor-pointer items-center justify-between gap-3 rounded-lg px-2.5 py-2 text-[13px] transition-colors duration-100 " +
-                    (i === active ? "bg-accent/10 text-ink" : "text-dim")
-                  }
-                >
-                  <span className="truncate">{o.label}</span>
-                  <span className="flex shrink-0 items-center gap-2">
-                    {o.meta ? (
-                      <span className="font-mono text-[11px] text-faint">{o.meta}</span>
-                    ) : null}
-                    {o.tag ? (
-                      <span className={"font-mono text-[11px] tabular-nums " + toneCls(o.tagTone)}>
-                        {o.tag}
-                      </span>
-                    ) : null}
-                    {o.value === value ? <CheckIcon className="h-3.5 w-3.5 text-accent" /> : null}
-                  </span>
-                </div>
-              ))
+              filtered.map((o, i) =>
+                o.subLabel ? (
+                  // Two-line option: label on top; the muted sub-line (e.g. account id) + status
+                  // tag below — lets long names + id + a FARM marker all fit without truncation.
+                  <div
+                    key={o.value}
+                    data-idx={i}
+                    role="option"
+                    aria-selected={o.value === value}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      pick(o);
+                    }}
+                    onMouseEnter={() => setActive(i)}
+                    className={
+                      "flex cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors duration-100 " +
+                      (i === active ? "bg-accent/10 text-ink" : "text-dim")
+                    }
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate">{o.label}</span>
+                      {o.value === value ? <CheckIcon className="h-3.5 w-3.5 shrink-0 text-accent" /> : null}
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate font-mono text-[11px] text-faint">{o.subLabel}</span>
+                      {o.tag ? (
+                        <span className={"shrink-0 font-mono text-[11px] tabular-nums " + toneCls(o.tagTone)}>
+                          {o.tag}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : (
+                  <div
+                    key={o.value}
+                    data-idx={i}
+                    role="option"
+                    aria-selected={o.value === value}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      pick(o);
+                    }}
+                    onMouseEnter={() => setActive(i)}
+                    className={
+                      "flex cursor-pointer items-center justify-between gap-3 rounded-lg px-2.5 py-2 text-[13px] transition-colors duration-100 " +
+                      (i === active ? "bg-accent/10 text-ink" : "text-dim")
+                    }
+                  >
+                    <span className="truncate">{o.label}</span>
+                    <span className="flex shrink-0 items-center gap-2">
+                      {o.meta ? (
+                        <span className="font-mono text-[11px] text-faint">{o.meta}</span>
+                      ) : null}
+                      {o.tag ? (
+                        <span className={"font-mono text-[11px] tabular-nums " + toneCls(o.tagTone)}>
+                          {o.tag}
+                        </span>
+                      ) : null}
+                      {o.value === value ? <CheckIcon className="h-3.5 w-3.5 text-accent" /> : null}
+                    </span>
+                  </div>
+                ),
+              )
             )}
           </div>
             </div>,

@@ -37,6 +37,7 @@ export function useAdAccounts(enabled: boolean, preferredPixel?: Bound): AdAccou
           setAccounts([]);
           return;
         }
+        // Short pixel name for the FARM marker, e.g. "HS-Pixel-FARM-1" → "FARM-1".
         const short = (preferredName ?? "").replace(/^HS-Pixel-/, "") || "pixel";
         setAccounts(
           d.accounts.map((a) => {
@@ -45,9 +46,16 @@ export function useAdAccounts(enabled: boolean, preferredPixel?: Bound): AdAccou
             return {
               value: String(a.id),
               label: String(a.name),
-              meta: String(a.id),
+              meta: String(a.id), // drives search + the closed "Name · id" display
+              subLabel: String(a.id), // second option line
               pixels,
-              ...(hasPreferred ? {} : { tag: `no ${short}`, tagTone: "warn" as const }),
+              // FARM marker on the second line: green when the account carries the tracking pixel,
+              // amber when it doesn't (conversion launches there optimize blind).
+              ...(preferredId
+                ? hasPreferred
+                  ? { tag: short, tagTone: "ok" as const }
+                  : { tag: `no ${short}`, tagTone: "warn" as const }
+                : {}),
             };
           }),
         );
