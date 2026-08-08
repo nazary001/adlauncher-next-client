@@ -169,7 +169,9 @@ export function SearchSelect({
           "placeholder:text-faint outline-none transition-[border-color,box-shadow] duration-150 " +
           "hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 " +
           "disabled:opacity-40 disabled:cursor-not-allowed " +
-          (!open && selected?.tag ? "pr-20" : "pr-8")
+          // Room on the right for the status tag (+ the clear button beside it) so a picked
+          // option's label truncates cleanly instead of running under them.
+          (!open && selected?.tag ? "pr-24" : "pr-8")
         }
       />
       {!open && selected?.tag ? (

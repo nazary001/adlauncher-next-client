@@ -291,7 +291,6 @@ export function CampaignCard({
                       options={adAccounts ?? []}
                       placeholder="Search account"
                       emptyHint={adAccounts ? "No accounts on the token" : "Loading accounts…"}
-                      metaWhenClosed
                     />
                   ) : partner.lockedAccount ? (
                     <LockedField value={partner.lockedAccount.name} hint="only" />
@@ -347,7 +346,6 @@ export function CampaignCard({
                       }))}
                       placeholder="Search pixel"
                       emptyHint={c.account ? "No pixels on this account" : "Pick an account first"}
-                      metaWhenClosed
                     />
                   ) : partner.lockedPixel ? (
                     <LockedField value={partner.lockedPixel.id} hint="auto" mono />
