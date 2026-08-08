@@ -162,15 +162,45 @@ export function namePrefixFor(p: PartnerConfig, ddmm: string): string {
 /** FB macros must stay literal (unencoded), so the URL is built by hand, not URLSearchParams. */
 const FB_MACROS = "&utm_campaign={{campaign.id}}&utm_term={{adset.id}}&utm_content={{ad.id}}";
 
+/** A plausible Meta pixel id (matches the funnel's own guard). */
+const isPixelId = (v?: string): v is string => !!v && /^\d{10,20}$/.test(v);
+
+/** Role of a link segment — drives the color in the tracking-link preview. */
+export type LinkRole = "base" | "slug" | "gcmKey" | "gcm" | "params" | "fire" | "pixel";
+export type LinkSegment = { text: string; role: LinkRole };
+
 /**
- * Full destination link the ad points to. Shape (per owner, 2026-08-04):
- * {base}/{slug}?gcm=NN&utm_source=facebook&utm_medium={tier}&utm_campaign={{campaign.id}}
- *   &utm_term={{adset.id}}&utm_content={{ad.id}}[&fire=click][&pixel=<id>]
- * `fire=click` is appended for conversion campaigns (fires Purchase on the banner click).
- * `pixel=<id>` tells the funnel which Meta pixel to fire — the campaign's chosen pixel, so the
- * conversion lands on the same pixel the adset optimizes for (funnel defaults to its original
- * pixel when omitted). Only a plausible numeric id is appended.
+ * The destination link as ORDERED, role-tagged segments — the single source of truth for both the
+ * launched URL (fullLandingUrl joins them) and the card's colored preview (colors each role), so
+ * the preview can never drift from the real link again. Shape (per owner, 2026-08-04):
+ *   {base}/{slug}?gcm=NN&utm_source=facebook&utm_medium={tier}&utm_campaign={{campaign.id}}
+ *     &utm_term={{adset.id}}&utm_content={{ad.id}}[&fire=click][&pixel=<id>]
+ * `fire=click` is appended for conversion campaigns (Purchase on the banner click). `pixel=<id>`
+ * tells the funnel which Meta pixel to fire — the campaign's chosen pixel, so the conversion lands
+ * on the same pixel the adset optimizes for (funnel defaults to its original pixel when omitted).
  */
+export function landingUrlSegments(
+  p: PartnerConfig,
+  slug: string,
+  gcm: string,
+  conversions: boolean,
+  pixel?: string,
+): LinkSegment[] {
+  if (!slug) return [];
+  const medium = p.nameTier ? `&utm_medium=${p.nameTier}` : "";
+  const segs: LinkSegment[] = [
+    { text: `${p.landingBase}/`, role: "base" },
+    { text: slug, role: "slug" },
+    { text: "?gcm=", role: "gcmKey" },
+    { text: gcm, role: "gcm" },
+    { text: `&utm_source=facebook${medium}${FB_MACROS}`, role: "params" },
+  ];
+  if (conversions) segs.push({ text: "&fire=click", role: "fire" });
+  if (isPixelId(pixel)) segs.push({ text: `&pixel=${pixel}`, role: "pixel" });
+  return segs;
+}
+
+/** Full destination link the ad points to — assembled from the segments (one source of truth). */
 export function fullLandingUrl(
   p: PartnerConfig,
   slug: string,
@@ -178,11 +208,8 @@ export function fullLandingUrl(
   conversions: boolean,
   pixel?: string,
 ): string {
-  if (!slug) return "";
-  const medium = p.nameTier ? `&utm_medium=${p.nameTier}` : "";
-  const fire = conversions ? "&fire=click" : "";
-  const px = pixel && /^\d{10,20}$/.test(pixel) ? `&pixel=${pixel}` : "";
-  return `${p.landingBase}/${slug}?gcm=${gcm}&utm_source=facebook${medium}${FB_MACROS}${fire}${px}`;
+  const segs = landingUrlSegments(p, slug, gcm, conversions, pixel);
+  return segs.length ? segs.map((s) => s.text).join("") : "";
 }
 
 /** Pin account/pixel/fanpage to the partner's single bound values (Indians). No-op otherwise. */

@@ -24,7 +24,7 @@ import {
   pagesFor,
   pixelsFor,
 } from "@/lib/catalog";
-import { type PartnerConfig, fullLandingUrl, launchReadyOpts } from "@/lib/partners";
+import { type LinkRole, type PartnerConfig, fullLandingUrl, landingUrlSegments, launchReadyOpts } from "@/lib/partners";
 import type { FanpageOption } from "./use-fanpages";
 import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-adaccounts";
 import { Field, MoneyInput, Select, TextArea, TextInput, IconButton } from "./ui";
@@ -42,6 +42,18 @@ import {
   TargetIcon,
   TrashIcon,
 } from "./icons";
+
+/** Tracking-link preview colors, keyed by segment role (see landingUrlSegments).
+ *  gcm = accent blue, fire = launch green, pixel = accent2 violet — each distinct. */
+const LINK_ROLE_CLASS: Record<LinkRole, string> = {
+  base: "text-faint",
+  slug: "text-ink",
+  gcmKey: "text-faint",
+  gcm: "text-[#9db8ff]",
+  params: "text-faint",
+  fire: "text-launch2",
+  pixel: "text-accent2",
+};
 
 function SectionLabel({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
   return (
@@ -515,14 +527,13 @@ export function CampaignCard({
                           {c.landing ? (
                             <>
                               <div className="max-h-24 select-all overflow-y-auto break-all px-3 py-2 font-mono text-[11px] leading-relaxed">
-                                <span className="text-faint">{partner.landingBase}/</span>
-                                <span className="text-ink">{c.landing}</span>
-                                <span className="text-faint">?gcm=</span>
-                                <span className="text-[#9db8ff]">{c.gcm || "…"}</span>
-                                <span className="text-faint">
-                                  {`&utm_source=facebook${partner.nameTier ? `&utm_medium=${partner.nameTier}` : ""}&utm_campaign={{campaign.id}}&utm_term={{adset.id}}&utm_content={{ad.id}}`}
-                                </span>
-                                {conversions ? <span className="text-launch2">{"&fire=click"}</span> : null}
+                                {landingUrlSegments(partner, c.landing, c.gcm || "…", conversions, c.pixel).map(
+                                  (seg, i) => (
+                                    <span key={i} className={LINK_ROLE_CLASS[seg.role]}>
+                                      {seg.text}
+                                    </span>
+                                  ),
+                                )}
                               </div>
                               <div className="flex items-center justify-between gap-2 border-t border-line bg-surface/50 px-2 py-1.5">
                                 <span className="select-none font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
