@@ -369,6 +369,7 @@ function CloneInner({
                       options={fanpages ?? []}
                       placeholder={partner.pagePlaceholder}
                       emptyHint={fanpages ? "No fanpages on the token" : "Loading fanpages…"}
+                      metaWhenClosed
                     />
                   </div>
                 ) : null}

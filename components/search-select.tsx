@@ -13,6 +13,7 @@ export function SearchSelect({
   placeholder,
   emptyHint = "No matches",
   disabled,
+  metaWhenClosed,
 }: {
   id?: string;
   value: string;
@@ -21,6 +22,8 @@ export function SearchSelect({
   placeholder?: string;
   emptyHint?: string;
   disabled?: boolean;
+  /** Closed input shows "label · meta" (fanpages: name · page id) instead of the label alone. */
+  metaWhenClosed?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ left: number; width: number; top: number; up: boolean } | null>(null);
@@ -69,7 +72,11 @@ export function SearchSelect({
   // Closed input shows the picked option's LABEL (+ its status tag) — value and label differ for
   // id-keyed options (fanpages); plain string catalogs are unaffected (value === label).
   const selected = opts.find((o) => o.value === value);
-  const displayValue = selected?.label ?? value;
+  const displayValue = selected
+    ? metaWhenClosed && selected.meta
+      ? `${selected.label} · ${selected.meta}`
+      : selected.label
+    : value;
   const q = query.trim().toLowerCase();
   // Searchable by label, meta AND value — for fanpages the value is the page id.
   const filtered = q

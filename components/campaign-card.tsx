@@ -298,6 +298,7 @@ export function CampaignCard({
                       options={fanpages ?? []}
                       placeholder={partner.pagePlaceholder}
                       emptyHint={fanpages ? "No fanpages on the token" : "Loading fanpages…"}
+                      metaWhenClosed
                     />
                   ) : locked ? (
                     <LockedField value={partner.fanpages[0] ?? ""} hint="only" />

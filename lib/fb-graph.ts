@@ -155,13 +155,30 @@ export async function isAdvertisablePage(pageId: string): Promise<boolean> {
 // runs at most once per TTL, and concurrent /api/fanpages requests share one in-flight sweep
 // instead of stacking 60-call storms onto the launch quota.
 const COUNTS_TTL_MS = 15 * 60_000;
-// A sweep where EVERY slot failed (typically the account-level rate limit, code 17) is retried
-// much sooner — otherwise one throttled sweep pins an all-null result for the full TTL.
+// How soon holes (nulls) may be re-swept, and how long an ALL-null result (typically the
+// account-level rate limit, code 17) is trusted before a full retry.
+const COUNTS_HEAL_MS = 60_000;
 const COUNTS_RETRY_TTL_MS = 60_000;
-const COUNTS_CONCURRENCY = 6;
-let countsCache: { key: string; at: number; ttl: number; counts: Map<string, number | null> } | null = null;
+// Gentle on purpose: a 6-way burst of 60 reads is exactly the spike that trips the
+// development-tier rate limit and punches holes in the result.
+const COUNTS_CONCURRENCY = 3;
+const COUNTS_STAGGER_MS = 120;
+
+type CountsCache = {
+  key: string;
+  at: number;
+  ttl: number;
+  /** Earliest time a fresh-but-holey cache may re-sweep just its null slots. */
+  healAt: number;
+  counts: Map<string, number | null>;
+};
+let countsCache: CountsCache | null = null;
 let countsInflight: { key: string; promise: Promise<Map<string, number | null>> } | null = null;
 
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Sweep the given page ids (single-shot per page — no fbGet retry ladder: under a rate limit
+ *  it would stretch the sweep past the function timeout; a missing count is decoration). */
 async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<Map<string, number | null>> {
   const counts = new Map<string, number | null>();
   let next = 0;
@@ -171,9 +188,6 @@ async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<
       if (i >= pageIds.length) return;
       const id = pageIds[i];
       try {
-        // Single-shot ON PURPOSE (raw fetch, not fbGet): under an account rate-limit (code 17)
-        // fbGet's retry ladder would stretch a 60-page sweep past the function timeout and 504
-        // the whole page list — a missing count is decoration, a missing list breaks the picker.
         const res = await fetch(
           `${FB}/act_${accountId}/ads_volume?page_id=${id}&fields=ads_running_or_in_review_count`,
           { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
@@ -185,20 +199,42 @@ async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<
       } catch {
         counts.set(id, null); // one page failing must not sink the whole list
       }
+      await pause(COUNTS_STAGGER_MS);
     }
   };
   await Promise.all(Array.from({ length: Math.min(COUNTS_CONCURRENCY, pageIds.length) }, worker));
   return counts;
 }
 
-/** Ads-running-or-in-review count per fanpage — the page's cross-account total (null =
- *  unavailable). Cached; sweep deduped; failed slots backfill from the previous sweep so a
- *  rate-limited refresh degrades to stale numbers instead of empty ones. */
+/**
+ * Ads-running-or-in-review count per fanpage — the page's cross-account total (null =
+ * unavailable). Cached + deduped, and SELF-HEALING: a fresh cache with holes re-sweeps only its
+ * null slots (at most once per COUNTS_HEAL_MS), so a partially rate-limited sweep converges to
+ * full coverage instead of pinning holes for the whole TTL. Full-sweep failures backfill from
+ * the previous numbers (stale beats empty); an all-null sweep is only trusted briefly.
+ */
 export async function pageAdCounts(accountId: string, pageIds: string[]): Promise<Map<string, number | null>> {
   const key = `${accountId}:${pageIds.length}`;
-  if (countsCache && countsCache.key === key && Date.now() - countsCache.at < countsCache.ttl) {
-    return countsCache.counts;
+  const now = Date.now();
+
+  if (countsCache && countsCache.key === key && now - countsCache.at < countsCache.ttl) {
+    const cache = countsCache;
+    const holes = pageIds.filter((id) => typeof cache.counts.get(id) !== "number");
+    if (holes.length === 0 || now < cache.healAt) return cache.counts;
+    if (countsInflight && countsInflight.key === key) return countsInflight.promise;
+    const promise = sweepPageAdCounts(accountId, holes)
+      .then((part) => {
+        for (const [id, v] of part) if (typeof v === "number") cache.counts.set(id, v);
+        cache.healAt = Date.now() + COUNTS_HEAL_MS;
+        return cache.counts;
+      })
+      .finally(() => {
+        countsInflight = null;
+      });
+    countsInflight = { key, promise };
+    return promise;
   }
+
   if (countsInflight && countsInflight.key === key) return countsInflight.promise;
   const prev = countsCache?.key === key ? countsCache.counts : null;
   const promise = sweepPageAdCounts(accountId, pageIds)
@@ -209,7 +245,13 @@ export async function pageAdCounts(accountId: string, pageIds: string[]): Promis
           if (v === null && typeof prev.get(id) === "number") counts.set(id, prev.get(id)!);
         }
       }
-      countsCache = { key, at: Date.now(), ttl: anyLive ? COUNTS_TTL_MS : COUNTS_RETRY_TTL_MS, counts };
+      countsCache = {
+        key,
+        at: Date.now(),
+        ttl: anyLive ? COUNTS_TTL_MS : COUNTS_RETRY_TTL_MS,
+        healAt: Date.now() + COUNTS_HEAL_MS,
+        counts,
+      };
       return counts;
     })
     .finally(() => {
