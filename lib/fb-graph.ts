@@ -149,10 +149,12 @@ export async function isAdvertisablePage(pageId: string): Promise<boolean> {
 
 // Meta returns the "ads running or in review" count per page only via one ads_volume call PER
 // page (`?page_id=` — the show_breakdown_by_actor variant answers [] for this system user), so a
-// full sweep is ~60 reads. Cached hard and deduped: the sweep runs at most once per TTL, and
-// concurrent /api/fanpages requests share one in-flight sweep instead of stacking 60-call storms
-// onto the launch quota (fbGet self-paces under the usage headers on top).
-const COUNTS_TTL_MS = 10 * 60_000;
+// full sweep is ~60 reads. Semantics verified live 08-08: ads_running_or_in_review_count is the
+// page's CROSS-ACCOUNT total (what the 250 limit meters — Marisel8 showed 34 total vs 2 on this
+// account via current_account_ads_running_or_in_review_count). Cached hard and deduped: the sweep
+// runs at most once per TTL, and concurrent /api/fanpages requests share one in-flight sweep
+// instead of stacking 60-call storms onto the launch quota.
+const COUNTS_TTL_MS = 15 * 60_000;
 const COUNTS_CONCURRENCY = 6;
 let countsCache: { key: string; at: number; counts: Map<string, number | null> } | null = null;
 let countsInflight: { key: string; promise: Promise<Map<string, number | null>> } | null = null;
@@ -166,7 +168,14 @@ async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<
       if (i >= pageIds.length) return;
       const id = pageIds[i];
       try {
-        const body = await fbGet(`act_${accountId}/ads_volume?page_id=${id}&fields=ads_running_or_in_review_count`);
+        // Single-shot ON PURPOSE (raw fetch, not fbGet): under an account rate-limit (code 17)
+        // fbGet's retry ladder would stretch a 60-page sweep past the function timeout and 504
+        // the whole page list — a missing count is decoration, a missing list breaks the picker.
+        const res = await fetch(
+          `${FB}/act_${accountId}/ads_volume?page_id=${id}&fields=ads_running_or_in_review_count`,
+          { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
+        );
+        const body = (await res.json().catch(() => ({}))) as Json;
         const n = (body.data as Array<{ ads_running_or_in_review_count?: number }> | undefined)?.[0]
           ?.ads_running_or_in_review_count;
         counts.set(id, typeof n === "number" ? n : null);
@@ -179,15 +188,23 @@ async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<
   return counts;
 }
 
-/** Ads-running-or-in-review count per fanpage (null = unavailable). Cached; sweep deduped. */
+/** Ads-running-or-in-review count per fanpage — the page's cross-account total (null =
+ *  unavailable). Cached; sweep deduped; failed slots backfill from the previous sweep so a
+ *  rate-limited refresh degrades to stale numbers instead of empty ones. */
 export async function pageAdCounts(accountId: string, pageIds: string[]): Promise<Map<string, number | null>> {
   const key = `${accountId}:${pageIds.length}`;
   if (countsCache && countsCache.key === key && Date.now() - countsCache.at < COUNTS_TTL_MS) {
     return countsCache.counts;
   }
   if (countsInflight && countsInflight.key === key) return countsInflight.promise;
+  const prev = countsCache?.key === key ? countsCache.counts : null;
   const promise = sweepPageAdCounts(accountId, pageIds)
     .then((counts) => {
+      if (prev) {
+        for (const [id, v] of counts) {
+          if (v === null && typeof prev.get(id) === "number") counts.set(id, prev.get(id)!);
+        }
+      }
       countsCache = { key, at: Date.now(), counts };
       return counts;
     })
