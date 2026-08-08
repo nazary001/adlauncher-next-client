@@ -155,8 +155,11 @@ export async function isAdvertisablePage(pageId: string): Promise<boolean> {
 // runs at most once per TTL, and concurrent /api/fanpages requests share one in-flight sweep
 // instead of stacking 60-call storms onto the launch quota.
 const COUNTS_TTL_MS = 15 * 60_000;
+// A sweep where EVERY slot failed (typically the account-level rate limit, code 17) is retried
+// much sooner — otherwise one throttled sweep pins an all-null result for the full TTL.
+const COUNTS_RETRY_TTL_MS = 60_000;
 const COUNTS_CONCURRENCY = 6;
-let countsCache: { key: string; at: number; counts: Map<string, number | null> } | null = null;
+let countsCache: { key: string; at: number; ttl: number; counts: Map<string, number | null> } | null = null;
 let countsInflight: { key: string; promise: Promise<Map<string, number | null>> } | null = null;
 
 async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<Map<string, number | null>> {
@@ -193,19 +196,20 @@ async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<
  *  rate-limited refresh degrades to stale numbers instead of empty ones. */
 export async function pageAdCounts(accountId: string, pageIds: string[]): Promise<Map<string, number | null>> {
   const key = `${accountId}:${pageIds.length}`;
-  if (countsCache && countsCache.key === key && Date.now() - countsCache.at < COUNTS_TTL_MS) {
+  if (countsCache && countsCache.key === key && Date.now() - countsCache.at < countsCache.ttl) {
     return countsCache.counts;
   }
   if (countsInflight && countsInflight.key === key) return countsInflight.promise;
   const prev = countsCache?.key === key ? countsCache.counts : null;
   const promise = sweepPageAdCounts(accountId, pageIds)
     .then((counts) => {
+      const anyLive = [...counts.values()].some((v) => v !== null);
       if (prev) {
         for (const [id, v] of counts) {
           if (v === null && typeof prev.get(id) === "number") counts.set(id, prev.get(id)!);
         }
       }
-      countsCache = { key, at: Date.now(), counts };
+      countsCache = { key, at: Date.now(), ttl: anyLive ? COUNTS_TTL_MS : COUNTS_RETRY_TTL_MS, counts };
       return counts;
     })
     .finally(() => {
