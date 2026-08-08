@@ -189,12 +189,15 @@ let volumeInflight: { key: string; promise: Promise<Map<string, number | null>> 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Sweep the given page ids (single-shot per page — no fbGet retry ladder: under a rate limit
- *  it would stretch the sweep past the function timeout; a missing count is decoration). */
+ *  it would stretch the sweep past the function timeout; a missing count is decoration).
+ *  ABORTS on the first rate-limit error: once the account is throttled every remaining call
+ *  would fail too, and burning them only postpones the quota's recovery. */
 async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<Map<string, number | null>> {
   const counts = new Map<string, number | null>();
   let next = 0;
+  let throttled = false;
   const worker = async () => {
-    for (;;) {
+    while (!throttled) {
       const i = next++;
       if (i >= pageIds.length) return;
       const id = pageIds[i];
@@ -204,6 +207,12 @@ async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<
           { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
         );
         const body = (await res.json().catch(() => ({}))) as Json;
+        const err = body.error as { code?: number } | undefined;
+        if (err && RATE_LIMIT_CODES.has(err.code ?? -1)) {
+          counts.set(id, null);
+          throttled = true;
+          return;
+        }
         const n = (body.data as Array<{ ads_running_or_in_review_count?: number }> | undefined)?.[0]
           ?.ads_running_or_in_review_count;
         counts.set(id, typeof n === "number" ? n : null);
@@ -275,14 +284,17 @@ async function resolveVolume(
       shared.healAt = now + VOLUME_HEAL_MS; // claim the heal window before sweeping
       await writeAppCache(key, shared, docId);
       const part = await sweepPageAdCounts(accountId, holes);
-      let healed = false;
+      let healed = 0;
       for (const [id, v] of part) {
         if (typeof v === "number") {
           shared.counts[id] = v;
-          healed = true;
+          healed++;
         }
       }
-      if (healed) await writeAppCache(key, shared, docId);
+      // A fruitless heal means the account is still throttled — back the next attempt off hard,
+      // or the minute-cadence hole sweeps themselves keep the quota from ever recovering.
+      shared.healAt = Date.now() + (healed > 0 ? VOLUME_HEAL_MS : VOLUME_FAIL_TTL_MS);
+      await writeAppCache(key, shared, docId);
     }
     setVolumeL1(key, shared, hasL2);
     return toMap(pageIds, shared.counts);
