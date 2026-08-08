@@ -9,7 +9,8 @@ export type FanpageOption = RichOption & { adCount: number | null };
 // Counts converge server-side (the sweep self-heals its rate-limited holes every ~60s), so the
 // client re-asks until every page has a number — a few patient polls, not a hot loop.
 const VOLUME_REPOLL_MS = 75_000;
-const VOLUME_MAX_POLLS = 6;
+// Covers the server's 5-min total-failure backoff plus one full recovery sweep.
+const VOLUME_MAX_POLLS = 10;
 
 /**
  * Fanpages the launch token can advertise with, as picker options (value = page ID = the meta

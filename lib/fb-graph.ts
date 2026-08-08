@@ -3,6 +3,8 @@
 // 4/17/613/is_transient), extracted so read routes (clone sources) get the same resilience.
 // Server-only: FB_LAUNCH_TOKEN never reaches the browser.
 
+import { readAppCache, writeAppCache } from "./app-cache";
+
 const FB = "https://graph.facebook.com/v21.0";
 const TOKEN = process.env.FB_LAUNCH_TOKEN ?? "";
 
@@ -154,26 +156,35 @@ export async function isAdvertisablePage(pageId: string): Promise<boolean> {
 // account via current_account_ads_running_or_in_review_count). Cached hard and deduped: the sweep
 // runs at most once per TTL, and concurrent /api/fanpages requests share one in-flight sweep
 // instead of stacking 60-call storms onto the launch quota.
-const COUNTS_TTL_MS = 15 * 60_000;
-// How soon holes (nulls) may be re-swept, and how long an ALL-null result (typically the
-// account-level rate limit, code 17) is trusted before a full retry.
-const COUNTS_HEAL_MS = 60_000;
-const COUNTS_RETRY_TTL_MS = 60_000;
+// Cache windows. The shared row (Strapi app-cache, see lib/app-cache) is the source of truth —
+// module memory is only a short L1 so each instance re-reads the shared row at most once a
+// minute. A successful sweep is trusted for OK_TTL; an ALL-null sweep (account rate limit,
+// code 17) backs off for FAIL_TTL — retrying a 60-call sweep every minute is what previously
+// kept the account pinned inside its own rate limit (self-sustaining storm, seen live 08-08).
+const VOLUME_OK_TTL_MS = 15 * 60_000;
+const VOLUME_FAIL_TTL_MS = 5 * 60_000;
+// A claim marks the row briefly while a sweep runs so other instances serve stale data instead
+// of sweeping in parallel; if the claimer dies, the row re-expires soon.
+const VOLUME_CLAIM_TTL_MS = 2 * 60_000;
+// Holes (individual failed slots) may be re-swept this often — small sweeps, not the full list.
+const VOLUME_HEAL_MS = 60_000;
+const VOLUME_L1_MS = 60_000;
 // Gentle on purpose: a 6-way burst of 60 reads is exactly the spike that trips the
 // development-tier rate limit and punches holes in the result.
 const COUNTS_CONCURRENCY = 3;
 const COUNTS_STAGGER_MS = 120;
 
-type CountsCache = {
-  key: string;
-  at: number;
-  ttl: number;
-  /** Earliest time a fresh-but-holey cache may re-sweep just its null slots. */
+/** The shared row's shape (cvalue of app-cache key `fanpage-volume:<accountId>`). */
+type VolumeState = {
+  counts: Record<string, number | null>;
+  /** When this state stops being trusted (success → +15 min, total failure → +5 min). */
+  expiresAt: number;
+  /** Earliest time a fresh-but-holey state may re-sweep just its null slots. */
   healAt: number;
-  counts: Map<string, number | null>;
 };
-let countsCache: CountsCache | null = null;
-let countsInflight: { key: string; promise: Promise<Map<string, number | null>> } | null = null;
+
+let volumeL1: { key: string; readAt: number; hasL2: boolean; state: VolumeState } | null = null;
+let volumeInflight: { key: string; promise: Promise<Map<string, number | null>> } | null = null;
 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -206,59 +217,106 @@ async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<
   return counts;
 }
 
+const toMap = (pageIds: string[], counts: Record<string, number | null>): Map<string, number | null> =>
+  new Map(pageIds.map((id) => [id, typeof counts[id] === "number" ? counts[id] : null]));
+
+const holesOf = (pageIds: string[], counts: Record<string, number | null>): string[] =>
+  pageIds.filter((id) => typeof counts[id] !== "number");
+
+function setVolumeL1(key: string, state: VolumeState, hasL2: boolean): void {
+  volumeL1 = { key, readAt: Date.now(), hasL2, state };
+}
+
 /**
  * Ads-running-or-in-review count per fanpage — the page's cross-account total (null =
- * unavailable). Cached + deduped, and SELF-HEALING: a fresh cache with holes re-sweeps only its
- * null slots (at most once per COUNTS_HEAL_MS), so a partially rate-limited sweep converges to
- * full coverage instead of pinning holes for the whole TTL. Full-sweep failures backfill from
- * the previous numbers (stale beats empty); an all-null sweep is only trusted briefly.
+ * unavailable). Backed by the SHARED Strapi app-cache row, so every serverless instance sees
+ * the same swept result and the same refresh claim (module-only caching made each cold start
+ * re-sweep 60 pages and the fleet kept the account rate-limited around the clock). Fresh-but-
+ * holey state re-sweeps ONLY its null slots (≤ once per minute); a total failure backs off for
+ * 5 minutes; previous numbers survive failed refreshes (stale beats empty).
  */
 export async function pageAdCounts(accountId: string, pageIds: string[]): Promise<Map<string, number | null>> {
-  const key = `${accountId}:${pageIds.length}`;
+  const key = `fanpage-volume:${accountId}`;
   const now = Date.now();
 
-  if (countsCache && countsCache.key === key && now - countsCache.at < countsCache.ttl) {
-    const cache = countsCache;
-    const holes = pageIds.filter((id) => typeof cache.counts.get(id) !== "number");
-    if (holes.length === 0 || now < cache.healAt) return cache.counts;
-    if (countsInflight && countsInflight.key === key) return countsInflight.promise;
-    const promise = sweepPageAdCounts(accountId, holes)
-      .then((part) => {
-        for (const [id, v] of part) if (typeof v === "number") cache.counts.set(id, v);
-        cache.healAt = Date.now() + COUNTS_HEAL_MS;
-        return cache.counts;
-      })
-      .finally(() => {
-        countsInflight = null;
-      });
-    countsInflight = { key, promise };
-    return promise;
+  if (volumeL1 && volumeL1.key === key && now < volumeL1.state.expiresAt) {
+    // Without L2 the local state IS the truth — re-reading Strapi every minute would just fail
+    // again; with L2 the L1 view re-syncs once a minute to pick up other instances' heals.
+    const l1Fresh = volumeL1.hasL2 ? now < volumeL1.readAt + VOLUME_L1_MS : true;
+    const holes = holesOf(pageIds, volumeL1.state.counts);
+    if (l1Fresh && (holes.length === 0 || now < volumeL1.state.healAt)) {
+      return toMap(pageIds, volumeL1.state.counts);
+    }
   }
 
-  if (countsInflight && countsInflight.key === key) return countsInflight.promise;
-  const prev = countsCache?.key === key ? countsCache.counts : null;
-  const promise = sweepPageAdCounts(accountId, pageIds)
-    .then((counts) => {
-      const anyLive = [...counts.values()].some((v) => v !== null);
-      if (prev) {
-        for (const [id, v] of counts) {
-          if (v === null && typeof prev.get(id) === "number") counts.set(id, prev.get(id)!);
+  if (volumeInflight && volumeInflight.key === key) return volumeInflight.promise;
+  const promise = resolveVolume(key, accountId, pageIds).finally(() => {
+    volumeInflight = null;
+  });
+  volumeInflight = { key, promise };
+  return promise;
+}
+
+async function resolveVolume(
+  key: string,
+  accountId: string,
+  pageIds: string[],
+): Promise<Map<string, number | null>> {
+  const now = Date.now();
+  const row = await readAppCache<VolumeState>(key);
+  const shared = row?.value && typeof row.value === "object" && row.value.counts ? row.value : null;
+  const docId = row?.documentId ?? null;
+  const hasL2 = row !== null;
+
+  // Shared state still trusted → serve it; quietly heal its holes at most once per minute.
+  if (shared && now < shared.expiresAt) {
+    const holes = holesOf(pageIds, shared.counts);
+    if (holes.length > 0 && now >= shared.healAt) {
+      shared.healAt = now + VOLUME_HEAL_MS; // claim the heal window before sweeping
+      await writeAppCache(key, shared, docId);
+      const part = await sweepPageAdCounts(accountId, holes);
+      let healed = false;
+      for (const [id, v] of part) {
+        if (typeof v === "number") {
+          shared.counts[id] = v;
+          healed = true;
         }
       }
-      countsCache = {
-        key,
-        at: Date.now(),
-        ttl: anyLive ? COUNTS_TTL_MS : COUNTS_RETRY_TTL_MS,
-        healAt: Date.now() + COUNTS_HEAL_MS,
-        counts,
-      };
-      return counts;
-    })
-    .finally(() => {
-      countsInflight = null;
-    });
-  countsInflight = { key, promise };
-  return promise;
+      if (healed) await writeAppCache(key, shared, docId);
+    }
+    setVolumeL1(key, shared, hasL2);
+    return toMap(pageIds, shared.counts);
+  }
+
+  // Stale/absent → claim the row first (short expiry) so parallel instances serve the stale
+  // numbers instead of sweeping too; if this claimer dies, the claim re-expires in 2 minutes.
+  const base: VolumeState = {
+    counts: shared?.counts ?? {},
+    expiresAt: now + VOLUME_CLAIM_TTL_MS,
+    healAt: now + VOLUME_HEAL_MS,
+  };
+  const claimedId = (await writeAppCache(key, base, docId)) ?? docId;
+
+  const swept = await sweepPageAdCounts(accountId, pageIds);
+  const counts: Record<string, number | null> = {};
+  let live = 0;
+  for (const id of pageIds) {
+    const v = swept.get(id);
+    if (typeof v === "number") {
+      counts[id] = v;
+      live++;
+    } else {
+      counts[id] = typeof base.counts[id] === "number" ? base.counts[id] : null; // stale beats empty
+    }
+  }
+  const next: VolumeState = {
+    counts,
+    expiresAt: Date.now() + (live > 0 ? VOLUME_OK_TTL_MS : VOLUME_FAIL_TTL_MS),
+    healAt: Date.now() + VOLUME_HEAL_MS,
+  };
+  await writeAppCache(key, next, claimedId);
+  setVolumeL1(key, next, hasL2);
+  return toMap(pageIds, counts);
 }
 
 /**
