@@ -204,8 +204,8 @@ function CloneInner({
   const partner = partnerConfig(partnerId);
   const target = targetById(settings.targetId);
   const targets = targetsFor(partnerId);
-  // Token fanpages for the batch fanka picker. null while loading.
-  const fanpages = useFanpages(Boolean(partner.fanpagesFromToken));
+  // Token fanpages for the batch fanka picker (with live N/limit fill tags). null while loading.
+  const fanpages = useFanpages(Boolean(partner.fanpagesFromToken), partner.pageAdLimit ?? 250);
   const fanpageMissing = Boolean(partner.fanpagesFromToken) && !settings.pageId;
   // Whoever is signed in — clone names default to end with " - <Username>".
   const me = user?.username ?? null;

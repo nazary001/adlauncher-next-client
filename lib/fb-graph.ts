@@ -145,6 +145,59 @@ export async function isAdvertisablePage(pageId: string): Promise<boolean> {
   return pages.some((p) => p.id === pageId);
 }
 
+// ---------- per-fanpage ad volume ----------
+
+// Meta returns the "ads running or in review" count per page only via one ads_volume call PER
+// page (`?page_id=` — the show_breakdown_by_actor variant answers [] for this system user), so a
+// full sweep is ~60 reads. Cached hard and deduped: the sweep runs at most once per TTL, and
+// concurrent /api/fanpages requests share one in-flight sweep instead of stacking 60-call storms
+// onto the launch quota (fbGet self-paces under the usage headers on top).
+const COUNTS_TTL_MS = 10 * 60_000;
+const COUNTS_CONCURRENCY = 6;
+let countsCache: { key: string; at: number; counts: Map<string, number | null> } | null = null;
+let countsInflight: { key: string; promise: Promise<Map<string, number | null>> } | null = null;
+
+async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<Map<string, number | null>> {
+  const counts = new Map<string, number | null>();
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= pageIds.length) return;
+      const id = pageIds[i];
+      try {
+        const body = await fbGet(`act_${accountId}/ads_volume?page_id=${id}&fields=ads_running_or_in_review_count`);
+        const n = (body.data as Array<{ ads_running_or_in_review_count?: number }> | undefined)?.[0]
+          ?.ads_running_or_in_review_count;
+        counts.set(id, typeof n === "number" ? n : null);
+      } catch {
+        counts.set(id, null); // one page failing must not sink the whole list
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(COUNTS_CONCURRENCY, pageIds.length) }, worker));
+  return counts;
+}
+
+/** Ads-running-or-in-review count per fanpage (null = unavailable). Cached; sweep deduped. */
+export async function pageAdCounts(accountId: string, pageIds: string[]): Promise<Map<string, number | null>> {
+  const key = `${accountId}:${pageIds.length}`;
+  if (countsCache && countsCache.key === key && Date.now() - countsCache.at < COUNTS_TTL_MS) {
+    return countsCache.counts;
+  }
+  if (countsInflight && countsInflight.key === key) return countsInflight.promise;
+  const promise = sweepPageAdCounts(accountId, pageIds)
+    .then((counts) => {
+      countsCache = { key, at: Date.now(), counts };
+      return counts;
+    })
+    .finally(() => {
+      countsInflight = null;
+    });
+  countsInflight = { key, promise };
+  return promise;
+}
+
 /**
  * POST a Graph path with form-encoding (nested objects/arrays are JSON-stringified, per the
  * Marketing API convention), with the same rate-limit backoff as fbGet. Throws FbError on failure.

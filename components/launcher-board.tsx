@@ -54,8 +54,6 @@ function LauncherInner({ user }: { user?: SessionUser }) {
   const [partnerId, setPartnerId] = useState<PartnerId>("in");
   // Codes already taken in the Strapi gcm registry. null = not loaded yet → assign nothing.
   const [reserved, setReserved] = useState<Set<string> | null>(null);
-  // Live ads-running-or-in-review count on the bound fanpage. null = unavailable/not loaded.
-  const [adCount, setAdCount] = useState<number | null>(null);
   // Count just sent to the Task Manager, shown as a brief confirmation (campaigns stay on the board).
   const [justQueued, setJustQueued] = useState(0);
   const queuedTimer = useRef<number | null>(null);
@@ -74,8 +72,8 @@ function LauncherInner({ user }: { user?: SessionUser }) {
   const nextId = useRef(2);
   const partner = partnerConfig(partnerId);
   const anyExpanded = campaigns.some((c) => !c.collapsed);
-  // Token fanpages for the per-card fanka picker (Indians). null while loading.
-  const fanpages = useFanpages(Boolean(partner.fanpagesFromToken));
+  // Token fanpages for the per-card fanka picker (Indians), each with its live N/limit fill tag.
+  const fanpages = useFanpages(Boolean(partner.fanpagesFromToken), partner.pageAdLimit ?? 250);
 
   // Latest partner for callbacks that must not re-subscribe on partner switch.
   const partnerRef = useRef(partner);
@@ -135,27 +133,6 @@ function LauncherInner({ user }: { user?: SessionUser }) {
     });
   }, [tasks]);
 
-  // Bound fanpage's live ad usage for the "N / limit" badge; re-runs on partner change + after launch.
-  function loadVolume() {
-    const acct = partner.lockedAccount?.id;
-    if (!acct) {
-      setAdCount(null);
-      return;
-    }
-    fetch(`/api/fanpage-volume?account=${acct}`)
-      .then((r) => r.json())
-      .then((d) => setAdCount(d?.ok && typeof d.count === "number" ? d.count : null))
-      .catch(() => {});
-  }
-
-  useEffect(() => {
-    // loadVolume() sets adCount from the fetch result (async for the live Indians partner; the
-    // synchronous null-set only applies to a bound-account-less partner, which isn't selectable).
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    loadVolume();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [partnerId]);
-
   /** Non-blocking launch: every launchable campaign is captured + dropped into the Task Manager
    *  instantly, then flies off the board so you can keep building. The queue creates them one by
    *  one (PAUSED) in the background. */
@@ -196,7 +173,6 @@ function LauncherInner({ user }: { user?: SessionUser }) {
     setJustQueued(launched.size);
     if (queuedTimer.current) window.clearTimeout(queuedTimer.current);
     queuedTimer.current = window.setTimeout(() => setJustQueued(0), 3500);
-    loadVolume();
   }
 
   function mutate(fn: (cs: Campaign[]) => Campaign[]) {
@@ -382,7 +358,6 @@ function LauncherInner({ user }: { user?: SessionUser }) {
                 campaign={c}
                 index={i}
                 partner={partner}
-                adCount={adCount}
                 fanpages={fanpages}
                 highlight={highlightId === c.id}
                 onPatch={patch}

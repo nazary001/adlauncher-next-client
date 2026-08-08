@@ -43,7 +43,10 @@ export function SearchSelect({
   function openList() {
     computePos();
     setOpen(true);
-    setActive(0);
+    // Cursor starts on the picked option (query is empty on open → indexes match the full list),
+    // so a long list opens scrolled to the current choice instead of the top.
+    const selectedIdx = opts.findIndex((o) => o.value === value);
+    setActive(selectedIdx >= 0 ? selectedIdx : 0);
   }
 
   // Keep the portaled list glued to the field while open (scroll, resize).
@@ -63,16 +66,23 @@ export function SearchSelect({
   const opts: RichOption[] = options.map((o) =>
     typeof o === "string" ? { value: o, label: o } : o,
   );
-  // Closed input shows the picked option's LABEL — value and label differ for id-keyed options
-  // (fanpages); plain string catalogs are unaffected (value === label).
-  const displayValue = opts.find((o) => o.value === value)?.label ?? value;
+  // Closed input shows the picked option's LABEL (+ its status tag) — value and label differ for
+  // id-keyed options (fanpages); plain string catalogs are unaffected (value === label).
+  const selected = opts.find((o) => o.value === value);
+  const displayValue = selected?.label ?? value;
   const q = query.trim().toLowerCase();
+  // Searchable by label, meta AND value — for fanpages the value is the page id.
   const filtered = q
     ? opts.filter(
         (o) =>
-          o.label.toLowerCase().includes(q) || o.meta?.toLowerCase().includes(q),
+          o.label.toLowerCase().includes(q) ||
+          o.meta?.toLowerCase().includes(q) ||
+          o.value.toLowerCase().includes(q),
       )
     : opts;
+
+  const toneCls = (tone?: RichOption["tagTone"]) =>
+    tone === "danger" ? "text-danger" : tone === "warn" ? "text-warn" : "text-dim";
 
   useEffect(() => {
     if (!open) return;
@@ -130,6 +140,11 @@ export function SearchSelect({
         placeholder={placeholder}
         value={open ? query : displayValue}
         onFocus={openList}
+        onClick={() => {
+          // Re-clicking an already-focused input fires no focus event — without this the list
+          // only reopens after a blur+refocus, which reads as "the dropdown doesn't open".
+          if (!open) openList();
+        }}
         onChange={(e) => {
           setQuery(e.target.value);
           if (!open) openList();
@@ -137,12 +152,23 @@ export function SearchSelect({
         }}
         onKeyDown={onKeyDown}
         className={
-          "h-9 w-full rounded-lg border border-line bg-surface2 pl-8 pr-8 text-[13px] text-ink " +
+          "h-9 w-full rounded-lg border border-line bg-surface2 pl-8 text-[13px] text-ink " +
           "placeholder:text-faint outline-none transition-[border-color,box-shadow] duration-150 " +
           "hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 " +
-          "disabled:opacity-40 disabled:cursor-not-allowed"
+          "disabled:opacity-40 disabled:cursor-not-allowed " +
+          (!open && selected?.tag ? "pr-20" : "pr-8")
         }
       />
+      {!open && selected?.tag ? (
+        <span
+          className={
+            "pointer-events-none absolute right-8 top-1/2 -translate-y-1/2 font-mono text-[11px] tabular-nums " +
+            toneCls(selected.tagTone)
+          }
+        >
+          {selected.tag}
+        </span>
+      ) : null}
       {value && !open ? (
         <button
           type="button"
@@ -174,7 +200,7 @@ export function SearchSelect({
                 (pos.up ? "animate-drop-in-up" : "animate-drop-in")
               }
             >
-              <div ref={listRef} className="max-h-56 overflow-y-auto p-1">
+              <div ref={listRef} className="max-h-72 overflow-y-auto p-1">
             {filtered.length === 0 ? (
               <p className="px-3 py-3 text-[12px] text-faint">{emptyHint}</p>
             ) : (
@@ -198,6 +224,11 @@ export function SearchSelect({
                   <span className="flex shrink-0 items-center gap-2">
                     {o.meta ? (
                       <span className="font-mono text-[11px] text-faint">{o.meta}</span>
+                    ) : null}
+                    {o.tag ? (
+                      <span className={"font-mono text-[11px] tabular-nums " + toneCls(o.tagTone)}>
+                        {o.tag}
+                      </span>
                     ) : null}
                     {o.value === value ? <CheckIcon className="h-3.5 w-3.5 text-accent" /> : null}
                   </span>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import type { Campaign } from "@/lib/types";
 import { bidAmountMissing, fullName, isReady, limitMoney, moneyLabel } from "@/lib/types";
 import {
@@ -25,7 +25,7 @@ import {
   pixelsFor,
 } from "@/lib/catalog";
 import { type PartnerConfig, fullLandingUrl, launchReadyOpts } from "@/lib/partners";
-import type { RichOption } from "@/lib/catalog";
+import type { FanpageOption } from "./use-fanpages";
 import { Field, MoneyInput, Select, TextArea, TextInput, IconButton } from "./ui";
 import { SearchSelect } from "./search-select";
 import { MultiSelect } from "./multi-select";
@@ -54,18 +54,8 @@ function SectionLabel({ icon, children }: { icon: React.ReactNode; children: Rea
   );
 }
 
-/** Read-only field for values pinned by the partner (single account / pixel / fanpage). */
-function LockedField({
-  value,
-  hint,
-  mono,
-  badge,
-}: {
-  value: string;
-  hint?: string;
-  mono?: boolean;
-  badge?: ReactNode;
-}) {
+/** Read-only field for values pinned by the partner (single account / pixel). */
+function LockedField({ value, hint, mono }: { value: string; hint?: string; mono?: boolean }) {
   return (
     <div
       title={value}
@@ -75,7 +65,6 @@ function LockedField({
         {value || "—"}
       </span>
       <span className="flex shrink-0 items-center gap-1.5 text-faint">
-        {badge}
         {hint ? (
           <span className="text-[9px] font-semibold uppercase tracking-[0.14em]">{hint}</span>
         ) : null}
@@ -85,27 +74,10 @@ function LockedField({
   );
 }
 
-/** Live ad usage on the bound fanpage vs Meta's per-Page limit, e.g. "28/250".
- *  Warms to amber past 80%, red at/over the cap. */
-function VolumeBadge({ count, limit }: { count: number; limit: number }) {
-  const ratio = limit > 0 ? count / limit : 0;
-  const tone = ratio >= 1 ? "text-danger" : ratio >= 0.8 ? "text-warn" : "text-dim";
-  return (
-    <span
-      title={`${count} ads running or in review · page limit ${limit}`}
-      className={"font-mono text-[11px] tabular-nums " + tone}
-    >
-      {count}
-      <span className="text-faint">/{limit}</span>
-    </span>
-  );
-}
-
 export function CampaignCard({
   campaign: c,
   index,
   partner,
-  adCount,
   fanpages,
   highlight,
   onPatch,
@@ -117,10 +89,9 @@ export function CampaignCard({
   campaign: Campaign;
   index: number;
   partner: PartnerConfig;
-  /** Live ads-running-or-in-review count on the bound ACCOUNT (Indians). null = unavailable. */
-  adCount?: number | null;
-  /** Token fanpages for the picker (value = page id). null = loading/unavailable. */
-  fanpages?: RichOption[] | null;
+  /** Token fanpages for the picker (value = page id, adCount = live ads-running-or-in-review
+   *  count on that page). null = loading/unavailable. */
+  fanpages?: FanpageOption[] | null;
   /** Focus-pulse this card after a jump from the Launch bay. */
   highlight?: boolean;
   onPatch: (id: string, patch: Partial<Campaign>) => void;
@@ -321,30 +292,15 @@ export function CampaignCard({
                   error={partner.fanpagesFromToken && !c.page ? "Pick a fanpage" : undefined}
                 >
                   {partner.fanpagesFromToken ? (
-                    <div className="flex items-center gap-2">
-                      <div className="min-w-0 flex-1">
-                        <SearchSelect
-                          value={c.page}
-                          onChange={(v) => patch({ page: v })}
-                          options={fanpages ?? []}
-                          placeholder={partner.pagePlaceholder}
-                          emptyHint={fanpages ? "No fanpages on the token" : "Loading fanpages…"}
-                        />
-                      </div>
-                      {typeof adCount === "number" && partner.pageAdLimit ? (
-                        <VolumeBadge count={adCount} limit={partner.pageAdLimit} />
-                      ) : null}
-                    </div>
-                  ) : locked ? (
-                    <LockedField
-                      value={partner.fanpages[0] ?? ""}
-                      badge={
-                        typeof adCount === "number" && partner.pageAdLimit ? (
-                          <VolumeBadge count={adCount} limit={partner.pageAdLimit} />
-                        ) : undefined
-                      }
-                      hint={typeof adCount === "number" ? undefined : "only"}
+                    <SearchSelect
+                      value={c.page}
+                      onChange={(v) => patch({ page: v })}
+                      options={fanpages ?? []}
+                      placeholder={partner.pagePlaceholder}
+                      emptyHint={fanpages ? "No fanpages on the token" : "Loading fanpages…"}
                     />
+                  ) : locked ? (
+                    <LockedField value={partner.fanpages[0] ?? ""} hint="only" />
                   ) : (
                     <SearchSelect
                       value={c.page}
