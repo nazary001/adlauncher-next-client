@@ -172,6 +172,17 @@ export function swapGcm(link: string, gcm: string): string {
   return link + (link.includes("?") ? "&" : "?") + `gcm=${gcm}`;
 }
 
+/**
+ * Set the `pixel=<id>` param on a tracking link to the clone's account pixel (the funnel fires
+ * that pixel). Replaces an existing pixel= or appends it. Empty pixel id → link left untouched
+ * (funnel falls back to its default pixel — correct for click-optimized sources with no pixel).
+ */
+export function swapPixel(link: string, pixelId: string): string {
+  if (!link || !/^\d{10,20}$/.test(pixelId)) return link;
+  if (/([?&]pixel=)\d+/.test(link)) return link.replace(/([?&]pixel=)\d+/, `$1${pixelId}`);
+  return link + (link.includes("?") ? "&" : "?") + `pixel=${pixelId}`;
+}
+
 /** A Campaign-shaped object from the clone edit + source, to reuse the launch payload builders. */
 export function cloneToCampaign(edit: CloneEdit, src: SourceDetail): Campaign {
   const c = makeCampaign(edit.campaignId, "", edit.name); // namePrefix "" → fullName === edit.name
@@ -190,8 +201,13 @@ export function cloneToCampaign(edit: CloneEdit, src: SourceDetail): Campaign {
   return c;
 }
 
-/** video_data rebuild: same video/copy/title/CTA, only the gcm in the CTA link swapped. */
-function videoCreativeData(videoData: Json, gcm: string): Json {
+/** Rewrite a tracking link for the clone: fresh gcm + the clone's account pixel (funnel fires it). */
+function rewriteLink(link: string, gcm: string, pixelId: string): string {
+  return swapPixel(swapGcm(link, gcm), pixelId);
+}
+
+/** video_data rebuild: same video/copy/title/CTA, the gcm + pixel in the CTA link swapped. */
+function videoCreativeData(videoData: Json, gcm: string, pixelId: string): Json {
   const vd: Json = {};
   if (videoData.video_id) vd.video_id = videoData.video_id;
   if (videoData.message) vd.message = videoData.message;
@@ -204,19 +220,19 @@ function videoCreativeData(videoData: Json, gcm: string): Json {
   const cta = videoData.call_to_action as Json | undefined;
   if (cta) {
     const val = (cta.value ?? {}) as Json;
-    const link = typeof val.link === "string" ? swapGcm(val.link, gcm) : val.link;
+    const link = typeof val.link === "string" ? rewriteLink(val.link, gcm, pixelId) : val.link;
     vd.call_to_action = { type: cta.type, value: { ...val, link } };
   }
   return vd;
 }
 
-/** link_data rebuild (static image ad): same image/copy/headline/CTA, the gcm swapped in the
- *  destination link (and in the CTA link when the source carries one). The image is reused by
+/** link_data rebuild (static image ad): same image/copy/headline/CTA, the gcm + pixel swapped in
+ *  the destination link (and in the CTA link when the source carries one). The image is reused by
  *  image_hash — an account-library asset, valid here because clones are created in the same ad
  *  account the source lives in. */
-function imageCreativeData(linkData: Json, gcm: string): Json {
+function imageCreativeData(linkData: Json, gcm: string, pixelId: string): Json {
   const ld: Json = {};
-  if (typeof linkData.link === "string") ld.link = swapGcm(linkData.link, gcm);
+  if (typeof linkData.link === "string") ld.link = rewriteLink(linkData.link, gcm, pixelId);
   if (linkData.message) ld.message = linkData.message;
   if (linkData.name) ld.name = linkData.name;
   if (linkData.description) ld.description = linkData.description;
@@ -228,7 +244,7 @@ function imageCreativeData(linkData: Json, gcm: string): Json {
   const cta = linkData.call_to_action as Json | undefined;
   if (cta && typeof cta.type === "string") {
     const val = (cta.value ?? {}) as Json;
-    const link = typeof val.link === "string" ? swapGcm(val.link, gcm) : undefined;
+    const link = typeof val.link === "string" ? rewriteLink(val.link, gcm, pixelId) : undefined;
     ld.call_to_action = link ? { type: cta.type, value: { ...val, link } } : { type: cta.type };
   }
   return ld;
@@ -236,14 +252,20 @@ function imageCreativeData(linkData: Json, gcm: string): Json {
 
 /**
  * Rebuild the creative from the source's media — video_data for video ads, link_data for static
- * image ads — swapping only the gcm in the tracking link. Only known-writable fields are forwarded
- * (the read fetch returns extras).
+ * image ads — swapping the gcm + the clone's account pixel in the tracking link. Only known-
+ * writable fields are forwarded (the read fetch returns extras).
  */
-export function cloneCreativePayload(name: string, pageId: string, media: SourceMedia, gcm: string): Json {
+export function cloneCreativePayload(
+  name: string,
+  pageId: string,
+  media: SourceMedia,
+  gcm: string,
+  pixelId: string,
+): Json {
   const spec =
     media.kind === "video"
-      ? { video_data: videoCreativeData(media.data, gcm) }
-      : { link_data: imageCreativeData(media.data, gcm) };
+      ? { video_data: videoCreativeData(media.data, gcm, pixelId) }
+      : { link_data: imageCreativeData(media.data, gcm, pixelId) };
   return { name, object_story_spec: { page_id: pageId, ...spec } };
 }
 

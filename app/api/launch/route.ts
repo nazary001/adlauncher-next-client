@@ -417,7 +417,9 @@ export async function POST(req: Request) {
           notes: "claimed via adlauncher launch",
         });
         const gcm = claim.gcm;
-        const link = fullLandingUrl(partner, campaign.landing, gcm, conversions);
+        // The link carries the campaign's chosen pixel (binds.pixelId, already validated) so the
+        // funnel fires that pixel — matching the adset's promoted pixel.
+        const link = fullLandingUrl(partner, campaign.landing, gcm, conversions, binds.pixelId);
         if (!link) throw new FbError("no landing selected — cannot build destination link", {});
 
         // 2) register the creative (FB pulls it from the Blob URL) and wait for processing

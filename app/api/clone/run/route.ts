@@ -158,7 +158,7 @@ export async function POST(req: Request) {
           send({ idx, stage: "creative" });
           const creative = await fbPost(
             `act_${editBinds.accountId}/adcreatives`,
-            cloneCreativePayload(edit.name, editBinds.pageId, media, gcm),
+            cloneCreativePayload(edit.name, editBinds.pageId, media, gcm, editBinds.pixelId),
           );
           created.creative_id = String(creative.id);
 

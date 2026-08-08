@@ -165,19 +165,24 @@ const FB_MACROS = "&utm_campaign={{campaign.id}}&utm_term={{adset.id}}&utm_conte
 /**
  * Full destination link the ad points to. Shape (per owner, 2026-08-04):
  * {base}/{slug}?gcm=NN&utm_source=facebook&utm_medium={tier}&utm_campaign={{campaign.id}}
- *   &utm_term={{adset.id}}&utm_content={{ad.id}}[&fire=click]
+ *   &utm_term={{adset.id}}&utm_content={{ad.id}}[&fire=click][&pixel=<id>]
  * `fire=click` is appended for conversion campaigns (fires Purchase on the banner click).
+ * `pixel=<id>` tells the funnel which Meta pixel to fire — the campaign's chosen pixel, so the
+ * conversion lands on the same pixel the adset optimizes for (funnel defaults to its original
+ * pixel when omitted). Only a plausible numeric id is appended.
  */
 export function fullLandingUrl(
   p: PartnerConfig,
   slug: string,
   gcm: string,
   conversions: boolean,
+  pixel?: string,
 ): string {
   if (!slug) return "";
   const medium = p.nameTier ? `&utm_medium=${p.nameTier}` : "";
   const fire = conversions ? "&fire=click" : "";
-  return `${p.landingBase}/${slug}?gcm=${gcm}&utm_source=facebook${medium}${FB_MACROS}${fire}`;
+  const px = pixel && /^\d{10,20}$/.test(pixel) ? `&pixel=${pixel}` : "";
+  return `${p.landingBase}/${slug}?gcm=${gcm}&utm_source=facebook${medium}${FB_MACROS}${fire}${px}`;
 }
 
 /** Pin account/pixel/fanpage to the partner's single bound values (Indians). No-op otherwise. */

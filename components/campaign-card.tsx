@@ -127,7 +127,7 @@ export function CampaignCard({
   const pageOptions = partner.fanpages.length ? partner.fanpages : pagesFor(c.profile);
   const landingOptions = partner.landings.map((l) => ({ value: l.slug, label: l.title, meta: l.lang }));
   const conversions = c.optimization === "conversions";
-  const derivedLink = fullLandingUrl(partner, c.landing, c.gcm, conversions);
+  const derivedLink = fullLandingUrl(partner, c.landing, c.gcm, conversions, c.pixel);
 
   function copyLink() {
     if (!derivedLink) return;
