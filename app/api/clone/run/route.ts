@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { partnerConfig, type PartnerId } from "@/lib/partners";
-import { FbError, fbPost } from "@/lib/fb-graph";
+import { FbError, fbPost, isAdvertisablePage } from "@/lib/fb-graph";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import type { CloneEdit } from "@/lib/clone";
 import {
@@ -70,14 +70,37 @@ export async function POST(req: Request) {
   if (edits.length > 200) return NextResponse.json({ ok: false, error: "too_many", max: 200 }, { status: 400 });
 
   const partner = partnerConfig(partnerId);
-  // Enforce the locked binds server-side — never trust the client for account/page/pixel.
-  const binds: LaunchBinds = {
+  // Enforce the locked binds server-side — never trust the client for account/pixel. The fanka is
+  // the buyer's PICK (edit.pageId), accepted only when it's on the launch token's own page list.
+  const binds: Omit<LaunchBinds, "pageId"> = {
     accountId: (partner.lockedAccount?.id ?? "").replace(/^act_/, ""),
-    pageId: partner.lockedPage?.id ?? "",
     pixelId: partner.lockedPixel?.id ?? "",
   };
-  if (!binds.accountId || !binds.pageId) {
+  if (!binds.accountId || !partner.fanpagesFromToken) {
     return NextResponse.json({ ok: false, error: "partner_not_launchable" }, { status: 400 });
+  }
+  const pageIds = [...new Set(edits.map((e) => String(e.pageId ?? "").trim()))];
+  if (pageIds.some((p) => !/^\d{5,}$/.test(p))) {
+    return NextResponse.json(
+      { ok: false, error: "fanpage_required — pick a fanpage in the board settings" },
+      { status: 400 },
+    );
+  }
+  try {
+    for (const p of pageIds) {
+      if (!(await isAdvertisablePage(p))) {
+        return NextResponse.json(
+          { ok: false, error: "fanpage_not_allowed — the launch token cannot advertise with this page" },
+          { status: 400 },
+        );
+      }
+    }
+  } catch (e) {
+    const err = e as { message?: string };
+    return NextResponse.json(
+      { ok: false, error: `fanpage check failed: ${err.message ?? String(e)}` },
+      { status: 502 },
+    );
   }
 
   const encoder = new TextEncoder();
@@ -112,6 +135,9 @@ export async function POST(req: Request) {
 
           const campaign = cloneToCampaign(edit, src);
           const localeIds = await resolveLocales(edit.locales);
+          // The validated pick for THIS clone (batches are single-page today, but the shape allows
+          // per-row pages tomorrow without another contract change).
+          const editBinds: LaunchBinds = { ...binds, pageId: String(edit.pageId).trim() };
 
           send({ idx, stage: "campaign" });
           const camp = await fbPost(`act_${binds.accountId}/campaigns`, campaignPayload(campaign, edit.name));
@@ -120,14 +146,14 @@ export async function POST(req: Request) {
           send({ idx, stage: "adset" });
           const adset = await createAdset(
             `act_${binds.accountId}/adsets`,
-            adsetPayload(campaign, edit.name, String(camp.id), binds, localeIds),
+            adsetPayload(campaign, edit.name, String(camp.id), editBinds, localeIds),
           );
           created.adset_id = String(adset.id);
 
           send({ idx, stage: "creative" });
           const creative = await fbPost(
             `act_${binds.accountId}/adcreatives`,
-            cloneCreativePayload(edit.name, binds.pageId, media, gcm),
+            cloneCreativePayload(edit.name, editBinds.pageId, media, gcm),
           );
           created.creative_id = String(creative.id);
 

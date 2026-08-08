@@ -73,6 +73,8 @@ export type CloneEdit = {
   placement: string;
   ageMin: string;
   userOs: "all" | "android";
+  /** The PICKED fanpage id the clone advertises with (from /api/fanpages; server-validated). */
+  pageId: string;
 };
 
 /**
@@ -86,12 +88,12 @@ export type CloneTarget = {
   label: string;
   accountId: string; // digits only, no act_ prefix
   accountName: string;
-  pageId: string;
-  pageName: string;
   pixelId: string;
   pixelName: string;
 };
 
+// The fanpage is NOT part of the target anymore — it's picked per batch from the launch token's
+// own page list (/api/fanpages) in the board settings.
 export const CLONE_TARGETS: CloneTarget[] = [
   {
     id: "in-magicoffers",
@@ -99,8 +101,6 @@ export const CLONE_TARGETS: CloneTarget[] = [
     label: "GC-Magicoffers-BR-1500",
     accountId: "1297336295903991",
     accountName: "GC-Magicoffers-BR-1500",
-    pageId: "778068408713203",
-    pageName: "Marisel8",
     pixelId: "3288799954641310",
     pixelName: "HS-Pixel-FARM-1",
   },
@@ -117,13 +117,15 @@ export function targetById(id: string): CloneTarget | undefined {
 /** Global settings applied to every clone. */
 export type CloneSettings = {
   targetId: string;
+  /** The PICKED fanpage (id) every clone in the batch advertises with. Empty = not picked yet. */
+  pageId: string;
   userOs: "all" | "android";
   copies: number;
 };
 
 export function defaultSettings(partner: PartnerId): CloneSettings {
   const t = targetsFor(partner)[0] ?? CLONE_TARGETS[0];
-  return { targetId: t.id, userOs: "all", copies: 1 };
+  return { targetId: t.id, pageId: "", userOs: "all", copies: 1 };
 }
 
 /**

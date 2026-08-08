@@ -35,6 +35,8 @@ import { Header } from "./header";
 import { TaskManagerProvider, useTaskManager } from "./task-manager";
 import { CloneTargetingModal } from "./clone-targeting-modal";
 import { CloneHighOfferModal } from "./clone-high-offer-modal";
+import { SearchSelect } from "./search-select";
+import { useFanpages } from "./use-fanpages";
 import type { SessionUser } from "./user-menu";
 
 /** Today as DD.MM for clone-name date stamping (client-side). */
@@ -202,6 +204,9 @@ function CloneInner({
   const partner = partnerConfig(partnerId);
   const target = targetById(settings.targetId);
   const targets = targetsFor(partnerId);
+  // Token fanpages for the batch fanka picker. null while loading.
+  const fanpages = useFanpages(Boolean(partner.fanpagesFromToken));
+  const fanpageMissing = Boolean(partner.fanpagesFromToken) && !settings.pageId;
   // Whoever is signed in — clone names default to end with " - <Username>".
   const me = user?.username ?? null;
 
@@ -296,6 +301,7 @@ function CloneInner({
   /** Queue each clone (rows × copies) into the Task Manager, which builds them one at a time
    *  (PAUSED) with live stages / errors / retry — the same queue and pipeline as launches. */
   const duplicate = () => {
+    if (fanpageMissing) return; // the button is disabled too — belt and suspenders
     const total = Math.max(1, Math.floor(settings.copies) || 1);
     let queued = 0;
     for (const r of rows) {
@@ -313,6 +319,7 @@ function CloneInner({
           placement: r.placement,
           ageMin: r.ageMin,
           userOs: settings.userOs,
+          pageId: settings.pageId,
         };
         enqueueClone({ partnerId, edit, name, geo: geoShort(r.countries), budget: r.budget });
         queued++;
@@ -353,11 +360,24 @@ function CloneInner({
                 ) : (
                   <LockedRow label="Account" value={target?.accountName ?? "—"} />
                 )}
-                <LockedRow label="Fanpage" value={target?.pageName ?? "—"} />
+                {partner.fanpagesFromToken ? (
+                  <div className="flex flex-col gap-1 px-1.5 py-1">
+                    <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Fanpage</span>
+                    <SearchSelect
+                      value={settings.pageId}
+                      onChange={(v) => patchSettings({ pageId: v })}
+                      options={fanpages ?? []}
+                      placeholder={partner.pagePlaceholder}
+                      emptyHint={fanpages ? "No fanpages on the token" : "Loading fanpages…"}
+                    />
+                  </div>
+                ) : null}
                 <LockedRow label="Pixel" value={target?.pixelName ?? "—"} />
               </div>
               <p className="px-0.5 text-[10.5px] leading-relaxed text-faint">
-                Clones are created on the {partner.label} account. More accounts unlock the selector automatically.
+                Clones are created on the {partner.label} account
+                {partner.fanpagesFromToken ? " with the fanpage picked above (applies to every clone in the batch)" : ""}.
+                More accounts unlock the selector automatically.
               </p>
             </div>
 
@@ -423,16 +443,21 @@ function CloneInner({
                 <button
                   type="button"
                   onClick={duplicate}
+                  disabled={fanpageMissing}
                   className={
                     "animate-pop-in flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-launch/50 " +
                     "bg-launch/15 text-[14px] font-semibold text-launch2 transition-all duration-150 hover:border-launch/70 " +
-                    "hover:bg-launch/25 active:scale-[0.98] " +
+                    "hover:bg-launch/25 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 " +
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-launch/40"
                   }
                 >
                   <CopyIcon className="h-4 w-4" />
                   {`Duplicate ${preview.length} ${preview.length === 1 ? "clone" : "clones"} · PAUSED`}
                 </button>
+              ) : null}
+
+              {previewed && rows.length > 0 && fanpageMissing ? (
+                <p className="text-center text-[11px] text-warn">Pick a fanpage in Destination first.</p>
               ) : null}
 
               {previewed ? (

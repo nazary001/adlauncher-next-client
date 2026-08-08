@@ -63,6 +63,9 @@ export function SearchSelect({
   const opts: RichOption[] = options.map((o) =>
     typeof o === "string" ? { value: o, label: o } : o,
   );
+  // Closed input shows the picked option's LABEL — value and label differ for id-keyed options
+  // (fanpages); plain string catalogs are unaffected (value === label).
+  const displayValue = opts.find((o) => o.value === value)?.label ?? value;
   const q = query.trim().toLowerCase();
   const filtered = q
     ? opts.filter(
@@ -125,7 +128,7 @@ export function SearchSelect({
         spellCheck={false}
         disabled={disabled}
         placeholder={placeholder}
-        value={open ? query : value}
+        value={open ? query : displayValue}
         onFocus={openList}
         onChange={(e) => {
           setQuery(e.target.value);

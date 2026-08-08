@@ -101,6 +101,50 @@ export async function fbGet(path: string): Promise<Json> {
   }
 }
 
+// ---------- fanpages of the launch token ----------
+
+export type FanPage = { id: string; name: string };
+
+// The system-user token advertises through pages ASSIGNED to it (me/accounts), not through a
+// page bound to the ad account — Meta checks the "Ads" task on the page at creative-create time.
+// Cached briefly: the list feeds both the UI picker and the per-launch server-side validation.
+const PAGES_TTL_MS = 5 * 60_000;
+let pagesCache: { at: number; pages: FanPage[] } | null = null;
+
+/** Every page the launch token can advertise with (ADVERTISE task), paginated + cached. */
+export async function advertisablePages(): Promise<FanPage[]> {
+  if (pagesCache && Date.now() - pagesCache.at < PAGES_TTL_MS) return pagesCache.pages;
+
+  const pages: FanPage[] = [];
+  let after = "";
+  // 20 × 100 = a 2000-page ceiling — far above the ~60 the token carries today.
+  for (let i = 0; i < 20; i++) {
+    const body = await fbGet(`me/accounts?fields=id,name,tasks&limit=100${after ? `&after=${encodeURIComponent(after)}` : ""}`);
+    const data = (body.data as Array<{ id?: string; name?: string; tasks?: string[] }> | undefined) ?? [];
+    for (const p of data) {
+      if (!p?.id || !p.name) continue;
+      if (!Array.isArray(p.tasks) || !p.tasks.includes("ADVERTISE")) continue;
+      pages.push({ id: String(p.id), name: String(p.name) });
+    }
+    const paging = body.paging as { cursors?: { after?: string }; next?: string } | undefined;
+    const next = paging?.next ? paging.cursors?.after ?? "" : "";
+    if (!next || next === after) break;
+    after = next;
+  }
+
+  // Stable order for the picker; duplicate display names exist → id is the tiebreaker.
+  pages.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  pagesCache = { at: Date.now(), pages };
+  return pages;
+}
+
+/** Server-side guard: only ids from the token's own page list are accepted for a launch/clone. */
+export async function isAdvertisablePage(pageId: string): Promise<boolean> {
+  if (!/^\d{5,}$/.test(pageId)) return false;
+  const pages = await advertisablePages();
+  return pages.some((p) => p.id === pageId);
+}
+
 /**
  * POST a Graph path with form-encoding (nested objects/arrays are JSON-stringified, per the
  * Marketing API convention), with the same rate-limit backoff as fbGet. Throws FbError on failure.

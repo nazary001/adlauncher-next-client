@@ -3,7 +3,7 @@
 import type { Campaign } from "@/lib/types";
 import { fullName, isLaunchable, moneyLabel, parseMoney } from "@/lib/types";
 import { CONVERSION_EVENTS, countryName } from "@/lib/catalog";
-import type { PartnerConfig } from "@/lib/partners";
+import { type PartnerConfig, launchReadyOpts } from "@/lib/partners";
 import { CheckIcon, EyeIcon, RocketIcon } from "./icons";
 
 function geoLabel(c: Campaign): string {
@@ -33,7 +33,7 @@ export function LaunchRail({
   onLaunch: () => void;
 }) {
   const total = campaigns.reduce((s, c) => s + parseMoney(c.budget), 0);
-  const opts = { landing: partner.usesGcm, profile: partner.usesProfile };
+  const opts = launchReadyOpts(partner);
   const readyCount = campaigns.filter((c) => isLaunchable(c, opts)).length;
   const allReady = campaigns.length > 0 && readyCount === campaigns.length;
 

@@ -28,13 +28,15 @@ export type PartnerConfig = {
   /** Label + catalog for the page-binding field. Indians call these "fanky" (fanpages). */
   pageLabel: string;
   pagePlaceholder: string;
-  /** Fanpages promotable by the bound account. Indians: this account promotes only Marisel8. */
+  /** Static fanpage catalog (LION partners). Empty when fanpages come from the token instead. */
   fanpages: string[];
-  /** When set, the flow is pinned to a single account/pixel/page — fields render locked. */
+  /** Fanpages are the launch token's own assigned pages (GET /api/fanpages) — the buyer PICKS one
+   *  per campaign/clone (stored as the page ID in `Campaign.page` / `CloneEdit.pageId`), and the
+   *  server validates the id against the same token list. Indians since the system-user token. */
+  fanpagesFromToken?: boolean;
+  /** When set, the flow is pinned to a single account/pixel — fields render locked. */
   lockedAccount?: Bound;
   lockedPixel?: Bound;
-  /** Bound fanpage (id + name). The launch uses the id as object_story_spec.page_id. */
-  lockedPage?: Bound;
   /** Caption under the launch button naming the submit channel. Indians go straight through
    *  the Graph API; LION (anti-detect profiles) is a Brazilians/Americans concept. */
   launchNote: string;
@@ -60,14 +62,12 @@ const MKLEARN_LANDINGS: Landing[] = [
   { slug: "retiree-health-coverage", title: "Retiree Health Coverage", lang: "EN" },
 ];
 
-// The Indians flow is pinned to one account. Verified live on the launch token 2026-08-04:
-// act_1297336295903991 (GC-Magicoffers-BR-1500, BM VD-C1) promotes exactly ONE page (Marisel8)
-// and carries one pixel (HS-Pixel-FARM-1 = the MK Learn tracking pixel). BM VD-C1 holds ~70
-// other fanky, but they are NOT attached to this account, so it cannot advertise with them.
+// The Indians flow is pinned to one account + pixel. Verified live on the system-user launch
+// token 2026-08-08: act_1297336295903991 (GC-Magicoffers-BR-1500) is visible and writable, and
+// the token carries ~60 assigned fanpages (ADVERTISE task) — the fanka is PICKED per campaign
+// from /api/fanpages, no longer bound to the account (Marisel8 belonged to the old user token).
 const MAGICOFFERS_ACCOUNT: Bound = { id: "1297336295903991", name: "GC-Magicoffers-BR-1500" };
 const MAGICOFFERS_PIXEL: Bound = { id: "3288799954641310", name: "HS-Pixel-FARM-1" };
-const MAGICOFFERS_PAGE: Bound = { id: "778068408713203", name: "Marisel8" };
-const MAGICOFFERS_FANPAGES = ["Marisel8"];
 
 export const PARTNERS: PartnerConfig[] = [
   {
@@ -95,10 +95,10 @@ export const PARTNERS: PartnerConfig[] = [
     landings: MKLEARN_LANDINGS,
     pageLabel: "Fanpage",
     pagePlaceholder: "Search fanpage",
-    fanpages: MAGICOFFERS_FANPAGES,
+    fanpages: [],
+    fanpagesFromToken: true,
     lockedAccount: MAGICOFFERS_ACCOUNT,
     lockedPixel: MAGICOFFERS_PIXEL,
-    lockedPage: MAGICOFFERS_PAGE,
     launchNote: "Submits directly via Graph API",
     pageAdLimit: 250,
     maxCreatives: 1,
@@ -121,6 +121,12 @@ export const PARTNERS: PartnerConfig[] = [
 
 export function partnerConfig(id: PartnerId): PartnerConfig {
   return PARTNERS.find((p) => p.id === id) ?? PARTNERS[0];
+}
+
+/** Readiness requirements for a partner — single source for the card dot, the Launch bay and the
+ *  launch filter, so a campaign can never count as "ready" while missing a required fanka. */
+export function launchReadyOpts(p: PartnerConfig): { landing: boolean; profile: boolean; page: boolean } {
+  return { landing: p.usesGcm, profile: p.usesProfile, page: Boolean(p.fanpagesFromToken) };
 }
 
 /** Fixed naming prefix for a new campaign, e.g. "[04.08] - (t1) - ". Empty when the partner has no tier. */

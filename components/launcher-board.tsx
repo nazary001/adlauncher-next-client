@@ -9,11 +9,13 @@ import {
   type PartnerId,
   applyPartnerLocks,
   assignGcmCodes,
+  launchReadyOpts,
   namePrefixFor,
   partnerConfig,
 } from "@/lib/partners";
 import { Header } from "./header";
 import { CampaignCard } from "./campaign-card";
+import { useFanpages } from "./use-fanpages";
 import { LaunchRail } from "./launch-rail";
 import { CopySettingsModal } from "./copy-settings-modal";
 import { ChevronsIcon, CopyIcon, PlusIcon } from "./icons";
@@ -72,6 +74,8 @@ function LauncherInner({ user }: { user?: SessionUser }) {
   const nextId = useRef(2);
   const partner = partnerConfig(partnerId);
   const anyExpanded = campaigns.some((c) => !c.collapsed);
+  // Token fanpages for the per-card fanka picker (Indians). null while loading.
+  const fanpages = useFanpages(Boolean(partner.fanpagesFromToken));
 
   // Latest partner for callbacks that must not re-subscribe on partner switch.
   const partnerRef = useRef(partner);
@@ -156,7 +160,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
    *  instantly, then flies off the board so you can keep building. The queue creates them one by
    *  one (PAUSED) in the background. */
   function launch() {
-    const opts = { landing: partner.usesGcm, profile: partner.usesProfile };
+    const opts = launchReadyOpts(partner);
     const launchable = campaigns.filter((c) => isLaunchable(c, opts));
     if (launchable.length === 0) return;
 
@@ -379,6 +383,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
                 index={i}
                 partner={partner}
                 adCount={adCount}
+                fanpages={fanpages}
                 highlight={highlightId === c.id}
                 onPatch={patch}
                 onToggleCollapse={toggleCollapse}

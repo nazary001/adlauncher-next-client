@@ -24,7 +24,8 @@ import {
   pagesFor,
   pixelsFor,
 } from "@/lib/catalog";
-import { type PartnerConfig, fullLandingUrl } from "@/lib/partners";
+import { type PartnerConfig, fullLandingUrl, launchReadyOpts } from "@/lib/partners";
+import type { RichOption } from "@/lib/catalog";
 import { Field, MoneyInput, Select, TextArea, TextInput, IconButton } from "./ui";
 import { SearchSelect } from "./search-select";
 import { MultiSelect } from "./multi-select";
@@ -105,6 +106,7 @@ export function CampaignCard({
   index,
   partner,
   adCount,
+  fanpages,
   highlight,
   onPatch,
   onToggleCollapse,
@@ -115,8 +117,10 @@ export function CampaignCard({
   campaign: Campaign;
   index: number;
   partner: PartnerConfig;
-  /** Live ads-running-or-in-review count on the bound fanpage (Indians). null = unavailable. */
+  /** Live ads-running-or-in-review count on the bound ACCOUNT (Indians). null = unavailable. */
   adCount?: number | null;
+  /** Token fanpages for the picker (value = page id). null = loading/unavailable. */
+  fanpages?: RichOption[] | null;
   /** Focus-pulse this card after a jump from the Launch bay. */
   highlight?: boolean;
   onPatch: (id: string, patch: Partial<Campaign>) => void;
@@ -135,7 +139,7 @@ export function CampaignCard({
 
   const accounts = accountsFor(c.profile);
   const pixels = pixelsFor(c.account);
-  const ready = isReady(c, { landing: partner.usesGcm, profile: partner.usesProfile });
+  const ready = isReady(c, launchReadyOpts(partner));
   const bidCapEnabled = c.bidStrategy !== "LOWEST_COST_WITHOUT_CAP";
 
   // Indians pin one account → its pixel and fanpage render locked, not searchable.
@@ -311,8 +315,27 @@ export function CampaignCard({
                     />
                   )}
                 </Field>
-                <Field label={partner.pageLabel} className={setupCol}>
-                  {locked ? (
+                <Field
+                  label={partner.pageLabel}
+                  className={setupCol}
+                  error={partner.fanpagesFromToken && !c.page ? "Pick a fanpage" : undefined}
+                >
+                  {partner.fanpagesFromToken ? (
+                    <div className="flex items-center gap-2">
+                      <div className="min-w-0 flex-1">
+                        <SearchSelect
+                          value={c.page}
+                          onChange={(v) => patch({ page: v })}
+                          options={fanpages ?? []}
+                          placeholder={partner.pagePlaceholder}
+                          emptyHint={fanpages ? "No fanpages on the token" : "Loading fanpages…"}
+                        />
+                      </div>
+                      {typeof adCount === "number" && partner.pageAdLimit ? (
+                        <VolumeBadge count={adCount} limit={partner.pageAdLimit} />
+                      ) : null}
+                    </div>
+                  ) : locked ? (
                     <LockedField
                       value={partner.fanpages[0] ?? ""}
                       badge={

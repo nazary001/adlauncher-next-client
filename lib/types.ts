@@ -15,6 +15,8 @@ export type Campaign = {
   name: string;
   profile: string;
   account: string;
+  /** LION partners: page name from the profile catalog. Token-fanpage partners (Indians): the
+   *  PICKED fanpage ID (names duplicate across the token's pages, so the id is the value). */
   page: string;
   pixel: string;
   objective: string;
@@ -121,12 +123,13 @@ export function bidAmountMissing(c: Campaign): boolean {
 
 export function isReady(
   c: Campaign,
-  opts: { landing?: boolean; profile?: boolean } = {},
+  opts: { landing?: boolean; profile?: boolean; page?: boolean } = {},
 ): boolean {
-  const { landing = false, profile = true } = opts;
+  const { landing = false, profile = true, page = false } = opts;
   if (!c.name.trim() || c.countries.length === 0) return false;
   if (profile && !c.profile) return false;
   if (landing && !c.landing) return false;
+  if (page && !c.page) return false;
   if (bidAmountMissing(c)) return false;
   return true;
 }
@@ -134,7 +137,7 @@ export function isReady(
 /** A campaign can actually fire only if it's ready AND carries a video creative. */
 export function isLaunchable(
   c: Campaign,
-  opts: { landing?: boolean; profile?: boolean } = {},
+  opts: { landing?: boolean; profile?: boolean; page?: boolean } = {},
 ): boolean {
   return isReady(c, opts) && c.files.some((f) => f.kind === "video");
 }

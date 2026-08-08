@@ -9,6 +9,7 @@ import {
   creativePayload,
 } from "@/lib/fb-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
+import { isAdvertisablePage } from "@/lib/fb-graph";
 import { del } from "@vercel/blob";
 
 export const runtime = "nodejs";
@@ -315,13 +316,40 @@ export async function POST(req: Request) {
   }
 
   const partner = partnerConfig(partnerId);
-  // Enforce the locked binds server-side — never trust client for account/page/pixel.
+  // Enforce the locked binds server-side — never trust client for account/pixel. The fanka is the
+  // buyer's PICK (campaign.page carries the page ID), but only ids from the launch token's own
+  // page list are accepted — so the client still can't smuggle in an arbitrary page.
+  const pickedPage = partner.fanpagesFromToken ? String(campaign.page ?? "").trim() : "";
   const binds: LaunchBinds = {
     accountId: (partner.lockedAccount?.id ?? "").replace(/^act_/, ""),
-    pageId: partner.lockedPage?.id ?? "",
+    pageId: partner.fanpagesFromToken ? pickedPage : "",
     pixelId: partner.lockedPixel?.id ?? "",
   };
-  if (!binds.accountId || !binds.pageId) {
+  if (!binds.accountId) {
+    return NextResponse.json({ ok: false, stage: "config", error: "partner_not_launchable" }, { status: 400 });
+  }
+  if (partner.fanpagesFromToken) {
+    if (!/^\d{5,}$/.test(pickedPage)) {
+      return NextResponse.json(
+        { ok: false, stage: "config", error: "fanpage_required — pick a fanpage on the campaign card" },
+        { status: 400 },
+      );
+    }
+    try {
+      if (!(await isAdvertisablePage(pickedPage))) {
+        return NextResponse.json(
+          { ok: false, stage: "config", error: "fanpage_not_allowed — the launch token cannot advertise with this page" },
+          { status: 400 },
+        );
+      }
+    } catch (e) {
+      const err = e as { message?: string };
+      return NextResponse.json(
+        { ok: false, stage: "config", error: `fanpage check failed: ${err.message ?? String(e)}` },
+        { status: 502 },
+      );
+    }
+  } else if (!binds.pageId) {
     return NextResponse.json({ ok: false, stage: "config", error: "partner_not_launchable" }, { status: 400 });
   }
   if (!videoUrl) {
