@@ -30,7 +30,7 @@ import {
   TrashIcon,
 } from "./icons";
 import { Header } from "./header";
-import { TaskManagerProvider, useTaskManager } from "./task-manager";
+import { useTaskManager } from "./task-manager";
 import { CloneTargetingModal } from "./clone-targeting-modal";
 import { CloneHighOfferModal } from "./clone-high-offer-modal";
 import { SearchSelect } from "./search-select";
@@ -161,6 +161,8 @@ function GeoChips({ codes }: { codes: string[] }) {
   );
 }
 
+/** Rendered inside the (app) layout's TaskManagerProvider — the queue lives up there so it
+ *  survives navigating between the launcher and the clone board. */
 export function CloneBoard({
   user,
   initialIds,
@@ -170,11 +172,7 @@ export function CloneBoard({
   initialIds: string[];
   partner?: PartnerId;
 }) {
-  return (
-    <TaskManagerProvider user={user}>
-      <CloneInner user={user} initialIds={initialIds} partner={partner} />
-    </TaskManagerProvider>
-  );
+  return <CloneInner user={user} initialIds={initialIds} partner={partner} />;
 }
 
 function CloneInner({

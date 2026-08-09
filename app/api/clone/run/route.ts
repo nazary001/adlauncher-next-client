@@ -5,6 +5,7 @@ import { bidAmountMissing } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES } from "@/lib/fb-launch";
 import { FbError, fbPost, isAdvertisablePage, isTokenAccount } from "@/lib/fb-graph";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
+import { taskWriter } from "@/lib/task-store";
 import type { CloneEdit } from "@/lib/clone";
 import {
   type LaunchBinds,
@@ -62,15 +63,23 @@ async function createAdset(path: string, payload: Json): Promise<Json> {
 export async function POST(req: Request) {
   // Defense in depth: this high-impact write route also self-checks the session (like /api/launch),
   // not only the proxy gate — so a matcher edit or future middleware-bypass can't open it up.
-  if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
+  const session = sessionFromCookieHeader(req.headers.get("cookie"));
+  if (!session) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
   let partnerId: PartnerId;
   let edits: CloneEdit[];
+  let taskIds: (string | null)[] = [];
   try {
-    const j = (await req.json()) as { partnerId?: string; edits?: CloneEdit[] };
+    const j = (await req.json()) as { partnerId?: string; edits?: CloneEdit[]; taskIds?: unknown[] };
     partnerId = String(j.partnerId ?? "in") as PartnerId;
     edits = Array.isArray(j.edits) ? j.edits : [];
+    // Task Manager rows aligned with `edits` by index. When present, per-clone progress + the
+    // terminal state are ALSO written to Strapi server-side (see /api/launch) so every account's
+    // drawer tracks the run live, surviving the launching browser.
+    taskIds = (Array.isArray(j.taskIds) ? j.taskIds : []).map((x) =>
+      typeof x === "string" && /^[\w-]{6,64}$/.test(x) ? x : null,
+    );
   } catch {
     return NextResponse.json({ ok: false, error: "bad_json" }, { status: 400 });
   }
@@ -119,6 +128,14 @@ export async function POST(req: Request) {
 
       for (let idx = 0; idx < edits.length; idx++) {
         const edit = edits[idx];
+        // Server-side mirror of this clone's Task Manager row (no-op when no task id was sent).
+        const tw = taskWriter(session.username, taskIds[idx] ?? null);
+        let lastStage = "source";
+        const progress = (stage: string) => {
+          lastStage = stage;
+          send({ idx, stage });
+          tw.write({ status: "running", stage });
+        };
         let claim: { gcm: string; documentId: string | null } | null = null;
         const created: Json = {};
         try {
@@ -127,7 +144,7 @@ export async function POST(req: Request) {
           // Source detail — fetched once per source campaign, reused across its copies.
           let src = detailCache.get(edit.campaignId);
           if (!src) {
-            send({ idx, stage: "source" });
+            progress("source");
             src = await fetchSourceDetail(edit.campaignId);
             detailCache.set(edit.campaignId, src);
           }
@@ -162,31 +179,31 @@ export async function POST(req: Request) {
             throw new FbError("source has no country targeting to clone — set a geo on the clone row", { campaignId: edit.campaignId });
           }
 
-          send({ idx, stage: "gcm" });
+          progress("gcm");
           claim = await claimGcm("", { campaign_name: edit.name, notes: "claimed via adlauncher clone" });
           const gcm = claim.gcm;
 
           const localeIds = await resolveLocales(edit.locales);
 
-          send({ idx, stage: "campaign" });
+          progress("campaign");
           const camp = await fbPost(`act_${editBinds.accountId}/campaigns`, campaignPayload(campaign, edit.name));
           created.campaign_id = String(camp.id);
 
-          send({ idx, stage: "adset" });
+          progress("adset");
           const adset = await createAdset(
             `act_${editBinds.accountId}/adsets`,
             adsetPayload(campaign, edit.name, String(camp.id), editBinds, localeIds),
           );
           created.adset_id = String(adset.id);
 
-          send({ idx, stage: "creative" });
+          progress("creative");
           const creative = await fbPost(
             `act_${editBinds.accountId}/adcreatives`,
             cloneCreativePayload(edit.name, editBinds.pageId, media, gcm, editBinds.pixelId),
           );
           created.creative_id = String(creative.id);
 
-          send({ idx, stage: "ad" });
+          progress("ad");
           const ad = await fbPost(`act_${editBinds.accountId}/ads`, adPayload(edit.name, String(adset.id), String(creative.id)));
           // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
           if (!ad.id) throw new FbError("ad create returned no id", ad);
@@ -199,6 +216,16 @@ export async function POST(req: Request) {
           });
 
           ok++;
+          tw.write({
+            status: "done",
+            stage: "ad",
+            finished_at: Date.now(),
+            campaign_id: created.campaign_id,
+            adset_id: created.adset_id,
+            ad_id: created.ad_id,
+            gcm,
+            error: null,
+          });
           send({ idx, ok: true, stage: "done", gcm, ...created });
         } catch (e) {
           failed++;
@@ -218,8 +245,18 @@ export async function POST(req: Request) {
               });
             else await deleteGcm(claim.documentId);
           }
+          tw.write({
+            status: "error",
+            stage: lastStage,
+            finished_at: Date.now(),
+            error: err.message ?? String(e),
+            ...(created.campaign_id ? { campaign_id: created.campaign_id } : {}),
+            ...(created.adset_id ? { adset_id: created.adset_id } : {}),
+          });
           send({ idx, ok: false, stage: "error", error: err.message ?? String(e), detail: err.detail ?? null, created });
         }
+        // The clone's last transition must land before the loop moves on / the function freezes.
+        await tw.flush();
       }
 
       send({ stage: "batch-done", ok, failed, total: edits.length });

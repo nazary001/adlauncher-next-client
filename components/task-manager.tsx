@@ -13,12 +13,26 @@ import { upload } from "@vercel/blob/client";
 import { type Campaign, moneyLabel } from "@/lib/types";
 import type { PartnerId } from "@/lib/partners";
 import type { CloneEdit } from "@/lib/clone";
+import {
+  type EffStatus,
+  type LaunchTask,
+  type TaskKind,
+  type TaskStatus,
+  type ViewTask,
+  STALE_MS,
+  effStatusOf,
+  fromRemote,
+  mergeShared,
+  ownerHue,
+  ownerLastWrite,
+} from "@/lib/task-view";
 import type { SessionUser } from "./user-menu";
 import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, TrashIcon, XIcon } from "./icons";
 
+export type { LaunchTask } from "@/lib/task-view";
+
 // ---------- stages (per task kind) ----------
 
-type TaskKind = "launch" | "clone";
 type StageDef = { key: string; label: string };
 
 // Launch pipeline ("upload" is client→Blob; the rest mirror /api/launch events).
@@ -52,6 +66,20 @@ const UPLOAD_TIMEOUT_MS = 5 * 60_000;
 // FB object is created mid-abort.
 const STREAM_TIMEOUT_MS = 330_000;
 
+// ---- shared-view cadence ----
+// The whole team's queue refreshes continuously — the header badge and drawer must be truthful at
+// any moment, not only while the drawer is open (drawer open polls faster for live stage motion).
+const POLL_OPEN_MS = 4_000;
+const POLL_CLOSED_MS = 12_000;
+// Re-upsert my running task every 25s: the identical PUT bumps the row's updatedAt (verified), so
+// teammates can tell a live-but-slow stage (video processing) from a dead session. Hidden tabs
+// throttle timers to ~60s — still comfortably inside STALE_MS (180s).
+const HEARTBEAT_MS = 25_000;
+// Coarse re-render tick so stale detection advances with time even with the drawer closed.
+const TICK_MS = 10_000;
+// Ids deleted here are ignored in merges briefly, so an in-flight fetch can't resurrect them.
+const TOMBSTONE_MS = 60_000;
+
 function stagesFor(kind: TaskKind): readonly StageDef[] {
   return kind === "clone" ? CLONE_STAGES : LAUNCH_STAGES;
 }
@@ -62,8 +90,6 @@ function stageIndexFor(kind: TaskKind, stage: string | null): number {
 }
 
 // ---------- task model ----------
-
-type TaskStatus = "queued" | "running" | "done" | "error";
 
 type LaunchInput = {
   kind: "launch";
@@ -80,82 +106,6 @@ type CloneInput = {
 };
 
 type TaskInput = LaunchInput | CloneInput;
-
-export type LaunchTask = {
-  id: string;
-  kind: TaskKind;
-  /** Username that launched/cloned this. Shared view shows everyone's; mutations stay owner-scoped. */
-  owner?: string | null;
-  name: string;
-  gcm: string;
-  geo: string;
-  budget: string;
-  status: TaskStatus;
-  stage: string | null;
-  result?: { campaignId?: string; adsetId?: string; adId?: string; gcm?: string; link?: string };
-  error?: string;
-  queuedAt: number;
-  startedAt?: number;
-  finishedAt?: number;
-  /** Created this session (has its input → can be retried). Restored rows are false. */
-  local?: boolean;
-};
-
-/** A Strapi/localStorage row → in-memory task. */
-function fromRemote(r: Record<string, unknown>): LaunchTask {
-  const n = (v: unknown) => (v == null || v === "" ? undefined : Number(v));
-  const s = (v: unknown) => (v == null ? undefined : String(v));
-  const name = s(r.name) ?? "";
-  return {
-    id: String(r.id ?? r.task_id ?? ""),
-    // Strapi doesn't store the kind; infer it from the "(CLONE)" name stamp for restore rendering.
-    kind: /\(clone\)/i.test(name) ? "clone" : "launch",
-    owner: s(r.owner) ?? null,
-    name,
-    gcm: s(r.gcm) ?? "",
-    geo: s(r.geo) ?? "",
-    budget: s(r.budget) ?? "",
-    status: (s(r.status) ?? "queued") as TaskStatus,
-    stage: s(r.stage) ?? null,
-    result:
-      r.campaign_id || r.ad_id || r.link
-        ? { campaignId: s(r.campaign_id), adsetId: s(r.adset_id), adId: s(r.ad_id), gcm: s(r.gcm), link: s(r.link) }
-        : undefined,
-    error: s(r.error),
-    queuedAt: n(r.queued_at) ?? Date.now(),
-    startedAt: n(r.started_at),
-    finishedAt: n(r.finished_at),
-  };
-}
-
-/** On restore, my own non-terminal task was cut off by this reload → mark interrupted (non-retryable
- *  after restore, since the input is gone). Another user's still-active task is live on their
- *  machine, so keep its state. Restored rows are never `local`. */
-function asRestored(t: LaunchTask, me: string | null): LaunchTask {
-  if (t.status === "done" || t.status === "error") return { ...t, local: false };
-  if (me && t.owner && t.owner !== me) return { ...t, local: false };
-  return {
-    ...t,
-    status: "error",
-    error: "Interrupted by page reload — relaunch to retry",
-    finishedAt: t.finishedAt ?? t.startedAt ?? t.queuedAt,
-    local: false,
-  };
-}
-
-/** Merge a freshly-fetched shared list into the current in-memory list. My own in-flight tasks stay
- *  authoritative (never clobbered by a stale Strapi row); everyone else's come from the fetch.
- *  Newest first. */
-function mergeShared(cur: LaunchTask[], fetched: LaunchTask[], me: string | null): LaunchTask[] {
-  const byId = new Map<string, LaunchTask>();
-  for (const f of fetched) byId.set(f.id, f);
-  for (const c of cur) {
-    const mine = c.local || (!!me && c.owner === me);
-    if (mine && (c.local || c.status === "running" || c.status === "queued")) byId.set(c.id, c);
-    else if (!byId.has(c.id)) byId.set(c.id, c);
-  }
-  return [...byId.values()].sort((a, b) => b.queuedAt - a.queuedAt);
-}
 
 // Per-account key: several people share machines/browsers, and the fallback snapshot must not
 // leak one account's queue into another. The bare legacy key predates scoping and gets dropped.
@@ -182,7 +132,8 @@ export type CloneEnqueueArgs = {
 };
 
 type TaskManagerValue = {
-  tasks: LaunchTask[];
+  /** The shared team list, each task with its display status (`eff`) resolved. Newest first. */
+  tasks: ViewTask[];
   counts: { queued: number; running: number; done: number; error: number; active: number; total: number };
   /** The current user — used to label task owners and gate own-only actions in the shared view. */
   me: string | null;
@@ -204,17 +155,24 @@ export function useTaskManager(): TaskManagerValue {
   return v;
 }
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 // ---------- provider (single-concurrency worker) ----------
+// Mounted ONCE in the (app) layout, above both boards — the queue, worker and drawer survive
+// navigating between the launcher and the clone board.
 
 export function TaskManagerProvider({ children, user }: { children: React.ReactNode; user?: SessionUser }) {
   const lsKey = lsKeyFor(user);
   const me = user?.username ?? null;
   const [tasks, setTasks] = useState<LaunchTask[]>([]);
   const [open, setOpen] = useState(false);
+  // Coarse clock for staleness re-evaluation (stale is derived, so it must advance with time).
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const inputs = useRef(new Map<string, TaskInput>());
   const queue = useRef<string[]>([]);
   const working = useRef(false);
   const tasksRef = useRef<LaunchTask[]>([]);
+  const openRef = useRef(false);
   useEffect(() => {
     tasksRef.current = tasks;
   }, [tasks]);
@@ -226,51 +184,108 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
   // ---- persistence: Strapi (source of truth) + localStorage (offline fallback) ----
   const meta = useRef(new Map<string, Record<string, unknown>>()); // static fields per task
   const saveChains = useRef(new Map<string, Promise<unknown>>()); // serialize saves per task
+  // Tasks whose terminal state was already chained — the heartbeat must never write "running"
+  // after it (the interval reads tasksRef, which lags one render behind the done/error patch).
+  const terminalSaved = useRef(new Set<string>());
   const loadedRef = useRef(false);
+  // Server-clock skew measured at fetch time (server `now` − client now): owner liveness is judged
+  // on the server clock so wrong local clocks can't fake or mask a dead session. State (not a ref)
+  // because the render-time `view` memo needs it; the guarded setter only fires on a real shift,
+  // so routine polls don't re-render anything.
+  const [skew, setSkew] = useState(0);
+  const noteSkew = useCallback((serverNow: number) => {
+    const s = serverNow - Date.now();
+    setSkew((prev) => (Math.abs(prev - s) > 3000 ? s : prev));
+  }, []);
+  const tombstones = useRef(new Map<string, number>());
+  const interruptsPersisted = useRef(new Set<string>());
+  const authDeadRef = useRef(false);
+  const lastPollRef = useRef(0);
+  // Last SUCCESSFUL fetch — gates any terminal write derived from staleness: a session whose view
+  // is frozen (hidden tab, network loss) must never "settle" rows off stale data.
+  const lastPollOkRef = useRef(0);
 
   /** Upsert one task's state to Strapi. Non-blocking for the caller, but chained PER TASK so
-   *  queued→running→done apply in order (no racing creates that would drop fields). */
+   *  queued→running→done apply in order (no racing creates that would drop fields). One retry on
+   *  failure — a dropped terminal save would leave the team a forever-"running" ghost. */
   const saveRemote = useCallback((id: string, dyn: Record<string, unknown>) => {
+    if (dyn.status === "done" || dyn.status === "error") terminalSaved.current.add(id);
     const payload = { task_id: id, ...(meta.current.get(id) ?? {}), ...dyn };
+    const post = () =>
+      fetch("/api/launch-tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
     const prev = saveChains.current.get(id) ?? Promise.resolve();
     const next = prev
       .catch(() => {})
-      .then(() =>
-        fetch("/api/launch-tasks", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        }).catch(() => {}),
-      );
+      .then(async () => {
+        try {
+          const res = await post();
+          if (res.ok || res.status === 400 || res.status === 401 || res.status === 403) return;
+        } catch {
+          /* network — retry below */
+        }
+        await sleep(4000);
+        await post().catch(() => {});
+      });
     saveChains.current.set(id, next);
   }, []);
 
   const deleteRemote = useCallback((ids: string[]) => {
     if (!ids.length) return;
-    fetch(`/api/launch-tasks?taskIds=${ids.map(encodeURIComponent).join(",")}`, { method: "DELETE" }).catch(
-      () => {},
-    );
+    // One retry, like saveRemote — a dropped DELETE would let the row outlive its 60s tombstone
+    // and resurrect a dismissed task on a later poll.
+    const call = () =>
+      fetch(`/api/launch-tasks?taskIds=${ids.map(encodeURIComponent).join(",")}`, { method: "DELETE" });
+    void (async () => {
+      try {
+        const res = await call();
+        if (res.ok) return;
+      } catch {
+        /* network — retry below */
+      }
+      await sleep(4000);
+      await call().catch(() => {});
+    })();
   }, []);
 
-  // Pull the whole team's tasks and merge them in (my in-flight tasks stay authoritative). Used for
-  // the live refreshes on window focus and while the drawer is open.
+  /** Pull the whole team's tasks and merge them in. My in-session tasks stay authoritative; every
+   *  other row mirrors the fetch (so a teammate's dismiss disappears here too). */
   const loadRemote = useCallback(() => {
     fetch("/api/launch-tasks")
-      .then((r) => r.json())
-      .then((d) => {
+      .then(async (r) => {
+        if (r.status === 401) {
+          // Session died — stop hammering; the next focus/visibility re-arms polling.
+          authDeadRef.current = true;
+          return;
+        }
+        const d = (await r.json().catch(() => null)) as
+          | { ok?: boolean; now?: number; tasks?: Record<string, unknown>[] }
+          | null;
         if (!d?.ok || !Array.isArray(d.tasks)) return;
-        const fetched = (d.tasks as Record<string, unknown>[]).map(fromRemote).map((t) => asRestored(t, me));
-        setTasks((cur) => mergeShared(cur, fetched, me));
+        lastPollOkRef.current = Date.now();
+        if (typeof d.now === "number") noteSkew(d.now);
+        const cutoff = Date.now() - TOMBSTONE_MS;
+        for (const [id, ts] of tombstones.current) if (ts < cutoff) tombstones.current.delete(id);
+        const fetched = d.tasks.map(fromRemote);
+        const tomb = new Set(tombstones.current.keys());
+        // A tombstoned id still coming back means the DELETE hasn't landed — keep it buried
+        // (deleteRemote retries) instead of letting the tombstone lapse and resurrect it.
+        for (const f of fetched) if (f.id && tomb.has(f.id)) tombstones.current.set(f.id, Date.now());
+        setTasks((cur) => mergeShared(cur, fetched, tomb));
       })
       .catch(() => {});
-  }, [me]);
+  }, [noteSkew]);
 
   // Restore once on mount: the team's Strapi list wins; localStorage is the offline fallback.
   useEffect(() => {
     let localSnap: LaunchTask[] = [];
     try {
       const raw = localStorage.getItem(lsKey);
-      if (raw) localSnap = JSON.parse(raw) as LaunchTask[];
+      // A snapshot task can never be `local` again — its input (video blob) died with the session.
+      if (raw) localSnap = (JSON.parse(raw) as LaunchTask[]).map((t) => ({ ...t, local: false }));
       // Pre-scoping snapshot was account-agnostic — drop it so it can't surface for the wrong user.
       if (lsKey !== LS_BASE) localStorage.removeItem(LS_BASE);
     } catch {
@@ -281,34 +296,140 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
       .then((r) => r.json())
       .then((d) => {
         if (!alive) return;
-        const rows: LaunchTask[] =
-          d?.ok && Array.isArray(d.tasks) ? (d.tasks as Record<string, unknown>[]).map(fromRemote) : localSnap;
-        setTasks((cur) => mergeShared(cur, rows.map((t) => asRestored(t, me)), me));
+        if (d?.ok && Array.isArray(d.tasks)) {
+          lastPollOkRef.current = Date.now();
+          if (typeof d.now === "number") noteSkew(d.now);
+          const fetched = (d.tasks as Record<string, unknown>[]).map(fromRemote);
+          setTasks((cur) => mergeShared(cur, fetched));
+        } else {
+          setTasks((cur) => mergeShared(cur, localSnap));
+        }
       })
       .catch(() => {
-        if (alive) setTasks((cur) => mergeShared(cur, localSnap.map((t) => asRestored(t, me)), me));
+        if (alive) setTasks((cur) => mergeShared(cur, localSnap));
       })
       .finally(() => {
         loadedRef.current = true;
+        lastPollRef.current = Date.now();
       });
     return () => {
       alive = false;
     };
-  }, [lsKey, me]);
+  }, [lsKey, noteSkew]);
 
-  // Live shared view: refresh on window focus, and — while the drawer is open — on open + every 15s.
+  // Live shared view: poll continuously (faster with the drawer open), pause while the tab is
+  // hidden, refresh immediately on focus/visible — the badge is truthful at any moment.
   useEffect(() => {
-    const onFocus = () => loadRemote();
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    const tick = () => {
+      if (document.hidden || authDeadRef.current) return;
+      const interval = openRef.current ? POLL_OPEN_MS : POLL_CLOSED_MS;
+      if (Date.now() - lastPollRef.current < interval - 500) return;
+      lastPollRef.current = Date.now();
+      loadRemote();
+    };
+    const iv = window.setInterval(tick, POLL_OPEN_MS);
+    const wake = () => {
+      authDeadRef.current = false;
+      lastPollRef.current = Date.now();
+      loadRemote();
+    };
+    const onVis = () => {
+      if (!document.hidden) wake();
+    };
+    window.addEventListener("focus", wake);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.clearInterval(iv);
+      window.removeEventListener("focus", wake);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, [loadRemote]);
 
   useEffect(() => {
-    if (!open) return;
-    loadRemote();
-    const iv = window.setInterval(loadRemote, 15000);
-    return () => window.clearInterval(iv);
+    openRef.current = open;
+    if (open) {
+      lastPollRef.current = Date.now();
+      loadRemote();
+    }
   }, [open, loadRemote]);
+
+  // Staleness advances with time even when nothing refetches.
+  useEffect(() => {
+    const iv = window.setInterval(() => setNowTick(Date.now()), TICK_MS);
+    return () => window.clearInterval(iv);
+  }, []);
+
+  // Heartbeat: keep my running task's row fresh through long silent stages (upload, video
+  // processing, rate-limit backoff) so the team never mistakes a live run for a dead one.
+  useEffect(() => {
+    const iv = window.setInterval(() => {
+      const t = tasksRef.current.find((x) => x.local && x.status === "running");
+      if (t && !terminalSaved.current.has(t.id)) saveRemote(t.id, { status: "running", stage: t.stage });
+    }, HEARTBEAT_MS);
+    return () => window.clearInterval(iv);
+  }, [saveRemote]);
+
+  // Leaving the page kills this session's worker: batch-mark my in-flight rows interrupted right
+  // now (beacon survives unload). If the server is in fact still finishing the run, its own writer
+  // overwrites this moments later — either way the row converges to the truth.
+  useEffect(() => {
+    const onPageHide = () => {
+      // terminalSaved is the synchronous truth — tasksRef lags one commit behind the done/error
+      // patch, and a beacon fired in that window would clobber a just-completed task with "error"
+      // (the beacon survives unload while the client's own done-save fetch may be cancelled).
+      const mine = tasksRef.current.filter(
+        (t) => t.local && (t.status === "queued" || t.status === "running") && !terminalSaved.current.has(t.id),
+      );
+      if (mine.length === 0) return;
+      const rows = mine.map((t) => ({
+        task_id: t.id,
+        status: "error",
+        stage: t.stage,
+        error: "Interrupted — page closed mid-run",
+        finished_at: Date.now(),
+      }));
+      // Chunked to the API's batch cap — a big wave can leave 100+ queued tasks behind.
+      for (let i = 0; i < rows.length; i += 25) {
+        try {
+          navigator.sendBeacon?.(
+            "/api/launch-tasks",
+            new Blob([JSON.stringify({ tasks: rows.slice(i, i + 25) })], { type: "application/json" }),
+          );
+        } catch {
+          /* best-effort */
+        }
+      }
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, []);
+
+  // Convergence: persist the interrupt for MY OWN stale rows (a crashed session can't beacon).
+  // Owner-scoped writes mean only my sessions can settle my rows; others' dead rows stay derived-
+  // stale for everyone until their owner's next session settles them.
+  useEffect(() => {
+    if (!loadedRef.current || !me) return;
+    // NEVER settle rows off a frozen view: a hidden tab pauses polling, so its `tasks` stop
+    // refreshing while the clock advances — judging staleness there would let a background second
+    // tab of the SAME user falsely bury (even done→error overwrite) rows another tab is running.
+    // Only a visible session that fetched successfully within the stale window may write.
+    if (document.hidden || Date.now() - lastPollOkRef.current > STALE_MS) return;
+    const estNow = nowTick + skew; // same render-safe clock as `view` — lags ≤10s, only ever delays
+    const lastWrite = ownerLastWrite(tasks);
+    for (const t of tasks) {
+      if (t.local || t.owner !== me) continue;
+      if (t.status !== "queued" && t.status !== "running") continue;
+      if (effStatusOf(t, lastWrite, estNow) !== "stale") continue;
+      if (interruptsPersisted.current.has(t.id)) continue;
+      interruptsPersisted.current.add(t.id);
+      saveRemote(t.id, {
+        status: "error",
+        stage: t.stage,
+        error: "Interrupted — session went offline",
+        finished_at: t.finishedAt ?? t.startedAt ?? t.queuedAt,
+      });
+    }
+  }, [tasks, nowTick, me, skew, saveRemote]);
 
   // Mirror to localStorage after the initial load (guard prevents the empty first render from
   // wiping the stored snapshot before restore reads it).
@@ -364,10 +485,12 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
         let final: Record<string, unknown> | null = null;
         let resStatus = 0;
         try {
+          // taskId lets the server mirror progress + the terminal state into the shared row —
+          // the team keeps seeing the truth even if this browser dies mid-run.
           const res = await fetch("/api/launch", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ partnerId: input.partnerId, campaign: input.campaign, videoUrl }),
+            body: JSON.stringify({ partnerId: input.partnerId, campaign: input.campaign, videoUrl, taskId: id }),
             signal: streamAbort.signal,
           });
           resStatus = res.status;
@@ -439,6 +562,7 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
             ad_id: f.ad_id,
             link: f.link,
             gcm: f.gcm,
+            error: null,
           });
           inputs.current.delete(id); // done → never re-run; free the captured Campaign/video url
         } else {
@@ -496,7 +620,7 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
           const res = await fetch("/api/clone/run", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ partnerId: input.partnerId, edits: [input.edit] }),
+            body: JSON.stringify({ partnerId: input.partnerId, edits: [input.edit], taskIds: [id] }),
             signal: streamAbort.signal,
           });
           resStatus = res.status;
@@ -565,6 +689,7 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
             adset_id: f.adset_id,
             ad_id: f.ad_id,
             gcm: f.gcm,
+            error: null,
           });
           inputs.current.delete(id); // done → never re-run
         } else {
@@ -649,13 +774,13 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
       setTasks((ts) => [
         {
           id,
-          kind: "launch",
+          kind: "launch" as const,
           owner: me,
           name: args.name,
           gcm: args.gcm,
           geo: args.geo,
           budget: args.budget,
-          status: "queued",
+          status: "queued" as const,
           stage: null,
           queuedAt,
           local: true,
@@ -688,13 +813,13 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
       setTasks((ts) => [
         {
           id,
-          kind: "clone",
+          kind: "clone" as const,
           owner: me,
           name: args.name,
           gcm: "",
           geo: args.geo,
           budget: args.budget,
-          status: "queued",
+          status: "queued" as const,
           stage: null,
           queuedAt,
           local: true,
@@ -718,6 +843,7 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
       // No input (restored task / already cleaned) → runTask would bail; and don't double-submit an
       // id that is already queued or running.
       if (!inputs.current.has(id) || queue.current.includes(id) || t.status === "queued" || t.status === "running") return;
+      terminalSaved.current.delete(id); // re-armed — the heartbeat may keep it fresh again
       patch(id, {
         status: "queued",
         stage: null,
@@ -745,13 +871,17 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
 
   const remove = useCallback(
     (id: string) => {
+      const t = tasksRef.current.find((x) => x.id === id);
+      // Others' rows aren't mine to delete — visibility is shared, authority is not.
+      if (t && !(t.local || (!!me && t.owner === me))) return;
       inputs.current.delete(id);
       meta.current.delete(id);
       queue.current = queue.current.filter((q) => q !== id);
-      setTasks((ts) => ts.filter((t) => t.id !== id));
+      tombstones.current.set(id, Date.now());
+      setTasks((ts) => ts.filter((x) => x.id !== id));
       deleteRemote([id]);
     },
-    [deleteRemote],
+    [deleteRemote, me],
   );
 
   const retryAll = useCallback(() => {
@@ -771,27 +901,37 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
     gone.forEach((id) => {
       inputs.current.delete(id);
       meta.current.delete(id);
+      tombstones.current.set(id, Date.now());
     });
     setTasks((ts) => ts.filter((t) => !gone.has(t.id)));
     deleteRemote([...gone]);
   }, [deleteRemote, me]);
+
+  // Display statuses resolved against owner liveness — a non-terminal row of a dead session shows
+  // as "stale"/interrupted instead of running forever. nowTick is the render-safe clock: it lags
+  // real time by ≤10s, which only ever DELAYS a stale verdict (never fakes one).
+  const view = useMemo<ViewTask[]>(() => {
+    const estNow = nowTick + skew;
+    const lastWrite = ownerLastWrite(tasks);
+    return tasks.map((t) => ({ ...t, eff: effStatusOf(t, lastWrite, estNow) }));
+  }, [tasks, nowTick, skew]);
 
   const counts = useMemo(() => {
     let queued = 0,
       running = 0,
       done = 0,
       error = 0;
-    for (const t of tasks) {
-      if (t.status === "queued") queued++;
-      else if (t.status === "running") running++;
-      else if (t.status === "done") done++;
-      else error++;
+    for (const t of view) {
+      if (t.eff === "queued") queued++;
+      else if (t.eff === "running") running++;
+      else if (t.eff === "done") done++;
+      else error++; // real errors + stale/interrupted
     }
-    return { queued, running, done, error, active: queued + running, total: tasks.length };
-  }, [tasks]);
+    return { queued, running, done, error, active: queued + running, total: view.length };
+  }, [view]);
 
   const value: TaskManagerValue = {
-    tasks,
+    tasks: view,
     counts,
     me,
     open,
@@ -868,10 +1008,20 @@ function fmtElapsed(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+const inBucket = (eff: EffStatus, f: Filter): boolean =>
+  f === "all"
+    ? true
+    : f === "active"
+      ? eff === "queued" || eff === "running"
+      : f === "error"
+        ? eff === "error" || eff === "stale"
+        : eff === f;
+
 function TaskManagerPanel() {
   const { tasks, counts, me, open, setOpen, retry, retryAll, remove, clearFinished } = useTaskManager();
   const [filter, setFilter] = useState<Filter>("all");
   const [kindFilter, setKindFilter] = useState<KindFilter>("all");
+  const [mineOnly, setMineOnly] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -891,33 +1041,30 @@ function TaskManagerPanel() {
 
   if (!open) return null;
 
+  const isMine = (t: ViewTask) => t.local || (!!me && t.owner === me);
+
   // Only local errors can actually retry (restored tasks lost their input); match retryAll.
   const retryable = tasks.filter((t) => t.status === "error" && t.local && !t.result?.campaignId).length;
   // Failed tasks I can dismiss (mine). Successful ones are a permanent record — not removable.
-  const clearable = tasks.filter((t) => t.status === "error" && (t.local || (!!me && t.owner === me))).length;
+  const clearable = tasks.filter((t) => t.status === "error" && isMine(t)).length;
 
-  // Split by kind first (New launches vs Duplicates), then filter by status within that split.
-  const kindTasks = kindFilter === "all" ? tasks : tasks.filter((t) => t.kind === kindFilter);
+  // Mine toggle → kind split (New launches vs Duplicates) → status filter within that split.
+  const scoped = mineOnly ? tasks.filter(isMine) : tasks;
+  const kindTasks = kindFilter === "all" ? scoped : scoped.filter((t) => t.kind === kindFilter);
   const kc = { queued: 0, running: 0, done: 0, error: 0 };
   for (const t of kindTasks) {
-    if (t.status === "queued") kc.queued++;
-    else if (t.status === "running") kc.running++;
-    else if (t.status === "done") kc.done++;
+    if (t.eff === "queued") kc.queued++;
+    else if (t.eff === "running") kc.running++;
+    else if (t.eff === "done") kc.done++;
     else kc.error++;
   }
 
-  const shown = kindTasks.filter((t) =>
-    filter === "all"
-      ? true
-      : filter === "active"
-        ? t.status === "queued" || t.status === "running"
-        : t.status === filter,
-  );
+  const shown = kindTasks.filter((t) => inBucket(t.eff, filter));
 
   const kinds: { key: KindFilter; label: string; icon: React.ReactNode; n: number }[] = [
-    { key: "all", label: "All", icon: null, n: tasks.length },
-    { key: "launch", label: "Launches", icon: <RocketIcon className="h-3.5 w-3.5" />, n: tasks.filter((t) => t.kind === "launch").length },
-    { key: "clone", label: "Duplicates", icon: <CopyIcon className="h-3.5 w-3.5" />, n: tasks.filter((t) => t.kind === "clone").length },
+    { key: "all", label: "All", icon: null, n: scoped.length },
+    { key: "launch", label: "Launches", icon: <RocketIcon className="h-3.5 w-3.5" />, n: scoped.filter((t) => t.kind === "launch").length },
+    { key: "clone", label: "Duplicates", icon: <CopyIcon className="h-3.5 w-3.5" />, n: scoped.filter((t) => t.kind === "clone").length },
   ];
 
   const tabs: { key: Filter; label: string; n: number }[] = [
@@ -939,7 +1086,7 @@ function TaskManagerPanel() {
             </span>
             <div className="leading-none">
               <h2 className="text-[14px] font-semibold text-ink">Task Manager</h2>
-              <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-faint">Launch &amp; clone queue</p>
+              <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-faint">Team launch &amp; clone queue</p>
             </div>
           </div>
           <button
@@ -981,7 +1128,7 @@ function TaskManagerPanel() {
           <Stat label="Failed" n={kc.error} tone="text-danger" />
         </div>
 
-        {/* filter tabs */}
+        {/* filter tabs + mine toggle */}
         <div className="flex items-center gap-1 px-3 pt-3">
           {tabs.map((tab) => (
             <button
@@ -997,6 +1144,20 @@ function TaskManagerPanel() {
               <span className="font-mono text-[10.5px] text-faint">{tab.n}</span>
             </button>
           ))}
+          <button
+            type="button"
+            onClick={() => setMineOnly((v) => !v)}
+            aria-pressed={mineOnly}
+            data-tip={mineOnly ? "Showing only your tasks" : "Show only your tasks"}
+            className={
+              "tip ml-auto flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] font-medium transition-colors duration-150 " +
+              (mineOnly
+                ? "border-accent/40 bg-accent/15 text-[#9db8ff]"
+                : "border-line text-faint hover:border-line2 hover:text-dim")
+            }
+          >
+            Mine
+          </button>
         </div>
 
         {/* list */}
@@ -1008,7 +1169,8 @@ function TaskManagerPanel() {
               </span>
               <p className="text-[13px] font-medium text-dim">Nothing here yet</p>
               <p className="max-w-[240px] text-[11.5px] leading-relaxed text-faint">
-                Launched and cloned campaigns land here and build one at a time. Keep working — the queue runs on its own.
+                Launches and duplicates from every account land here live, building one at a time per
+                session. Keep working — the queue runs on its own.
               </p>
             </div>
           ) : (
@@ -1060,6 +1222,22 @@ function Stat({ label, n, tone }: { label: string; n: number; tone: string }) {
   );
 }
 
+/** Colored chip naming who launched a task — stable hue per username across all sessions. */
+function OwnerChip({ owner, mine }: { owner: string | null | undefined; mine: boolean }) {
+  if (mine) return <span className="text-dim">you</span>;
+  const name = owner || "—";
+  const h = ownerHue(name);
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-full px-1.5 py-[1px] align-middle"
+      style={{ color: `hsl(${h} 75% 72%)`, background: `hsl(${h} 70% 60% / 0.14)` }}
+    >
+      <span className="h-1.5 w-1.5 rounded-full" style={{ background: `hsl(${h} 75% 62%)` }} />
+      {name}
+    </span>
+  );
+}
+
 function TaskRow({
   task,
   me,
@@ -1067,20 +1245,22 @@ function TaskRow({
   onRetry,
   onRemove,
 }: {
-  task: LaunchTask;
+  task: ViewTask;
   me: string | null;
   now: number;
   onRetry: () => void;
   onRemove: () => void;
 }) {
   const mine = task.local || (!!me && task.owner === me);
-  const owner = mine ? "you" : task.owner || "—";
   const stages = stagesFor(task.kind);
   const idx = stageIndexFor(task.kind, task.stage);
-  const done = task.status === "done";
-  const error = task.status === "error";
-  const running = task.status === "running";
-  const elapsed = task.startedAt ? (task.finishedAt ?? now) - task.startedAt : 0;
+  const done = task.eff === "done";
+  const error = task.eff === "error";
+  const stale = task.eff === "stale";
+  const running = task.eff === "running";
+  // A stale task's clock froze at its owner's last sign of life — never tick a dead run.
+  const end = task.finishedAt ?? (stale ? task.updatedMs ?? task.startedAt : now);
+  const elapsed = task.startedAt ? Math.max(0, (end ?? now) - task.startedAt) : 0;
 
   const statusLabel = done
     ? task.kind === "clone"
@@ -1088,26 +1268,30 @@ function TaskRow({
       : "Launched · paused"
     : error
       ? task.error || "Failed"
-      : running
-        ? stages[idx]?.label ?? "Working…"
-        : "Queued";
+      : stale
+        ? task.status === "queued"
+          ? "Interrupted — queued in a session that went offline"
+          : "Interrupted — session went offline"
+        : running
+          ? stages[idx]?.label ?? "Working…"
+          : "Queued";
 
   return (
     <div
       className={
         "animate-row-in rounded-xl border bg-surface2/40 p-3 transition-colors " +
-        (error ? "border-danger/30" : done ? "border-launch/25" : "border-line")
+        (error ? "border-danger/30" : stale ? "border-warn/30" : done ? "border-launch/25" : "border-line")
       }
     >
       <div className="flex items-start gap-2.5">
-        <StatusDot status={task.status} />
+        <StatusDot eff={task.eff} />
         <div className="min-w-0 flex-1">
           <p className="truncate text-[12.5px] font-medium text-ink" title={task.name}>
             {task.name || "Untitled campaign"}
           </p>
           <p className="mt-0.5 truncate font-mono text-[10.5px] text-faint">
             gcm {task.gcm || "—"} · {task.geo} · ${moneyLabel(task.budget)} ·{" "}
-            <span className={mine ? "text-dim" : "text-[#9db8ff]"}>{owner}</span>
+            <OwnerChip owner={task.owner} mine={mine} />
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
@@ -1153,11 +1337,13 @@ function TaskRow({
             ? "bg-launch"
             : error && i === idx
               ? "bg-danger"
-              : i < idx
-                ? "bg-accent"
-                : running && i === idx
-                  ? "bg-accent/70 animate-pulse"
-                  : "bg-line2";
+              : stale && i === idx
+                ? "bg-warn"
+                : i < idx
+                  ? "bg-accent"
+                  : running && i === idx
+                    ? "bg-accent/70 animate-pulse"
+                    : "bg-line2";
           return <span key={s.key} className={"h-1 flex-1 rounded-full transition-colors duration-300 " + cls} />;
         })}
       </div>
@@ -1166,10 +1352,10 @@ function TaskRow({
         <span
           className={
             "flex items-center gap-1.5 truncate text-[11px] " +
-            (done ? "text-launch2" : error ? "text-danger" : "text-dim")
+            (done ? "text-launch2" : error ? "text-danger" : stale ? "text-warn" : "text-dim")
           }
         >
-          {error ? <AlertIcon className="h-3 w-3 shrink-0" /> : null}
+          {error || stale ? <AlertIcon className="h-3 w-3 shrink-0" /> : null}
           {done ? <CheckIcon className="h-3 w-3 shrink-0" /> : null}
           {running ? <RocketIcon className="h-3 w-3 shrink-0 text-[#9db8ff]" /> : null}
           <span className="truncate" title={statusLabel}>
@@ -1182,8 +1368,8 @@ function TaskRow({
   );
 }
 
-function StatusDot({ status }: { status: TaskStatus }) {
-  if (status === "running")
+function StatusDot({ eff }: { eff: EffStatus }) {
+  if (eff === "running")
     return (
       <span className="relative mt-1 flex h-3.5 w-3.5 shrink-0 items-center justify-center">
         <span className="z-10 h-2 w-2 rounded-full bg-[#9db8ff]" />
@@ -1191,7 +1377,7 @@ function StatusDot({ status }: { status: TaskStatus }) {
       </span>
     );
   const color =
-    status === "done" ? "bg-launch2" : status === "error" ? "bg-danger" : "bg-warn";
+    eff === "done" ? "bg-launch2" : eff === "error" ? "bg-danger" : "bg-warn"; // queued + stale → warn
   return <span className={"mt-1.5 h-2 w-2 shrink-0 rounded-full " + color} />;
 }
 
@@ -1213,3 +1399,6 @@ function CopyId({ id }: { id: string }) {
     </button>
   );
 }
+
+// Keep TaskStatus referenced for consumers that narrow on it (type-only re-export below).
+export type { TaskStatus, ViewTask };

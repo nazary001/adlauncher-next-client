@@ -1,0 +1,115 @@
+// Server-only persistence for launch-task rows (Strapi collection `launch-task`).
+// Shared by /api/launch-tasks (client upserts) AND the launch/clone runners, which write
+// status/stage progress server-side so the row stays truthful for the whole team even when the
+// launching browser dies mid-run. Rows belong to their owner: creates are stamped from the
+// session, foreign updates are refused — visibility is shared, authority is not.
+
+const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
+const TOKEN = process.env.STRAPI_TOKEN ?? "";
+
+const H = () => ({ Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" });
+
+export const storeConfigured = () => Boolean(STRAPI && TOKEN);
+
+// Fields persisted per task (Strapi attribute names). Wire format matches this 1:1.
+// `owner` is intentionally NOT here — it is always stamped server-side from the session,
+// never taken from a request body.
+export const TASK_FIELDS = [
+  "task_id",
+  "name",
+  "partner",
+  "gcm",
+  "geo",
+  "budget",
+  "status",
+  "stage",
+  "campaign_id",
+  "adset_id",
+  "ad_id",
+  "link",
+  "error",
+  "queued_at",
+  "started_at",
+  "finished_at",
+] as const;
+
+export type TaskRowData = Record<string, unknown>;
+
+export function pickTaskFields(body: Record<string, unknown>): TaskRowData {
+  const out: TaskRowData = {};
+  for (const k of TASK_FIELDS) if (body[k] !== undefined) out[k] = body[k];
+  return out;
+}
+
+export async function findTaskRow(
+  taskId: string,
+): Promise<{ documentId: string; owner: string | null } | null> {
+  const res = await fetch(
+    `${STRAPI}/api/launch-tasks?filters[task_id][$eq]=${encodeURIComponent(taskId)}&fields[0]=task_id&fields[1]=owner&pagination[pageSize]=1`,
+    { headers: H(), cache: "no-store" },
+  );
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => ({}));
+  const row = body?.data?.[0];
+  return row?.documentId ? { documentId: row.documentId, owner: row.owner ? String(row.owner) : null } : null;
+}
+
+export type UpsertResult = { ok: true } | { ok: false; reason: "forbidden" | "store" | "not_configured"; detail?: string };
+
+/**
+ * Upsert one task row by task_id on behalf of `user`.
+ * Fail CLOSED: an existing row is writable only when its owner is readable AND it is the caller's.
+ * A create that loses the unique-task_id race (two writers creating at once) re-finds and updates.
+ */
+export async function upsertTaskRow(user: string, taskId: string, fields: TaskRowData): Promise<UpsertResult> {
+  if (!storeConfigured()) return { ok: false, reason: "not_configured" };
+  const data: TaskRowData = { ...pickTaskFields(fields), task_id: taskId, owner: user };
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const existing = await findTaskRow(taskId);
+      if (existing && existing.owner !== user) return { ok: false, reason: "forbidden" };
+      const res = existing
+        ? await fetch(`${STRAPI}/api/launch-tasks/${existing.documentId}`, {
+            method: "PUT",
+            headers: H(),
+            body: JSON.stringify({ data }),
+          })
+        : await fetch(`${STRAPI}/api/launch-tasks`, {
+            method: "POST",
+            headers: H(),
+            // Creates default queued_at (the runners' server-side writes don't carry it, and the
+            // shared GET windows on it — a row without it would be invisible to the team until the
+            // client's own save backfills it). Updates never touch it.
+            body: JSON.stringify({ data: { queued_at: Date.now(), ...data } }),
+          });
+      if (res.ok) return { ok: true };
+      // Lost the create race (unique task_id → 400): the row now exists — retry as an update.
+      if (!existing && res.status === 400 && attempt === 0) continue;
+      const err = await res.text().catch(() => "");
+      return { ok: false, reason: "store", detail: `${res.status} ${err.slice(0, 300)}` };
+    }
+    return { ok: false, reason: "store", detail: "create raced twice" };
+  } catch (e) {
+    return { ok: false, reason: "store", detail: String(e) };
+  }
+}
+
+/**
+ * Non-blocking, ordered task-row writer for the launch/clone runners: each write() chains after
+ * the previous so status transitions land in order without ever delaying the FB pipeline; flush()
+ * awaits the tail — call it before closing the stream so Vercel can't freeze the function with a
+ * write still in flight. Failures are swallowed (the client-side saver is the fallback writer).
+ */
+export function taskWriter(user: string, taskId: string | null) {
+  let chain: Promise<unknown> = Promise.resolve();
+  const active = Boolean(taskId) && storeConfigured();
+  return {
+    write(fields: TaskRowData): void {
+      if (!active) return;
+      chain = chain.then(() => upsertTaskRow(user, taskId as string, fields)).catch(() => {});
+    },
+    flush(): Promise<unknown> {
+      return chain.catch(() => {});
+    },
+  };
+}

@@ -12,6 +12,7 @@ import {
 } from "@/lib/fb-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { accountPixels, isAdvertisablePage, isTokenAccount } from "@/lib/fb-graph";
+import { taskWriter } from "@/lib/task-store";
 import { del } from "@vercel/blob";
 
 export const runtime = "nodejs";
@@ -300,7 +301,8 @@ async function resolveLocales(names: string[]): Promise<number[]> {
 
 export async function POST(req: Request) {
   // This route is excluded from the proxy (large body), so it authenticates itself.
-  if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
+  const session = sessionFromCookieHeader(req.headers.get("cookie"));
+  if (!session) {
     return NextResponse.json({ ok: false, stage: "auth", error: "unauthorized" }, { status: 401 });
   }
   if (!TOKEN) return NextResponse.json({ ok: false, stage: "config", error: "no_fb_token" }, { status: 500 });
@@ -308,11 +310,16 @@ export async function POST(req: Request) {
   let campaign: Campaign;
   let partnerId: PartnerId;
   let videoUrl = "";
+  let taskId: string | null = null;
   try {
-    const j = (await req.json()) as { campaign?: Campaign; partnerId?: string; videoUrl?: string };
+    const j = (await req.json()) as { campaign?: Campaign; partnerId?: string; videoUrl?: string; taskId?: string };
     campaign = (j.campaign ?? {}) as Campaign;
     partnerId = String(j.partnerId ?? "in") as PartnerId;
     videoUrl = typeof j.videoUrl === "string" ? j.videoUrl : "";
+    // The Task Manager row this run belongs to. When present, progress + the terminal state are
+    // ALSO written to Strapi server-side, so every account keeps seeing the truth live even if the
+    // launching browser dies mid-run (the run itself continues here regardless).
+    taskId = typeof j.taskId === "string" && /^[\w-]{6,64}$/.test(j.taskId) ? j.taskId : null;
   } catch (e) {
     return NextResponse.json({ ok: false, stage: "parse", error: String(e) }, { status: 400 });
   }
@@ -464,11 +471,20 @@ export async function POST(req: Request) {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const send = (o: Json) => controller.enqueue(encoder.encode(JSON.stringify(o) + "\n"));
+      // Mirror progress into the launch-task row (chained, non-blocking, owner-guarded) so the
+      // shared Task Manager stays live for every account — including after this client is gone.
+      const tw = taskWriter(session.username, taskId);
+      let lastStage = "gcm";
+      const progress = (stage: string) => {
+        lastStage = stage;
+        send({ stage });
+        tw.write({ status: "running", stage });
+      };
       const created: Json = {};
       let claim: { gcm: string; documentId: string | null } | null = null;
       try {
         // 1) reserve the gcm BEFORE building the link (guarantees no duplicate marker)
-        send({ stage: "gcm" });
+        progress("gcm");
         claim = await claimGcm(campaign.gcm, {
           campaign_name: name,
           landing: campaign.landing || null,
@@ -481,34 +497,34 @@ export async function POST(req: Request) {
         if (!link) throw new FbError("no landing selected — cannot build destination link", {});
 
         // 2) register the creative (FB pulls it from the Blob URL) and wait for processing
-        send({ stage: "video" });
+        progress("video");
         const videoId = await uploadVideo(binds.accountId, videoUrl, `${name} · video`);
         created.video_id = videoId;
-        send({ stage: "processing" });
+        progress("processing");
         await waitForVideo(videoId);
         const thumbUrl = await videoThumb(videoId);
         const localeIds = await resolveLocales(campaign.locales);
 
         // 3) campaign → adset → creative → ad, all PAUSED
-        send({ stage: "campaign" });
+        progress("campaign");
         const camp = await fbPost(`act_${binds.accountId}/campaigns`, campaignPayload(campaign, name));
         created.campaign_id = String(camp.id);
 
-        send({ stage: "adset" });
+        progress("adset");
         const adset = await createAdset(
           `act_${binds.accountId}/adsets`,
           adsetPayload(campaign, name, String(camp.id), binds, localeIds),
         );
         created.adset_id = String(adset.id);
 
-        send({ stage: "creative" });
+        progress("creative");
         const creative = await fbPost(
           `act_${binds.accountId}/adcreatives`,
           creativePayload(campaign, name, binds, { videoId, thumbUrl, link }),
         );
         created.creative_id = String(creative.id);
 
-        send({ stage: "ad" });
+        progress("ad");
         const ad = await fbPost(`act_${binds.accountId}/ads`, adPayload(name, String(adset.id), String(creative.id)));
         // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
         if (!ad.id) throw new FbError("ad create returned no id", ad);
@@ -521,6 +537,17 @@ export async function POST(req: Request) {
           ad_id: created.ad_id,
         });
 
+        tw.write({
+          status: "done",
+          stage: "ad",
+          finished_at: Date.now(),
+          campaign_id: created.campaign_id,
+          adset_id: created.adset_id,
+          ad_id: created.ad_id,
+          link,
+          gcm,
+          error: null,
+        });
         send({ ok: true, stage: "done", gcm, link, page_id: binds.pageId, ...created });
       } catch (e) {
         const err = e as FbError;
@@ -540,12 +567,22 @@ export async function POST(req: Request) {
             });
           else await deleteGcm(claim.documentId);
         }
+        tw.write({
+          status: "error",
+          stage: lastStage,
+          finished_at: Date.now(),
+          error: err.message ?? String(e),
+          ...(created.campaign_id ? { campaign_id: created.campaign_id } : {}),
+          ...(created.adset_id ? { adset_id: created.adset_id } : {}),
+        });
         send({ ok: false, stage: "error", error: err.message ?? String(e), detail: err.detail ?? null, created });
       } finally {
         // Drop the temporary Blob whether the launch succeeded or failed — never orphan the upload.
         // Awaited (not fire-and-forget) so it completes before the stream closes and Vercel can
         // freeze the function. The "done"/"error" event was already sent, so this adds no visible wait.
         await del(videoUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
+        // Flush the task-row writer too — its last transition must land before Vercel freezes us.
+        await tw.flush();
         controller.close();
       }
     },

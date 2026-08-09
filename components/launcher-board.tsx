@@ -20,7 +20,7 @@ import { type AdAccountOption, defaultPixelFor, useAdAccounts } from "./use-adac
 import { LaunchRail } from "./launch-rail";
 import { CopySettingsModal } from "./copy-settings-modal";
 import { ChevronsIcon, CopyIcon, PlusIcon } from "./icons";
-import { TaskManagerProvider, useTaskManager } from "./task-manager";
+import { useTaskManager } from "./task-manager";
 import type { SessionUser } from "./user-menu";
 
 /** Today as DD.MM for the campaign-name prefix. Runs client-side (and on the local dev server). */
@@ -71,12 +71,10 @@ function geoShort(c: Campaign): string {
   return `${c.countries.length} geos`;
 }
 
+/** Rendered inside the (app) layout's TaskManagerProvider — the queue lives up there so it
+ *  survives navigating between the launcher and the clone board. */
 export function LauncherBoard({ user }: { user?: SessionUser }) {
-  return (
-    <TaskManagerProvider user={user}>
-      <LauncherInner user={user} />
-    </TaskManagerProvider>
-  );
+  return <LauncherInner user={user} />;
 }
 
 function LauncherInner({ user }: { user?: SessionUser }) {
@@ -124,7 +122,6 @@ function LauncherInner({ user }: { user?: SessionUser }) {
   // changes, so this never cascades.
   useEffect(() => {
     if (!adAccounts || adAccounts.length === 0) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setCampaigns((cs) => fillAccountDefaults(cs, partnerRef.current, adAccounts));
   }, [adAccounts]);
 
