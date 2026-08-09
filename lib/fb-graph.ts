@@ -173,6 +173,9 @@ type AccountsState = { accounts: TokenAdAccount[]; expiresAt: number };
 const ACCOUNTS_KEY = "token-adaccounts";
 const ACCOUNTS_OK_TTL_MS = 15 * 60_000;
 const ACCOUNTS_FAIL_TTL_MS = 5 * 60_000;
+// The account LIST loaded but the pixel sweep was throttled (some accounts have empty pixels) —
+// re-sweep soon to fill them, don't sit on the partial pixel data for the full OK_TTL.
+const ACCOUNTS_INCOMPLETE_TTL_MS = 60_000;
 const ACCOUNTS_CLAIM_TTL_MS = 2 * 60_000;
 
 let accountsL1: { readAt: number; hasL2: boolean; state: AccountsState } | null = null;
@@ -276,11 +279,15 @@ async function resolveAccounts(): Promise<TokenAdAccount[]> {
       }
     }
 
-    const complete = !throttled && accounts.length > 0;
-    const state: AccountsState = {
-      accounts,
-      expiresAt: Date.now() + (complete ? ACCOUNTS_OK_TTL_MS : ACCOUNTS_FAIL_TTL_MS),
-    };
+    // TTL: full success → 15 min; account list loaded but pixels throttled → 60 s (re-fill soon);
+    // no accounts at all → 5 min backoff.
+    const ttl =
+      accounts.length === 0
+        ? ACCOUNTS_FAIL_TTL_MS
+        : throttled
+          ? ACCOUNTS_INCOMPLETE_TTL_MS
+          : ACCOUNTS_OK_TTL_MS;
+    const state: AccountsState = { accounts, expiresAt: Date.now() + ttl };
     await writeAppCache(ACCOUNTS_KEY, state, claimedId);
     accountsL1 = { readAt: Date.now(), hasL2, state };
     return accounts;

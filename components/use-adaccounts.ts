@@ -46,20 +46,25 @@ export function useAdAccounts(enabled: boolean, preferredPixel?: Bound): AdAccou
             d.accounts.map((a) => {
               const pixels = Array.isArray(a.pixels) ? a.pixels : [];
               const hasPreferred = !preferredId || pixels.some((p) => p.id === preferredId);
-              return {
-                value: String(a.id),
-                label: String(a.name),
-                meta: String(a.id),
-                subLabel: String(a.id),
-                pixels,
-                ...(preferredId
-                  ? hasPreferred
-                    ? { tag: short, tagTone: "ok" as const }
-                    : { tag: `no ${short}`, tagTone: "warn" as const }
-                  : {}),
-              };
+              // Tag semantics: no pixel at all = can't run conversions (danger); has the preferred
+              // pixel = green marker. An account with some OTHER pixel is FINE now (the buy link
+              // carries &pixel=<that pixel> so the funnel fires it and CAPI matches the adset) — no
+              // warning, that was only true before the URL-pixel funnel.
+              const tag: Partial<Pick<AdAccountOption, "tag" | "tagTone">> =
+                pixels.length === 0
+                  ? { tag: "no pixel", tagTone: "danger" }
+                  : preferredId && hasPreferred
+                    ? { tag: short, tagTone: "ok" }
+                    : {};
+              return { value: String(a.id), label: String(a.name), meta: String(a.id), subLabel: String(a.id), pixels, ...tag };
             }),
           );
+          // Coverage check: the preferred pixel (FARM-1) lives on at least one account, so if NO
+          // loaded account shows it, the server's pixel sweep was throttled/incomplete — keep
+          // re-polling (the shown list is usable meanwhile) until the pixels fill in.
+          const coverageOk =
+            !preferredId || d.accounts.some((a) => (a.pixels ?? []).some((p) => p.id === preferredId));
+          if (!coverageOk && attempt < 8) timer = setTimeout(() => void load(attempt + 1), 12000);
           return;
         }
         // HTTP 200 + ok:false = a genuine "no accounts / no token" answer → show the empty hint.

@@ -19,8 +19,10 @@ export async function GET() {
   if (!hasFbToken()) return NextResponse.json({ ok: false, reason: "no_token", counts: {} });
   try {
     const pages = await advertisablePages();
-    // Volume is account-scoped in the API; the Indians flow runs one pinned account today.
-    const accountId = (partnerConfig("in").lockedAccount?.id ?? "").replace(/^act_/, "");
+    // The count is the page's CROSS-account total, so any token account works for the sweep — use
+    // the partner's default account. (Was lockedAccount, removed in the 08-08 account-picker
+    // migration → this route silently returned no_account and killed every fill badge.)
+    const accountId = (partnerConfig("in").defaultAccount?.id ?? "").replace(/^act_/, "");
     if (!accountId) return NextResponse.json({ ok: false, reason: "no_account", counts: {} });
     const counts = await pageAdCounts(accountId, pages.map((p) => p.id));
     return NextResponse.json({ ok: true, counts: Object.fromEntries(counts) });

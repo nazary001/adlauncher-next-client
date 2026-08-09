@@ -135,7 +135,10 @@ export async function POST(req: Request) {
           }
           const editBinds: LaunchBinds = {
             accountId: src.accountId,
-            pixelId: src.pixelId, // the source's own promoted pixel (empty for click-optimized sources)
+            // The source's own promoted pixel (empty for click-optimized sources). Format-guarded so
+            // a malformed id from Graph can't be promoted on the ad set yet dropped from the link
+            // (which would leave the funnel firing its default pixel, diverging from the adset).
+            pixelId: /^\d{10,20}$/.test(src.pixelId) ? src.pixelId : "",
             pageId: String(edit.pageId).trim(),
           };
 
