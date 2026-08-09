@@ -292,7 +292,7 @@ export function CampaignCard({
                 <Field
                   label="Account"
                   className={setupCol}
-                  error={partner.accountsFromToken && !c.account ? "Pick an account" : undefined}
+                  error={partner.accountsFromToken && (adAccounts?.length ?? 0) > 0 && !c.account ? "Pick an account" : undefined}
                 >
                   {partner.accountsFromToken ? (
                     <SearchSelect
@@ -319,7 +319,7 @@ export function CampaignCard({
                 <Field
                   label={partner.pageLabel}
                   className={setupCol}
-                  error={partner.fanpagesFromToken && !c.page ? "Pick a fanpage" : undefined}
+                  error={partner.fanpagesFromToken && fanpages != null && !c.page ? "Pick a fanpage" : undefined}
                 >
                   {partner.fanpagesFromToken ? (
                     <SearchSelect

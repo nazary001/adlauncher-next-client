@@ -71,30 +71,38 @@ export function useFanpages(enabled: boolean, limit = 250): FanpageOption[] | nu
       }
     }
 
-    async function load() {
+    async function load(attempt: number): Promise<void> {
       // Phase 1: the list itself — the picker is usable as soon as this lands.
       let ids: string[] = [];
       try {
-        const d = (await fetch("/api/fanpages").then((r) => r.json())) as {
+        const r = await fetch("/api/fanpages");
+        const d = (await r.json().catch(() => ({}))) as {
           ok?: boolean;
           pages?: Array<{ id: string; name: string }>;
         };
         if (!alive) return;
-        if (!d?.ok || !Array.isArray(d.pages)) {
-          setPages([]);
+        if (r.ok && d?.ok && Array.isArray(d.pages)) {
+          ids = d.pages.map((p) => p.id);
+          setPages(d.pages.map((p) => ({ value: p.id, label: p.name, meta: p.id, adCount: null })));
+        } else if (r.ok) {
+          setPages([]); // genuine empty / no-token answer
           return;
+        } else {
+          throw new Error(`HTTP ${r.status}`); // transient → retry (stay in loading state)
         }
-        ids = d.pages.map((p) => p.id);
-        setPages(d.pages.map((p) => ({ value: p.id, label: p.name, meta: p.id, adCount: null })));
       } catch {
-        if (alive) setPages([]);
+        if (!alive) return;
+        // A transient blip must NOT strand the picker on a false "No fanpages" with no recovery:
+        // stay loading (null) and retry a few times.
+        if (attempt < 4) timer = setTimeout(() => void load(attempt + 1), 4000);
+        else setPages([]);
         return;
       }
       // Phase 2+: fill counts — decoration only; polls until every page has its number.
       await loadVolume(ids, 1);
     }
 
-    void load();
+    void load(0);
     return () => {
       alive = false;
       if (timer) clearTimeout(timer);

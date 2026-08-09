@@ -273,8 +273,10 @@ function LauncherInner({ user }: { user?: SessionUser }) {
 
   const remove = (id: string) => mutate((cs) => cs.filter((c) => c.id !== id));
 
-  /** Copy the picked settings from the first campaign onto every other one. Never touches gcm
-   *  (each keeps its own code) or name (each stays distinct); locks re-sync via normalize. */
+  /** Copy the picked settings from the first campaign onto every other one. gcm is NEVER copied
+   *  (each ad keeps its own code); every other field including `name` is copied only when the user
+   *  ticks it in the modal (name is offered default-on, per the 08-05 wave workflow). Locks re-sync
+   *  via normalize; account defaults re-fill via mutate → fillAccountDefaults. */
   const applyCopy = (keys: (keyof Campaign)[]) => {
     setCopyOpen(false);
     if (keys.length === 0) return;
@@ -291,7 +293,8 @@ function LauncherInner({ user }: { user?: SessionUser }) {
     });
   };
 
-  const MAX_CARDS = 100;
+  // Capped at the gcm pool size (codes 01–99) so a full wave can't leave a card without a code.
+  const MAX_CARDS = 99;
 
   /** Wave builder: grow every card to `n` copies (fresh gcm each; primary text copied verbatim).
    *  Clones open expanded so you can review them right away. `n` is the total-per-card multiplier. */

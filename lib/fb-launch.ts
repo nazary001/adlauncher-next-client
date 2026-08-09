@@ -27,6 +27,16 @@ export function bidAmountCents(c: Campaign): number | undefined {
   return cents > 0 ? cents : undefined;
 }
 
+/** Bid strategies the payload builder can faithfully rebuild. Others (e.g. LOWEST_COST_WITH_MIN_ROAS,
+ *  which needs a roas_average_floor we don't emit) must be rejected BEFORE any FB write — cloning an
+ *  arbitrary live source could import one, and Meta would reject the ad set after the campaign
+ *  exists, orphaning it and burning a gcm code. */
+export const SUPPORTED_BID_STRATEGIES = new Set([
+  "LOWEST_COST_WITHOUT_CAP",
+  "LOWEST_COST_WITH_BID_CAP",
+  "COST_CAP",
+]);
+
 /** Placement encodes a placement set (FULL vs COMPLIANCE) + optional gender suffix. */
 function placementBits(placement: string) {
   return {

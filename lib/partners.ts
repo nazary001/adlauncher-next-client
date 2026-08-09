@@ -232,7 +232,7 @@ export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[
 }
 
 /**
- * Fill the lowest free 2-digit code (01..100) for landing-having campaigns missing a gcm.
+ * Fill the lowest free 2-digit code (01..99) for landing-having campaigns missing a gcm.
  * `reserved` = codes already taken in the Strapi registry. While it's null (not loaded yet)
  * NOTHING is assigned — never hand out a code that might already be live. The batch also
  * avoids reusing a code across two campaigns in the same session.

@@ -29,42 +29,58 @@ export function useAdAccounts(enabled: boolean, preferredPixel?: Bound): AdAccou
       return;
     }
     let alive = true;
-    fetch("/api/adaccounts")
-      .then((r) => r.json())
-      .then((d: { ok?: boolean; accounts?: Array<{ id: string; name: string; pixels?: PixelInfo[] }> }) => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    setAccounts(null); // (re)enter loading state
+
+    async function load(attempt: number): Promise<void> {
+      try {
+        const r = await fetch("/api/adaccounts");
+        const d = (await r.json().catch(() => ({}))) as {
+          ok?: boolean;
+          accounts?: Array<{ id: string; name: string; pixels?: PixelInfo[] }>;
+        };
         if (!alive) return;
-        if (!d?.ok || !Array.isArray(d.accounts)) {
+        if (r.ok && d?.ok && Array.isArray(d.accounts)) {
+          const short = (preferredName ?? "").replace(/^HS-Pixel-/, "") || "pixel"; // "HS-Pixel-FARM-1" → "FARM-1"
+          setAccounts(
+            d.accounts.map((a) => {
+              const pixels = Array.isArray(a.pixels) ? a.pixels : [];
+              const hasPreferred = !preferredId || pixels.some((p) => p.id === preferredId);
+              return {
+                value: String(a.id),
+                label: String(a.name),
+                meta: String(a.id),
+                subLabel: String(a.id),
+                pixels,
+                ...(preferredId
+                  ? hasPreferred
+                    ? { tag: short, tagTone: "ok" as const }
+                    : { tag: `no ${short}`, tagTone: "warn" as const }
+                  : {}),
+              };
+            }),
+          );
+          return;
+        }
+        // HTTP 200 + ok:false = a genuine "no accounts / no token" answer → show the empty hint.
+        if (r.ok) {
           setAccounts([]);
           return;
         }
-        // Short pixel name for the FARM marker, e.g. "HS-Pixel-FARM-1" → "FARM-1".
-        const short = (preferredName ?? "").replace(/^HS-Pixel-/, "") || "pixel";
-        setAccounts(
-          d.accounts.map((a) => {
-            const pixels = Array.isArray(a.pixels) ? a.pixels : [];
-            const hasPreferred = !preferredId || pixels.some((p) => p.id === preferredId);
-            return {
-              value: String(a.id),
-              label: String(a.name),
-              meta: String(a.id), // drives search + the closed "Name · id" display
-              subLabel: String(a.id), // second option line
-              pixels,
-              // FARM marker on the second line: green when the account carries the tracking pixel,
-              // amber when it doesn't (conversion launches there optimize blind).
-              ...(preferredId
-                ? hasPreferred
-                  ? { tag: short, tagTone: "ok" as const }
-                  : { tag: `no ${short}`, tagTone: "warn" as const }
-                : {}),
-            };
-          }),
-        );
-      })
-      .catch(() => {
-        if (alive) setAccounts([]);
-      });
+        throw new Error(`HTTP ${r.status}`); // 429/5xx → transient, retry below
+      } catch {
+        if (!alive) return;
+        // A transient blip must NOT strand every card un-launchable with a false "No accounts on the
+        // token" and no recovery: stay in the loading state (null) and retry a few times.
+        if (attempt < 4) timer = setTimeout(() => void load(attempt + 1), 4000);
+        else setAccounts([]);
+      }
+    }
+
+    void load(0);
     return () => {
       alive = false;
+      if (timer) clearTimeout(timer);
     };
   }, [enabled, preferredId, preferredName]);
 

@@ -7,6 +7,7 @@ import {
   adsetPayload,
   campaignPayload,
   creativePayload,
+  money,
 } from "@/lib/fb-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { accountPixels, isAdvertisablePage, isTokenAccount } from "@/lib/fb-graph";
@@ -347,7 +348,9 @@ export async function POST(req: Request) {
           { status: 400 },
         );
       }
-      if (!/^\d{5,}$/.test(pickedPixel)) {
+      if (!/^\d{10,20}$/.test(pickedPixel)) {
+        // Must match lib/partners isPixelId, or a pixel set on the adset would be dropped from the
+        // link (funnel then fires its default pixel, not the one the adset optimizes for).
         return NextResponse.json(
           { ok: false, stage: "config", error: "pixel_required — pick a pixel on the campaign card" },
           { status: 400 },
@@ -388,12 +391,33 @@ export async function POST(req: Request) {
       { status: 502 },
     );
   }
+  // Landing must be a real slug from the partner catalog — a stale/renamed slug (e.g. from a
+  // restored draft) would build a live ad pointing at a 404, reported as success, spend + a burnt
+  // gcm on a dead link. Validated here, before any gcm claim / FB write.
+  if (partner.usesGcm) {
+    const slug = String(campaign.landing ?? "").trim();
+    if (!partner.landings.some((l) => l.slug === slug)) {
+      return NextResponse.json(
+        { ok: false, stage: "config", error: "landing_invalid — pick a valid landing on the campaign card" },
+        { status: 400 },
+      );
+    }
+  }
   if (!videoUrl) {
     return NextResponse.json({ ok: false, stage: "media", error: "video_required" }, { status: 400 });
   }
   if (bidAmountMissing(campaign)) {
     return NextResponse.json(
       { ok: false, stage: "config", error: "Bid amount required for the selected bid strategy" },
+      { status: 400 },
+    );
+  }
+  // A cleared/zero budget (money("") → 0) would create the campaign, then Meta rejects the ad set
+  // for daily_budget below the floor → orphan PAUSED campaign + a permanently retired gcm code.
+  // Reject before any claim/write. $1/day (100 cents) is the USD daily minimum.
+  if (money(campaign.budget) < 100) {
+    return NextResponse.json(
+      { ok: false, stage: "config", error: "budget_too_low — daily budget must be at least $1" },
       { status: 400 },
     );
   }

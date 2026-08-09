@@ -111,11 +111,28 @@ export type FanPage = { id: string; name: string };
 // page bound to the ad account — Meta checks the "Ads" task on the page at creative-create time.
 // Cached briefly: the list feeds both the UI picker and the per-launch server-side validation.
 const PAGES_TTL_MS = 5 * 60_000;
-let pagesCache: { at: number; pages: FanPage[] } | null = null;
+// An EMPTY result (transient de-permission / edge blip) is trusted only briefly — caching it for the
+// full TTL would reject every launch with fanpage_not_allowed for 5 minutes with no self-correction.
+const PAGES_EMPTY_TTL_MS = 20_000;
+let pagesCache: { at: number; ttl: number; pages: FanPage[] } | null = null;
+
+/** Read a paging cursor: prefer cursors.after, else pull `after` out of the next URL (relay-style
+ *  paging / >100 entries return a next URL without cursors.after — dropping it truncated the list). */
+function nextAfter(paging: { cursors?: { after?: string }; next?: string } | undefined): string {
+  if (paging?.cursors?.after) return paging.cursors.after;
+  if (paging?.next) {
+    try {
+      return new URL(paging.next).searchParams.get("after") ?? "";
+    } catch {
+      /* malformed next URL — stop paging */
+    }
+  }
+  return "";
+}
 
 /** Every page the launch token can advertise with (ADVERTISE task), paginated + cached. */
 export async function advertisablePages(): Promise<FanPage[]> {
-  if (pagesCache && Date.now() - pagesCache.at < PAGES_TTL_MS) return pagesCache.pages;
+  if (pagesCache && Date.now() - pagesCache.at < pagesCache.ttl) return pagesCache.pages;
 
   const pages: FanPage[] = [];
   let after = "";
@@ -128,15 +145,14 @@ export async function advertisablePages(): Promise<FanPage[]> {
       if (!Array.isArray(p.tasks) || !p.tasks.includes("ADVERTISE")) continue;
       pages.push({ id: String(p.id), name: String(p.name) });
     }
-    const paging = body.paging as { cursors?: { after?: string }; next?: string } | undefined;
-    const next = paging?.next ? paging.cursors?.after ?? "" : "";
-    if (!next || next === after) break;
-    after = next;
+    const nxt = nextAfter(body.paging as { cursors?: { after?: string }; next?: string } | undefined);
+    if (!nxt || nxt === after) break;
+    after = nxt;
   }
 
   // Stable order for the picker; duplicate display names exist → id is the tiebreaker.
   pages.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-  pagesCache = { at: Date.now(), pages };
+  pagesCache = { at: Date.now(), ttl: pages.length > 0 ? PAGES_TTL_MS : PAGES_EMPTY_TTL_MS, pages };
   return pages;
 }
 
@@ -214,10 +230,9 @@ async function resolveAccounts(): Promise<TokenAdAccount[]> {
           accounts.push({ id: String(a.account_id), name: String(a.name), pixels: [] });
         }
       }
-      const paging = body.paging as { cursors?: { after?: string }; next?: string } | undefined;
-      const next = paging?.next ? paging.cursors?.after ?? "" : "";
-      if (!next || next === after) break;
-      after = next;
+      const nxt = nextAfter(body.paging as { cursors?: { after?: string }; next?: string } | undefined);
+      if (!nxt || nxt === after) break;
+      after = nxt;
     }
     accounts.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 
@@ -237,7 +252,7 @@ async function resolveAccounts(): Promise<TokenAdAccount[]> {
           });
           const body = (await res.json().catch(() => ({}))) as Json;
           const err = body.error as { code?: number } | undefined;
-          if (err && RATE_LIMIT_CODES.has(err.code ?? -1)) {
+          if ((err && RATE_LIMIT_CODES.has(err.code ?? -1)) || res.status === 429 || res.status >= 500) {
             throttled = true;
             return;
           }
@@ -361,7 +376,9 @@ async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<
         );
         const body = (await res.json().catch(() => ({}))) as Json;
         const err = body.error as { code?: number } | undefined;
-        if (err && RATE_LIMIT_CODES.has(err.code ?? -1)) {
+        // Abort on a Graph rate-limit code OR a gateway 429/5xx (Meta's CDN returns those with an
+        // HTML body → no error.code), else the remaining ~60 calls all fail and keep the quota pinned.
+        if ((err && RATE_LIMIT_CODES.has(err.code ?? -1)) || res.status === 429 || res.status >= 500) {
           counts.set(id, null);
           throttled = true;
           return;
@@ -477,7 +494,9 @@ async function resolveVolume(
   const next: VolumeState = {
     counts,
     expiresAt: Date.now() + (live > 0 ? VOLUME_OK_TTL_MS : VOLUME_FAIL_TTL_MS),
-    healAt: Date.now() + VOLUME_HEAL_MS,
+    // A fully-failed sweep (live===0) must NOT invite a +1-min full re-sweep — push the heal window
+    // out to the fail backoff so a throttled account gets time to recover instead of being re-stormed.
+    healAt: Date.now() + (live > 0 ? VOLUME_HEAL_MS : VOLUME_FAIL_TTL_MS),
   };
   await writeAppCache(key, next, claimedId);
   setVolumeL1(key, next, hasL2);

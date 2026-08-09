@@ -165,10 +165,12 @@ export async function fetchSourceDetail(campaignId: string): Promise<SourceDetai
   };
 }
 
-/** Swap the gcm=NN value in a tracking link (or append it), keeping every other param + FB macro. */
+/** Swap the gcm value in a tracking link (or append it), keeping every other param + FB macro.
+ *  Matches any existing value ([^&#]*), not just digits, so a malformed `gcm=` (empty/non-numeric)
+ *  is REPLACED rather than leaving a duplicate `gcm=` param the funnel would misread. */
 export function swapGcm(link: string, gcm: string): string {
   if (!link) return link;
-  if (/([?&]gcm=)\d+/.test(link)) return link.replace(/([?&]gcm=)\d+/, `$1${gcm}`);
+  if (/[?&]gcm=[^&#]*/.test(link)) return link.replace(/([?&]gcm=)[^&#]*/, `$1${gcm}`);
   return link + (link.includes("?") ? "&" : "?") + `gcm=${gcm}`;
 }
 
@@ -179,7 +181,7 @@ export function swapGcm(link: string, gcm: string): string {
  */
 export function swapPixel(link: string, pixelId: string): string {
   if (!link || !/^\d{10,20}$/.test(pixelId)) return link;
-  if (/([?&]pixel=)\d+/.test(link)) return link.replace(/([?&]pixel=)\d+/, `$1${pixelId}`);
+  if (/[?&]pixel=[^&#]*/.test(link)) return link.replace(/([?&]pixel=)[^&#]*/, `$1${pixelId}`);
   return link + (link.includes("?") ? "&" : "?") + `pixel=${pixelId}`;
 }
 

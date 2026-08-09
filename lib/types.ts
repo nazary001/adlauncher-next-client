@@ -137,6 +137,9 @@ export function isReady(c: Campaign, opts: ReadyOpts = {}): boolean {
   if (page && !c.page) return false;
   if (account && !c.account) return false;
   if (pixel && !c.pixel) return false;
+  // A cleared/zero daily budget would create the campaign then get the ad set rejected by Meta
+  // (orphan + burnt gcm) — never let such a card count as launchable. $1 = Meta's USD daily floor.
+  if (parseMoney(c.budget) < 1) return false;
   if (bidAmountMissing(c)) return false;
   return true;
 }

@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { partnerConfig, type PartnerId } from "@/lib/partners";
+import { bidAmountMissing } from "@/lib/types";
+import { SUPPORTED_BID_STRATEGIES } from "@/lib/fb-launch";
 import { FbError, fbPost, isAdvertisablePage, isTokenAccount } from "@/lib/fb-graph";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import type { CloneEdit } from "@/lib/clone";
@@ -137,11 +139,24 @@ export async function POST(req: Request) {
             pageId: String(edit.pageId).trim(),
           };
 
+          // Build + validate the clone campaign BEFORE claiming a gcm, so an un-clonable source
+          // (a bid strategy the builder can't rebuild, or no country targeting) fails here without
+          // burning a code or leaving an orphaned PAUSED campaign.
+          const campaign = cloneToCampaign(edit, src);
+          if (!SUPPORTED_BID_STRATEGIES.has(campaign.bidStrategy)) {
+            throw new FbError(`source bid strategy ${campaign.bidStrategy} can't be cloned — recreate it manually`, { campaignId: edit.campaignId });
+          }
+          if (bidAmountMissing(campaign)) {
+            throw new FbError("source uses a bid cap but no ROAS goal was set on the clone row", { campaignId: edit.campaignId });
+          }
+          if (campaign.countries.length === 0) {
+            throw new FbError("source has no country targeting to clone — set a geo on the clone row", { campaignId: edit.campaignId });
+          }
+
           send({ idx, stage: "gcm" });
           claim = await claimGcm("", { campaign_name: edit.name, notes: "claimed via adlauncher clone" });
           const gcm = claim.gcm;
 
-          const campaign = cloneToCampaign(edit, src);
           const localeIds = await resolveLocales(edit.locales);
 
           send({ idx, stage: "campaign" });
