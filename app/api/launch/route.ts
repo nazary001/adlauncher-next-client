@@ -475,11 +475,18 @@ export async function POST(req: Request) {
       // shared Task Manager stays live for every account — including after this client is gone.
       const tw = taskWriter(session.username, taskId);
       let lastStage = "gcm";
+      let settled = false; // set before the terminal write — the beat must never chain after it
       const progress = (stage: string) => {
         lastStage = stage;
         send({ stage });
         tw.write({ status: "running", stage });
       };
+      // Server-side liveness beat: stage writes alone can gap for minutes (video processing polls,
+      // rate-limit backoffs). If the launching browser died, its 25s client heartbeat died with it —
+      // without this the team would see a live server-run go amber "stale" mid-processing.
+      const beat = setInterval(() => {
+        if (!settled) tw.write({ status: "running", stage: lastStage });
+      }, 30_000);
       const created: Json = {};
       let claim: { gcm: string; documentId: string | null } | null = null;
       try {
@@ -537,6 +544,7 @@ export async function POST(req: Request) {
           ad_id: created.ad_id,
         });
 
+        settled = true;
         tw.write({
           status: "done",
           stage: "ad",
@@ -567,6 +575,7 @@ export async function POST(req: Request) {
             });
           else await deleteGcm(claim.documentId);
         }
+        settled = true;
         tw.write({
           status: "error",
           stage: lastStage,
@@ -577,6 +586,7 @@ export async function POST(req: Request) {
         });
         send({ ok: false, stage: "error", error: err.message ?? String(e), detail: err.detail ?? null, created });
       } finally {
+        clearInterval(beat);
         // Drop the temporary Blob whether the launch succeeded or failed — never orphan the upload.
         // Awaited (not fire-and-forget) so it completes before the stream closes and Vercel can
         // freeze the function. The "done"/"error" event was already sent, so this adds no visible wait.

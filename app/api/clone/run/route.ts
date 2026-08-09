@@ -131,11 +131,17 @@ export async function POST(req: Request) {
         // Server-side mirror of this clone's Task Manager row (no-op when no task id was sent).
         const tw = taskWriter(session.username, taskIds[idx] ?? null);
         let lastStage = "source";
+        let settled = false; // set before the terminal write — the beat must never chain after it
         const progress = (stage: string) => {
           lastStage = stage;
           send({ idx, stage });
           tw.write({ status: "running", stage });
         };
+        // Liveness beat across slow FB calls / rate-limit backoffs (same rationale as /api/launch):
+        // keeps the row fresh for the team even if the launching browser died mid-run.
+        const beat = setInterval(() => {
+          if (!settled) tw.write({ status: "running", stage: lastStage });
+        }, 30_000);
         let claim: { gcm: string; documentId: string | null } | null = null;
         const created: Json = {};
         try {
@@ -216,6 +222,7 @@ export async function POST(req: Request) {
           });
 
           ok++;
+          settled = true;
           tw.write({
             status: "done",
             stage: "ad",
@@ -245,6 +252,7 @@ export async function POST(req: Request) {
               });
             else await deleteGcm(claim.documentId);
           }
+          settled = true;
           tw.write({
             status: "error",
             stage: lastStage,
@@ -256,6 +264,7 @@ export async function POST(req: Request) {
           send({ idx, ok: false, stage: "error", error: err.message ?? String(e), detail: err.detail ?? null, created });
         }
         // The clone's last transition must land before the loop moves on / the function freezes.
+        clearInterval(beat);
         await tw.flush();
       }
 

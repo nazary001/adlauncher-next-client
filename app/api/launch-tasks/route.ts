@@ -2,6 +2,10 @@ import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { findTaskRow, pickTaskFields, storeConfigured, upsertTaskRow } from "@/lib/task-store";
 
+// A pagehide-beacon batch (25 rows) or a bulk clear is ~2 Strapi round-trips per row — the
+// platform default duration (~15s) could cut the tail off mid-write, leaving half a wave unmarked.
+export const maxDuration = 60;
+
 // Server-only: the Strapi token never reaches the browser.
 const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
 const TOKEN = process.env.STRAPI_TOKEN ?? "";
@@ -105,15 +109,22 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, reason: "bad_batch" }, { status: 400 });
   }
 
+  if (items.some((item) => !String(item.task_id ?? ""))) {
+    return NextResponse.json({ ok: false, reason: "no_task_id" }, { status: 400 });
+  }
   let forbidden = false;
   let failed: string | null = null;
-  for (const item of items) {
-    const taskId = String(item.task_id ?? "");
-    if (!taskId) return NextResponse.json({ ok: false, reason: "no_task_id" }, { status: 400 });
-    const r = await upsertTaskRow(user, taskId, pickTaskFields(item));
-    if (!r.ok) {
-      if (r.reason === "forbidden") forbidden = true;
-      else failed = r.detail ?? r.reason;
+  // Distinct task_ids have no ordering dependency between them — write in parallel chunks so a
+  // full beacon batch completes well inside the function budget.
+  for (let i = 0; i < items.length; i += 8) {
+    const results = await Promise.all(
+      items.slice(i, i + 8).map((item) => upsertTaskRow(user, String(item.task_id), pickTaskFields(item))),
+    );
+    for (const r of results) {
+      if (!r.ok) {
+        if (r.reason === "forbidden") forbidden = true;
+        else failed = r.detail ?? r.reason;
+      }
     }
   }
   if (forbidden && items.length === 1) return NextResponse.json({ ok: false, reason: "forbidden" }, { status: 403 });
@@ -134,11 +145,16 @@ export async function DELETE(req: Request) {
   if (ids.length === 0) return NextResponse.json({ ok: false, reason: "no_task_id" }, { status: 400 });
 
   try {
-    for (const id of ids) {
-      const found = await findTaskRow(id);
-      if (found && found.owner === user) {
-        await fetch(`${STRAPI}/api/launch-tasks/${found.documentId}`, { method: "DELETE", headers: H() });
-      }
+    // Parallel chunks — a bulk "clear failed" can carry dozens of ids.
+    for (let i = 0; i < ids.length; i += 8) {
+      await Promise.all(
+        ids.slice(i, i + 8).map(async (id) => {
+          const found = await findTaskRow(id);
+          if (found && found.owner === user) {
+            await fetch(`${STRAPI}/api/launch-tasks/${found.documentId}`, { method: "DELETE", headers: H() });
+          }
+        }),
+      );
     }
     return NextResponse.json({ ok: true });
   } catch (e) {
