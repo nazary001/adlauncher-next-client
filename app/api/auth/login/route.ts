@@ -6,35 +6,49 @@ export const runtime = "nodejs";
 // Same users as amazon-tools: the "tools" Strapi (users-permissions /api/auth/local).
 const TOOLS = (process.env.STRAPI_TOOLS_URL ?? "").replace(/\/+$/, "");
 
-// Best-effort in-memory brute-force throttle (per IP, counting FAILED attempts only — so a shared
-// office/VPN NAT IP isn't locked out by successful logins). Resets on restart.
+// Best-effort in-memory brute-force throttle, counting FAILED attempts only (a shared office/VPN NAT
+// IP isn't locked out by successful logins). Keyed by BOTH the client IP and the identifier, so
+// rotating one can't dodge the other. Resets on restart / per serverless instance — Strapi's own
+// auth throttling is the durable backstop.
 const hits = new Map<string, { n: number; resetAt: number }>();
 const WINDOW = 15 * 60 * 1000;
 const MAX = 10;
-function overLimit(ip: string): boolean {
-  const rec = hits.get(ip);
+function overLimit(key: string): boolean {
+  const rec = hits.get(key);
   return !!rec && rec.resetAt >= Date.now() && rec.n >= MAX;
 }
-function recordFailure(ip: string): void {
+function recordFailure(key: string): void {
   const now = Date.now();
-  const rec = hits.get(ip);
-  if (!rec || rec.resetAt < now) hits.set(ip, { n: 1, resetAt: now + WINDOW });
+  const rec = hits.get(key);
+  if (!rec || rec.resetAt < now) hits.set(key, { n: 1, resetAt: now + WINDOW });
   else rec.n += 1;
+}
+
+/** Trusted client IP. On Vercel `x-real-ip` is set by the platform (a client can't spoof it); the
+ *  leftmost X-Forwarded-For hop is CLIENT-controlled, so never key the throttle on it. */
+function clientIp(req: Request): string {
+  const real = req.headers.get("x-real-ip");
+  if (real) return real.trim();
+  // Fallback (local dev / non-Vercel): the RIGHTMOST XFF hop is the one added by the nearest proxy.
+  const xff = req.headers.get("x-forwarded-for") ?? "";
+  const hops = xff.split(",").map((s) => s.trim()).filter(Boolean);
+  return hops.length ? hops[hops.length - 1] : "local";
 }
 
 export async function POST(req: Request) {
   if (!TOOLS) return NextResponse.json({ ok: false, error: "auth_not_configured" }, { status: 500 });
 
-  const ip = (req.headers.get("x-forwarded-for") ?? "local").split(",")[0].trim();
-  if (overLimit(ip)) {
-    return NextResponse.json({ ok: false, error: "Too many failed attempts — try again later." }, { status: 429 });
-  }
+  const ipKey = `ip:${clientIp(req)}`;
 
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
   const identifier = String(body.username ?? body.identifier ?? "").trim();
   const password = String(body.password ?? "").trim();
   if (!identifier || !password) {
     return NextResponse.json({ ok: false, error: "Username and password are required." }, { status: 400 });
+  }
+  const idKey = `id:${identifier.toLowerCase()}`;
+  if (overLimit(ipKey) || overLimit(idKey)) {
+    return NextResponse.json({ ok: false, error: "Too many failed attempts — try again later." }, { status: 429 });
   }
 
   try {
@@ -46,10 +60,12 @@ export async function POST(req: Request) {
     });
     const data = (await res.json().catch(() => ({}))) as { user?: Record<string, unknown> };
     if (!res.ok || !data?.user) {
-      recordFailure(ip);
+      recordFailure(ipKey);
+      recordFailure(idKey);
       return NextResponse.json({ ok: false, error: "Invalid username or password." }, { status: 401 });
     }
-    hits.delete(ip); // successful login clears the failure counter
+    hits.delete(ipKey); // successful login clears both failure counters
+    hits.delete(idKey);
 
     const u = data.user;
     const username = String(u.username ?? identifier);

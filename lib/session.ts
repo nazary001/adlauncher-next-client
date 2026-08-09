@@ -2,7 +2,14 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 // Server-only. HMAC-signed session cookie (no JWT dependency). Runs in the proxy (Node
 // runtime in Next 16) and route handlers.
-const SECRET = process.env.AUTH_SECRET ?? "";
+// A too-short secret is treated as UNSET (fail closed): with a known-plaintext HMAC pair, a
+// low-entropy key could be brute-forced offline → forged sessions. 32+ chars is the floor; the
+// deployed secret is far longer.
+const RAW_SECRET = process.env.AUTH_SECRET ?? "";
+const SECRET = RAW_SECRET.length >= 32 ? RAW_SECRET : "";
+if (RAW_SECRET && RAW_SECRET.length < 32) {
+  console.error("AUTH_SECRET is too short (<32 chars) — sessions are DISABLED until it is strengthened.");
+}
 export const SESSION_COOKIE = "adl_session";
 const DEFAULT_TTL = 60 * 60 * 24 * 7; // 7 days
 

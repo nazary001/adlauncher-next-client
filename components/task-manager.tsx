@@ -46,6 +46,11 @@ const CLONE_STAGES: readonly StageDef[] = [
 // A Blob upload has no server-side deadline — a hung connection would otherwise spin the task (and
 // block the one-at-a-time queue) forever. Seen live 08-07: a task stuck at "Uploading video" 30+ min.
 const UPLOAD_TIMEOUT_MS = 5 * 60_000;
+// Client-side deadline on the /api/launch|clone request+stream. The server caps itself at
+// maxDuration=300s; this fires just past that so a socket held open by infra after the function
+// dies can't wedge the single-threaded queue. Aborting after the server is already dead means no
+// FB object is created mid-abort.
+const STREAM_TIMEOUT_MS = 330_000;
 
 function stagesFor(kind: TaskKind): readonly StageDef[] {
   return kind === "clone" ? CLONE_STAGES : LAUNCH_STAGES;
@@ -188,7 +193,6 @@ type TaskManagerValue = {
   retry: (id: string) => void;
   retryAll: () => void;
   remove: (id: string) => void;
-  clearDone: () => void;
   clearFinished: () => void;
 };
 
@@ -355,48 +359,57 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
           window.clearTimeout(uploadTimer);
         }
 
-        const res = await fetch("/api/launch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ partnerId: input.partnerId, campaign: input.campaign, videoUrl }),
-        });
-
+        const streamAbort = new AbortController();
+        const streamTimer = window.setTimeout(() => streamAbort.abort(), STREAM_TIMEOUT_MS);
         let final: Record<string, unknown> | null = null;
-        const handle = (line: string) => {
-          let ev: Record<string, unknown>;
-          try {
-            ev = JSON.parse(line);
-          } catch {
-            return;
-          }
-          if (ev.ok === true || ev.ok === false) {
-            final = ev;
-            return;
-          }
-          if (typeof ev.stage === "string") {
-            lastStage = ev.stage;
-            patch(id, { stage: ev.stage });
-          }
-        };
+        let resStatus = 0;
+        try {
+          const res = await fetch("/api/launch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ partnerId: input.partnerId, campaign: input.campaign, videoUrl }),
+            signal: streamAbort.signal,
+          });
+          resStatus = res.status;
 
-        if (res.body) {
-          const reader = res.body.getReader();
-          const dec = new TextDecoder();
-          let buf = "";
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buf += dec.decode(value, { stream: true });
-            let nl: number;
-            while ((nl = buf.indexOf("\n")) >= 0) {
-              const line = buf.slice(0, nl).trim();
-              buf = buf.slice(nl + 1);
-              if (line) handle(line);
+          const handle = (line: string) => {
+            let ev: Record<string, unknown>;
+            try {
+              ev = JSON.parse(line);
+            } catch {
+              return;
             }
+            if (ev.ok === true || ev.ok === false) {
+              final = ev;
+              return;
+            }
+            if (typeof ev.stage === "string") {
+              lastStage = ev.stage;
+              patch(id, { stage: ev.stage });
+            }
+          };
+
+          if (res.body) {
+            const reader = res.body.getReader();
+            const dec = new TextDecoder();
+            let buf = "";
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buf += dec.decode(value, { stream: true });
+              let nl: number;
+              while ((nl = buf.indexOf("\n")) >= 0) {
+                const line = buf.slice(0, nl).trim();
+                buf = buf.slice(nl + 1);
+                if (line) handle(line);
+              }
+            }
+            if (buf.trim()) handle(buf.trim());
+          } else {
+            final = await res.json().catch(() => null);
           }
-          if (buf.trim()) handle(buf.trim());
-        } else {
-          final = await res.json().catch(() => null);
+        } finally {
+          window.clearTimeout(streamTimer);
         }
 
         const f = final as Record<string, unknown> | null;
@@ -427,23 +440,35 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
             link: f.link,
             gcm: f.gcm,
           });
+          inputs.current.delete(id); // done → never re-run; free the captured Campaign/video url
         } else {
           const finishedAt = Date.now();
           const msg = f
-            ? (f.error as string) || (f.stage as string) || `HTTP ${res.status}`
-            : "stream ended unexpectedly — the server may have timed out mid-launch; check Ads Manager before retrying";
-          // Record which stage actually failed + whatever FB objects were created before the
-          // failure, so the orphaned campaign stays traceable from the task row.
+            ? (f.error as string) || (f.stage as string) || `HTTP ${resStatus}`
+            : `stream ended unexpectedly (HTTP ${resStatus}) — the server may have timed out mid-launch; check Ads Manager before retrying`;
+          // Record which stage failed + whatever FB objects were created before the failure. A
+          // created campaign means a blind retry would DUPLICATE it (fresh gcm, second full tree),
+          // so we surface the campaign id on the task (result.campaignId) → the UI hides Retry and
+          // we drop the input so it can never re-run.
           const created = ((f?.created ?? {}) as Record<string, unknown>) || {};
-          patch(id, { status: "error", stage: lastStage, finishedAt, error: msg });
+          const createdCampaign = created.campaign_id ? String(created.campaign_id) : undefined;
+          const createdAdset = created.adset_id ? String(created.adset_id) : undefined;
+          patch(id, {
+            status: "error",
+            stage: lastStage,
+            finishedAt,
+            error: msg,
+            ...(createdCampaign ? { result: { campaignId: createdCampaign, adsetId: createdAdset } } : {}),
+          });
           saveRemote(id, {
             status: "error",
             stage: lastStage,
             finished_at: finishedAt,
             error: msg,
-            ...(created.campaign_id ? { campaign_id: String(created.campaign_id) } : {}),
-            ...(created.adset_id ? { adset_id: String(created.adset_id) } : {}),
+            ...(createdCampaign ? { campaign_id: createdCampaign } : {}),
+            ...(createdAdset ? { adset_id: createdAdset } : {}),
           });
+          if (createdCampaign) inputs.current.delete(id); // partial success is not safely retryable
         }
       } catch (e) {
         const finishedAt = Date.now();
@@ -461,51 +486,60 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
       saveRemote(id, { status: "running", stage: "source", started_at: startedAt });
       let lastStage = "source";
       try {
-        const res = await fetch("/api/clone/run", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ partnerId: input.partnerId, edits: [input.edit] }),
-        });
-
+        const streamAbort = new AbortController();
+        const streamTimer = window.setTimeout(() => streamAbort.abort(), STREAM_TIMEOUT_MS);
         // Stream mirrors /api/clone/run: per-clone {idx,stage} progress, a per-clone {ok,...} final,
         // then a {stage:"batch-done"} summary we ignore (this task carries a single clone).
         let final: Record<string, unknown> | null = null;
-        const handle = (line: string) => {
-          let ev: Record<string, unknown>;
-          try {
-            ev = JSON.parse(line);
-          } catch {
-            return;
-          }
-          if (ev.stage === "batch-done") return;
-          if (ev.ok === true || ev.ok === false) {
-            final = ev;
-            return;
-          }
-          if (typeof ev.stage === "string" && ev.stage !== "start") {
-            lastStage = ev.stage;
-            patch(id, { stage: ev.stage });
-          }
-        };
+        let resStatus = 0;
+        try {
+          const res = await fetch("/api/clone/run", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ partnerId: input.partnerId, edits: [input.edit] }),
+            signal: streamAbort.signal,
+          });
+          resStatus = res.status;
 
-        if (res.body) {
-          const reader = res.body.getReader();
-          const dec = new TextDecoder();
-          let buf = "";
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buf += dec.decode(value, { stream: true });
-            let nl: number;
-            while ((nl = buf.indexOf("\n")) >= 0) {
-              const line = buf.slice(0, nl).trim();
-              buf = buf.slice(nl + 1);
-              if (line) handle(line);
+          const handle = (line: string) => {
+            let ev: Record<string, unknown>;
+            try {
+              ev = JSON.parse(line);
+            } catch {
+              return;
             }
+            if (ev.stage === "batch-done") return;
+            if (ev.ok === true || ev.ok === false) {
+              final = ev;
+              return;
+            }
+            if (typeof ev.stage === "string" && ev.stage !== "start") {
+              lastStage = ev.stage;
+              patch(id, { stage: ev.stage });
+            }
+          };
+
+          if (res.body) {
+            const reader = res.body.getReader();
+            const dec = new TextDecoder();
+            let buf = "";
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buf += dec.decode(value, { stream: true });
+              let nl: number;
+              while ((nl = buf.indexOf("\n")) >= 0) {
+                const line = buf.slice(0, nl).trim();
+                buf = buf.slice(nl + 1);
+                if (line) handle(line);
+              }
+            }
+            if (buf.trim()) handle(buf.trim());
+          } else {
+            final = await res.json().catch(() => null);
           }
-          if (buf.trim()) handle(buf.trim());
-        } else {
-          final = await res.json().catch(() => null);
+        } finally {
+          window.clearTimeout(streamTimer);
         }
 
         const f = final as Record<string, unknown> | null;
@@ -532,21 +566,32 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
             ad_id: f.ad_id,
             gcm: f.gcm,
           });
+          inputs.current.delete(id); // done → never re-run
         } else {
           const finishedAt = Date.now();
           const msg = f
-            ? (f.error as string) || (f.stage as string) || `HTTP ${res.status}`
-            : "stream ended unexpectedly — the server may have timed out mid-clone; check Ads Manager before retrying";
+            ? (f.error as string) || (f.stage as string) || `HTTP ${resStatus}`
+            : `stream ended unexpectedly (HTTP ${resStatus}) — the server may have timed out mid-clone; check Ads Manager before retrying`;
+          // Same partial-success guard as launch: a created campaign means a blind retry duplicates it.
           const created = ((f?.created ?? {}) as Record<string, unknown>) || {};
-          patch(id, { status: "error", stage: lastStage, finishedAt, error: msg });
+          const createdCampaign = created.campaign_id ? String(created.campaign_id) : undefined;
+          const createdAdset = created.adset_id ? String(created.adset_id) : undefined;
+          patch(id, {
+            status: "error",
+            stage: lastStage,
+            finishedAt,
+            error: msg,
+            ...(createdCampaign ? { result: { campaignId: createdCampaign, adsetId: createdAdset } } : {}),
+          });
           saveRemote(id, {
             status: "error",
             stage: lastStage,
             finished_at: finishedAt,
             error: msg,
-            ...(created.campaign_id ? { campaign_id: String(created.campaign_id) } : {}),
-            ...(created.adset_id ? { adset_id: String(created.adset_id) } : {}),
+            ...(createdCampaign ? { campaign_id: createdCampaign } : {}),
+            ...(createdAdset ? { adset_id: createdAdset } : {}),
           });
+          if (createdCampaign) inputs.current.delete(id);
         }
       } catch (e) {
         const finishedAt = Date.now();
@@ -665,6 +710,14 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
 
   const retry = useCallback(
     (id: string) => {
+      const t = tasksRef.current.find((x) => x.id === id);
+      if (!t) return;
+      // A partial failure already created a campaign on FB — re-running would build a SECOND full
+      // tree under a fresh gcm. Never auto-retry those (the button is hidden too).
+      if (t.result?.campaignId) return;
+      // No input (restored task / already cleaned) → runTask would bail; and don't double-submit an
+      // id that is already queued or running.
+      if (!inputs.current.has(id) || queue.current.includes(id) || t.status === "queued" || t.status === "running") return;
       patch(id, {
         status: "queued",
         stage: null,
@@ -701,17 +754,10 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
     [deleteRemote],
   );
 
-  const clearDone = useCallback(() => {
-    setTasks((ts) => {
-      ts.filter((t) => t.status === "done").forEach((t) => inputs.current.delete(t.id));
-      return ts.filter((t) => t.status !== "done");
-    });
-  }, []);
-
   const retryAll = useCallback(() => {
-    // Only local tasks (created this session) can retry — restored ones lost their video and would
-    // otherwise get stuck in "queued" forever (runTask bails without an input).
-    for (const t of tasksRef.current) if (t.status === "error" && t.local) retry(t.id);
+    // Retry only local errored tasks (restored ones lost their video) that did NOT create a
+    // campaign — a partial success is not safely retryable (retry() also guards this).
+    for (const t of tasksRef.current) if (t.status === "error" && t.local && !t.result?.campaignId) retry(t.id);
   }, [retry]);
 
   /** Dismiss my FAILED tasks. Successful (done) tasks are a permanent record and cannot be removed —
@@ -755,7 +801,6 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
     retry,
     retryAll,
     remove,
-    clearDone,
     clearFinished,
   };
 
@@ -847,7 +892,7 @@ function TaskManagerPanel() {
   if (!open) return null;
 
   // Only local errors can actually retry (restored tasks lost their input); match retryAll.
-  const retryable = tasks.filter((t) => t.status === "error" && t.local).length;
+  const retryable = tasks.filter((t) => t.status === "error" && t.local && !t.result?.campaignId).length;
   // Failed tasks I can dismiss (mine). Successful ones are a permanent record — not removable.
   const clearable = tasks.filter((t) => t.status === "error" && (t.local || (!!me && t.owner === me))).length;
 
@@ -1067,7 +1112,7 @@ function TaskRow({
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <span className="font-mono text-[10.5px] tabular-nums text-faint">{fmtElapsed(elapsed)}</span>
-          {error && task.local ? (
+          {error && task.local && !task.result?.campaignId ? (
             <button
               type="button"
               onClick={onRetry}
@@ -1077,6 +1122,15 @@ function TaskRow({
             >
               <RetryIcon className="h-3.5 w-3.5" />
             </button>
+          ) : error && task.result?.campaignId ? (
+            // Partial failure — a campaign was created. Retrying would duplicate it, so show a
+            // non-retryable marker pointing the buyer at Ads Manager instead of a Retry button.
+            <span
+              data-tip="Campaign was partially created — review/delete it in Ads Manager, don't retry"
+              className="tip font-mono text-[9px] font-semibold uppercase tracking-wide text-warn"
+            >
+              partial
+            </span>
           ) : null}
           {mine && error ? (
             <button

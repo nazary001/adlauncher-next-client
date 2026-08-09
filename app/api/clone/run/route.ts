@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { sessionFromCookieHeader } from "@/lib/session";
 import { partnerConfig, type PartnerId } from "@/lib/partners";
 import { bidAmountMissing } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES } from "@/lib/fb-launch";
@@ -59,6 +60,11 @@ async function createAdset(path: string, payload: Json): Promise<Json> {
  * Streams NDJSON per-clone/per-stage progress. Gated by the proxy (session required).
  */
 export async function POST(req: Request) {
+  // Defense in depth: this high-impact write route also self-checks the session (like /api/launch),
+  // not only the proxy gate — so a matcher edit or future middleware-bypass can't open it up.
+  if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
   let partnerId: PartnerId;
   let edits: CloneEdit[];
   try {

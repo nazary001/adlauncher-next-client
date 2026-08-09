@@ -117,13 +117,16 @@ export async function POST(req: Request) {
   const taskId = String(body.task_id ?? "");
   if (!taskId) return NextResponse.json({ ok: false, reason: "no_task_id" }, { status: 400 });
 
-  // Owner is always the session user. Pre-owner rows (owner=null) are adopted on update so a
-  // task that was mid-flight during the rollout keeps persisting instead of erroring forever.
+  // Owner is always the session user (never from the body — `owner` isn't in FIELDS).
   const data = pickFields(body);
   data.owner = user;
   try {
     const existing = await findByTaskId(taskId);
-    if (existing && existing.owner && existing.owner !== user) {
+    // Fail CLOSED, mirroring DELETE: an existing row is writable only when we can read its owner
+    // AND it is the caller's. A missing/foreign owner is refused (the pre-owner-migration adoption
+    // path is retired — legacy null-owner rows are inert test junk). This also means a future
+    // owner-attribute change that made owner unreadable can't silently open cross-user overwrite.
+    if (existing && existing.owner !== user) {
       return NextResponse.json({ ok: false, reason: "forbidden" }, { status: 403 });
     }
     const res = existing

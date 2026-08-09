@@ -289,6 +289,12 @@ function LauncherInner({ user }: { user?: SessionUser }) {
         patch[k] = Array.isArray(v) ? [...v] : v; // clone arrays (geo/locales/files)
       }
       if (keys.includes("redirectType")) patch.paramMode = src.paramMode; // keep the pair consistent
+      // objective ↔ conversionEvent are a pair — copying one without the other would leave a
+      // target with an event invalid for its objective (Meta rejects the ad set). Copy both together.
+      if (keys.includes("objective") || keys.includes("conversionEvent")) {
+        patch.objective = src.objective;
+        patch.conversionEvent = src.conversionEvent;
+      }
       return cs.map((c, i) => (i === 0 ? c : { ...c, ...(patch as Partial<Campaign>) }));
     });
   };

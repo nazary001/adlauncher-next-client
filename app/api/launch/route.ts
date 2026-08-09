@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { type Campaign, bidAmountMissing } from "@/lib/types";
+import { conversionEventsFor } from "@/lib/catalog";
 import { partnerConfig, fullLandingUrl, type PartnerId } from "@/lib/partners";
 import {
   type LaunchBinds,
@@ -406,9 +407,42 @@ export async function POST(req: Request) {
   if (!videoUrl) {
     return NextResponse.json({ ok: false, stage: "media", error: "video_required" }, { status: 400 });
   }
+  // The video must be a Vercel Blob URL from our own store — never an arbitrary URL. Otherwise a
+  // logged-in user could make FB fetch any URL (advideos file_url) or make `del()` target a blob
+  // outside our store. Blob URLs are https on the *.blob.vercel-storage.com host.
+  {
+    let host = "";
+    try {
+      const u = new URL(videoUrl);
+      host = u.protocol === "https:" ? u.hostname : "";
+    } catch {
+      host = "";
+    }
+    if (!host.endsWith(".blob.vercel-storage.com")) {
+      return NextResponse.json({ ok: false, stage: "media", error: "video_url_invalid" }, { status: 400 });
+    }
+  }
   if (bidAmountMissing(campaign)) {
     return NextResponse.json(
       { ok: false, stage: "config", error: "Bid amount required for the selected bid strategy" },
+      { status: 400 },
+    );
+  }
+  // Geo is required — an empty country list builds geo_locations:{countries:[]}, which Meta rejects
+  // only at the ad-set step, AFTER the campaign is created → orphan + burnt gcm. (isReady guards it
+  // client-side; a restored/edited draft could still POST empty.)
+  if (!Array.isArray(campaign.countries) || campaign.countries.length === 0) {
+    return NextResponse.json(
+      { ok: false, stage: "config", error: "geo_required — pick at least one country" },
+      { status: 400 },
+    );
+  }
+  // The conversion event must be valid for the chosen objective — a desync (e.g. Copy-to-all copying
+  // the event but not the objective) sends OFFSITE_CONVERSIONS + a foreign custom_event_type, which
+  // Meta rejects after the campaign exists → orphan + burnt gcm.
+  if (!conversionEventsFor(campaign.objective).some((e) => e.value === campaign.conversionEvent)) {
+    return NextResponse.json(
+      { ok: false, stage: "config", error: "event_invalid — conversion event is not valid for the objective" },
       { status: 400 },
     );
   }
