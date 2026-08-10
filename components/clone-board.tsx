@@ -35,6 +35,7 @@ import { CloneTargetingModal } from "./clone-targeting-modal";
 import { CloneHighOfferModal } from "./clone-high-offer-modal";
 import { SearchSelect } from "./search-select";
 import { useFanpages } from "./use-fanpages";
+import { defaultPixelFor, pixelOptionsOf, useAdAccounts } from "./use-adaccounts";
 import type { SessionUser } from "./user-menu";
 
 /** Today as DD.MM for clone-name date stamping (client-side). */
@@ -202,6 +203,13 @@ function CloneInner({
   // Token fanpages for the batch fanka picker (with live N/limit fill tags). null while loading.
   const fanpages = useFanpages(Boolean(partner.fanpagesFromToken), partner.pageAdLimit ?? 250);
   const fanpageMissing = Boolean(partner.fanpagesFromToken) && !settings.pageId;
+  // Token ad accounts for the OPTIONAL target-account pick (cross-account clones). Default "" =
+  // each clone stays in its source's own account (media is account-local there).
+  const adAccounts = useAdAccounts(Boolean(partner.accountsFromToken), partner.preferredPixel);
+  const targetPixels = settings.accountId ? pixelOptionsOf(adAccounts, settings.accountId) : [];
+  // A picked target account needs a pixel of that account: conversion sources can't carry their
+  // own pixel across (it lives on the source's account) — the server enforces this too.
+  const pixelMissing = Boolean(settings.accountId) && !settings.pixelId;
   // Whoever is signed in — clone names default to end with " - <Username>".
   const me = user?.username ?? null;
 
@@ -296,7 +304,7 @@ function CloneInner({
   /** Queue each clone (rows × copies) into the Task Manager, which builds them one at a time
    *  (PAUSED) with live stages / errors / retry — the same queue and pipeline as launches. */
   const duplicate = () => {
-    if (fanpageMissing) return; // the button is disabled too — belt and suspenders
+    if (fanpageMissing || pixelMissing) return; // the button is disabled too — belt and suspenders
     const total = Math.max(1, Math.floor(settings.copies) || 1);
     let queued = 0;
     for (const r of rows) {
@@ -315,6 +323,8 @@ function CloneInner({
           ageMin: r.ageMin,
           userOs: settings.userOs,
           pageId: settings.pageId,
+          // Target account+pixel only when the batch is re-targeted; omitted = source account.
+          ...(settings.accountId ? { accountId: settings.accountId, pixelId: settings.pixelId } : {}),
         };
         enqueueClone({ partnerId, edit, name, geo: geoSummary(r.countries), budget: r.budget });
         queued++;
@@ -340,7 +350,7 @@ function CloneInner({
           <section className="flex flex-col gap-4 lg:sticky lg:top-[88px]">
             <SectionHeading>Settings</SectionHeading>
 
-            {/* destination — the fanpage is picked; account + pixel follow each source campaign */}
+            {/* destination — fanpage always picked; account+pixel optionally re-target the batch */}
             <div className="flex flex-col gap-2">
               <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Destination</span>
               <div className="flex flex-col gap-0.5 rounded-xl border border-line bg-surface2/40 p-1.5">
@@ -357,13 +367,55 @@ function CloneInner({
                     />
                   </div>
                 ) : null}
-                <LockedRow label="Account" value="From each source" />
-                <LockedRow label="Pixel" value="From each source" />
+                {partner.accountsFromToken ? (
+                  <>
+                    <div className="flex flex-col gap-1 px-1.5 py-1">
+                      <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Account</span>
+                      <SearchSelect
+                        value={settings.accountId}
+                        onChange={(v) =>
+                          patchSettings({
+                            accountId: v,
+                            // Auto-pick the target's pixel (FARM-1 when it carries it) the same way
+                            // a fresh launch card does; cleared when returning to "From each source".
+                            pixelId: v ? defaultPixelFor(adAccounts, v, partner.preferredPixel) : "",
+                          })
+                        }
+                        options={[
+                          { value: "", label: "From each source" },
+                          ...(adAccounts ?? []),
+                        ]}
+                        placeholder="Search account"
+                        emptyHint={adAccounts ? "No accounts on the token" : "Loading accounts…"}
+                      />
+                    </div>
+                    {settings.accountId ? (
+                      <div className="flex flex-col gap-1 px-1.5 py-1">
+                        <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Pixel</span>
+                        <SearchSelect
+                          value={settings.pixelId}
+                          onChange={(v) => patchSettings({ pixelId: v })}
+                          options={targetPixels.map((p) => ({ value: p.id, label: p.name, meta: p.id }))}
+                          placeholder="Search pixel"
+                          emptyHint={adAccounts ? "No pixels on this account" : "Loading pixels…"}
+                          metaWhenClosed
+                        />
+                      </div>
+                    ) : (
+                      <LockedRow label="Pixel" value="From each source" />
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <LockedRow label="Account" value="From each source" />
+                    <LockedRow label="Pixel" value="From each source" />
+                  </>
+                )}
               </div>
               <p className="px-0.5 text-[10.5px] leading-relaxed text-faint">
-                Each clone is created in its source campaign&apos;s own ad account (its video/image lives there),
-                with the source&apos;s pixel. Only the fanpage
-                {partner.fanpagesFromToken ? " above" : ""} is chosen — it applies to every clone in the batch.
+                {settings.accountId
+                  ? "Every clone in the batch is re-built in the picked account: the source video/image is re-uploaded there (adds a “Migrating media” step) and conversion clones optimize for the picked pixel."
+                  : "Each clone is created in its source campaign’s own ad account (its video/image lives there), with the source’s pixel. Pick an account above to clone the whole batch into it instead."}
               </p>
             </div>
 
@@ -434,7 +486,7 @@ function CloneInner({
                 <button
                   type="button"
                   onClick={duplicate}
-                  disabled={fanpageMissing}
+                  disabled={fanpageMissing || pixelMissing}
                   className={
                     "animate-pop-in flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-launch/50 " +
                     "bg-launch/15 text-[14px] font-semibold text-launch2 transition-all duration-150 hover:border-launch/70 " +
@@ -449,6 +501,9 @@ function CloneInner({
 
               {previewed && rows.length > 0 && fanpageMissing ? (
                 <p className="text-center text-[11px] text-warn">Pick a fanpage in Destination first.</p>
+              ) : null}
+              {previewed && rows.length > 0 && !fanpageMissing && pixelMissing ? (
+                <p className="text-center text-[11px] text-warn">Pick a pixel of the target account first.</p>
               ) : null}
 
               {previewed ? (

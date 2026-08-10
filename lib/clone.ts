@@ -75,20 +75,32 @@ export type CloneEdit = {
   userOs: "all" | "android";
   /** The PICKED fanpage id the clone advertises with (from /api/fanpages; server-validated). */
   pageId: string;
+  /** Target ad account (digits). Empty/absent = build in the SOURCE campaign's own account (the
+   *  default). When set to a DIFFERENT account, the server re-uploads the source media there
+   *  (video by its CDN source URL, image by adimages copy_from) before building the creative. */
+  accountId?: string;
+  /** The picked pixel of the TARGET account (required for conversion-optimized sources when
+   *  accountId is set — the source's pixel usually isn't shared to other accounts). */
+  pixelId?: string;
 };
 
-/** Global settings applied to every clone. The account + pixel are NOT settings — each clone is
- *  built in its SOURCE campaign's own account with the source's own pixel (reused media is an
- *  account-library asset), derived server-side. Only the fanpage + copies are chosen here. */
+/** Global settings applied to every clone. The fanpage, copies and (optionally) the target
+ *  account+pixel are batch-wide picks. Account default "" = each clone is built in its SOURCE
+ *  campaign's own account with the source's own pixel (media stays in its library); picking an
+ *  account re-uploads media there server-side and the clone optimizes for the picked pixel. */
 export type CloneSettings = {
   /** The PICKED fanpage (id) every clone in the batch advertises with. Empty = not picked yet. */
   pageId: string;
+  /** Target ad account for the whole batch ("" = from each source). */
+  accountId: string;
+  /** Pixel of the target account ("" = none picked; required while accountId is set). */
+  pixelId: string;
   userOs: "all" | "android";
   copies: number;
 };
 
 export function defaultSettings(_partner: PartnerId): CloneSettings {
-  return { pageId: "", userOs: "all", copies: 1 };
+  return { pageId: "", accountId: "", pixelId: "", userOs: "all", copies: 1 };
 }
 
 /**

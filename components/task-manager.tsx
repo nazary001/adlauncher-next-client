@@ -47,9 +47,12 @@ const LAUNCH_STAGES: readonly StageDef[] = [
   { key: "ad", label: "Publishing ad" },
 ];
 
-// Clone pipeline — mirrors /api/clone/run events; the source video is reused, so no upload.
+// Clone pipeline — mirrors /api/clone/run events; the source media is reused by id, so no upload.
+// "media" fires only for cross-account clones (the source video/image is re-homed in the target
+// account first); same-account clones skip straight from source to gcm.
 const CLONE_STAGES: readonly StageDef[] = [
   { key: "source", label: "Reading source" },
+  { key: "media", label: "Migrating media" },
   { key: "gcm", label: "Reserving code" },
   { key: "campaign", label: "Creating campaign" },
   { key: "adset", label: "Creating ad set" },

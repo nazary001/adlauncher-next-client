@@ -3,19 +3,22 @@ import { sessionFromCookieHeader } from "@/lib/session";
 import { partnerConfig, type PartnerId } from "@/lib/partners";
 import { bidAmountMissing } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
-import { FbError, fbPost, isAdvertisablePage, isTokenAccount } from "@/lib/fb-graph";
+import { FbError, accountPixels, fbPost, isAdvertisablePage, isTokenAccount } from "@/lib/fb-graph";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import { taskWriter } from "@/lib/task-store";
 import type { CloneEdit } from "@/lib/clone";
 import {
   type LaunchBinds,
   type SourceDetail,
+  type SourceMedia,
   adPayload,
   adsetPayload,
   campaignPayload,
   cloneCreativePayload,
   cloneToCampaign,
   fetchSourceDetail,
+  migrateMediaToAccount,
+  resolveCloneBinds,
   resolveLocales,
 } from "@/lib/clone-run";
 
@@ -57,7 +60,9 @@ async function createAdset(path: string, payload: Json): Promise<Json> {
  * Creates each clone on Facebook as a faithful PAUSED duplicate of its source: reuses the source's
  * media — video or static image — plus copy/title/CTA (only the gcm in the tracking link is swapped
  * for a freshly-claimed code), rebuilds targeting/bid/budget from the buyer's edits, all through the
- * launch payload builders.
+ * launch payload builders. An optional per-edit TARGET account (accountId+pixelId) makes the clone
+ * cross-account: the media is migrated into the target first (video via its CDN source URL →
+ * advideos file_url; image via adimages copy_from) and the clone optimizes for the picked pixel.
  * Streams NDJSON per-clone/per-stage progress. Gated by the proxy (session required).
  */
 export async function POST(req: Request) {
@@ -90,9 +95,10 @@ export async function POST(req: Request) {
   if (!partner.fanpagesFromToken) {
     return NextResponse.json({ ok: false, error: "partner_not_launchable" }, { status: 400 });
   }
-  // A clone is built in its SOURCE's own account (media is account-local) — the account/pixel are
-  // derived per source below, NOT picked. Only the fanka is the buyer's PICK, validated here
-  // against the launch token's own page list before any FB work starts.
+  // Default: a clone is built in its SOURCE's own account (media is account-local) with the
+  // source's pixel. The buyer MAY pick a target account+pixel instead (cross-account, media
+  // migrated). The fanka is always the buyer's pick. Every picked id is validated here against
+  // the launch token's own data before any FB work starts.
   const pageIds = [...new Set(edits.map((e) => String(e.pageId ?? "").trim()))];
   if (pageIds.some((p) => !/^\d{5,}$/.test(p))) {
     return NextResponse.json(
@@ -109,16 +115,57 @@ export async function POST(req: Request) {
         );
       }
     }
+    // Optional TARGET account+pixel (cross-account clones): validated up front against the token's
+    // own data — a bad pick fails the whole batch here, before any media migration or FB write.
+    // Same-account behaviour (no accountId) needs nothing: source accounts are re-checked per clone.
+    const targets = new Map<string, Set<string>>(); // accountId → picked pixel ids
+    for (const e of edits) {
+      const acct = String(e.accountId ?? "").trim().replace(/^act_/, "");
+      if (!acct) continue;
+      if (!/^\d{5,}$/.test(acct)) {
+        return NextResponse.json({ ok: false, error: "account_invalid — bad target ad account id" }, { status: 400 });
+      }
+      const px = String(e.pixelId ?? "").trim();
+      if (px && !/^\d{10,20}$/.test(px)) {
+        return NextResponse.json({ ok: false, error: "pixel_invalid — bad pixel id" }, { status: 400 });
+      }
+      if (!targets.has(acct)) targets.set(acct, new Set());
+      if (px) targets.get(acct)!.add(px);
+    }
+    for (const [acct, pixelIds] of targets) {
+      if (!(await isTokenAccount(acct))) {
+        return NextResponse.json(
+          { ok: false, error: "account_not_allowed — the launch token cannot use this ad account" },
+          { status: 400 },
+        );
+      }
+      if (pixelIds.size > 0) {
+        const pixels = await accountPixels(acct);
+        for (const px of pixelIds) {
+          if (!pixels.some((p) => p.id === px)) {
+            return NextResponse.json(
+              {
+                ok: false,
+                error: "pixel_not_on_account — this ad account does not carry the picked pixel (share it in BM first)",
+              },
+              { status: 400 },
+            );
+          }
+        }
+      }
+    }
   } catch (e) {
     const err = e as { message?: string };
     return NextResponse.json(
-      { ok: false, error: `fanpage check failed: ${err.message ?? String(e)}` },
+      { ok: false, error: `destination check failed: ${err.message ?? String(e)}` },
       { status: 502 },
     );
   }
 
   const encoder = new TextEncoder();
   const detailCache = new Map<string, SourceDetail>();
+  // Media already migrated into a target account this batch, keyed "<sourceCampaignId>→<accountId>".
+  const migratedCache = new Map<string, SourceMedia>();
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -156,18 +203,29 @@ export async function POST(req: Request) {
           }
           const media = src.media;
           if (!media) throw new FbError("source ad has no reusable video or image", { campaignId: edit.campaignId });
-          // A clone lives in its source's OWN account (reused video_id / image_hash is an
-          // account-library asset). Guard it's still a token account before writing there.
+          // The clone's build location: the source's own account by default, or the buyer's picked
+          // TARGET account (cross-account — media gets migrated there below). The source account is
+          // re-checked even for cross-account clones: its media is about to be read.
           if (!/^\d{5,}$/.test(src.accountId)) throw new FbError("source account unknown — cannot clone", { campaignId: edit.campaignId });
           if (!(await isTokenAccount(src.accountId))) {
             throw new FbError(`source account act_${src.accountId} is not available to the launch token`, { campaignId: edit.campaignId });
           }
+          const binds = resolveCloneBinds(edit, src);
+          // A conversion-optimized source cloned into ANOTHER account must carry a pixel of that
+          // account (the source's pixel isn't valid there) — the adset's promoted_object and the
+          // funnel's &pixel= both need it. Click sources (no source pixel) pass pixel-less.
+          if (binds.cross && /^\d{10,20}$/.test(src.pixelId) && !binds.pixelId) {
+            throw new FbError(
+              "pixel_required — the source optimizes for a pixel; pick a pixel of the target account",
+              { campaignId: edit.campaignId },
+            );
+          }
           const editBinds: LaunchBinds = {
-            accountId: src.accountId,
-            // The source's own promoted pixel (empty for click-optimized sources). Format-guarded so
-            // a malformed id from Graph can't be promoted on the ad set yet dropped from the link
-            // (which would leave the funnel firing its default pixel, diverging from the adset).
-            pixelId: /^\d{10,20}$/.test(src.pixelId) ? src.pixelId : "",
+            accountId: binds.accountId,
+            // Same-account: the source's own promoted pixel (or the buyer's explicit same-account
+            // pick); cross-account: the picked target-account pixel. Empty for click sources. The
+            // resolver format-guards ids so a malformed pixel can't reach the adset or the link.
+            pixelId: binds.pixelId,
             pageId: String(edit.pageId).trim(),
           };
 
@@ -191,6 +249,21 @@ export async function POST(req: Request) {
             throw new FbError("clone daily budget must be at least $1", { campaignId: edit.campaignId });
           }
 
+          // Cross-account: re-home the media in the target account BEFORE claiming a gcm — a failed
+          // migration (video unfetchable, processing error) must not burn a code or orphan anything.
+          // Cached per (source campaign → target account): N copies of one source migrate ONCE.
+          let cloneMedia = media;
+          if (binds.cross) {
+            progress("media");
+            const mKey = `${edit.campaignId}→${binds.accountId}`;
+            let migrated = migratedCache.get(mKey);
+            if (!migrated) {
+              migrated = await migrateMediaToAccount(media, src.accountId, binds.accountId, edit.name);
+              migratedCache.set(mKey, migrated);
+            }
+            cloneMedia = migrated;
+          }
+
           progress("gcm");
           claim = await claimGcm("", { campaign_name: edit.name, notes: "claimed via adlauncher clone" });
           const gcm = claim.gcm;
@@ -211,7 +284,7 @@ export async function POST(req: Request) {
           progress("creative");
           const creative = await fbPost(
             `act_${editBinds.accountId}/adcreatives`,
-            cloneCreativePayload(edit.name, editBinds.pageId, media, gcm, editBinds.pixelId),
+            cloneCreativePayload(edit.name, editBinds.pageId, cloneMedia, gcm, editBinds.pixelId),
           );
           created.creative_id = String(creative.id);
 

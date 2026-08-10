@@ -7,7 +7,7 @@
 
 import { type Campaign, makeCampaign } from "./types";
 import type { CloneEdit } from "./clone";
-import { fbGet } from "./fb-graph";
+import { FbError, fbGet, fbPost } from "./fb-graph";
 import { adPayload, adsetPayload, campaignPayload, type LaunchBinds } from "./fb-launch";
 
 type Json = Record<string, unknown>;
@@ -24,8 +24,9 @@ export type SourceDetail = {
   bidStrategy: string;
   optimizationGoal: string;
   conversionEvent: string;
-  /** The source's OWN ad account (digits) — a clone MUST be built here: its reused media
-   *  (video_id / image_hash) is an account-library asset, invalid in any other account. */
+  /** The source's OWN ad account (digits) — the DEFAULT build location: reused media
+   *  (video_id / image_hash) is an account-library asset, invalid in any other account.
+   *  Cloning into a different account requires migrateMediaToAccount() first. */
   accountId: string;
   /** The source adset's promoted pixel (empty when it optimizes for clicks / has none). */
   pixelId: string;
@@ -165,6 +166,101 @@ export async function fetchSourceDetail(campaignId: string): Promise<SourceDetai
   };
 }
 
+/** A plausible Meta pixel id (same guard as lib/partners isPixelId / the launch route). */
+const isPixelId = (v?: string): v is string => !!v && /^\d{10,20}$/.test(v);
+
+/** The account + pixel a clone is actually built with. Default (no target picked) = the source's
+ *  own account and pixel, exactly the pre-cross-account behaviour. A picked target account makes
+ *  the clone CROSS-account: media must be migrated there, and a conversion-optimized source needs
+ *  the buyer's picked pixel of that account (the source's pixel usually isn't shared to it). Click
+ *  sources stay pixel-less either way. Pure — unit-testable without FB. */
+export function resolveCloneBinds(
+  edit: Pick<CloneEdit, "accountId" | "pixelId">,
+  src: Pick<SourceDetail, "accountId" | "pixelId">,
+): { accountId: string; pixelId: string; cross: boolean } {
+  const target = String(edit.accountId ?? "")
+    .trim()
+    .replace(/^act_/, "");
+  const chosen = String(edit.pixelId ?? "").trim();
+  const srcPixel = isPixelId(src.pixelId) ? src.pixelId : "";
+  if (!target || target === src.accountId) {
+    // Same-account clone. A pixel explicitly picked with the target (validated to live on this
+    // account upstream) replaces the source's for conversion sources; click sources ignore it.
+    const pixelId = srcPixel ? (isPixelId(chosen) ? chosen : srcPixel) : "";
+    return { accountId: src.accountId, pixelId, cross: false };
+  }
+  return { accountId: target, pixelId: srcPixel && isPixelId(chosen) ? chosen : "", cross: true };
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Wait until an uploaded video finishes processing (mirrors /api/launch's waitForVideo). */
+async function waitVideoReady(videoId: string, timeoutMs = 180_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const body = await fbGet(`${videoId}?fields=status`);
+    const status = ((body?.status ?? {}) as Json).video_status;
+    if (status === "ready") return;
+    if (status === "error") throw new FbError("migrated video processing failed", body);
+    await sleep(4000);
+  }
+  throw new FbError("migrated video processing timed out", { videoId });
+}
+
+/** The thumbnail FB auto-generates for a processed video — required as the creative's image. */
+async function videoThumbUrl(videoId: string): Promise<string> {
+  for (let i = 0; i < 8; i++) {
+    const body = await fbGet(`${videoId}/thumbnails?fields=uri,is_preferred`);
+    const thumbs = (body?.data as Array<Json> | undefined) ?? [];
+    const pick = thumbs.find((t) => t.is_preferred) ?? thumbs[0];
+    if (pick?.uri) return String(pick.uri);
+    await sleep(3000);
+  }
+  throw new FbError("no thumbnail available for the migrated video", { videoId });
+}
+
+/**
+ * Re-home the source's media in ANOTHER ad account, returning media rebuilt around the new
+ * account-local assets. Video: read the original's CDN `source` URL → `advideos file_url` into the
+ * target (FB fetches the bytes itself, same mechanism as the launch flow) → wait for processing →
+ * take the NEW video's own thumbnail (the source's image_hash/image_url belong to the old account).
+ * Image: official cross-account `adimages copy_from`, swapping in the returned target-local hash
+ * (picture-URL-only sources need no migration — a URL is account-agnostic).
+ */
+export async function migrateMediaToAccount(
+  media: SourceMedia,
+  sourceAccountId: string,
+  targetAccountId: string,
+  name: string,
+): Promise<SourceMedia> {
+  if (media.kind === "video") {
+    const videoId = String(media.data.video_id ?? "");
+    const info = await fbGet(`${videoId}?fields=source`);
+    const sourceUrl = typeof info.source === "string" ? info.source : "";
+    if (!sourceUrl) {
+      throw new FbError("source video file unavailable — cannot clone it into another account", { videoId });
+    }
+    const up = await fbPost(`act_${targetAccountId}/advideos`, { name, file_url: sourceUrl });
+    if (!up?.id) throw new FbError("video migration upload failed", up);
+    const newId = String(up.id);
+    await waitVideoReady(newId);
+    const thumb = await videoThumbUrl(newId);
+    const data: Json = { ...media.data, video_id: newId, image_url: thumb };
+    delete data.image_hash; // the old account's asset — invalid in the target
+    return { kind: "video", data };
+  }
+
+  const hash = typeof media.data.image_hash === "string" ? media.data.image_hash : "";
+  if (!hash) return media; // picture-URL image — nothing account-local to migrate
+  const body = await fbPost(`act_${targetAccountId}/adimages`, {
+    copy_from: { source_account_id: sourceAccountId, hash },
+  });
+  const images = (body?.images ?? {}) as Record<string, { hash?: string }>;
+  const newHash = Object.values(images)[0]?.hash;
+  if (!newHash) throw new FbError("image migration failed — no hash returned", body);
+  return { kind: "image", data: { ...media.data, image_hash: String(newHash) } };
+}
+
 /** Swap the gcm value in a tracking link (or append it), keeping every other param + FB macro.
  *  Matches any existing value ([^&#]*), not just digits, so a malformed `gcm=` (empty/non-numeric)
  *  is REPLACED rather than leaving a duplicate `gcm=` param the funnel would misread. */
@@ -230,8 +326,8 @@ function videoCreativeData(videoData: Json, gcm: string, pixelId: string): Json 
 
 /** link_data rebuild (static image ad): same image/copy/headline/CTA, the gcm + pixel swapped in
  *  the destination link (and in the CTA link when the source carries one). The image is reused by
- *  image_hash — an account-library asset, valid here because clones are created in the same ad
- *  account the source lives in. */
+ *  image_hash — an account-library asset, valid because the clone is built in the account that
+ *  hash lives in (the source's own, or the target after migrateMediaToAccount rehomed it). */
 function imageCreativeData(linkData: Json, gcm: string, pixelId: string): Json {
   const ld: Json = {};
   if (typeof linkData.link === "string") ld.link = rewriteLink(linkData.link, gcm, pixelId);
