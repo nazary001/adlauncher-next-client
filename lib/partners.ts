@@ -83,7 +83,7 @@ const MAGICOFFERS_PIXEL: Bound = { id: "3288799954641310", name: "HS-Pixel-FARM-
 export const PARTNERS: PartnerConfig[] = [
   {
     id: "br",
-    label: "Бразики HS",
+    label: "HS",
     Flag: BrazilFlag,
     usesGcm: false,
     usesProfile: true,
@@ -97,7 +97,7 @@ export const PARTNERS: PartnerConfig[] = [
   },
   {
     id: "in",
-    label: "Индусы MO",
+    label: "MO",
     Flag: IndiaFlag,
     usesGcm: true,
     usesProfile: false,
@@ -117,7 +117,7 @@ export const PARTNERS: PartnerConfig[] = [
   },
   {
     id: "us",
-    label: "США - AIF",
+    label: "AIF",
     Flag: UsaFlag,
     usesGcm: false,
     usesProfile: true,
