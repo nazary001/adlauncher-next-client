@@ -5,6 +5,7 @@ import type { Campaign, FileItem } from "@/lib/types";
 import { firstVideo, fullName, isLaunchable, makeCampaign } from "@/lib/types";
 import { geoSummary } from "@/lib/catalog";
 import {
+  GCM_POOL_MAX,
   type PartnerConfig,
   type PartnerId,
   applyPartnerLocks,
@@ -290,8 +291,8 @@ function LauncherInner({ user }: { user?: SessionUser }) {
     });
   };
 
-  // Capped at the gcm pool size (codes 01–99) so a full wave can't leave a card without a code.
-  const MAX_CARDS = 99;
+  // Capped at the gcm pool size (codes 01–200) so a full wave can't leave a card without a code.
+  const MAX_CARDS = GCM_POOL_MAX;
 
   /** Wave builder: grow every card to `n` copies (fresh gcm each; primary text copied verbatim).
    *  Clones open expanded so you can review them right away. `n` is the total-per-card multiplier. */

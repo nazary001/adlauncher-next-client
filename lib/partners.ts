@@ -236,8 +236,15 @@ export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[
   return changed ? next : rows;
 }
 
+/** The MagicAds gcm marker pool: codes 1..200 (widened from 99 per partner, 2026-08-10). */
+export const GCM_POOL_MAX = 200;
+
+/** Canonical form of a pool code: 1–99 stay 2-digit zero-padded ("01".."99" — every live link and
+ *  registry row uses that shape), 100–200 are plain 3-digit. */
+export const gcmCode = (n: number): string => String(n).padStart(2, "0");
+
 /**
- * Fill the lowest free 2-digit code (01..99) for landing-having campaigns missing a gcm.
+ * Fill the lowest free code (01..200) for landing-having campaigns missing a gcm.
  * `reserved` = codes already taken in the Strapi registry. While it's null (not loaded yet)
  * NOTHING is assigned — never hand out a code that might already be live. The batch also
  * avoids reusing a code across two campaigns in the same session.
@@ -253,8 +260,8 @@ export function assignGcmCodes<T extends { landing: string; gcm: string }>(
   const next = rows.map((r) => {
     if (!r.landing || r.gcm) return r;
     let code = "";
-    for (let n = 1; n <= 99; n++) {
-      const c = String(n).padStart(2, "0");
+    for (let n = 1; n <= GCM_POOL_MAX; n++) {
+      const c = gcmCode(n);
       if (!used.has(c)) {
         code = c;
         break;

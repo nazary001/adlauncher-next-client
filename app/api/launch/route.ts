@@ -505,7 +505,7 @@ export async function POST(req: Request) {
       } catch (e) {
         const err = e as FbError;
         // Free the gcm code when nothing was created on FB (early failures like a rate limit or a
-        // video error) so the 01–99 pool never leaks; keep the row (marked failed) once a campaign
+        // video error) so the 01–200 pool never leaks; keep the row (marked failed) once a campaign
         // exists so the orphaned PAUSED campaign stays traceable.
         if (claim?.documentId) {
           if (created.campaign_id)

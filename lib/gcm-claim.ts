@@ -2,19 +2,46 @@
 // share a code). Same contract as app/api/launch/route.ts, extracted so the clone run reuses it
 // without touching the launch route. Server-only.
 
+import { GCM_POOL_MAX, gcmCode } from "@/lib/partners";
+
 const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
 const STRAPI_TOKEN = process.env.STRAPI_TOKEN ?? "";
 
 type Json = Record<string, unknown>;
 
+/**
+ * Every code currently in the registry (any status — the unique constraint spans them all).
+ * Paged: Strapi Cloud CLAMPS pageSize to 100 (verified live — `pageSize=200` comes back as 100),
+ * so a single fetch would silently drop rows once the pool grows past 100. Throws on any failed
+ * page — a partial list must never masquerade as the whole registry.
+ */
+export async function fetchUsedGcms(): Promise<string[]> {
+  const out: string[] = [];
+  // gcm is unique → row count ≤ pool size; +1 page of slack, hard-bounded against runaway loops.
+  const maxPages = Math.ceil(GCM_POOL_MAX / 100) + 1;
+  for (let page = 1; page <= maxPages; page++) {
+    const res = await fetch(
+      `${STRAPI}/api/gcm-maps?fields[0]=gcm&pagination[page]=${page}&pagination[pageSize]=100`,
+      { headers: { Authorization: `Bearer ${STRAPI_TOKEN}` }, cache: "no-store" },
+    );
+    if (!res.ok) throw new Error(`strapi ${res.status}`);
+    const body = await res.json().catch(() => ({}));
+    const rows = (body.data ?? []) as Array<{ gcm?: string }>;
+    out.push(...rows.map((r) => String(r.gcm ?? "")).filter(Boolean));
+    if (rows.length < 100) break;
+  }
+  return out;
+}
+
 async function usedCodes(): Promise<Set<string>> {
-  const res = await fetch(`${STRAPI}/api/gcm-maps?fields[0]=gcm&pagination[pageSize]=200`, {
-    headers: { Authorization: `Bearer ${STRAPI_TOKEN}` },
-    cache: "no-store",
-  });
-  if (!res.ok) return new Set();
-  const body = await res.json().catch(() => ({}));
-  return new Set(((body.data ?? []) as Array<{ gcm?: string }>).map((r) => String(r.gcm ?? "")).filter(Boolean));
+  // Degrade to empty on failure: the POST's unique constraint is the real guard — a claim just
+  // walks forward through 400s. The strict variant above is for callers that must not show a
+  // partial registry (the /api/gcm preview).
+  try {
+    return new Set(await fetchUsedGcms());
+  } catch {
+    return new Set();
+  }
 }
 
 /**
@@ -42,9 +69,10 @@ async function wonClaim(gcm: string, documentId: string): Promise<boolean> {
 }
 
 /**
- * Reserve a gcm code (2-digit 01–99, matching the buy-link contract gcm=NN). Tries `desired`, then
- * walks to the next free code on a unique-violation OR a lost concurrent race. Returns the code
- * claimed + the Strapi documentId (for later id back-fill / release). Race-safe (see wonClaim).
+ * Reserve a gcm code (01–200: 2-digit padded below 100, plain 3-digit above — the buy-link contract
+ * gcm=N accepts 1..200 since 2026-08-10). Tries `desired`, then walks to the next free code on a
+ * unique-violation OR a lost concurrent race. Returns the code claimed + the Strapi documentId
+ * (for later id back-fill / release). Race-safe (see wonClaim).
  */
 export async function claimGcm(
   desired: string,
@@ -52,9 +80,9 @@ export async function claimGcm(
 ): Promise<{ gcm: string; documentId: string | null }> {
   const used = await usedCodes();
   const candidates: string[] = [];
-  const start = /^\d{1,2}$/.test(desired) ? Math.min(parseInt(desired, 10) || 1, 99) : 1;
-  for (let n = start; n <= 99; n++) if (!used.has(String(n).padStart(2, "0"))) candidates.push(String(n).padStart(2, "0"));
-  for (let n = 1; n < start; n++) if (!used.has(String(n).padStart(2, "0"))) candidates.push(String(n).padStart(2, "0"));
+  const start = /^\d{1,3}$/.test(desired) ? Math.min(parseInt(desired, 10) || 1, GCM_POOL_MAX) : 1;
+  for (let n = start; n <= GCM_POOL_MAX; n++) if (!used.has(gcmCode(n))) candidates.push(gcmCode(n));
+  for (let n = 1; n < start; n++) if (!used.has(gcmCode(n))) candidates.push(gcmCode(n));
 
   for (const gcm of candidates) {
     const res = await fetch(`${STRAPI}/api/gcm-maps`, {
@@ -77,7 +105,7 @@ export async function claimGcm(
       throw new Error(`gcm claim failed (${res.status}): ${JSON.stringify(body).slice(0, 200)}`);
     }
   }
-  throw new Error("gcm pool exhausted — no free code 01–99");
+  throw new Error(`gcm pool exhausted — no free code 01–${GCM_POOL_MAX}`);
 }
 
 export async function backfillGcm(documentId: string | null, patch: Json): Promise<void> {
