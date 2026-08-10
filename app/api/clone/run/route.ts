@@ -3,7 +3,15 @@ import { sessionFromCookieHeader } from "@/lib/session";
 import { partnerConfig, type PartnerId } from "@/lib/partners";
 import { bidAmountMissing } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
-import { FbError, accountPixels, advertisablePageName, fbPost, isAdvertisablePage, isTokenAccount } from "@/lib/fb-graph";
+import {
+  FbError,
+  accountPixels,
+  advertisablePageName,
+  fbPost,
+  isAdvertisablePage,
+  isTokenAccount,
+  withFbBudget,
+} from "@/lib/fb-graph";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import { taskWriter } from "@/lib/task-store";
 import type { CloneEdit } from "@/lib/clone";
@@ -26,6 +34,12 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 type Json = Record<string, unknown>;
+
+// Same per-invocation FB retry budget as /api/launch: rate-limited calls wait out Meta's regain
+// estimate (up to 8 attempts) but never sleep past the deadline — the batch must settle every
+// task row and stream a terminal event BEFORE Vercel can kill the function.
+const FB_BUDGET_MS = 240_000;
+const FB_BUDGET_RETRIES = 8;
 
 /**
  * Create the ad set, self-healing the regional "universal ads" declarations Meta demands for
@@ -171,7 +185,9 @@ export async function POST(req: Request) {
   // Media already migrated into a target account this batch, keyed "<sourceCampaignId>→<accountId>".
   const migratedCache = new Map<string, SourceMedia>();
 
-  const stream = new ReadableStream<Uint8Array>({
+  // withFbBudget wraps the CONSTRUCTION: start() begins inside it, so the whole batch inherits it.
+  const stream = withFbBudget({ deadlineAt: Date.now() + FB_BUDGET_MS, retries: FB_BUDGET_RETRIES }, () =>
+    new ReadableStream<Uint8Array>({
     async start(controller) {
       const send = (o: Json) => controller.enqueue(encoder.encode(JSON.stringify(o) + "\n"));
       let ok = 0;
@@ -355,7 +371,8 @@ export async function POST(req: Request) {
       send({ stage: "batch-done", ok, failed, total: edits.length });
       controller.close();
     },
-  });
+    }),
+  );
 
   return new Response(stream, {
     headers: {

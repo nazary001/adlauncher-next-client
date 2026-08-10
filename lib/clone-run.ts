@@ -202,7 +202,8 @@ export function resolveCloneBinds(
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Wait until an uploaded video finishes processing (mirrors /api/launch's waitForVideo). */
+/** Wait until an uploaded video finishes processing (mirrors /api/launch's waitForVideo).
+ *  6s cadence — status polls dominate a wave's call count on the dev-tier quota. */
 async function waitVideoReady(videoId: string, timeoutMs = 180_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -210,7 +211,7 @@ async function waitVideoReady(videoId: string, timeoutMs = 180_000): Promise<voi
     const status = ((body?.status ?? {}) as Json).video_status;
     if (status === "ready") return;
     if (status === "error") throw new FbError("migrated video processing failed", body);
-    await sleep(4000);
+    await sleep(6000);
   }
   throw new FbError("migrated video processing timed out", { videoId });
 }
@@ -222,7 +223,7 @@ async function videoThumbUrl(videoId: string): Promise<string> {
     const thumbs = (body?.data as Array<Json> | undefined) ?? [];
     const pick = thumbs.find((t) => t.is_preferred) ?? thumbs[0];
     if (pick?.uri) return String(pick.uri);
-    await sleep(3000);
+    await sleep(4000);
   }
   throw new FbError("no thumbnail available for the migrated video", { videoId });
 }

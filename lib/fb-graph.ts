@@ -3,10 +3,28 @@
 // 4/17/613/is_transient), extracted so read routes (clone sources) get the same resilience.
 // Server-only: FB_LAUNCH_TOKEN never reaches the browser.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readAppCache, writeAppCache } from "./app-cache";
 
 const FB = "https://graph.facebook.com/v21.0";
 const TOKEN = process.env.FB_LAUNCH_TOKEN ?? "";
+
+// ---------- per-request retry budget (write pipelines) ----------
+
+// The launch/clone routes opt into MORE PATIENT rate-limit retries (the token is on Meta's low
+// development tier — mid-wave throttles are routine) whose waits honor Meta's own regain estimate.
+// The deadline is the hard stop: the function must finish with a CLEAN error before Vercel kills
+// it mid-stream — a timeout skips the error path entirely (no gcm release/retire, task row stuck).
+// AsyncLocalStorage so the budget flows through every nested helper without threading params;
+// callers outside a budget (UI reads) keep the old snappy 5×backoff behaviour.
+type FbBudget = { deadlineAt: number; retries: number };
+const fbBudgetALS = new AsyncLocalStorage<FbBudget>();
+
+export function withFbBudget<T>(budget: FbBudget, fn: () => T): T {
+  // fn runs synchronously inside the context; every async continuation it starts (including a
+  // ReadableStream's start() begun during construction) inherits the budget via ALS.
+  return fbBudgetALS.run(budget, fn);
+}
 
 export function hasFbToken(): boolean {
   return TOKEN.length > 0;
@@ -52,28 +70,52 @@ type UsageStat = {
   estimated_time_to_regain_access?: number;
 };
 
-/** Pace under Meta's rolling ads rate-limit (x-business-use-case-usage / x-app-usage). */
-async function throttle(res: Response): Promise<void> {
+/** Rolling ads rate-limit usage from a response's x-business-use-case-usage / x-app-usage:
+ *  pct = 0–100% of the limit, regainMin = Meta's minutes-until-access-returns estimate. */
+function usageOf(res: Response): { pct: number; regainMin: number } {
   const raw = res.headers.get("x-business-use-case-usage") ?? res.headers.get("x-app-usage") ?? "";
-  if (!raw) return;
+  let pct = 0;
+  let regainMin = 0;
+  if (!raw) return { pct, regainMin };
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const stats: UsageStat[] = [];
     if (typeof (parsed as UsageStat).call_count === "number") stats.push(parsed as UsageStat); // flat x-app-usage
     for (const v of Object.values(parsed)) if (Array.isArray(v)) for (const o of v) if (o && typeof o === "object") stats.push(o as UsageStat);
-    let pct = 0;
-    let regainMin = 0;
     for (const s of stats) {
       pct = Math.max(pct, s.call_count ?? 0, s.total_cputime ?? 0, s.total_time ?? 0);
       regainMin = Math.max(regainMin, s.estimated_time_to_regain_access ?? 0);
     }
-    if (regainMin > 0) await sleep(Math.min(regainMin * 60_000, 30_000));
-    else if (pct >= 95) await sleep(8000);
-    else if (pct >= 90) await sleep(4000);
-    else if (pct >= 80) await sleep(1500);
   } catch {
-    /* malformed header — ignore */
+    /* malformed header — treat as no data */
   }
+  return { pct, regainMin };
+}
+
+/** Pace under Meta's rolling ads rate-limit (x-business-use-case-usage / x-app-usage). */
+async function throttle(res: Response): Promise<void> {
+  const { pct, regainMin } = usageOf(res);
+  if (regainMin > 0) await sleep(Math.min(regainMin * 60_000, 30_000));
+  else if (pct >= 95) await sleep(8000);
+  else if (pct >= 90) await sleep(4000);
+  else if (pct >= 80) await sleep(1500);
+}
+
+/**
+ * One shared retry decision for fbGet/fbPost. Rate-limited call → how long to wait before the
+ * next attempt, or null to give up now. Inside a budget: waits stretch to Meta's own regain
+ * estimate (capped 60s) and more attempts are allowed, but a wait that would cross the deadline
+ * fails IMMEDIATELY — better a clean per-launch error than a function timeout that skips every
+ * error path. Outside a budget (UI reads): the old snappy exponential ladder.
+ */
+function retryWaitMs(res: Response, attempt: number): number | null {
+  const budget = fbBudgetALS.getStore();
+  const maxAttempts = budget?.retries ?? RATE_RETRIES;
+  if (attempt >= maxAttempts) return null;
+  if (!budget) return rateBackoff(attempt);
+  const { regainMin } = usageOf(res);
+  const wait = Math.max(rateBackoff(attempt), Math.min(regainMin * 60_000, 60_000));
+  return Date.now() + wait <= budget.deadlineAt ? wait : null;
 }
 
 /**
@@ -95,9 +137,12 @@ export async function fbGet(path: string): Promise<Json> {
       await throttle(res);
       return body;
     }
-    if (attempt < RATE_RETRIES && isRateLimited(body)) {
-      await sleep(rateBackoff(attempt));
-      continue;
+    if (isRateLimited(body)) {
+      const wait = retryWaitMs(res, attempt);
+      if (wait !== null) {
+        await sleep(wait);
+        continue;
+      }
     }
     throw new FbError(fbErrorMessage(body, `GET ${path} failed`), body, isRateLimited(body) ? 429 : 502);
   }
@@ -540,9 +585,12 @@ export async function fbPost(path: string, params: Json): Promise<Json> {
       await throttle(res);
       return body;
     }
-    if (attempt < RATE_RETRIES && isRateLimited(body)) {
-      await sleep(rateBackoff(attempt));
-      continue;
+    if (isRateLimited(body)) {
+      const wait = retryWaitMs(res, attempt);
+      if (wait !== null) {
+        await sleep(wait);
+        continue;
+      }
     }
     throw new FbError(fbErrorMessage(body, `POST ${path} failed`), body, isRateLimited(body) ? 429 : 502);
   }

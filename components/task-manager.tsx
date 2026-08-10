@@ -64,6 +64,10 @@ const CLONE_STAGES: readonly StageDef[] = [
 // A Blob upload has no server-side deadline — a hung connection would otherwise spin the task (and
 // block the one-at-a-time queue) forever. Seen live 08-07: a task stuck at "Uploading video" 30+ min.
 const UPLOAD_TIMEOUT_MS = 5 * 60_000;
+// Breather between consecutive FB-writing tasks: the dev-tier token meters a rolling window, and
+// back-to-back launches (each ~10–25 Graph calls) walk waves straight into (#4)/(#17). A short
+// fixed gap lets the window drain between tasks; server-side throttle/retries handle the rest.
+const TASK_GAP_MS = 8_000;
 // Client-side deadline on the /api/launch|clone request+stream. The server caps itself at
 // maxDuration=300s; this fires just past that so a socket held open by infra after the function
 // dies can't wedge the single-threaded queue. Aborting after the server is already dead means no
@@ -759,6 +763,9 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
       while (queue.current.length) {
         const id = queue.current.shift() as string;
         await runTask(id);
+        // Gap between tasks, not after the last one — `working` stays held through the sleep, so a
+        // concurrent enqueue()'s pump() no-ops and the queue stays strictly one-at-a-time.
+        if (queue.current.length) await new Promise((r) => setTimeout(r, TASK_GAP_MS));
       }
     } finally {
       working.current = false;
