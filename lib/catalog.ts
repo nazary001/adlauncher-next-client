@@ -404,6 +404,16 @@ export function countryName(code: string): string {
   return COUNTRY_BY_CODE.get(code) ?? code;
 }
 
+/** Canonical geo label for a code list — the ONE formatter used by the card, the Launch bay and the
+ *  clone board, so the same campaign never reads "US, BR" in one place and "United States, Brazil"
+ *  in another. WW → "World"; ≤2 → country names; more → "N geos". */
+export function geoSummary(codes: string[]): string {
+  if (codes.length === 0) return "no geo";
+  if (codes[0] === "WW") return "World";
+  if (codes.length <= 2) return codes.map(countryName).join(", ");
+  return `${codes.length} geos`;
+}
+
 /* Placeholder data below stands in for LION lookups until the logic phase. */
 
 function seed(s: string): number {

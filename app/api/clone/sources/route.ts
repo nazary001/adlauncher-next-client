@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { FbError, fbGet, hasFbToken } from "@/lib/fb-graph";
 import { moneyLabel } from "@/lib/types";
+import { sessionFromCookieHeader } from "@/lib/session";
 import type { CloneCreative, CloneSource } from "@/lib/clone";
 
 export const runtime = "nodejs";
@@ -103,6 +104,9 @@ function mapCampaign(id: string, obj: Json): CloneSource {
  * the duplicator shows live data. Gated by the proxy (session required). Read-only.
  */
 export async function GET(req: Request) {
+  if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
   if (!hasFbToken()) {
     return NextResponse.json({ ok: false, error: "no_fb_token" }, { status: 500 });
   }

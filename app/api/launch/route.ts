@@ -12,6 +12,7 @@ import {
 } from "@/lib/fb-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { accountPixels, isAdvertisablePage, isTokenAccount } from "@/lib/fb-graph";
+import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import { taskWriter } from "@/lib/task-store";
 import { del } from "@vercel/blob";
 
@@ -20,8 +21,6 @@ export const maxDuration = 300;
 
 const FB = "https://graph.facebook.com/v21.0";
 const TOKEN = process.env.FB_LAUNCH_TOKEN ?? "";
-const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
-const STRAPI_TOKEN = process.env.STRAPI_TOKEN ?? "";
 
 // ---------- Graph API helpers ----------
 
@@ -206,70 +205,10 @@ async function videoThumb(videoId: string): Promise<string> {
   throw new FbError("no video thumbnail available", { videoId });
 }
 
-// ---------- gcm registry (atomic claim, unique constraint) ----------
-
-async function strapiUsedCodes(): Promise<Set<string>> {
-  const res = await fetch(`${STRAPI}/api/gcm-maps?fields[0]=gcm&pagination[pageSize]=200`, {
-    headers: { Authorization: `Bearer ${STRAPI_TOKEN}` },
-    cache: "no-store",
-  });
-  if (!res.ok) return new Set();
-  const body = await res.json().catch(() => ({}));
-  return new Set(((body.data ?? []) as Array<{ gcm?: string }>).map((r) => String(r.gcm ?? "")).filter(Boolean));
-}
-
-/**
- * Reserve a gcm code before the link is built, so two campaigns can never share one.
- * Tries `desired`; on the DB unique-violation, walks to the next free code and retries.
- * Returns the code actually claimed plus the Strapi documentId (for later id back-fill).
- */
-async function claimGcm(
-  desired: string,
-  meta: Json,
-): Promise<{ gcm: string; documentId: string | null }> {
-  const used = await strapiUsedCodes();
-  const candidates: string[] = [];
-  // Codes are 2-digit (01–99): the buy-link contract is gcm=NN, so never hand out "100".
-  const start = /^\d{1,2}$/.test(desired) ? Math.min(parseInt(desired, 10) || 1, 99) : 1;
-  for (let n = start; n <= 99; n++) if (!used.has(String(n).padStart(2, "0"))) candidates.push(String(n).padStart(2, "0"));
-  for (let n = 1; n < start; n++) if (!used.has(String(n).padStart(2, "0"))) candidates.push(String(n).padStart(2, "0"));
-
-  for (const gcm of candidates) {
-    const res = await fetch(`${STRAPI}/api/gcm-maps`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${STRAPI_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ data: { gcm, platform: "facebook", status: "active", ...meta } }),
-    });
-    if (res.ok) {
-      const body = await res.json().catch(() => ({}));
-      return { gcm, documentId: body?.data?.documentId ?? null };
-    }
-    // 400 = unique violation (someone took it) → try the next candidate; other errors abort.
-    if (res.status !== 400) {
-      const body = await res.json().catch(() => ({}));
-      throw new FbError(`gcm claim failed (${res.status})`, body);
-    }
-  }
-  throw new FbError("gcm pool exhausted — no free code 01–99", {});
-}
-
-async function backfillGcm(documentId: string | null, patch: Json): Promise<void> {
-  if (!documentId) return;
-  await fetch(`${STRAPI}/api/gcm-maps/${documentId}`, {
-    method: "PUT",
-    headers: { Authorization: `Bearer ${STRAPI_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ data: patch }),
-  }).catch(() => {});
-}
-
-/** Release a claimed gcm code (delete the registry row) — used when a launch fails before any FB
- *  resource is created, so failed attempts don't permanently drain the 01–99 pool. */
-async function deleteGcm(documentId: string): Promise<void> {
-  await fetch(`${STRAPI}/api/gcm-maps/${documentId}`, {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${STRAPI_TOKEN}` },
-  }).catch(() => {});
-}
+// gcm registry claim/backfill/release now come from @/lib/gcm-claim — the SAME race-safe
+// (claim-then-verify) implementation the clone route uses. The launch route previously carried its
+// own inline copy that returned on the first 2xx without verifying it won the code, so two concurrent
+// launches (multi-user waves) could both commit the same code → two live campaigns sharing one gcm.
 
 // ---------- locale resolution (best-effort, non-fatal) ----------
 
@@ -414,18 +353,24 @@ export async function POST(req: Request) {
   if (!videoUrl) {
     return NextResponse.json({ ok: false, stage: "media", error: "video_required" }, { status: 400 });
   }
-  // The video must be a Vercel Blob URL from our own store — never an arbitrary URL. Otherwise a
+  // The video must be a Vercel Blob URL our OWN broker produced — never an arbitrary URL. Otherwise a
   // logged-in user could make FB fetch any URL (advideos file_url) or make `del()` target a blob
-  // outside our store. Blob URLs are https on the *.blob.vercel-storage.com host.
+  // outside our flow. Our broker always uploads to `creatives/<taskid>-<name>` on the
+  // *.blob.vercel-storage.com host over https, so we require both the host suffix AND that path
+  // prefix — narrowing the surface to blobs this app actually creates (rev-api #2).
   {
     let host = "";
+    let path = "";
     try {
       const u = new URL(videoUrl);
-      host = u.protocol === "https:" ? u.hostname : "";
+      if (u.protocol === "https:") {
+        host = u.hostname;
+        path = u.pathname;
+      }
     } catch {
       host = "";
     }
-    if (!host.endsWith(".blob.vercel-storage.com")) {
+    if (!host.endsWith(".blob.vercel-storage.com") || !path.startsWith("/creatives/")) {
       return NextResponse.json({ ok: false, stage: "media", error: "video_url_invalid" }, { status: 400 });
     }
   }

@@ -13,8 +13,8 @@ import {
   loadSampleSources,
   makeCloneRow,
 } from "@/lib/clone";
-import { moneyLabel } from "@/lib/types";
-import { OS_OPTIONS, countryName } from "@/lib/catalog";
+import { limitMoney, moneyLabel } from "@/lib/types";
+import { OS_OPTIONS, countryName, geoSummary } from "@/lib/catalog";
 import { type PartnerId, partnerConfig } from "@/lib/partners";
 import { Field, Select } from "./ui";
 import {
@@ -48,13 +48,6 @@ const cellInput =
   "outline-none transition-colors duration-150 hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15";
 
 /** Compact geo string for the Task Manager row (mirrors the launcher's geo summary). */
-function geoShort(codes: string[]): string {
-  if (codes.length === 0) return "no geo";
-  if (codes[0] === "WW") return "World";
-  if (codes.length <= 2) return codes.join(", ");
-  return `${codes.length} geos`;
-}
-
 function SectionHeading({ children, right }: { children: React.ReactNode; right?: React.ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-2 border-b border-line pb-2">
@@ -194,6 +187,14 @@ function CloneInner({
   const [targetingRowId, setTargetingRowId] = useState<string | null>(null);
   const [highOfferRowId, setHighOfferRowId] = useState<string | null>(null);
   const [justQueued, setJustQueued] = useState(0);
+  // Copies input: `null` = not being edited (show the committed settings.copies). While editing it
+  // holds the raw string so the field can be transiently empty — clearing "1" to type "20" no longer
+  // snaps back to 1 on every keystroke. Committed value stays clamped 1..100.
+  const [copiesDraft, setCopiesDraft] = useState<string | null>(null);
+  const setCopies = (n: number) => {
+    patchSettings({ copies: Math.max(1, Math.min(100, n)) });
+    setCopiesDraft(null);
+  };
   const nextRowId = useRef(1);
   const queuedTimer = useRef<number | null>(null);
 
@@ -315,7 +316,7 @@ function CloneInner({
           userOs: settings.userOs,
           pageId: settings.pageId,
         };
-        enqueueClone({ partnerId, edit, name, geo: geoShort(r.countries), budget: r.budget });
+        enqueueClone({ partnerId, edit, name, geo: geoSummary(r.countries), budget: r.budget });
         queued++;
       }
     }
@@ -380,25 +381,30 @@ function CloneInner({
                 <button
                   type="button"
                   aria-label="Fewer copies"
-                  onClick={() => patchSettings({ copies: Math.max(1, settings.copies - 1) })}
+                  onClick={() => setCopies(settings.copies - 1)}
                   disabled={settings.copies <= 1}
                   className="flex w-9 shrink-0 items-center justify-center text-[17px] leading-none text-dim transition-colors hover:bg-raise hover:text-ink disabled:opacity-30 disabled:hover:bg-transparent"
                 >
                   −
                 </button>
                 <input
-                  type="number"
-                  min={1}
-                  max={100}
+                  type="text"
+                  inputMode="numeric"
                   aria-label="Copies per campaign"
-                  value={settings.copies}
-                  onChange={(e) => patchSettings({ copies: Math.max(1, Math.min(100, Number(e.target.value) || 1)) })}
-                  className="w-full min-w-0 border-x border-line bg-transparent text-center font-mono text-[13px] tabular-nums text-ink outline-none [appearance:textfield] focus:bg-surface2/60 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                  value={copiesDraft ?? String(settings.copies)}
+                  onFocus={() => setCopiesDraft(String(settings.copies))}
+                  onChange={(e) => {
+                    const raw = e.target.value.replace(/[^\d]/g, "").slice(0, 3);
+                    setCopiesDraft(raw);
+                    if (raw !== "") patchSettings({ copies: Math.max(1, Math.min(100, Number(raw))) });
+                  }}
+                  onBlur={() => setCopiesDraft(null)}
+                  className="w-full min-w-0 border-x border-line bg-transparent text-center font-mono text-[13px] tabular-nums text-ink outline-none focus:bg-surface2/60"
                 />
                 <button
                   type="button"
                   aria-label="More copies"
-                  onClick={() => patchSettings({ copies: Math.min(100, settings.copies + 1) })}
+                  onClick={() => setCopies(settings.copies + 1)}
                   disabled={settings.copies >= 100}
                   className="flex w-9 shrink-0 items-center justify-center text-[17px] leading-none text-dim transition-colors hover:bg-raise hover:text-ink disabled:opacity-30 disabled:hover:bg-transparent"
                 >
@@ -609,11 +615,13 @@ function CloneInner({
                           </span>
                         </td>
 
-                        {/* clone settings (editable) */}
+                        {/* clone settings (editable) — money-sanitized like the launcher's fields
+                            (limitMoney) so garbage can't reach CloneEdit.roasGoal/budget → money()=0
+                            → an ad set Meta rejects (orphan + burnt gcm). */}
                         <td className="border-l border-line px-2 py-3.5">
                           <input
                             value={r.roasGoal}
-                            onChange={(e) => patchRow(r.id, { roasGoal: e.target.value })}
+                            onChange={(e) => patchRow(r.id, { roasGoal: limitMoney(e.target.value, 1000) })}
                             inputMode="decimal"
                             placeholder="1,20"
                             aria-label="ROAS goal"
@@ -627,7 +635,7 @@ function CloneInner({
                             </span>
                             <input
                               value={r.budget}
-                              onChange={(e) => patchRow(r.id, { budget: e.target.value })}
+                              onChange={(e) => patchRow(r.id, { budget: limitMoney(e.target.value, 10000) })}
                               inputMode="decimal"
                               aria-label="Daily budget"
                               className={`${cellInput} pl-5`}

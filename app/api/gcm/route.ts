@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { sessionFromCookieHeader } from "@/lib/session";
 
 // Server-only: the Strapi token never reaches the browser.
 const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
@@ -28,7 +29,12 @@ function nextFree(used: string[]): string | null {
 }
 
 /** GET → { used, next, poolMax } — the launcher assigns from this, skipping taken codes. */
-export async function GET() {
+export async function GET(req: Request) {
+  // Belt-and-suspenders: this route is proxy-gated, but (like /api/launch) it self-checks the
+  // session so a matcher regression can't expose the registry or let anyone burn codes.
+  if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
   if (!STRAPI || !TOKEN) {
     return NextResponse.json({ error: "strapi_not_configured" }, { status: 500 });
   }
@@ -47,6 +53,11 @@ export async function GET() {
  * FB-launch flow; not fired while merely editing the form.)
  */
 export async function POST(req: Request) {
+  // State-changing (creates a Strapi row, consumes the 01–99 pool) → self-check the session, same
+  // as /api/launch, so a proxy-matcher regression can't let an unauthenticated caller claim/burn codes.
+  if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
   if (!STRAPI || !TOKEN) {
     return NextResponse.json({ error: "strapi_not_configured" }, { status: 500 });
   }

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { FbError, advertisablePages, hasFbToken } from "@/lib/fb-graph";
+import { sessionFromCookieHeader } from "@/lib/session";
 
 export const runtime = "nodejs";
 
@@ -15,7 +16,10 @@ export const runtime = "nodejs";
  * Degrades quietly (ok:false, 200) when the token is absent so the picker just renders empty;
  * real API failures return their mapped status (429 rate-limited / 502 otherwise).
  */
-export async function GET() {
+export async function GET(req: Request) {
+  if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
   if (!hasFbToken()) return NextResponse.json({ ok: false, reason: "no_token", pages: [] });
   try {
     const pages = await advertisablePages();

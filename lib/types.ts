@@ -127,16 +127,23 @@ type ReadyOpts = {
   page?: boolean;
   account?: boolean;
   pixel?: boolean;
+  gcm?: boolean;
 };
 
 export function isReady(c: Campaign, opts: ReadyOpts = {}): boolean {
-  const { landing = false, profile = true, page = false, account = false, pixel = false } = opts;
+  // All requirements default OFF — callers pass launchReadyOpts(partner) to turn on exactly what
+  // that partner needs. (profile used to default ON, which would wrongly gate the Indians partner —
+  // usesProfile:false — as never-ready if ever called without opts.)
+  const { landing = false, profile = false, page = false, account = false, pixel = false, gcm = false } = opts;
   if (!c.name.trim() || c.countries.length === 0) return false;
   if (profile && !c.profile) return false;
   if (landing && !c.landing) return false;
   if (page && !c.page) return false;
   if (account && !c.account) return false;
   if (pixel && !c.pixel) return false;
+  // gcm-monetized partners: a card without a claimed code isn't ready (its tracking link would
+  // carry an empty gcm=). The server re-claims on launch, but the UI must not show "ready" without it.
+  if (gcm && !c.gcm) return false;
   // A cleared/zero daily budget would create the campaign then get the ad set rejected by Meta
   // (orphan + burnt gcm) — never let such a card count as launchable. $1 = Meta's USD daily floor.
   if (parseMoney(c.budget) < 1) return false;

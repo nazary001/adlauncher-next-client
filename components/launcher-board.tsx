@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Campaign, FileItem } from "@/lib/types";
 import { firstVideo, fullName, isLaunchable, makeCampaign } from "@/lib/types";
-import { countryName } from "@/lib/catalog";
+import { geoSummary } from "@/lib/catalog";
 import {
   type PartnerConfig,
   type PartnerId,
@@ -64,12 +64,6 @@ function fillAccountDefaults(
   return changed ? next : rows;
 }
 
-function geoShort(c: Campaign): string {
-  if (c.countries.length === 0) return "no geo";
-  if (c.countries[0] === "WW") return "World";
-  if (c.countries.length <= 2) return c.countries.map(countryName).join(", ");
-  return `${c.countries.length} geos`;
-}
 
 /** Rendered inside the (app) layout's TaskManagerProvider — the queue lives up there so it
  *  survives navigating between the launcher and the clone board. */
@@ -200,7 +194,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
         videoName: video.name,
         name: fullName(c),
         gcm: c.gcm,
-        geo: geoShort(c),
+        geo: geoSummary(c.countries),
         budget: c.budget,
       });
       launched.add(c.id);

@@ -144,6 +144,7 @@ export function launchReadyOpts(p: PartnerConfig): {
   page: boolean;
   account: boolean;
   pixel: boolean;
+  gcm: boolean;
 } {
   return {
     landing: p.usesGcm,
@@ -151,6 +152,10 @@ export function launchReadyOpts(p: PartnerConfig): {
     page: Boolean(p.fanpagesFromToken),
     account: Boolean(p.accountsFromToken),
     pixel: Boolean(p.accountsFromToken),
+    // gcm-monetized partners need a claimed code before the card counts as ready — a landing card
+    // whose code hasn't loaded (registry unreachable / pre-load window) must not look launchable,
+    // and Copy must not offer a "?gcm=" link with an empty code.
+    gcm: p.usesGcm,
   };
 }
 

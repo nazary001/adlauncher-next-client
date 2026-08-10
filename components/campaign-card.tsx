@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { Campaign } from "@/lib/types";
-import { bidAmountMissing, fullName, isReady, limitMoney, moneyLabel } from "@/lib/types";
+import { bidAmountMissing, fullName, isLaunchable, limitMoney, moneyLabel, parseMoney } from "@/lib/types";
 import {
   AGES,
   BID_STRATEGIES,
@@ -21,6 +21,7 @@ import {
   PROFILES,
   REDIRECT_TYPES,
   accountsFor,
+  geoSummary,
   pagesFor,
   pixelsFor,
 } from "@/lib/catalog";
@@ -54,6 +55,28 @@ const LINK_ROLE_CLASS: Record<LinkRole, string> = {
   fire: "text-launch2",
   pixel: "text-accent2",
 };
+
+/** Human list of what a card is still missing to launch — partner-aware (mirrors isLaunchable +
+ *  launchReadyOpts), so the draft-dot tooltip names the real blockers instead of a fixed string. */
+function missingRequirements(
+  c: Campaign,
+  partner: PartnerConfig,
+  opts: ReturnType<typeof launchReadyOpts>,
+): string[] {
+  const m: string[] = [];
+  if (!c.name.trim()) m.push("name");
+  if (c.countries.length === 0) m.push("geo");
+  if (opts.account && !c.account) m.push("account");
+  if (opts.pixel && !c.pixel) m.push("pixel");
+  if (opts.page && !c.page) m.push(partner.pageLabel.toLowerCase());
+  if (opts.landing && !c.landing) m.push("landing");
+  if (opts.gcm && !c.gcm) m.push("gcm code");
+  if (opts.profile && !c.profile) m.push("profile");
+  if (parseMoney(c.budget) < 1) m.push("budget");
+  if (bidAmountMissing(c)) m.push("bid cap");
+  if (!c.files.some((f) => f.kind === "video")) m.push("video");
+  return m.length ? m : ["—"];
+}
 
 function SectionLabel({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
   return (
@@ -126,7 +149,11 @@ export function CampaignCard({
 
   const accounts = accountsFor(c.profile);
   const pixels = pixelsFor(c.account);
-  const ready = isReady(c, launchReadyOpts(partner));
+  // Match the Launch bay + launch filter EXACTLY (isLaunchable = isReady + a video creative), so the
+  // card dot can't show green "ready" while the rail refuses to launch it for want of a video.
+  const opts = launchReadyOpts(partner);
+  const ready = isLaunchable(c, opts);
+  const missing = missingRequirements(c, partner, opts);
   const bidCapEnabled = c.bidStrategy !== "LOWEST_COST_WITHOUT_CAP";
 
   // Indians pin one account → its pixel and fanpage render locked, not searchable.
@@ -141,21 +168,18 @@ export function CampaignCard({
   const conversions = c.optimization === "conversions";
   const derivedLink = fullLandingUrl(partner, c.landing, c.gcm, conversions, c.pixel);
 
+  // Copy is offered only once the link is COMPLETE — for gcm partners that means a claimed code, so
+  // the button never yields a "?gcm=" link with an empty code (which is also why the preview shows a
+  // "…" placeholder until the code lands: preview and Copy now agree — nothing to copy until ready).
+  const linkCopyable = Boolean(derivedLink) && (!partner.usesGcm || Boolean(c.gcm));
   function copyLink() {
-    if (!derivedLink) return;
+    if (!linkCopyable) return;
     navigator.clipboard?.writeText(derivedLink);
     setCopied(true);
     setTimeout(() => setCopied(false), 1200);
   }
   const eventLabel = CONVERSION_EVENTS.find((e) => e.value === c.conversionEvent)?.label ?? "";
-  const geoSummary =
-    c.countries[0] === "WW"
-      ? "World"
-      : c.countries.length === 0
-        ? "no geo"
-        : c.countries.length <= 3
-          ? c.countries.join(", ")
-          : `${c.countries.length} geo`;
+  const geo = geoSummary(c.countries);
 
   function remove() {
     setLeaving(true);
@@ -181,7 +205,7 @@ export function CampaignCard({
           {String(index + 1).padStart(2, "0")}
         </span>
         <span
-          title={ready ? "Ready to launch" : "Draft — name, profile and geo required"}
+          title={ready ? "Ready to launch" : `Draft — needs: ${missing.join(", ")}`}
           className={
             "h-1.5 w-1.5 shrink-0 rounded-full transition-colors " +
             (ready ? "bg-launch2 shadow-[0_0_8px_rgba(52,211,153,0.9)]" : "bg-warn")
@@ -205,7 +229,7 @@ export function CampaignCard({
             ) : null}
             <span className="font-mono">${moneyLabel(c.budget)}</span>
             <span>·</span>
-            <span>{geoSummary}</span>
+            <span>{geo}</span>
             <span>·</span>
             <span>{eventLabel}</span>
           </span>
@@ -542,11 +566,13 @@ export function CampaignCard({
                                 <button
                                   type="button"
                                   onClick={copyLink}
+                                  disabled={!linkCopyable}
+                                  title={linkCopyable ? undefined : "Waiting for a gcm code…"}
                                   aria-label={copied ? "Link copied to clipboard" : "Copy link to clipboard"}
                                   className={
                                     "group inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-semibold " +
                                     "transition-all duration-200 active:scale-[0.94] focus-visible:outline-none " +
-                                    "focus-visible:ring-2 focus-visible:ring-accent/40 " +
+                                    "focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40 " +
                                     (copied
                                       ? "animate-copy-flash border-launch/40 bg-launch/15 text-launch2"
                                       : "border-line2 bg-raise text-dim hover:border-accent/50 hover:bg-accent/10 hover:text-ink")

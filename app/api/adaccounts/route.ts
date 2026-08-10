@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { FbError, hasFbToken, tokenAdAccounts } from "@/lib/fb-graph";
+import { sessionFromCookieHeader } from "@/lib/session";
 
 export const runtime = "nodejs";
 // Cold refresh = paginated account list + one pixels call per account; warm calls answer from
@@ -16,7 +17,10 @@ export const maxDuration = 60;
  * Degrades quietly (ok:false, 200) when the token is absent; real API failures return their
  * mapped status (429 rate-limited / 502 otherwise).
  */
-export async function GET() {
+export async function GET(req: Request) {
+  if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
   if (!hasFbToken()) return NextResponse.json({ ok: false, reason: "no_token", accounts: [] });
   try {
     const accounts = await tokenAdAccounts();

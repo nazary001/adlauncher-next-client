@@ -50,8 +50,27 @@ const SYNONYMS: string[][] = [
   ["economize", "guarde"],
 ];
 
+// A word appearing in two groups is AMBIGUOUS: without knowing the copy's language we can't pick the
+// right group, and a plain last-wins Map build leaked across languages — EN/ES "simple", ES/PT
+// "crédito"/"rápido"/"ideal" would map to whichever group came last, turning "financiamiento rápido"
+// into "financiamiento na hora" (Portuguese) in Spanish copy. Homographs are therefore excluded as
+// swap KEYS (they stay put) — they remain valid swap RESULTS inside their own group, which is safe.
+const ambiguousWords = (() => {
+  const seen = new Set<string>();
+  const dup = new Set<string>();
+  for (const group of SYNONYMS) for (const w of group) {
+    const k = w.toLowerCase();
+    if (seen.has(k)) dup.add(k);
+    seen.add(k);
+  }
+  return dup;
+})();
+
 const SYN_MAP = new Map<string, string[]>();
-for (const group of SYNONYMS) for (const w of group) SYN_MAP.set(w.toLowerCase(), group);
+for (const group of SYNONYMS) for (const w of group) {
+  const k = w.toLowerCase();
+  if (!ambiguousWords.has(k)) SYN_MAP.set(k, group);
+}
 
 const EMOJI_POOL = ["✨", "🔥", "🚀", "💡", "✅", "💸", "📈", "⭐", "💰", "👉"];
 
@@ -113,19 +132,18 @@ function varyPunctuation(text: string): { out: string; changed: boolean } {
 }
 
 /** Produce a near-variant of ad copy so duplicated campaigns aren't identical. Falls back to a
- *  trailing emoji if nothing else changed, so the result is always distinct from the input. */
+ *  trailing emoji if nothing else changed, so the result is always distinct from the input.
+ *  Distinctness is judged by COMPARING STRINGS, never by the stages' own "changed" flags — an
+ *  emoji "swap" can draw the same emoji from the pool (💸→💸), which used to flag changed=true
+ *  while the text stayed byte-identical, letting an unchanged clone slip through. */
 export function spinCopy(text: string): string {
   const original = (text ?? "").trim();
   if (!original) return text;
 
-  const s = swapSynonyms(original);
-  let out = dedupeAdjacent(reorderSentences(s.out));
-  const e = varyEmoji(out);
-  out = e.out;
-  const p = varyPunctuation(out);
-  out = p.out;
+  let out = dedupeAdjacent(reorderSentences(swapSynonyms(original).out));
+  out = varyEmoji(out).out;
+  out = varyPunctuation(out).out;
 
-  const changed = s.changed || e.changed || p.changed || out !== original;
-  if (!changed) out = `${original.replace(/\s+$/, "")} ${pick(EMOJI_POOL)}`;
+  if (out === original) out = `${original.replace(/\s+$/, "")} ${pick(EMOJI_POOL)}`;
   return out;
 }

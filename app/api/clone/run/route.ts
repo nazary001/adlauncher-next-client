@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { partnerConfig, type PartnerId } from "@/lib/partners";
 import { bidAmountMissing } from "@/lib/types";
-import { SUPPORTED_BID_STRATEGIES } from "@/lib/fb-launch";
+import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
 import { FbError, fbPost, isAdvertisablePage, isTokenAccount } from "@/lib/fb-graph";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import { taskWriter } from "@/lib/task-store";
@@ -183,6 +183,12 @@ export async function POST(req: Request) {
           }
           if (campaign.countries.length === 0) {
             throw new FbError("source has no country targeting to clone — set a geo on the clone row", { campaignId: edit.campaignId });
+          }
+          // Budget floor, mirroring the launch route: a cleared/garbage budget → money()=0 →
+          // daily_budget below Meta's $1 floor → the ad set is rejected AFTER the campaign exists,
+          // orphaning it and burning a gcm. Reject here, before any claim/FB write.
+          if (money(campaign.budget) < 100) {
+            throw new FbError("clone daily budget must be at least $1", { campaignId: edit.campaignId });
           }
 
           progress("gcm");

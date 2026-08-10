@@ -184,7 +184,9 @@ export function flattenPreview(rows: CloneRow[], copies: number): ClonePreviewIt
         rowId: r.id,
         copyIndex: k,
         total,
-        name: total > 1 ? `${fullCloneName(r)} · ${k}/${total}` : fullCloneName(r),
+        // Must match the name the run actually creates (clone-board `duplicate()`): "<name> (k)" —
+        // the preview would otherwise misrepresent what ships (was "<name> · k/total").
+        name: total > 1 ? `${fullCloneName(r)} (${k})` : fullCloneName(r),
         budget: r.budget,
         roasGoal: r.roasGoal,
         countries: r.countries,

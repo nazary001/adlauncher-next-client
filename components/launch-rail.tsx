@@ -2,16 +2,9 @@
 
 import type { Campaign } from "@/lib/types";
 import { fullName, isLaunchable, moneyLabel, parseMoney } from "@/lib/types";
-import { CONVERSION_EVENTS, countryName } from "@/lib/catalog";
+import { CONVERSION_EVENTS, geoSummary } from "@/lib/catalog";
 import { type PartnerConfig, launchReadyOpts } from "@/lib/partners";
 import { CheckIcon, EyeIcon, RocketIcon } from "./icons";
-
-function geoLabel(c: Campaign): string {
-  if (c.countries.length === 0) return "no geo";
-  if (c.countries[0] === "WW") return "World";
-  if (c.countries.length <= 2) return c.countries.map(countryName).join(", ");
-  return `${c.countries.length} geos`;
-}
 
 export function LaunchRail({
   campaigns,
@@ -98,7 +91,7 @@ export function LaunchRail({
                           ? c.profile.replace("globecoders-", "")
                           : "no profile") +
                         " · " +
-                        geoLabel(c) +
+                        geoSummary(c.countries) +
                         " · " +
                         eventLabel}
                     </span>

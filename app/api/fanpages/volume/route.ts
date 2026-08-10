@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { FbError, advertisablePages, hasFbToken, pageAdCounts } from "@/lib/fb-graph";
 import { partnerConfig } from "@/lib/partners";
+import { sessionFromCookieHeader } from "@/lib/session";
 
 export const runtime = "nodejs";
 // The cold sweep is ~60 sequential-ish Graph reads (6-way pool) — give it headroom beyond the
@@ -15,7 +16,10 @@ export const maxDuration = 60;
  * (one ads_volume call per page, cached 15 min server-side): the picker renders the page list
  * instantly and decorates it with these counts when they arrive. Gated by the proxy.
  */
-export async function GET() {
+export async function GET(req: Request) {
+  if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
   if (!hasFbToken()) return NextResponse.json({ ok: false, reason: "no_token", counts: {} });
   try {
     const pages = await advertisablePages();

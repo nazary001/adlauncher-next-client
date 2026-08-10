@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { sessionFromCookieHeader } from "@/lib/session";
 
 // Server-only: the FB launch token never reaches the browser.
 const TOKEN = process.env.FB_LAUNCH_TOKEN ?? "";
@@ -17,6 +18,9 @@ const VER = "v21.0";
  * without a badge; real API/transport failures return 4xx/5xx.
  */
 export async function GET(req: Request) {
+  if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
   if (!TOKEN) return NextResponse.json({ ok: false, reason: "no_token" });
 
   const account = new URL(req.url).searchParams.get("account") ?? "";
