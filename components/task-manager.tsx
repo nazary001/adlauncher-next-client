@@ -35,11 +35,12 @@ export type { LaunchTask } from "@/lib/task-view";
 
 type StageDef = { key: string; label: string };
 
-// Launch pipeline ("upload" is client→Blob; the rest mirror /api/launch events).
+// Launch pipeline ("upload" is client→Blob; the rest mirror /api/launch events). Media-neutral
+// labels: the "video" stage registers either kind (image launches skip "processing").
 const LAUNCH_STAGES: readonly StageDef[] = [
-  { key: "upload", label: "Uploading video" },
+  { key: "upload", label: "Uploading creative" },
   { key: "gcm", label: "Reserving code" },
-  { key: "video", label: "Registering video" },
+  { key: "video", label: "Registering media" },
   { key: "processing", label: "Processing video" },
   { key: "campaign", label: "Creating campaign" },
   { key: "adset", label: "Creating ad set" },
@@ -98,8 +99,9 @@ type LaunchInput = {
   kind: "launch";
   partnerId: PartnerId;
   campaign: Campaign;
-  videoUrl: string;
-  videoName: string;
+  mediaUrl: string;
+  mediaName: string;
+  mediaKind: "video" | "image";
 };
 
 type CloneInput = {
@@ -118,8 +120,9 @@ const lsKeyFor = (user?: SessionUser) => (user?.username ? `${LS_BASE}.${user.us
 export type EnqueueArgs = {
   partnerId: PartnerId;
   campaign: Campaign;
-  videoUrl: string;
-  videoName: string;
+  mediaUrl: string;
+  mediaName: string;
+  mediaKind: "video" | "image";
   name: string;
   gcm: string;
   geo: string;
@@ -454,30 +457,33 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
       // failed (previously Strapi kept the initial "upload" even for FB-side failures).
       let lastStage = "upload";
       try {
-        // Recover the video bytes from the (session-lived) object URL captured at enqueue.
-        const blob = await fetch(input.videoUrl).then((r) => r.blob());
-        const file = new File([blob], input.videoName || "creative.mp4", {
-          type: blob.type || "video/mp4",
+        // Recover the creative bytes from the (session-lived) object URL captured at enqueue.
+        const fallbackType = input.mediaKind === "image" ? "image/jpeg" : "video/mp4";
+        const fallbackName = input.mediaKind === "image" ? "creative.jpg" : "creative.mp4";
+        const blob = await fetch(input.mediaUrl).then((r) => r.blob());
+        const file = new File([blob], input.mediaName || fallbackName, {
+          type: blob.type || fallbackType,
         });
 
         // Upload the creative straight to Vercel Blob — this bypasses the serverless request-body
         // limit (~4.5MB) entirely. The launch route then gets just the URL and FB pulls the video
-        // from it via file_url. Bounded by UPLOAD_TIMEOUT_MS so a hung connection fails the task
-        // (retryable) instead of spinning forever and blocking the queue.
-        const safeName = (file.name || "creative.mp4").replace(/[^\w.-]+/g, "_");
+        // from it via file_url (images are re-read server-side into adimages). Bounded by
+        // UPLOAD_TIMEOUT_MS so a hung connection fails the task (retryable) instead of spinning
+        // forever and blocking the queue.
+        const safeName = (file.name || fallbackName).replace(/[^\w.-]+/g, "_");
         const uploadAbort = new AbortController();
         const uploadTimer = window.setTimeout(() => uploadAbort.abort(), UPLOAD_TIMEOUT_MS);
-        let videoUrl: string;
+        let mediaUrl: string;
         try {
-          ({ url: videoUrl } = await upload(`creatives/${id}-${safeName}`, file, {
+          ({ url: mediaUrl } = await upload(`creatives/${id}-${safeName}`, file, {
             access: "public",
-            contentType: file.type || "video/mp4",
+            contentType: file.type || fallbackType,
             handleUploadUrl: "/api/blob-upload",
             abortSignal: uploadAbort.signal,
           }));
         } catch (e) {
           throw uploadAbort.signal.aborted
-            ? new Error(`video upload timed out after ${UPLOAD_TIMEOUT_MS / 60_000} min — check the connection and retry`)
+            ? new Error(`creative upload timed out after ${UPLOAD_TIMEOUT_MS / 60_000} min — check the connection and retry`)
             : e;
         } finally {
           window.clearTimeout(uploadTimer);
@@ -493,7 +499,13 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
           const res = await fetch("/api/launch", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ partnerId: input.partnerId, campaign: input.campaign, videoUrl, taskId: id }),
+            body: JSON.stringify({
+              partnerId: input.partnerId,
+              campaign: input.campaign,
+              mediaUrl,
+              mediaKind: input.mediaKind,
+              taskId: id,
+            }),
             signal: streamAbort.signal,
           });
           resStatus = res.status;
@@ -762,8 +774,9 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
         kind: "launch",
         partnerId: args.partnerId,
         campaign: args.campaign,
-        videoUrl: args.videoUrl,
-        videoName: args.videoName,
+        mediaUrl: args.mediaUrl,
+        mediaName: args.mediaName,
+        mediaKind: args.mediaKind,
       });
       // static fields reused on every remote upsert for this task
       meta.current.set(id, {

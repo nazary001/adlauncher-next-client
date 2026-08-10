@@ -163,6 +163,13 @@ export async function isAdvertisablePage(pageId: string): Promise<boolean> {
   return pages.some((p) => p.id === pageId);
 }
 
+/** Display name of one of the token's own pages ("" when unknown) — free, the list is cached.
+ *  Feeds the ad set's DSA beneficiary/payor declaration (what Ads Manager pre-fills there). */
+export async function advertisablePageName(pageId: string): Promise<string> {
+  const pages = await advertisablePages();
+  return pages.find((p) => p.id === pageId)?.name ?? "";
+}
+
 // ---------- ad accounts of the launch token (with their pixels) ----------
 
 export type TokenAdAccount = { id: string; name: string; pixels: { id: string; name: string }[] };

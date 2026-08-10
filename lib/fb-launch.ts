@@ -5,6 +5,8 @@ import { parseMoney } from "./types";
 export type LaunchBinds = {
   accountId: string; // digits only, no act_ prefix
   pageId: string;
+  /** Display name of the fanpage — becomes the ad set's DSA beneficiary/payor declaration. */
+  pageName: string;
   pixelId: string;
 };
 
@@ -140,6 +142,16 @@ export function adsetPayload(
   const declarations = regionalDeclarations(c);
   if (declarations.length) p.regional_regulated_categories = declarations;
 
+  // EU-reaching audiences (worldwide always is) demand a DSA "who is promoted / who pays"
+  // declaration, or Meta rejects the ad set with "Advertiser not specified" — UNLESS the ad
+  // account carries a default beneficiary. Only one of our accounts did, so launches silently
+  // depended on landing there (live failure 2026-08-10). Declare the fanpage on every ad set —
+  // exactly what Ads Manager pre-fills — so any token account works.
+  if (binds.pageName) {
+    p.dsa_beneficiary = binds.pageName;
+    p.dsa_payor = binds.pageName;
+  }
+
   return p;
 }
 
@@ -171,6 +183,32 @@ export function creativePayload(
   return {
     name,
     object_story_spec: { page_id: binds.pageId, video_data: videoData },
+  };
+}
+
+/** POST /act_<id>/adcreatives — static image creative (link_data). Field names differ from
+ *  video_data: the headline is `name`, the description is `description`, and the destination
+ *  `link` is mandatory on write (it also feeds the CTA). Same copy mapping as the video path. */
+export function imageCreativePayload(
+  c: Campaign,
+  name: string,
+  binds: LaunchBinds,
+  media: { imageHash: string; link: string },
+): Record<string, unknown> {
+  const linkData: Record<string, unknown> = {
+    link: media.link,
+    image_hash: media.imageHash,
+    message: c.copy || undefined, // primary text
+    name: c.headline || c.title || undefined, // headline
+  };
+  if (c.title && c.headline && c.title !== c.headline) linkData.description = c.title;
+  if (c.cta) {
+    linkData.call_to_action = { type: c.cta, value: { link: media.link } };
+  }
+
+  return {
+    name,
+    object_story_spec: { page_id: binds.pageId, link_data: linkData },
   };
 }
 

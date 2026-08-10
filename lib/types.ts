@@ -151,12 +151,13 @@ export function isReady(c: Campaign, opts: ReadyOpts = {}): boolean {
   return true;
 }
 
-/** A campaign can actually fire only if it's ready AND carries a video creative. */
+/** A campaign can actually fire only if it's ready AND carries a creative (video or image). */
 export function isLaunchable(c: Campaign, opts: ReadyOpts = {}): boolean {
-  return isReady(c, opts) && c.files.some((f) => f.kind === "video");
+  return isReady(c, opts) && firstMedia(c) !== undefined;
 }
 
-/** The video creative a launch will upload (first video file). */
-export function firstVideo(c: Campaign) {
-  return c.files.find((f) => f.kind === "video");
+/** The creative a launch will upload: the first video, else the first image (video is the
+ *  launcher's native format and wins when a card carries both). */
+export function firstMedia(c: Campaign): FileItem | undefined {
+  return c.files.find((f) => f.kind === "video") ?? c.files.find((f) => f.kind === "image");
 }

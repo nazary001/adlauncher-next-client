@@ -3,7 +3,7 @@ import { sessionFromCookieHeader } from "@/lib/session";
 import { partnerConfig, type PartnerId } from "@/lib/partners";
 import { bidAmountMissing } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
-import { FbError, accountPixels, fbPost, isAdvertisablePage, isTokenAccount } from "@/lib/fb-graph";
+import { FbError, accountPixels, advertisablePageName, fbPost, isAdvertisablePage, isTokenAccount } from "@/lib/fb-graph";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import { taskWriter } from "@/lib/task-store";
 import type { CloneEdit } from "@/lib/clone";
@@ -106,6 +106,9 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
+  // Page display names, for the ad set's DSA beneficiary/payor declaration (see adsetPayload) —
+  // resolved once per unique page from the same cached list that validates the ids below.
+  const pageNames = new Map<string, string>();
   try {
     for (const p of pageIds) {
       if (!(await isAdvertisablePage(p))) {
@@ -114,6 +117,7 @@ export async function POST(req: Request) {
           { status: 400 },
         );
       }
+      pageNames.set(p, await advertisablePageName(p));
     }
     // Optional TARGET account+pixel (cross-account clones): validated up front against the token's
     // own data — a bad pick fails the whole batch here, before any media migration or FB write.
@@ -227,6 +231,7 @@ export async function POST(req: Request) {
             // resolver format-guards ids so a malformed pixel can't reach the adset or the link.
             pixelId: binds.pixelId,
             pageId: String(edit.pageId).trim(),
+            pageName: pageNames.get(String(edit.pageId).trim()) ?? "",
           };
 
           // Build + validate the clone campaign BEFORE claiming a gcm, so an un-clonable source

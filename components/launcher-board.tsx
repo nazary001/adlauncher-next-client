@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Campaign, FileItem } from "@/lib/types";
-import { firstVideo, fullName, isLaunchable, makeCampaign } from "@/lib/types";
+import { firstMedia, fullName, isLaunchable, makeCampaign } from "@/lib/types";
 import { geoSummary } from "@/lib/catalog";
 import {
   GCM_POOL_MAX,
@@ -185,14 +185,15 @@ function LauncherInner({ user }: { user?: SessionUser }) {
     const nextReserved = reserved ? new Set(reserved) : null;
     const launched = new Set<string>();
     for (const c of launchable) {
-      const video = firstVideo(c);
-      if (!video) continue;
+      const media = firstMedia(c);
+      if (!media) continue;
       if (nextReserved && c.gcm) nextReserved.add(c.gcm);
       enqueue({
         partnerId,
         campaign: c,
-        videoUrl: video.url,
-        videoName: video.name,
+        mediaUrl: media.url,
+        mediaName: media.name,
+        mediaKind: media.kind === "image" ? "image" : "video",
         name: fullName(c),
         gcm: c.gcm,
         geo: geoSummary(c.countries),

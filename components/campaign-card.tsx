@@ -74,7 +74,7 @@ function missingRequirements(
   if (opts.profile && !c.profile) m.push("profile");
   if (parseMoney(c.budget) < 1) m.push("budget");
   if (bidAmountMissing(c)) m.push("bid cap");
-  if (!c.files.some((f) => f.kind === "video")) m.push("video");
+  if (!c.files.some((f) => f.kind === "video" || f.kind === "image")) m.push("creative");
   return m.length ? m : ["—"];
 }
 

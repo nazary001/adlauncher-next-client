@@ -8,10 +8,11 @@ import {
   adsetPayload,
   campaignPayload,
   creativePayload,
+  imageCreativePayload,
   money,
 } from "@/lib/fb-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { accountPixels, isAdvertisablePage, isTokenAccount } from "@/lib/fb-graph";
+import { accountPixels, advertisablePageName, isAdvertisablePage, isTokenAccount } from "@/lib/fb-graph";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import { taskWriter } from "@/lib/task-store";
 import { del } from "@vercel/blob";
@@ -170,7 +171,7 @@ async function createAdset(path: string, payload: Json): Promise<Json> {
   return fbPost(path, { ...payload, regional_regulated_categories: [...cats] });
 }
 
-// ---------- video upload + processing ----------
+// ---------- media upload + processing ----------
 
 /** Register the creative with FB by URL — FB fetches the bytes from the (public) Blob URL itself,
  *  so the video never passes through this function. */
@@ -178,6 +179,28 @@ async function uploadVideo(accountId: string, fileUrl: string, name: string): Pr
   const body = await fbPost(`act_${accountId}/advideos`, { name, file_url: fileUrl });
   if (!body?.id) throw new FbError("video upload failed", body);
   return String(body.id);
+}
+
+// adimages has no file_url — the bytes must be posted (base64). Meta's own ad-image ceiling is
+// 30MB; anything bigger fails there anyway, so reject before buffering it into the function.
+const IMAGE_MAX_BYTES = 30 * 1024 * 1024;
+
+/** Upload a static image into the account's image library; returns its stable image_hash. */
+async function uploadImage(accountId: string, fileUrl: string): Promise<string> {
+  const res = await fetch(fileUrl, { cache: "no-store" });
+  if (!res.ok) throw new FbError(`image fetch failed (HTTP ${res.status})`, { fileUrl });
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.byteLength === 0) throw new FbError("image is empty", { fileUrl });
+  if (buf.byteLength > IMAGE_MAX_BYTES) {
+    throw new FbError("image too large — Meta accepts ad images up to 30MB", { size: buf.byteLength });
+  }
+  const body = await fbPost(`act_${accountId}/adimages`, { bytes: buf.toString("base64") });
+  // Response shape: { images: { bytes: { hash, ... } } } — key varies by upload method, so take
+  // the first entry (same convention as the clone route's copy_from reader).
+  const images = (body?.images ?? {}) as Record<string, { hash?: string }>;
+  const hash = Object.values(images)[0]?.hash;
+  if (!hash) throw new FbError("image upload returned no hash", body);
+  return String(hash);
 }
 
 /** Wait until the uploaded video finishes processing (or throw on error/timeout). */
@@ -248,13 +271,23 @@ export async function POST(req: Request) {
 
   let campaign: Campaign;
   let partnerId: PartnerId;
-  let videoUrl = "";
+  let mediaUrl = "";
+  let mediaKind: "video" | "image" = "video";
   let taskId: string | null = null;
   try {
-    const j = (await req.json()) as { campaign?: Campaign; partnerId?: string; videoUrl?: string; taskId?: string };
+    const j = (await req.json()) as {
+      campaign?: Campaign;
+      partnerId?: string;
+      mediaUrl?: string;
+      mediaKind?: string;
+      /** Legacy client field (pre-image builds still in open tabs) — video by definition. */
+      videoUrl?: string;
+      taskId?: string;
+    };
     campaign = (j.campaign ?? {}) as Campaign;
     partnerId = String(j.partnerId ?? "in") as PartnerId;
-    videoUrl = typeof j.videoUrl === "string" ? j.videoUrl : "";
+    mediaUrl = typeof j.mediaUrl === "string" && j.mediaUrl ? j.mediaUrl : typeof j.videoUrl === "string" ? j.videoUrl : "";
+    mediaKind = j.mediaKind === "image" ? "image" : "video";
     // The Task Manager row this run belongs to. When present, progress + the terminal state are
     // ALSO written to Strapi server-side, so every account keeps seeing the truth live even if the
     // launching browser dies mid-run (the run itself continues here regardless).
@@ -276,6 +309,7 @@ export async function POST(req: Request) {
   const binds: LaunchBinds = {
     accountId: pickedAccount,
     pageId: partner.fanpagesFromToken ? pickedPage : "",
+    pageName: "", // resolved below, once the picked page passes validation
     pixelId: pickedPixel,
   };
   if (!binds.accountId && !partner.accountsFromToken) {
@@ -328,6 +362,10 @@ export async function POST(req: Request) {
           { status: 400 },
         );
       }
+      // The page's display name feeds the ad set's DSA beneficiary/payor declaration — without it
+      // Meta rejects EU-reaching ad sets ("Advertiser not specified") on any account that lacks a
+      // default beneficiary. Free: read from the same cached list that just validated the id.
+      binds.pageName = await advertisablePageName(pickedPage);
     } else if (!binds.pageId) {
       return NextResponse.json({ ok: false, stage: "config", error: "partner_not_launchable" }, { status: 400 });
     }
@@ -350,19 +388,19 @@ export async function POST(req: Request) {
       );
     }
   }
-  if (!videoUrl) {
-    return NextResponse.json({ ok: false, stage: "media", error: "video_required" }, { status: 400 });
+  if (!mediaUrl) {
+    return NextResponse.json({ ok: false, stage: "media", error: "media_required" }, { status: 400 });
   }
-  // The video must be a Vercel Blob URL our OWN broker produced — never an arbitrary URL. Otherwise a
-  // logged-in user could make FB fetch any URL (advideos file_url) or make `del()` target a blob
-  // outside our flow. Our broker always uploads to `creatives/<taskid>-<name>` on the
-  // *.blob.vercel-storage.com host over https, so we require both the host suffix AND that path
-  // prefix — narrowing the surface to blobs this app actually creates (rev-api #2).
+  // The creative must be a Vercel Blob URL our OWN broker produced — never an arbitrary URL.
+  // Otherwise a logged-in user could make FB (or this function, for images) fetch any URL, or make
+  // `del()` target a blob outside our flow. Our broker always uploads to `creatives/<taskid>-<name>`
+  // on the *.blob.vercel-storage.com host over https, so we require both the host suffix AND that
+  // path prefix — narrowing the surface to blobs this app actually creates (rev-api #2).
   {
     let host = "";
     let path = "";
     try {
-      const u = new URL(videoUrl);
+      const u = new URL(mediaUrl);
       if (u.protocol === "https:") {
         host = u.hostname;
         path = u.pathname;
@@ -371,7 +409,7 @@ export async function POST(req: Request) {
       host = "";
     }
     if (!host.endsWith(".blob.vercel-storage.com") || !path.startsWith("/creatives/")) {
-      return NextResponse.json({ ok: false, stage: "media", error: "video_url_invalid" }, { status: 400 });
+      return NextResponse.json({ ok: false, stage: "media", error: "media_url_invalid" }, { status: 400 });
     }
   }
   if (bidAmountMissing(campaign)) {
@@ -448,13 +486,23 @@ export async function POST(req: Request) {
         const link = fullLandingUrl(partner, campaign.landing, gcm, conversions, binds.pixelId);
         if (!link) throw new FbError("no landing selected — cannot build destination link", {});
 
-        // 2) register the creative (FB pulls it from the Blob URL) and wait for processing
+        // 2) register the creative. Video: FB pulls it from the Blob URL, then we wait out
+        // processing. Image: the bytes go straight into the account's image library (no
+        // processing step) and the creative is built as link_data around the returned hash.
         progress("video");
-        const videoId = await uploadVideo(binds.accountId, videoUrl, `${name} · video`);
-        created.video_id = videoId;
-        progress("processing");
-        await waitForVideo(videoId);
-        const thumbUrl = await videoThumb(videoId);
+        let videoId = "";
+        let thumbUrl = "";
+        let imageHash = "";
+        if (mediaKind === "image") {
+          imageHash = await uploadImage(binds.accountId, mediaUrl);
+          created.image_hash = imageHash;
+        } else {
+          videoId = await uploadVideo(binds.accountId, mediaUrl, `${name} · video`);
+          created.video_id = videoId;
+          progress("processing");
+          await waitForVideo(videoId);
+          thumbUrl = await videoThumb(videoId);
+        }
         const localeIds = await resolveLocales(campaign.locales);
 
         // 3) campaign → adset → creative → ad, all PAUSED
@@ -472,7 +520,9 @@ export async function POST(req: Request) {
         progress("creative");
         const creative = await fbPost(
           `act_${binds.accountId}/adcreatives`,
-          creativePayload(campaign, name, binds, { videoId, thumbUrl, link }),
+          mediaKind === "image"
+            ? imageCreativePayload(campaign, name, binds, { imageHash, link })
+            : creativePayload(campaign, name, binds, { videoId, thumbUrl, link }),
         );
         created.creative_id = String(creative.id);
 
@@ -535,7 +585,7 @@ export async function POST(req: Request) {
         // Drop the temporary Blob whether the launch succeeded or failed — never orphan the upload.
         // Awaited (not fire-and-forget) so it completes before the stream closes and Vercel can
         // freeze the function. The "done"/"error" event was already sent, so this adds no visible wait.
-        await del(videoUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
+        await del(mediaUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
         // Flush the task-row writer too — its last transition must land before Vercel freezes us.
         await tw.flush();
         controller.close();
