@@ -38,6 +38,9 @@ const SRC_FIELDS = [
   "account_id",
   "objective",
   "special_ad_categories",
+  // Campaign-budget (CBO) sources carry the bid strategy on the CAMPAIGN; legacy ad-set-budget
+  // sources carry it on the ad set. Read both and prefer the campaign's (see fetchSourceDetail).
+  "bid_strategy",
   "adsets.limit(1){bid_strategy,optimization_goal,promoted_object}",
   // Read several ads + both places a video can live: inline video_data, and the asset_feed_spec that
   // Advantage+/flexible ads use instead (this is how ads built by hand in Ads Manager usually look).
@@ -157,7 +160,12 @@ export async function fetchSourceDetail(campaignId: string): Promise<SourceDetai
   return {
     objective: typeof obj.objective === "string" ? obj.objective : "OUTCOME_SALES",
     specialCategories: Array.isArray(cats) ? cats.filter((c) => c && c !== "NONE") : [],
-    bidStrategy: typeof adset.bid_strategy === "string" ? adset.bid_strategy : "LOWEST_COST_WITHOUT_CAP",
+    bidStrategy:
+      typeof obj.bid_strategy === "string"
+        ? obj.bid_strategy // campaign-budget (CBO) source — strategy lives on the campaign
+        : typeof adset.bid_strategy === "string"
+          ? adset.bid_strategy // legacy ad-set-budget source
+          : "LOWEST_COST_WITHOUT_CAP",
     optimizationGoal: typeof adset.optimization_goal === "string" ? adset.optimization_goal : "OFFSITE_CONVERSIONS",
     conversionEvent: typeof promoted.custom_event_type === "string" ? promoted.custom_event_type : "PURCHASE",
     accountId: String(obj.account_id ?? "").replace(/^act_/, ""),

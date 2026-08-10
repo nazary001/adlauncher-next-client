@@ -90,19 +90,24 @@ export function targeting(c: Campaign, localeIds: number[]): Record<string, unkn
   return t;
 }
 
-/** POST /act_<id>/campaigns. Budgets live on the ad set (no CBO), so Meta requires an
- *  explicit is_adset_budget_sharing_enabled — false = ad sets keep their own budgets. */
+/** POST /act_<id>/campaigns. The DAILY BUDGET lives here (campaign budget / CBO, decision
+ *  2026-08-10 — was ad-set-level before), and with a campaign budget Meta requires the
+ *  bid_strategy on the campaign too (the ad set then only carries bid_amount for cap
+ *  strategies). The old is_adset_budget_sharing_enabled flag applied to ad-set budgets only. */
 export function campaignPayload(c: Campaign, name: string): Record<string, unknown> {
   return {
     name,
     objective: c.objective,
     status: "PAUSED",
     special_ad_categories: specialAdCategories(c),
-    is_adset_budget_sharing_enabled: false,
+    daily_budget: money(c.budget),
+    bid_strategy: c.bidStrategy,
   };
 }
 
-/** POST /act_<id>/adsets — budget + bid + optimization + targeting + promoted pixel. */
+/** POST /act_<id>/adsets — bid amount + optimization + targeting + promoted pixel. The daily
+ *  budget and bid strategy live on the CAMPAIGN (see campaignPayload) — an ad set under a
+ *  campaign budget must not carry its own. */
 export function adsetPayload(
   c: Campaign,
   name: string,
@@ -113,10 +118,8 @@ export function adsetPayload(
   const p: Record<string, unknown> = {
     name,
     campaign_id: campaignId,
-    daily_budget: money(c.budget),
     billing_event: "IMPRESSIONS",
     optimization_goal: optimizationGoal(c),
-    bid_strategy: c.bidStrategy,
     status: "PAUSED",
     targeting: targeting(c, localeIds),
   };

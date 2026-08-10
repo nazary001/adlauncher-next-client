@@ -12,6 +12,10 @@ const FIELDS = [
   "name",
   "objective",
   "special_ad_categories",
+  // Campaign-budget (CBO) sources carry daily_budget + bid_strategy on the CAMPAIGN; legacy
+  // sources on the ad set. Both are read — mapCampaign prefers the campaign's values.
+  "daily_budget",
+  "bid_strategy",
   "adsets.limit(5){name,daily_budget,bid_strategy,bid_amount,billing_event,optimization_goal,promoted_object,targeting}",
   "ads.limit(15){name,creative{id,video_id,thumbnail_url}}",
 ].join(",");
@@ -61,9 +65,15 @@ function mapCampaign(id: string, obj: Json): CloneSource {
   const cats = obj.special_ad_categories as string[] | undefined;
   const category = Array.isArray(cats) && cats[0] && cats[0] !== "NONE" ? cats[0] : "";
 
-  const budgetCents = num(adset.daily_budget);
+  // Prefer the campaign's own budget/strategy (CBO source), fall back to the ad set (legacy).
+  const budgetCents = num(obj.daily_budget) ?? num(adset.daily_budget);
   const bidCents = num(adset.bid_amount);
-  const bidStrategy = typeof adset.bid_strategy === "string" ? adset.bid_strategy : "LOWEST_COST_WITHOUT_CAP";
+  const bidStrategy =
+    typeof obj.bid_strategy === "string"
+      ? obj.bid_strategy
+      : typeof adset.bid_strategy === "string"
+        ? adset.bid_strategy
+        : "LOWEST_COST_WITHOUT_CAP";
   const optimization = adset.optimization_goal === "LINK_CLICKS" ? "clicks" : "conversions";
   const promoted = (adset.promoted_object ?? {}) as Json;
   const conversionEvent = typeof promoted.custom_event_type === "string" ? promoted.custom_event_type : "PURCHASE";
