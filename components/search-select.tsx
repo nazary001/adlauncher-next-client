@@ -14,6 +14,7 @@ export function SearchSelect({
   emptyHint = "No matches",
   disabled,
   metaWhenClosed,
+  warn,
 }: {
   id?: string;
   value: string;
@@ -24,6 +25,8 @@ export function SearchSelect({
   disabled?: boolean;
   /** Closed input shows "label · meta" (fanpages: name · page id) instead of the label alone. */
   metaWhenClosed?: boolean;
+  /** Amber "required" accent on the field (missing destination picks etc.). */
+  warn?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ left: number; width: number; top: number; up: boolean } | null>(null);
@@ -165,10 +168,12 @@ export function SearchSelect({
         }}
         onKeyDown={onKeyDown}
         className={
-          "h-9 w-full rounded-lg border border-line bg-surface2 pl-8 text-[13px] text-ink " +
+          "h-9 w-full rounded-lg border bg-surface2 pl-8 text-[13px] text-ink " +
           "placeholder:text-faint outline-none transition-[border-color,box-shadow] duration-150 " +
-          "hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 " +
           "disabled:opacity-40 disabled:cursor-not-allowed " +
+          (warn
+            ? "border-warn/60 hover:border-warn/80 focus:border-warn focus:ring-2 focus:ring-warn/15 "
+            : "border-line hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 ") +
           // Room on the right for the status tag (+ the clear button beside it) so a picked
           // option's label truncates cleanly instead of running under them.
           (!open && selected?.tag ? "pr-24" : "pr-8")

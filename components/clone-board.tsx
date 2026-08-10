@@ -6,6 +6,7 @@ import {
   type CloneRow,
   type CloneSettings,
   type HighOfferConfig,
+  SOURCE_ACCOUNT,
   defaultSettings,
   flattenPreview,
   fullCloneName,
@@ -203,13 +204,18 @@ function CloneInner({
   // Token fanpages for the batch fanka picker (with live N/limit fill tags). null while loading.
   const fanpages = useFanpages(Boolean(partner.fanpagesFromToken), partner.pageAdLimit ?? 250);
   const fanpageMissing = Boolean(partner.fanpagesFromToken) && !settings.pageId;
-  // Token ad accounts for the OPTIONAL target-account pick (cross-account clones). Default "" =
-  // each clone stays in its source's own account (media is account-local there).
+  // Token ad accounts for the destination pick. The destination is an EXPLICIT choice:
+  // "" = nothing chosen yet (Duplicate stays locked), SOURCE_ACCOUNT = consciously keep each
+  // clone in its source campaign's own account, digits = a concrete target account (media gets
+  // migrated there). No silent default — the buyer must say where the batch goes.
   const adAccounts = useAdAccounts(Boolean(partner.accountsFromToken), partner.preferredPixel);
-  const targetPixels = settings.accountId ? pixelOptionsOf(adAccounts, settings.accountId) : [];
-  // A picked target account needs a pixel of that account: conversion sources can't carry their
-  // own pixel across (it lives on the source's account) — the server enforces this too.
-  const pixelMissing = Boolean(settings.accountId) && !settings.pixelId;
+  const accountMissing = Boolean(partner.accountsFromToken) && !settings.accountId;
+  const isTargetAccount = Boolean(settings.accountId) && settings.accountId !== SOURCE_ACCOUNT;
+  const targetPixels = isTargetAccount ? pixelOptionsOf(adAccounts, settings.accountId) : [];
+  // A concrete target account needs a pixel of that account: conversion sources can't carry
+  // their own pixel across (it lives on the source's account) — the server enforces this too.
+  const pixelMissing = isTargetAccount && !settings.pixelId;
+  const destinationMissing = fanpageMissing || accountMissing || pixelMissing;
   // Whoever is signed in — clone names default to end with " - <Username>".
   const me = user?.username ?? null;
 
@@ -304,7 +310,7 @@ function CloneInner({
   /** Queue each clone (rows × copies) into the Task Manager, which builds them one at a time
    *  (PAUSED) with live stages / errors / retry — the same queue and pipeline as launches. */
   const duplicate = () => {
-    if (fanpageMissing || pixelMissing) return; // the button is disabled too — belt and suspenders
+    if (destinationMissing) return; // the button is disabled too — belt and suspenders
     const total = Math.max(1, Math.floor(settings.copies) || 1);
     let queued = 0;
     for (const r of rows) {
@@ -323,8 +329,9 @@ function CloneInner({
           ageMin: r.ageMin,
           userOs: settings.userOs,
           pageId: settings.pageId,
-          // Target account+pixel only when the batch is re-targeted; omitted = source account.
-          ...(settings.accountId ? { accountId: settings.accountId, pixelId: settings.pixelId } : {}),
+          // Target account+pixel only for a concrete account; SOURCE_ACCOUNT (an explicit pick
+          // too) omits them = each clone builds in its source's own account.
+          ...(isTargetAccount ? { accountId: settings.accountId, pixelId: settings.pixelId } : {}),
         };
         enqueueClone({ partnerId, edit, name, geo: geoSummary(r.countries), budget: r.budget });
         queued++;
@@ -356,7 +363,11 @@ function CloneInner({
               <div className="flex flex-col gap-0.5 rounded-xl border border-line bg-surface2/40 p-1.5">
                 {partner.fanpagesFromToken ? (
                   <div className="flex flex-col gap-1 px-1.5 py-1">
-                    <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Fanpage</span>
+                    <span
+                      className={`text-[10px] font-medium uppercase tracking-[0.14em] ${fanpageMissing ? "text-warn" : "text-faint"}`}
+                    >
+                      Fanpage{fanpageMissing ? " — required" : ""}
+                    </span>
                     <SearchSelect
                       value={settings.pageId}
                       onChange={(v) => patchSettings({ pageId: v })}
@@ -364,34 +375,45 @@ function CloneInner({
                       placeholder={partner.pagePlaceholder}
                       emptyHint={fanpages ? "No fanpages on the token" : "Loading fanpages…"}
                       metaWhenClosed
+                      warn={fanpageMissing}
                     />
                   </div>
                 ) : null}
                 {partner.accountsFromToken ? (
                   <>
                     <div className="flex flex-col gap-1 px-1.5 py-1">
-                      <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Account</span>
+                      <span
+                        className={`text-[10px] font-medium uppercase tracking-[0.14em] ${accountMissing ? "text-warn" : "text-faint"}`}
+                      >
+                        Account{accountMissing ? " — required" : ""}
+                      </span>
                       <SearchSelect
                         value={settings.accountId}
                         onChange={(v) =>
                           patchSettings({
                             accountId: v,
                             // Auto-pick the target's pixel (FARM-1 when it carries it) the same way
-                            // a fresh launch card does; cleared when returning to "From each source".
-                            pixelId: v ? defaultPixelFor(adAccounts, v, partner.preferredPixel) : "",
+                            // a fresh launch card does; no pixel in source mode / when cleared.
+                            pixelId:
+                              v && v !== SOURCE_ACCOUNT ? defaultPixelFor(adAccounts, v, partner.preferredPixel) : "",
                           })
                         }
                         options={[
-                          { value: "", label: "From each source" },
+                          { value: SOURCE_ACCOUNT, label: "From each source" },
                           ...(adAccounts ?? []),
                         ]}
-                        placeholder="Search account"
+                        placeholder="Select account"
                         emptyHint={adAccounts ? "No accounts on the token" : "Loading accounts…"}
+                        warn={accountMissing}
                       />
                     </div>
-                    {settings.accountId ? (
+                    {isTargetAccount ? (
                       <div className="flex flex-col gap-1 px-1.5 py-1">
-                        <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Pixel</span>
+                        <span
+                          className={`text-[10px] font-medium uppercase tracking-[0.14em] ${pixelMissing ? "text-warn" : "text-faint"}`}
+                        >
+                          Pixel{pixelMissing ? " — required" : ""}
+                        </span>
                         <SearchSelect
                           value={settings.pixelId}
                           onChange={(v) => patchSettings({ pixelId: v })}
@@ -399,11 +421,12 @@ function CloneInner({
                           placeholder="Search pixel"
                           emptyHint={adAccounts ? "No pixels on this account" : "Loading pixels…"}
                           metaWhenClosed
+                          warn={pixelMissing}
                         />
                       </div>
-                    ) : (
+                    ) : settings.accountId === SOURCE_ACCOUNT ? (
                       <LockedRow label="Pixel" value="From each source" />
-                    )}
+                    ) : null}
                   </>
                 ) : (
                   <>
@@ -413,9 +436,11 @@ function CloneInner({
                 )}
               </div>
               <p className="px-0.5 text-[10.5px] leading-relaxed text-faint">
-                {settings.accountId
-                  ? "Every clone in the batch is re-built in the picked account: the source video/image is re-uploaded there (adds a “Migrating media” step) and conversion clones optimize for the picked pixel."
-                  : "Each clone is created in its source campaign’s own ad account (its video/image lives there), with the source’s pixel. Pick an account above to clone the whole batch into it instead."}
+                {accountMissing
+                  ? "Pick the destination explicitly: the fanpage and the account. “From each source” keeps every clone in its source campaign’s own account; a concrete account re-builds the whole batch there."
+                  : isTargetAccount
+                    ? "Every clone in the batch is re-built in the picked account: the source video/image is re-uploaded there (adds a “Migrating media” step) and conversion clones optimize for the picked pixel."
+                    : "Each clone is created in its source campaign’s own ad account (its video/image lives there), with the source’s pixel. Only the fanpage applies to every clone in the batch."}
               </p>
             </div>
 
@@ -486,7 +511,7 @@ function CloneInner({
                 <button
                   type="button"
                   onClick={duplicate}
-                  disabled={fanpageMissing || pixelMissing}
+                  disabled={destinationMissing}
                   className={
                     "animate-pop-in flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-launch/50 " +
                     "bg-launch/15 text-[14px] font-semibold text-launch2 transition-all duration-150 hover:border-launch/70 " +
@@ -499,11 +524,19 @@ function CloneInner({
                 </button>
               ) : null}
 
-              {previewed && rows.length > 0 && fanpageMissing ? (
-                <p className="text-center text-[11px] text-warn">Pick a fanpage in Destination first.</p>
-              ) : null}
-              {previewed && rows.length > 0 && !fanpageMissing && pixelMissing ? (
-                <p className="text-center text-[11px] text-warn">Pick a pixel of the target account first.</p>
+              {previewed && rows.length > 0 && destinationMissing ? (
+                <div className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11.5px] leading-relaxed text-warn">
+                  Duplicate is locked — set in Destination:{" "}
+                  <span className="font-semibold">
+                    {[
+                      fanpageMissing ? "Fanpage" : null,
+                      accountMissing ? "Account" : null,
+                      pixelMissing ? "Pixel" : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </span>
+                </div>
               ) : null}
 
               {previewed ? (

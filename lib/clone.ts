@@ -84,16 +84,22 @@ export type CloneEdit = {
   pixelId?: string;
 };
 
-/** Global settings applied to every clone. The fanpage, copies and (optionally) the target
- *  account+pixel are batch-wide picks. Account default "" = each clone is built in its SOURCE
- *  campaign's own account with the source's own pixel (media stays in its library); picking an
- *  account re-uploads media there server-side and the clone optimizes for the picked pixel. */
+/** The account picker's explicit "build each clone in its source's own account" choice. A
+ *  SENTINEL, not an id: the buyer must consciously pick it (or a concrete account) — an empty
+ *  accountId means "not chosen yet" and blocks Duplicate. */
+export const SOURCE_ACCOUNT = "source";
+
+/** Global settings applied to every clone. The fanpage AND the account are EXPLICIT batch-wide
+ *  picks — Duplicate stays locked until both are chosen. Account = SOURCE_ACCOUNT keeps every
+ *  clone in its source campaign's own account with the source's pixel (media stays in its
+ *  library); a concrete account re-uploads media there server-side and the clone optimizes for
+ *  the picked pixel of that account. */
 export type CloneSettings = {
   /** The PICKED fanpage (id) every clone in the batch advertises with. Empty = not picked yet. */
   pageId: string;
-  /** Target ad account for the whole batch ("" = from each source). */
+  /** Destination account: "" = NOT CHOSEN (blocks Duplicate), SOURCE_ACCOUNT, or account digits. */
   accountId: string;
-  /** Pixel of the target account ("" = none picked; required while accountId is set). */
+  /** Pixel of the target account ("" = none picked; required while a concrete account is set). */
   pixelId: string;
   userOs: "all" | "android";
   copies: number;
