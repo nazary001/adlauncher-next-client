@@ -1,0 +1,22 @@
+import { NextResponse } from "next/server";
+import { sessionFromCookieHeader } from "@/lib/session";
+import { LION_ACR, lionConfigured, lionProfiles } from "@/lib/lion";
+
+export const runtime = "nodejs";
+
+/** LION profiles the token can launch on, plus the token's ACR (the card needs it for the live
+ *  campaign-name prefix). Slugs only — profile display names arrive double-encoded from LION. */
+export async function GET(req: Request): Promise<NextResponse> {
+  if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
+  if (!lionConfigured()) {
+    return NextResponse.json({ ok: false, error: "lion_not_configured" }, { status: 500 });
+  }
+  try {
+    const profiles = await lionProfiles();
+    return NextResponse.json({ ok: true, acr: LION_ACR, profiles });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: String((e as Error).message) }, { status: 502 });
+  }
+}

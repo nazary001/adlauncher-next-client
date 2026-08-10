@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { SESSION_COOKIE, verifySession } from "@/lib/session";
 import { TaskManagerProvider } from "@/components/task-manager";
+import { HsTaskManagerProvider } from "@/components/hs-task-manager";
 
 /**
  * Shared shell for the authenticated app (launcher + clone board). The Task Manager provider is
@@ -16,7 +17,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   return (
     <TaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
-      {children}
+      <HsTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
+        {children}
+      </HsTaskManagerProvider>
     </TaskManagerProvider>
   );
 }

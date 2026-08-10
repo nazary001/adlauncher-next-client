@@ -5,10 +5,10 @@ import { type Campaign, moneyLabel } from "@/lib/types";
 import type { PartnerConfig } from "@/lib/partners";
 import {
   AGES,
-  BID_STRATEGIES,
   CATEGORIES,
   CONVERSION_EVENTS,
   CTAS,
+  HS_BID_STRATEGIES,
   OBJECTIVES,
   OPTIMIZATIONS,
   OS_OPTIONS,
@@ -52,8 +52,15 @@ const FIELDS: Field[] = [
   { key: "pixel", label: "Pixel", group: "Setup", when: (p) => !p.lockedPixel, preview: (c) => c.pixel || "—" },
 
   { key: "objective", label: "Objective", group: "Delivery", preview: (c) => optLabel(OBJECTIVES, c.objective) },
-  { key: "optimization", label: "Optimization", group: "Delivery", preview: (c) => optLabel(OPTIMIZATIONS, c.optimization) },
-  { key: "bidStrategy", label: "Bid strategy", group: "Delivery", preview: (c) => optLabel(BID_STRATEGIES, c.bidStrategy) },
+  // fire=click optimization is MO-funnel-only; LION owns HS tracking.
+  {
+    key: "optimization",
+    label: "Optimization",
+    group: "Delivery",
+    when: (p) => !p.lionLaunch,
+    preview: (c) => optLabel(OPTIMIZATIONS, c.optimization),
+  },
+  { key: "bidStrategy", label: "Bid strategy", group: "Delivery", preview: (c) => optLabel(HS_BID_STRATEGIES, c.bidStrategy) },
   { key: "conversionEvent", label: "Conversion event", group: "Delivery", preview: (c) => optLabel(CONVERSION_EVENTS, c.conversionEvent) },
   { key: "budget", label: "Daily budget", group: "Delivery", preview: (c) => `$${moneyLabel(c.budget)}` },
   { key: "bidCap", label: "Bid cap", group: "Delivery", preview: (c) => (c.bidCap ? `$${moneyLabel(c.bidCap)}` : "—") },
@@ -64,7 +71,13 @@ const FIELDS: Field[] = [
   { key: "copy", label: "Primary text", group: "Creative", preview: (c) => c.copy || "—" },
   { key: "cta", label: "CTA", group: "Creative", preview: (c) => optLabel(CTAS, c.cta) },
   { key: "redirectType", label: "Redirect type", group: "Creative", preview: (c) => optLabel(REDIRECT_TYPES, c.redirectType) },
-  { key: "headline", label: "Headline", group: "Creative", preview: (c) => c.headline || "—" },
+  {
+    key: "headline",
+    label: "Headline",
+    group: "Creative",
+    when: (p) => !p.lionLaunch,
+    preview: (c) => c.headline || "—",
+  },
   {
     key: "files",
     label: "Creatives",

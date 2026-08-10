@@ -128,19 +128,37 @@ type ReadyOpts = {
   account?: boolean;
   pixel?: boolean;
   gcm?: boolean;
+  /** LION partners: the typed destination link is the ad's landing — require a real http(s) URL. */
+  link?: boolean;
+  /** LION partners: title + primary text are hard-required by the create weapon. */
+  adText?: boolean;
 };
+
+/** A usable ad destination — http(s) and no whitespace inside. */
+export const isHttpUrl = (v: string): boolean => /^https?:\/\/\S+$/i.test((v ?? "").trim());
 
 export function isReady(c: Campaign, opts: ReadyOpts = {}): boolean {
   // All requirements default OFF — callers pass launchReadyOpts(partner) to turn on exactly what
   // that partner needs. (profile used to default ON, which would wrongly gate the Indians partner —
   // usesProfile:false — as never-ready if ever called without opts.)
-  const { landing = false, profile = false, page = false, account = false, pixel = false, gcm = false } = opts;
+  const {
+    landing = false,
+    profile = false,
+    page = false,
+    account = false,
+    pixel = false,
+    gcm = false,
+    link = false,
+    adText = false,
+  } = opts;
   if (!c.name.trim() || c.countries.length === 0) return false;
   if (profile && !c.profile) return false;
   if (landing && !c.landing) return false;
   if (page && !c.page) return false;
   if (account && !c.account) return false;
   if (pixel && !c.pixel) return false;
+  if (link && !isHttpUrl(c.link)) return false;
+  if (adText && (!c.title.trim() || !c.copy.trim())) return false;
   // gcm-monetized partners: a card without a claimed code isn't ready (its tracking link would
   // carry an empty gcm=). The server re-claims on launch, but the UI must not show "ready" without it.
   if (gcm && !c.gcm) return false;

@@ -60,6 +60,12 @@ export const BID_STRATEGIES: Option[] = [
   { value: "COST_CAP", label: "Cost cap" },
 ];
 
+/** LION's weapon additionally offers min-ROAS (bid = ROAS decimal, event pinned to Purchase). */
+export const HS_BID_STRATEGIES: Option[] = [
+  ...BID_STRATEGIES,
+  { value: "LOWEST_COST_WITH_MIN_ROAS", label: "Lowest cost + min ROAS" },
+];
+
 export const CONVERSION_EVENTS: Option[] = [
   { value: "PURCHASE", label: "Purchase" },
   { value: "CONTENT_VIEW", label: "ViewContent" },

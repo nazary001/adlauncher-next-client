@@ -48,6 +48,10 @@ export type PartnerConfig = {
   /** Caption under the launch button naming the submit channel. Indians go straight through
    *  the Graph API; LION (anti-detect profiles) is a Brazilians/Americans concept. */
   launchNote: string;
+  /** Launches submit to the LION create weapon (HS): profile/account/page/pixel cascade comes
+   *  from LION, the name follows LION's validated format, creatives are public URLs (one ad per
+   *  URL) and an independent HS task manager tracks the LION-side creation. */
+  lionLaunch?: boolean;
   /** Not built out yet → the switcher renders this partner disabled ("in development"). */
   inDevelopment?: boolean;
   /** Meta's per-Page ad-limit tier for the bound fanpage. The Graph API returns the live
@@ -94,13 +98,13 @@ export const PARTNERS: PartnerConfig[] = [
     Flag: BrazilFlag,
     usesGcm: false,
     usesProfile: true,
+    lionLaunch: true,
     landingBase: "",
     landings: [],
     pageLabel: "Page",
     pagePlaceholder: "Search page",
     fanpages: [],
     launchNote: "Submits through LION",
-    inDevelopment: true,
   },
   {
     id: "in",
@@ -152,17 +156,22 @@ export function launchReadyOpts(p: PartnerConfig): {
   account: boolean;
   pixel: boolean;
   gcm: boolean;
+  link: boolean;
+  adText: boolean;
 } {
   return {
     landing: p.usesGcm,
     profile: p.usesProfile,
-    page: Boolean(p.fanpagesFromToken),
-    account: Boolean(p.accountsFromToken),
-    pixel: Boolean(p.accountsFromToken),
+    page: Boolean(p.fanpagesFromToken) || Boolean(p.lionLaunch),
+    account: Boolean(p.accountsFromToken) || Boolean(p.lionLaunch),
+    pixel: Boolean(p.accountsFromToken) || Boolean(p.lionLaunch),
     // gcm-monetized partners need a claimed code before the card counts as ready — a landing card
     // whose code hasn't loaded (registry unreachable / pre-load window) must not look launchable,
     // and Copy must not offer a "?gcm=" link with an empty code.
     gcm: p.usesGcm,
+    // LION builds ads from the typed destination link + title/copy — all hard-required by create/.
+    link: Boolean(p.lionLaunch),
+    adText: Boolean(p.lionLaunch),
   };
 }
 

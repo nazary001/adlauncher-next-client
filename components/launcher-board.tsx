@@ -14,14 +14,17 @@ import {
   namePrefixFor,
   partnerConfig,
 } from "@/lib/partners";
+import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { Header } from "./header";
 import { CampaignCard } from "./campaign-card";
 import { useFanpages } from "./use-fanpages";
 import { type AdAccountOption, defaultPixelFor, useAdAccounts } from "./use-adaccounts";
+import { useHs } from "./use-hs";
 import { LaunchRail } from "./launch-rail";
 import { CopySettingsModal } from "./copy-settings-modal";
 import { ChevronsIcon, CopyIcon, PlusIcon } from "./icons";
 import { useTaskManager } from "./task-manager";
+import { useHsTaskManager } from "./hs-task-manager";
 import type { SessionUser } from "./user-menu";
 
 /** Today as DD.MM for the campaign-name prefix. Runs client-side (and on the local dev server). */
@@ -99,6 +102,9 @@ function LauncherInner({ user }: { user?: SessionUser }) {
   const fanpages = useFanpages(Boolean(partner.fanpagesFromToken), partner.pageAdLimit ?? 250);
   // Token ad accounts (with their pixels) for the account/pixel pickers.
   const adAccounts = useAdAccounts(Boolean(partner.accountsFromToken), partner.preferredPixel);
+  // LION catalog (HS): profiles + ACR, per-profile accounts/pages/locales, per-account pixels.
+  const hs = useHs(Boolean(partner.lionLaunch));
+  const hsTasks = useHsTaskManager();
 
   // Latest partner for callbacks that must not re-subscribe on partner switch.
   const partnerRef = useRef(partner);
@@ -179,6 +185,31 @@ function LauncherInner({ user }: { user?: SessionUser }) {
     const opts = launchReadyOpts(partner);
     const launchable = campaigns.filter((c) => isLaunchable(c, opts));
     if (launchable.length === 0) return;
+
+    // HS: every launchable card becomes ONE submit to LION's create weapon (all its creatives —
+    // LION makes one ad per URL). Cards stay on the board for tweak-and-relaunch, same as MO.
+    if (partner.lionLaunch) {
+      const ddmm = todaySaoPauloDDMM();
+      let sent = 0;
+      for (const c of launchable) {
+        const media = c.files.filter((f) => f.kind === "video" || f.kind === "image");
+        if (media.length === 0) continue;
+        hsTasks.enqueue({
+          campaign: c,
+          files: media,
+          name: hsFullName(c, hs.acr, ddmm),
+          profile: c.profile,
+          geo: geoSummary(c.countries),
+          budget: c.budget,
+        });
+        sent++;
+      }
+      setPreviewed(false);
+      setJustQueued(sent);
+      if (queuedTimer.current) window.clearTimeout(queuedTimer.current);
+      queuedTimer.current = window.setTimeout(() => setJustQueued(0), 3500);
+      return;
+    }
 
     // Reserve every code we're launching right now (optimistic — the tasks fire in the background),
     // so any card built next never re-previews a code that's already on its way into the registry.
@@ -409,6 +440,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
                 partner={partner}
                 fanpages={fanpages}
                 adAccounts={adAccounts}
+                hs={partner.lionLaunch ? hs : undefined}
                 highlight={highlightId === c.id}
                 onPatch={patch}
                 onToggleCollapse={toggleCollapse}
@@ -436,6 +468,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
           <LaunchRail
             campaigns={campaigns}
             partner={partner}
+            hsAcr={hs.acr}
             previewed={previewed}
             justQueued={justQueued}
             onJump={jumpTo}

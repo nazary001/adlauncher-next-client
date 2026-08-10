@@ -3,8 +3,9 @@
 import { FacebookMark, GoogleMark, RocketIcon, TikTokMark } from "./icons";
 import { PartnerSwitcher } from "./partner-switcher";
 import { TaskManagerButton } from "./task-manager";
+import { HsTaskManagerButton } from "./hs-task-manager";
 import { UserMenu, type SessionUser } from "./user-menu";
-import type { PartnerId } from "@/lib/partners";
+import { partnerConfig, type PartnerId } from "@/lib/partners";
 
 function Logo() {
   return (
@@ -87,6 +88,9 @@ export function Header({
         </div>
         <PartnerSwitcher value={partner} onChange={onPartnerChange} />
         <div className="flex items-center gap-2.5 justify-self-end">
+          {/* HS keeps its own independent queue (LION submits) — its button appears next to the
+              team Tasks button while the HS partner is active. */}
+          {partnerConfig(partner).lionLaunch ? <HsTaskManagerButton /> : null}
           <TaskManagerButton />
           <PlatformTabs />
           {user ? <UserMenu user={user} /> : null}

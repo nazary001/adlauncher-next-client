@@ -3,12 +3,14 @@
 import type { Campaign } from "@/lib/types";
 import { fullName, isLaunchable, moneyLabel, parseMoney } from "@/lib/types";
 import { CONVERSION_EVENTS, geoSummary } from "@/lib/catalog";
+import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { type PartnerConfig, launchReadyOpts } from "@/lib/partners";
 import { CheckIcon, EyeIcon, RocketIcon } from "./icons";
 
 export function LaunchRail({
   campaigns,
   partner,
+  hsAcr,
   previewed,
   justQueued,
   onJump,
@@ -17,6 +19,8 @@ export function LaunchRail({
 }: {
   campaigns: Campaign[];
   partner: PartnerConfig;
+  /** LION media-buyer acronym — the HS name preview needs it (empty while loading). */
+  hsAcr?: string;
   previewed: boolean;
   /** Count just sent to the Task Manager — shows a brief confirmation; campaigns stay on the board. */
   justQueued: number;
@@ -29,6 +33,9 @@ export function LaunchRail({
   const opts = launchReadyOpts(partner);
   const readyCount = campaigns.filter((c) => isLaunchable(c, opts)).length;
   const allReady = campaigns.length > 0 && readyCount === campaigns.length;
+  const ddmm = partner.lionLaunch ? todaySaoPauloDDMM() : "";
+  const nameOf = (c: Campaign) =>
+    partner.lionLaunch ? (c.name.trim() ? hsFullName(c, hsAcr ?? "", ddmm) : "") : fullName(c);
 
   return (
     <aside className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-20">
@@ -80,7 +87,7 @@ export function LaunchRail({
                         (c.name ? "text-ink" : "text-faint")
                       }
                     >
-                      {fullName(c) || "Untitled campaign"}
+                      {nameOf(c) || "Untitled campaign"}
                     </span>
                     <span className="block truncate text-[10.5px] text-faint">
                       {(partner.usesGcm
@@ -183,8 +190,10 @@ export function LaunchRail({
           ) : (
             <p className="text-center text-[10.5px] leading-relaxed text-faint">
               {readyCount > 0
-                ? "Queued to Task Manager · creates paused"
-                : `${partner.launchNote} · needs a video creative`}
+                ? partner.lionLaunch
+                  ? "Queued to HS Task Manager · LION builds the ads"
+                  : "Queued to Task Manager · creates paused"
+                : `${partner.launchNote} · needs a creative`}
             </p>
           )}
         </div>

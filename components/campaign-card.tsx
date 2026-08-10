@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Campaign } from "@/lib/types";
-import { bidAmountMissing, fullName, isLaunchable, limitMoney, moneyLabel, parseMoney } from "@/lib/types";
+import { bidAmountMissing, fullName, isHttpUrl, isLaunchable, limitMoney, moneyLabel, parseMoney } from "@/lib/types";
 import {
   AGES,
   BID_STRATEGIES,
@@ -12,6 +12,7 @@ import {
   COUNTRIES,
   COUNTRY_PRESETS,
   CTAS,
+  HS_BID_STRATEGIES,
   LOCALES,
   OBJECTIVES,
   OPTIMIZATIONS,
@@ -25,8 +26,10 @@ import {
   pagesFor,
   pixelsFor,
 } from "@/lib/catalog";
+import { hsBidKind, hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { type LinkRole, type PartnerConfig, fullLandingUrl, landingUrlSegments, launchReadyOpts } from "@/lib/partners";
 import type { FanpageOption } from "./use-fanpages";
+import type { HsCatalog } from "./use-hs";
 import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-adaccounts";
 import { Field, MoneyInput, Select, TextArea, TextInput, IconButton } from "./ui";
 import { SearchSelect } from "./search-select";
@@ -72,6 +75,9 @@ function missingRequirements(
   if (opts.landing && !c.landing) m.push("landing");
   if (opts.gcm && !c.gcm) m.push("gcm code");
   if (opts.profile && !c.profile) m.push("profile");
+  if (opts.link && !isHttpUrl(c.link)) m.push("link");
+  if (opts.adText && !c.title.trim()) m.push("title");
+  if (opts.adText && !c.copy.trim()) m.push("copy");
   if (parseMoney(c.budget) < 1) m.push("budget");
   if (bidAmountMissing(c)) m.push("bid cap");
   if (!c.files.some((f) => f.kind === "video" || f.kind === "image")) m.push("creative");
@@ -86,6 +92,64 @@ function SectionLabel({ icon, children }: { icon: React.ReactNode; children: Rea
         {children}
       </span>
       <span className="h-px flex-1 bg-line" />
+    </div>
+  );
+}
+
+/** Kind of a URL-added creative, judged by its extension (query strings tolerated). */
+function urlCreativeKind(url: string): "video" | "image" {
+  return /\.(jpe?g|png|gif|webp)([?#]|$)/i.test(url) ? "image" : "video";
+}
+
+/**
+ * HS creatives can be public URLs (creative-studio renders, CDN assets) — LION downloads them
+ * itself, so these skip the Blob upload entirely. One row: paste, Add, done.
+ */
+function AddByUrl({ onAdd }: { onAdd: (item: import("@/lib/types").FileItem) => void }) {
+  const [draft, setDraft] = useState("");
+  const valid = isHttpUrl(draft);
+  const add = () => {
+    if (!valid) return;
+    const url = draft.trim();
+    const name = url.split("?")[0].split("#")[0].split("/").filter(Boolean).pop() || "creative";
+    onAdd({
+      id: `u${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      name,
+      size: 0,
+      kind: urlCreativeKind(url),
+      url,
+    });
+    setDraft("");
+  };
+  return (
+    <div className="flex gap-2">
+      <TextInput
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            add();
+          }
+        }}
+        maxLength={2000}
+        placeholder="…or paste a public creative URL"
+        className="font-mono text-[11.5px]"
+      />
+      <button
+        type="button"
+        onClick={add}
+        disabled={!valid}
+        className={
+          "h-9 shrink-0 rounded-lg border px-3 text-[12px] font-semibold transition-all duration-150 " +
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
+          (valid
+            ? "border-accent/40 bg-accent/15 text-[#9db8ff] hover:border-accent/60 hover:bg-accent/25 active:scale-[0.97]"
+            : "cursor-not-allowed border-line bg-surface text-faint opacity-50")
+        }
+      >
+        Add
+      </button>
     </div>
   );
 }
@@ -116,6 +180,7 @@ export function CampaignCard({
   partner,
   fanpages,
   adAccounts,
+  hs,
   highlight,
   onPatch,
   onToggleCollapse,
@@ -131,6 +196,8 @@ export function CampaignCard({
   fanpages?: FanpageOption[] | null;
   /** Token ad accounts (value = account_id digits, with their pixels). null = loading. */
   adAccounts?: AdAccountOption[] | null;
+  /** LION catalog (HS partner): profiles + per-profile accounts/pages/locales + pixels. */
+  hs?: HsCatalog;
   /** Focus-pulse this card after a jump from the Launch bay. */
   highlight?: boolean;
   onPatch: (id: string, patch: Partial<Campaign>) => void;
@@ -155,6 +222,24 @@ export function CampaignCard({
   const ready = isLaunchable(c, opts);
   const missing = missingRequirements(c, partner, opts);
   const bidCapEnabled = c.bidStrategy !== "LOWEST_COST_WITHOUT_CAP";
+
+  // ---- HS (LION) mode: the bind cascade + locales come from LION's catalog ----
+  const hsMode = Boolean(partner.lionLaunch && hs);
+  const hsData = hsMode && hs ? hs.dataFor(c.profile) : undefined;
+  const hsPixels = hsMode && hs ? hs.pixelsFor(c.profile, c.account) : undefined;
+  // Idempotent loaders — cover picked, duplicated and copy-to-all'ed cards alike.
+  useEffect(() => {
+    if (hsMode && c.profile) hs?.ensureProfile(c.profile);
+  }, [hsMode, c.profile, hs]);
+  useEffect(() => {
+    if (hsMode && c.profile && c.account) hs?.ensurePixels(c.profile, c.account);
+  }, [hsMode, c.profile, c.account, hs]);
+  const hsKind = hsBidKind(c.bidStrategy);
+  const hsCurrency = hsMode ? hsData?.currencies?.[c.account] || "" : "";
+  // The LION-validated name prefix is DERIVED (date + ACR + redirect label + geo) — it re-renders
+  // live as the buyer flips redirect type or geo; the server rebuilds the exact same string.
+  const displayPrefix = hsMode ? hsNamePrefix(c, hs?.acr ?? "", todaySaoPauloDDMM()) : c.namePrefix;
+  const displayName = hsMode ? (c.name.trim() ? displayPrefix + c.name : "") : fullName(c);
 
   // Indians pin one account → its pixel and fanpage render locked, not searchable.
   const locked = Boolean(partner.lockedAccount);
@@ -212,7 +297,7 @@ export function CampaignCard({
           }
         />
         <span className={"truncate text-[13.5px] font-medium " + (c.name ? "text-ink" : "text-faint")}>
-          {fullName(c) || "Untitled campaign"}
+          {displayName || "Untitled campaign"}
         </span>
 
         {c.collapsed ? (
@@ -274,22 +359,26 @@ export function CampaignCard({
             <section className="flex flex-col gap-3">
               <SectionLabel icon={<SlidersIcon className="h-3.5 w-3.5" />}>Setup</SectionLabel>
               <div className="grid grid-cols-12 gap-3">
-                <Field label="Campaign name" className="col-span-12">
-                  {c.namePrefix ? (
+                <Field
+                  label="Campaign name"
+                  className="col-span-12"
+                  hint={hsMode ? "prefix follows LION's format — date, buyer, redirect, geo" : undefined}
+                >
+                  {displayPrefix ? (
                     <div className="flex h-9 items-center overflow-hidden rounded-lg border border-line bg-surface2 transition-[border-color,box-shadow] duration-150 hover:border-line2 focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/15">
                       <span
-                        title="Fixed prefix"
-                        className="flex h-full shrink-0 select-none items-center gap-1.5 whitespace-pre border-r border-line bg-surface px-3 font-mono text-[12px] text-faint"
+                        title={hsMode ? "LION name prefix (auto-built)" : "Fixed prefix"}
+                        className="flex h-full min-w-0 shrink select-none items-center gap-1.5 overflow-hidden whitespace-pre border-r border-line bg-surface px-3 font-mono text-[12px] text-faint"
                       >
                         <LockIcon className="h-3 w-3 shrink-0" />
-                        {c.namePrefix}
+                        <span className="truncate">{displayPrefix}</span>
                       </span>
                       <input
                         autoComplete="off"
                         spellCheck={false}
                         value={c.name}
                         onChange={(e) => patch({ name: e.target.value })}
-                        maxLength={Math.max(1, 400 - c.namePrefix.length)}
+                        maxLength={Math.max(1, 400 - displayPrefix.length)}
                         placeholder="suffix — e.g. Auto | vd-01"
                         className="h-full min-w-0 flex-1 bg-transparent px-3 text-[13px] text-ink placeholder:text-faint outline-none"
                       />
@@ -304,21 +393,52 @@ export function CampaignCard({
                   )}
                 </Field>
                 {partner.usesProfile ? (
-                  <Field label="Profile" className="col-span-12 md:col-span-6 xl:col-span-3">
+                  <Field
+                    label="Profile"
+                    className="col-span-12 md:col-span-6 xl:col-span-3"
+                    error={hsMode && hs?.profiles?.length && !c.profile ? "Pick a profile" : undefined}
+                  >
                     <SearchSelect
                       value={c.profile}
-                      onChange={(v) => patch({ profile: v, account: "", page: "", pixel: "" })}
-                      options={PROFILES}
+                      onChange={(v) =>
+                        // A new profile is a new bind space — every dependent pick resets.
+                        patch({ profile: v, account: "", page: "", pixel: "", locales: [] })
+                      }
+                      options={hsMode ? (hs?.profiles ?? []) : PROFILES}
                       placeholder="Search profile"
+                      emptyHint={hsMode ? (hs?.profiles ? "No LION profiles" : "Loading profiles…") : undefined}
                     />
                   </Field>
                 ) : null}
                 <Field
                   label="Account"
                   className={setupCol}
-                  error={partner.accountsFromToken && (adAccounts?.length ?? 0) > 0 && !c.account ? "Pick an account" : undefined}
+                  error={
+                    hsMode
+                      ? c.profile && hsData && !c.account
+                        ? "Pick an account"
+                        : undefined
+                      : partner.accountsFromToken && (adAccounts?.length ?? 0) > 0 && !c.account
+                        ? "Pick an account"
+                        : undefined
+                  }
                 >
-                  {partner.accountsFromToken ? (
+                  {hsMode ? (
+                    <SearchSelect
+                      value={c.account}
+                      onChange={(v) => patch({ account: v, pixel: "" })}
+                      options={hsData?.accounts ?? []}
+                      placeholder="Search account"
+                      emptyHint={
+                        !c.profile
+                          ? "Pick a profile first"
+                          : hsData
+                            ? "No accounts on this profile"
+                            : "Loading accounts…"
+                      }
+                      metaWhenClosed
+                    />
+                  ) : partner.accountsFromToken ? (
                     <SearchSelect
                       value={c.account}
                       onChange={(v) =>
@@ -343,9 +463,28 @@ export function CampaignCard({
                 <Field
                   label={partner.pageLabel}
                   className={setupCol}
-                  error={partner.fanpagesFromToken && fanpages != null && !c.page ? "Pick a fanpage" : undefined}
+                  error={
+                    hsMode
+                      ? c.profile && hsData && !c.page
+                        ? "Pick a page"
+                        : undefined
+                      : partner.fanpagesFromToken && fanpages != null && !c.page
+                        ? "Pick a fanpage"
+                        : undefined
+                  }
                 >
-                  {partner.fanpagesFromToken ? (
+                  {hsMode ? (
+                    <SearchSelect
+                      value={c.page}
+                      onChange={(v) => patch({ page: v })}
+                      options={hsData?.pages ?? []}
+                      placeholder={partner.pagePlaceholder}
+                      emptyHint={
+                        !c.profile ? "Pick a profile first" : hsData ? "No pages on this profile" : "Loading pages…"
+                      }
+                      metaWhenClosed
+                    />
+                  ) : partner.fanpagesFromToken ? (
                     <SearchSelect
                       value={c.page}
                       onChange={(v) => patch({ page: v })}
@@ -369,9 +508,31 @@ export function CampaignCard({
                 <Field
                   label="Pixel"
                   className={setupCol}
-                  error={partner.accountsFromToken && c.account && !c.pixel ? "Pick a pixel" : undefined}
+                  error={
+                    hsMode
+                      ? c.account && Array.isArray(hsPixels) && hsPixels.length > 0 && !c.pixel
+                        ? "Pick a pixel"
+                        : undefined
+                      : partner.accountsFromToken && c.account && !c.pixel
+                        ? "Pick a pixel"
+                        : undefined
+                  }
                 >
-                  {partner.accountsFromToken ? (
+                  {hsMode ? (
+                    <SearchSelect
+                      value={c.pixel}
+                      onChange={(v) => patch({ pixel: v })}
+                      options={(hsPixels ?? []).map((p) => ({ value: p.id, label: p.name, meta: p.id }))}
+                      placeholder="Search pixel"
+                      emptyHint={
+                        !c.account
+                          ? "Pick an account first"
+                          : hsPixels
+                            ? "No pixels on this account"
+                            : "Loading pixels…"
+                      }
+                    />
+                  ) : partner.accountsFromToken ? (
                     <SearchSelect
                       value={c.pixel}
                       onChange={(v) => patch({ pixel: v })}
@@ -402,7 +563,7 @@ export function CampaignCard({
             <section className="flex flex-col gap-3">
               <SectionLabel icon={<TargetIcon className="h-3.5 w-3.5" />}>Delivery</SectionLabel>
               <div className="grid grid-cols-12 gap-3">
-                <Field label="Objective" className="col-span-6 md:col-span-3">
+                <Field label="Objective" className={hsMode ? "col-span-6 md:col-span-4" : "col-span-6 md:col-span-3"}>
                   <Select
                     value={c.objective}
                     onChange={(e) => {
@@ -418,34 +579,54 @@ export function CampaignCard({
                     options={OBJECTIVES}
                   />
                 </Field>
-                <Field
-                  label="Optimization"
-                  className="col-span-6 md:col-span-3"
-                  hint={conversions ? "link gets &fire=click" : undefined}
-                >
-                  <Select
-                    value={c.optimization}
-                    onChange={(e) =>
-                      patch({ optimization: e.target.value as Campaign["optimization"] })
-                    }
-                    options={OPTIMIZATIONS}
-                  />
-                </Field>
-                <Field label="Bid strategy" className="col-span-6 md:col-span-3">
+                {/* Optimization (fire=click) is an MO funnel concept — LION owns HS tracking. */}
+                {!hsMode ? (
+                  <Field
+                    label="Optimization"
+                    className="col-span-6 md:col-span-3"
+                    hint={conversions ? "link gets &fire=click" : undefined}
+                  >
+                    <Select
+                      value={c.optimization}
+                      onChange={(e) =>
+                        patch({ optimization: e.target.value as Campaign["optimization"] })
+                      }
+                      options={OPTIMIZATIONS}
+                    />
+                  </Field>
+                ) : null}
+                <Field label="Bid strategy" className={hsMode ? "col-span-6 md:col-span-4" : "col-span-6 md:col-span-3"}>
                   <Select
                     value={c.bidStrategy}
-                    onChange={(e) => patch({ bidStrategy: e.target.value })}
-                    options={BID_STRATEGIES}
+                    onChange={(e) => {
+                      const bidStrategy = e.target.value;
+                      // Min-ROAS optimizes purchase value — LION pins the event to Purchase.
+                      if (hsMode && hsBidKind(bidStrategy) === "roas") {
+                        patch({ bidStrategy, conversionEvent: "PURCHASE" });
+                      } else {
+                        patch({ bidStrategy });
+                      }
+                    }}
+                    options={hsMode ? HS_BID_STRATEGIES : BID_STRATEGIES}
                   />
                 </Field>
-                <Field label="Conversion event" className="col-span-6 md:col-span-3">
+                <Field
+                  label="Conversion event"
+                  className={hsMode ? "col-span-6 md:col-span-4" : "col-span-6 md:col-span-3"}
+                  hint={hsMode && hsKind === "roas" ? "pinned by min ROAS" : undefined}
+                >
                   <Select
-                    value={c.conversionEvent}
+                    value={hsMode && hsKind === "roas" ? "PURCHASE" : c.conversionEvent}
                     onChange={(e) => patch({ conversionEvent: e.target.value })}
                     options={conversionEventsFor(c.objective)}
+                    disabled={hsMode && hsKind === "roas"}
                   />
                 </Field>
-                <Field label="Daily budget" className="col-span-6">
+                <Field
+                  label="Daily budget"
+                  className="col-span-6"
+                  hint={hsMode && hsCurrency ? `in ${hsCurrency} (account currency)` : undefined}
+                >
                   <MoneyInput
                     value={c.budget}
                     onChange={(e) => patch({ budget: limitMoney(e.target.value, 10000) })}
@@ -454,15 +635,23 @@ export function CampaignCard({
                   />
                 </Field>
                 <Field
-                  label={bidCapEnabled ? "Bid cap *" : "Bid cap"}
+                  label={hsMode && hsKind === "roas" ? "ROAS goal *" : bidCapEnabled ? "Bid cap *" : "Bid cap"}
                   className="col-span-6"
-                  hint={bidCapEnabled ? undefined : "Lowest cost bids automatically"}
+                  hint={
+                    hsMode && hsKind === "roas"
+                      ? "1,20 = 120% ROAS"
+                      : bidCapEnabled
+                        ? undefined
+                        : "Lowest cost bids automatically"
+                  }
                   error={bidAmountMissing(c) ? "Required for this bid strategy" : undefined}
                 >
                   <MoneyInput
                     value={c.bidCap}
-                    onChange={(e) => patch({ bidCap: limitMoney(e.target.value, 1000) })}
-                    placeholder="0,50"
+                    onChange={(e) =>
+                      patch({ bidCap: limitMoney(e.target.value, hsMode && hsKind === "roas" ? 100 : 1000) })
+                    }
+                    placeholder={hsMode && hsKind === "roas" ? "1,20" : "0,50"}
                     disabled={!bidCapEnabled}
                     maxLength={7}
                   />
@@ -510,7 +699,7 @@ export function CampaignCard({
                       />
                     </Field>
                   </div>
-                  {c.redirectType === "#ADX" ? (
+                  {c.redirectType === "#ADX" && !hsMode ? (
                     <div className="animate-pop-in">
                       <Field label="Param mode">
                         <Select
@@ -521,7 +710,7 @@ export function CampaignCard({
                       </Field>
                     </div>
                   ) : null}
-                  {c.redirectType === "HIGH ADX" ? (
+                  {c.redirectType === "HIGH ADX" && !hsMode ? (
                     <button
                       type="button"
                       className={
@@ -598,7 +787,11 @@ export function CampaignCard({
                       </Field>
                     </>
                   ) : (
-                    <Field label="Destination link">
+                    <Field
+                      label="Destination link"
+                      hint={hsMode ? "LION appends its tracking (url_tags) from the redirect type" : undefined}
+                      error={hsMode && c.link.trim() !== "" && !isHttpUrl(c.link) ? "Must be an http(s) URL" : undefined}
+                    >
                       <TextInput
                         value={c.link}
                         onChange={(e) => patch({ link: e.target.value })}
@@ -608,19 +801,26 @@ export function CampaignCard({
                       />
                     </Field>
                   )}
-                  <Field label="Headline">
-                    <TextInput
-                      value={c.headline}
-                      onChange={(e) => patch({ headline: e.target.value })}
-                      maxLength={255}
-                      placeholder="Headline"
-                    />
-                  </Field>
+                  {!hsMode ? (
+                    <Field label="Headline">
+                      <TextInput
+                        value={c.headline}
+                        onChange={(e) => patch({ headline: e.target.value })}
+                        maxLength={255}
+                        placeholder="Headline"
+                      />
+                    </Field>
+                  ) : null}
                 </div>
 
-                <Field label="Creatives" className="col-span-12 lg:col-span-5">
+                <Field
+                  label="Creatives"
+                  className="col-span-12 lg:col-span-5"
+                  hint={hsMode ? "one ad per creative (LION)" : undefined}
+                >
                   <div className="flex flex-col gap-2">
                     <Dropzone files={c.files} onChange={(files) => patch({ files })} maxFiles={partner.maxCreatives} />
+                    {hsMode ? <AddByUrl onAdd={(item) => patch({ files: [...c.files, item] })} /> : null}
                     {onApplyFilesToAll && c.files.length > 0 ? (
                       <button
                         type="button"
@@ -655,11 +855,27 @@ export function CampaignCard({
                     placeholder="Search country"
                   />
                 </Field>
-                <Field label="Languages" className="col-span-12 xl:col-span-6">
+                <Field
+                  label="Languages"
+                  className="col-span-12 xl:col-span-6"
+                  hint={
+                    hsMode
+                      ? !c.profile
+                        ? "pick a profile first"
+                        : hsData
+                          ? "FB locales from the profile · empty = all"
+                          : "loading locales…"
+                      : undefined
+                  }
+                >
                   <MultiSelect
                     values={c.locales}
                     onChange={(locales) => patch({ locales })}
-                    options={LOCALES.map((l) => ({ value: l, label: l }))}
+                    options={
+                      hsMode
+                        ? (hsData?.locales ?? []).map((l) => ({ value: l.id, label: l.name }))
+                        : LOCALES.map((l) => ({ value: l, label: l }))
+                    }
                     placeholder="Search language"
                   />
                 </Field>
