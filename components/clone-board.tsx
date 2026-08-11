@@ -14,7 +14,7 @@ import {
   loadSampleSources,
   makeCloneRow,
 } from "@/lib/clone";
-import { limitMoney, moneyLabel } from "@/lib/types";
+import { limitMoney, limitMoneyCents, moneyLabel } from "@/lib/types";
 import { OS_OPTIONS, countryName, geoSummary } from "@/lib/catalog";
 import { type PartnerId, partnerConfig } from "@/lib/partners";
 import { Field, Select } from "./ui";
@@ -704,12 +704,13 @@ function CloneInner({
                         </td>
 
                         {/* clone settings (editable) — money-sanitized like the launcher's fields
-                            (limitMoney) so garbage can't reach CloneEdit.roasGoal/budget → money()=0
-                            → an ad set Meta rejects (orphan + burnt gcm). */}
+                            (ROAS = cash-register mode, budget = limitMoney) so garbage can't reach
+                            CloneEdit.roasGoal/budget → money()=0 → an ad set Meta rejects
+                            (orphan + burnt gcm). */}
                         <td className="border-l border-line px-2 py-3.5">
                           <input
                             value={r.roasGoal}
-                            onChange={(e) => patchRow(r.id, { roasGoal: limitMoney(e.target.value, 1000) })}
+                            onChange={(e) => patchRow(r.id, { roasGoal: limitMoneyCents(e.target.value, 1000) })}
                             inputMode="decimal"
                             placeholder="1,20"
                             aria-label="ROAS goal"

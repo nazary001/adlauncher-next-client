@@ -39,8 +39,11 @@ export function LaunchRail({
 
   return (
     <aside className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-20">
-      <div className="flex flex-col gap-4 rounded-2xl border border-line bg-surface p-4">
-        <div className="flex items-center justify-between">
+      {/* Capped to the viewport on desktop: with a long wave only the campaign LIST scrolls
+          (min-h-0 makes it the one shrinkable flex child) while the header, total and the
+          Preview/Launch buttons stay on screen — no page-scrolling to reach Launch. */}
+      <div className="flex flex-col gap-4 rounded-2xl border border-line bg-surface p-4 lg:max-h-[calc(100vh-6rem)]">
+        <div className="flex shrink-0 items-center justify-between">
           <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-faint">
             Launch bay
           </span>
@@ -63,7 +66,7 @@ export function LaunchRail({
             Add one to arm the bay.
           </p>
         ) : (
-          <div className="-mx-2 flex flex-col">
+          <div className="-mx-2 flex min-h-0 flex-col overflow-y-auto overscroll-contain">
             {campaigns.map((c, i) => {
               const ready = isLaunchable(c, opts);
               const eventLabel =
@@ -133,7 +136,7 @@ export function LaunchRail({
           </div>
         )}
 
-        <div className="border-t border-line pt-3">
+        <div className="shrink-0 border-t border-line pt-3">
           <div className="flex items-end justify-between">
             <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-faint">
               Total / day
@@ -147,7 +150,7 @@ export function LaunchRail({
           </p>
         </div>
 
-        <div className="flex flex-col gap-2">
+        <div className="flex shrink-0 flex-col gap-2">
           <button
             type="button"
             onClick={onPreview}
