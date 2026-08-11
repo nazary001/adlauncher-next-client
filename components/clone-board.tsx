@@ -300,12 +300,18 @@ function CloneInner({
   };
 
   const changePartner = (id: PartnerId) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("partner", id);
+    // Switching onto a LION partner swaps the whole board (HS duplicator is a different server
+    // component tree) — full navigation; within Graph partners it's just state + URL.
+    if (partnerConfig(id).lionLaunch) {
+      window.location.assign(url.toString());
+      return;
+    }
     setPartnerId(id);
     setSettings(defaultSettings(id));
     setPreviewed(false);
     // The pick rides in the URL so a refresh reopens on the same partner (ids etc. preserved).
-    const url = new URL(window.location.href);
-    url.searchParams.set("partner", id);
     window.history.replaceState(null, "", url);
   };
 

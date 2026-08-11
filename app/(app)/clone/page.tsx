@@ -3,7 +3,8 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { SESSION_COOKIE, verifySession } from "@/lib/session";
 import { CloneBoard } from "@/components/clone-board";
-import { type PartnerId, sanitizePartnerId } from "@/lib/partners";
+import { HsCloneBoard } from "@/components/hs-clone-board";
+import { type PartnerId, partnerConfig, sanitizePartnerId } from "@/lib/partners";
 
 export const metadata: Metadata = {
   title: "Clone campaigns — Ad Launcher",
@@ -47,11 +48,17 @@ export default async function ClonePage({
         />
       </div>
 
-      <CloneBoard
-        user={{ username: session.username, role: session.role ?? null }}
-        initialIds={ids}
-        partner={partner}
-      />
+      {partnerConfig(partner).lionLaunch ? (
+        // HS clones go through LION's duplicate weapon — a different rail entirely (no Graph
+        // token, no gcm), so it gets its own board.
+        <HsCloneBoard user={{ username: session.username, role: session.role ?? null }} partner={partner} />
+      ) : (
+        <CloneBoard
+          user={{ username: session.username, role: session.role ?? null }}
+          initialIds={ids}
+          partner={partner}
+        />
+      )}
     </>
   );
 }

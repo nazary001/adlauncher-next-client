@@ -30,6 +30,9 @@ export type HsTask = {
   profile: string;
   geo: string;
   budget: string;
+  /** "launch" (create weapon, default for restored rows) or "duplicate" (clone weapon —
+   *  enters at "submitted" and auto-activates after COMPLETED, clones are born PAUSED). */
+  kind?: "launch" | "duplicate";
   status: HsTaskStatus;
   /** Furthest stage key reached (drives the segmented bar). */
   stage: string;
@@ -95,12 +98,23 @@ export type HsEnqueueArgs = {
   budget: string;
 };
 
+/** A duplicate already submitted to LION (the duplicate POST is instant) — one row per LION task. */
+export type HsSubmittedRow = {
+  name: string;
+  profile: string;
+  geo: string;
+  budget: string;
+  lionTaskId: string;
+};
+
 type HsTaskManagerValue = {
   tasks: HsTask[];
   counts: { active: number; done: number; failed: number; running: number; total: number };
   open: boolean;
   setOpen: (v: boolean) => void;
   enqueue: (args: HsEnqueueArgs) => void;
+  /** Enter duplicate tasks directly at "submitted" — polling + auto-activation take over. */
+  enqueueSubmitted: (rows: HsSubmittedRow[]) => void;
   retry: (id: string) => void;
   retryAll: () => void;
   remove: (id: string) => void;
@@ -127,6 +141,8 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
   const queue = useRef<string[]>([]);
   const working = useRef(false);
   const tasksRef = useRef<HsTask[]>([]);
+  // Duplicate tasks whose post-COMPLETED activation has already been fired (once per task).
+  const activatedRef = useRef(new Set<string>());
   const openRef = useRef(false);
   const loadedRef = useRef(false);
   const lastPollRef = useRef(0);
@@ -289,6 +305,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     }
     const pending = tasksRef.current.filter((t) => t.status === "submitted" && t.lionTaskId);
     if (pending.length === 0) return;
+    const pendingById = new Map(pending.map((t) => [t.lionTaskId as string, t]));
     pollBusyRef.current = true;
     try {
       const res = await fetch("/api/hs/status", {
@@ -311,6 +328,27 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         | null;
       if (!d?.ok || !Array.isArray(d.tasks)) return;
       const byLionId = new Map(d.tasks.map((t) => [t.taskId, t]));
+      // Duplicate clones are born PAUSED (birth status is unpredictable — playbook) → the moment
+      // a duplicate task COMPLETEs, flip its campaign ACTIVE. Fired once per task, outside the
+      // state updater; a failed flip surfaces as a warning note, not a task failure.
+      for (const r of d.tasks) {
+        const t = pendingById.get(r.taskId);
+        if (!t || t.kind !== "duplicate") continue;
+        if (r.status !== "COMPLETED" || !r.campaignId || activatedRef.current.has(t.id)) continue;
+        activatedRef.current.add(t.id);
+        const campaignId = r.campaignId;
+        const taskId = t.id;
+        void fetch("/api/hs/activate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ campaignId }),
+        })
+          .then(async (res) => {
+            const a = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+            if (!a?.ok) patch(taskId, { lionNote: `activation failed — flip it ACTIVE in LION (${a?.error ?? res.status})` });
+          })
+          .catch(() => patch(taskId, { lionNote: "activation failed — flip it ACTIVE in LION" }));
+      }
       setTasks((ts) =>
         ts.map((t) => {
           if (t.status !== "submitted" || !t.lionTaskId) return t;
@@ -428,6 +466,29 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     [pump],
   );
 
+  const enqueueSubmitted = useCallback((rows: HsSubmittedRow[]) => {
+    if (rows.length === 0) return;
+    const now = Date.now();
+    const fresh: HsTask[] = rows.map((r, i) => ({
+      id:
+        (globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)) +
+        now.toString(36) +
+        i.toString(36),
+      name: r.name,
+      profile: r.profile,
+      geo: r.geo,
+      budget: r.budget,
+      kind: "duplicate" as const,
+      status: "submitted" as const,
+      stage: "queue",
+      lionTaskId: r.lionTaskId,
+      queuedAt: now,
+      submittedAt: now,
+      local: true,
+    }));
+    setTasks((ts) => [...fresh, ...ts]);
+  }, []);
+
   const retry = useCallback(
     (id: string) => {
       const t = tasksRef.current.find((x) => x.id === id);
@@ -484,6 +545,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     open,
     setOpen,
     enqueue,
+    enqueueSubmitted,
     retry,
     retryAll,
     remove,

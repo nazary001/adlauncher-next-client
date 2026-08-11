@@ -196,6 +196,73 @@ export async function lionCreateCampaign(binds: {
   return results[0];
 }
 
+export type LionDuplicationResult = {
+  result?: string;
+  task_ids?: string[];
+  reason?: string;
+  campaign_id?: string;
+};
+
+/**
+ * Clone ONE existing LION campaign into the picked binds (playbook-proven flow: duplicate →
+ * creation-status → activate). `starting_budget` is integer CENTS of the account currency
+ * (write-side convention); the bid is NOT sent — it inherits from the source (a MIN_ROAS
+ * source takes a ROAS decimal there, so overriding blindly is a 100× class mistake). LION
+ * rebuilds the clone's name itself (re-dated prefix + "(CLONE)" marker) and appends
+ * `name_suffix`. Preflight rejections (object-story creatives → "No valid creative URL…")
+ * come back in duplication_results with a reason and create NOTHING.
+ */
+export async function lionDuplicate(args: {
+  profile_slug: string;
+  account_id: string;
+  page_id: string;
+  pixel_id: string;
+  campaign_id: string;
+  starting_budget: number;
+  number_of_copies: number;
+  name_suffix: string;
+}): Promise<LionDuplicationResult> {
+  const body = (await lionPost("/api/facebook/campaigns/duplicate/", {
+    profile_slug: args.profile_slug,
+    account_id: args.account_id,
+    page_id: args.page_id,
+    pixel_id: args.pixel_id,
+    campaigns: [
+      {
+        campaign_id: args.campaign_id,
+        starting_budget: args.starting_budget,
+        number_of_copies: args.number_of_copies,
+        name_suffix: args.name_suffix,
+      },
+    ],
+  })) as Record<string, unknown> | null;
+  const results = Array.isArray(body?.duplication_results)
+    ? (body!.duplication_results as LionDuplicationResult[])
+    : [];
+  if (results.length === 0) {
+    throw new LionError("LION duplicate returned no duplication_results", undefined, body);
+  }
+  return results[0];
+}
+
+/** Flip one campaign's status. A clone's birth status is unpredictable (PAUSED in the morning,
+ *  ACTIVE by afternoon — live 07-07), so the duplicate flow always activates after COMPLETED;
+ *  re-activating an already-active campaign answers "Application does not have permission for
+ *  this action", which is SUCCESS in disguise (playbook) — reported as alreadyActive. */
+export async function lionSetCampaignStatus(
+  campaignId: string,
+  status: "ACTIVE" | "PAUSED",
+): Promise<{ ok: boolean; alreadyActive?: boolean; message?: string }> {
+  try {
+    await lionPost(`/api/facebook/campaigns/${campaignId}/status/`, { status });
+    return { ok: true };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/does not have permission/i.test(msg)) return { ok: true, alreadyActive: true };
+    return { ok: false, message: msg };
+  }
+}
+
 export type LionTaskStatus = {
   task_id: string;
   campaign_id?: string | null;
