@@ -10,6 +10,8 @@ export type Landing = {
   slug: string;
   title: string;
   lang: "EN" | "ES";
+  /** Niche section the landing picker groups under (Cars / Loans / MK Digital / …). */
+  niche: string;
 };
 
 export type PartnerConfig = {
@@ -63,22 +65,23 @@ export type PartnerConfig = {
 
 // MK Learn guides = the landings paid traffic is sent to. Slug → /guides/<slug>.
 // Funnel domain is the MagicAds-monetized host (ads.js lives there), not the SEO host.
+// Ordered by niche — the picker emits a section header whenever `niche` changes.
 const MKLEARN_LANDINGS: Landing[] = [
-  { slug: "auto-financing-explained", title: "Auto Financing Explained", lang: "EN" },
-  { slug: "financiamiento-de-auto", title: "Financiamiento de auto", lang: "ES" },
-  { slug: "personal-loans", title: "Personal Loans Explained", lang: "EN" },
-  { slug: "personal-lending-and-investment", title: "Personal Lending & Investment", lang: "EN" },
-  { slug: "digital-marketing-skills-course", title: "Digital Marketing Skills Course", lang: "EN" },
-  { slug: "curso-marketing-digital", title: "Curso de Marketing Digital", lang: "ES" },
-  { slug: "paying-twice-for-netflix", title: "Paying Twice for Netflix", lang: "EN" },
-  { slug: "retiree-health-coverage", title: "Retiree Health Coverage", lang: "EN" },
-  { slug: "never-do-this-on-a-plane", title: "Never Do This on a Plane", lang: "EN" },
-  { slug: "secret-code-in-your-passport", title: "Secret Code in Your Passport", lang: "EN" },
-  { slug: "hidden-rooms-on-cruise-ships", title: "Hidden Rooms on Cruise Ships", lang: "EN" },
-  { slug: "never-book-this-cruise-cabin", title: "Never Book This Cruise Cabin", lang: "EN" },
-  { slug: "veneers-implants-abroad", title: "Veneers & Implants Abroad", lang: "EN" },
-  { slug: "flew-abroad-for-new-teeth", title: "Flew Abroad for New Teeth", lang: "EN" },
-  { slug: "world-capital-of-cheap-dentistry", title: "World Capital of Cheap Dentistry", lang: "EN" },
+  { slug: "auto-financing-explained", title: "Auto Financing Explained", lang: "EN", niche: "Cars" },
+  { slug: "financiamiento-de-auto", title: "Financiamiento de auto", lang: "ES", niche: "Cars" },
+  { slug: "personal-loans", title: "Personal Loans Explained", lang: "EN", niche: "Loans" },
+  { slug: "personal-lending-and-investment", title: "Personal Lending & Investment", lang: "EN", niche: "Loans" },
+  { slug: "digital-marketing-skills-course", title: "Digital Marketing Skills Course", lang: "EN", niche: "MK Digital" },
+  { slug: "curso-marketing-digital", title: "Curso de Marketing Digital", lang: "ES", niche: "MK Digital" },
+  { slug: "paying-twice-for-netflix", title: "Paying Twice for Netflix", lang: "EN", niche: "Streaming" },
+  { slug: "retiree-health-coverage", title: "Retiree Health Coverage", lang: "EN", niche: "Health" },
+  { slug: "never-do-this-on-a-plane", title: "Never Do This on a Plane", lang: "EN", niche: "Travel" },
+  { slug: "secret-code-in-your-passport", title: "Secret Code in Your Passport", lang: "EN", niche: "Travel" },
+  { slug: "hidden-rooms-on-cruise-ships", title: "Hidden Rooms on Cruise Ships", lang: "EN", niche: "Travel" },
+  { slug: "never-book-this-cruise-cabin", title: "Never Book This Cruise Cabin", lang: "EN", niche: "Travel" },
+  { slug: "veneers-implants-abroad", title: "Veneers & Implants Abroad", lang: "EN", niche: "Dental" },
+  { slug: "flew-abroad-for-new-teeth", title: "Flew Abroad for New Teeth", lang: "EN", niche: "Dental" },
+  { slug: "world-capital-of-cheap-dentistry", title: "World Capital of Cheap Dentistry", lang: "EN", niche: "Dental" },
 ];
 
 // Indians defaults: the token sees the ACTIVE GC-Magicoffers-BR-* accounts — the ACCOUNT is

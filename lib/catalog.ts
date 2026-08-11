@@ -3,6 +3,10 @@ export type RichOption = {
   value: string;
   label: string;
   meta?: string;
+  /** Section header this option renders under in SearchSelect (e.g. the landing's niche).
+   *  Options sharing a group must be CONTIGUOUS in the list — headers are emitted on change.
+   *  Searchable: typing a niche name filters to its options. */
+  group?: string;
   /** When set, the option renders on TWO lines: label on top, this muted line below (e.g. an
    *  account's id). The tag then sits at the right of the second line. */
   subLabel?: string;

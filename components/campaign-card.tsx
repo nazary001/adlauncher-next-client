@@ -257,7 +257,14 @@ export function CampaignCard({
     : "col-span-12 md:col-span-6 xl:col-span-4";
   // Fanpages (Indians) come from the partner, not the profile; other partners use profile pages.
   const pageOptions = partner.fanpages.length ? partner.fanpages : pagesFor(c.profile);
-  const landingOptions = partner.landings.map((l) => ({ value: l.slug, label: l.title, meta: l.lang }));
+  // Niche section headers + language tags in the picker; searching "dental" / "es" narrows.
+  const landingOptions = partner.landings.map((l) => ({
+    value: l.slug,
+    label: l.title,
+    group: l.niche,
+    tag: l.lang,
+    tagTone: l.lang === "ES" ? ("ok" as const) : ("dim" as const),
+  }));
   const conversions = c.optimization === "conversions";
   const derivedLink = fullLandingUrl(partner, c.landing, c.gcm, conversions, c.pixel);
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { CheckIcon, SearchIcon, XIcon } from "./icons";
 import type { RichOption } from "@/lib/catalog";
@@ -81,13 +81,16 @@ export function SearchSelect({
       : selected.label
     : value;
   const q = query.trim().toLowerCase();
-  // Searchable by label, meta AND value — for fanpages the value is the page id.
+  // Searchable by label, meta, value (fanpages: the page id), group (landing niche) and the
+  // exact tag ("es" → Spanish landings without also matching every label containing "es").
   const filtered = q
     ? opts.filter(
         (o) =>
           o.label.toLowerCase().includes(q) ||
           o.meta?.toLowerCase().includes(q) ||
-          o.value.toLowerCase().includes(q),
+          o.value.toLowerCase().includes(q) ||
+          o.group?.toLowerCase().includes(q) ||
+          o.tag?.toLowerCase() === q,
       )
     : opts;
 
@@ -224,12 +227,20 @@ export function SearchSelect({
             {filtered.length === 0 ? (
               <p className="px-3 py-3 text-[12px] text-faint">{emptyHint}</p>
             ) : (
-              filtered.map((o, i) =>
-                o.subLabel ? (
+              filtered.map((o, i) => (
+                <Fragment key={o.value}>
+                  {/* Section header whenever the (contiguous) group changes — landing niches etc.
+                      Headers are decoration only: keyboard nav walks the flat filtered list. */}
+                  {o.group && (i === 0 || filtered[i - 1].group !== o.group) ? (
+                    <p className="px-2.5 pb-1 pt-2.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-faint">
+                      {o.group}
+                    </p>
+                  ) : null}
+                  {o.subLabel ? (
                   // Two-line option: label on top; the muted sub-line (e.g. account id) + status
                   // tag below — lets long names + id + a FARM marker all fit without truncation.
                   <div
-                    key={o.value}
+
                     data-idx={i}
                     role="option"
                     aria-selected={o.value === value}
@@ -258,7 +269,7 @@ export function SearchSelect({
                   </div>
                 ) : (
                   <div
-                    key={o.value}
+
                     data-idx={i}
                     role="option"
                     aria-selected={o.value === value}
@@ -285,8 +296,9 @@ export function SearchSelect({
                       {o.value === value ? <CheckIcon className="h-3.5 w-3.5 text-accent" /> : null}
                     </span>
                   </div>
-                ),
-              )
+                  )}
+                </Fragment>
+              ))
             )}
           </div>
             </div>,
