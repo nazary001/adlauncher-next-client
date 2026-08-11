@@ -8,6 +8,7 @@ import { useHs } from "./use-hs";
 import { useHsTaskManager } from "./hs-task-manager";
 import { limitMoney, moneyLabel, parseMoney } from "@/lib/types";
 import { geoSummary } from "@/lib/catalog";
+import { todaySaoPauloDDMM } from "@/lib/hs-launch";
 import type { PartnerId } from "@/lib/partners";
 import { CopyIcon, EyeIcon, PlusIcon, TrashIcon } from "./icons";
 import type { SessionUser } from "./user-menu";
@@ -48,6 +49,17 @@ const STRATEGY_SHORT: Record<string, string> = {
   LOWEST_COST_WITH_MIN_ROAS: "min ROAS",
 };
 
+/** The clone name LION will rebuild: prefix re-dated to TODAY (Sao Paulo) + "(CLONE)" after
+ *  API. Approximate (LION rebuilds by creative family and may drop random tails) but close —
+ *  the buyer edits only the SUFFIX appended after it, exactly like the launcher's fixed
+ *  name prefix. */
+function predictedCloneName(sourceName: string, ddmm: string): string {
+  if (!sourceName) return "";
+  let n = sourceName.replace(/^\[\d{2}\/\d{2}\]/, `[${ddmm}]`);
+  if (!/\(CLONE\)/.test(n)) n = n.replace(/API/, "API (CLONE)");
+  return n;
+}
+
 const freshRow = (campaignId: string, suffix: string, n: number): Row => ({
   id: `r${Date.now()}-${n}`,
   campaignId,
@@ -86,13 +98,14 @@ export function HsCloneBoard({
   const [copies, setCopies] = useState("1");
   const [previewed, setPreviewed] = useState(false);
   const [firing, setFiring] = useState(false);
+  const [draftId, setDraftId] = useState("");
   const counter = useRef(1);
   const [rows, setRows] = useState<Row[]>(() => {
     const seeded = initialIds
       .filter((id) => /^\d{5,}$/.test(id))
       .slice(0, MAX_SOURCES)
       .map((cid, i) => freshRow(cid, user?.username ?? "", i + 1));
-    return seeded.length ? seeded : [freshRow("", user?.username ?? "", 1)];
+    return seeded;
   });
 
   const data = profile ? hs.dataFor(profile) : undefined;
@@ -117,12 +130,21 @@ export function HsCloneBoard({
     (id: string, p: Partial<Row>) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p } : r))),
     [],
   );
-  const addRow = () => {
-    setRows((rs) => (rs.length >= MAX_SOURCES ? rs : [...rs, freshRow("", user?.username ?? "", ++counter.current)]));
+  const addSources = () => {
+    const ids = [...new Set(draftId.split(/[\s,;]+/).map((x) => x.trim()).filter((x) => /^\d{5,}$/.test(x)))];
+    if (ids.length === 0) return;
+    setRows((rs) => {
+      const have = new Set(rs.map((r) => r.campaignId));
+      const fresh = ids
+        .filter((id) => !have.has(id))
+        .map((id) => freshRow(id, user?.username ?? "", ++counter.current));
+      return [...rs, ...fresh].slice(0, MAX_SOURCES);
+    });
+    setDraftId("");
     setPreviewed(false);
   };
   const removeRow = (id: string) => {
-    setRows((rs) => (rs.length > 1 ? rs.filter((r) => r.id !== id) : rs));
+    setRows((rs) => rs.filter((r) => r.id !== id));
     setPreviewed(false);
   };
 
@@ -378,18 +400,17 @@ export function HsCloneBoard({
             </div>
 
             <div className="overflow-x-auto rounded-2xl border border-line bg-surface">
-              <table className="w-full min-w-[880px] text-left">
+              <table className="w-full min-w-[960px] text-left">
                 <thead>
                   <tr className="border-b border-line text-[10px] font-semibold uppercase tracking-[0.14em] text-faint">
                     <th className="px-3 py-2 font-semibold">#</th>
-                    <th className="px-2 py-2 font-semibold">Source / Name</th>
+                    <th className="px-2 py-2 font-semibold">Name (fixed) + suffix</th>
                     <th className="px-2 py-2 font-semibold">Countries</th>
                     <th className="px-2 py-2 text-right font-semibold">Orig budget</th>
                     <th className="px-2 py-2 text-right font-semibold">Orig bid</th>
                     <th className="px-2 py-2 text-center font-semibold">Ads</th>
                     <th className="px-2 py-2 font-semibold">Bid</th>
                     <th className="px-2 py-2 font-semibold">Budget $</th>
-                    <th className="px-2 py-2 font-semibold">Suffix</th>
                     <th className="px-2 py-2 font-semibold">Status</th>
                     <th className="px-2 py-2" />
                   </tr>
@@ -398,28 +419,31 @@ export function HsCloneBoard({
                   {rows.map((r, i) => (
                     <tr key={r.id} className="border-b border-line/60 align-top last:border-b-0">
                       <td className="px-3 py-3 font-mono text-[11px] text-faint">{String(i + 1).padStart(2, "0")}</td>
-                      <td className="min-w-[240px] px-2 py-2.5">
-                        <input
-                          value={r.campaignId}
-                          onChange={(e) =>
-                            patchRow(r.id, {
-                              campaignId: e.target.value.replace(/\D/g, ""),
-                              info: null,
-                              state: "idle",
-                              msg: undefined,
-                            })
-                          }
-                          placeholder="Campaign ID (1202538…)"
-                          aria-label="Source campaign id"
-                          className={cellInput}
-                        />
-                        <p className="mt-1 line-clamp-2 break-all text-[11px] leading-snug text-dim" title={r.info?.name}>
-                          {r.loading ? "Loading from LION…" : r.info?.status === "UNREADABLE" ? (
-                            <span className="text-danger">LION can’t read this campaign</span>
-                          ) : (
-                            r.info?.name || "—"
-                          )}
-                        </p>
+                      <td className="min-w-[320px] px-2 py-2.5">
+                        {/* Like the launcher's name field: the LION-rebuilt part is FIXED (muted),
+                            only the trailing suffix is the buyer's to edit. */}
+                        <div className="rounded-md border border-line bg-surface2 px-2.5 py-1.5">
+                          <p className="font-mono text-[10px] text-faint">#{r.campaignId}</p>
+                          <p className="mt-0.5 break-words text-[11.5px] leading-snug text-dim" title={r.info?.name}>
+                            {r.loading ? (
+                              "Loading from LION…"
+                            ) : r.info?.status === "UNREADABLE" ? (
+                              <span className="text-danger">LION can’t read this campaign</span>
+                            ) : r.info?.name ? (
+                              predictedCloneName(r.info.name, todaySaoPauloDDMM())
+                            ) : (
+                              "—"
+                            )}
+                          </p>
+                          <input
+                            value={r.suffix}
+                            onChange={(e) => patchRow(r.id, { suffix: e.target.value })}
+                            placeholder="suffix (editable)"
+                            aria-label="Name suffix"
+                            maxLength={80}
+                            className="mt-1.5 h-7 w-full rounded border border-line bg-surface px-2 text-[12px] text-ink outline-none transition-colors hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
+                          />
+                        </div>
                       </td>
                       <td className="px-2 py-3 text-[11.5px] text-dim">
                         {r.info?.countries.length ? geoSummary(r.info.countries) : r.info ? "inherited" : "—"}
@@ -452,16 +476,6 @@ export function HsCloneBoard({
                           onChange={(e) => patchRow(r.id, { budget: limitMoney(e.target.value, 10000) })}
                           aria-label="Daily budget"
                           className={cellInput}
-                        />
-                      </td>
-                      <td className="min-w-[120px] px-2 py-2.5">
-                        <input
-                          value={r.suffix}
-                          onChange={(e) => patchRow(r.id, { suffix: e.target.value })}
-                          placeholder="suffix"
-                          aria-label="Name suffix"
-                          maxLength={80}
-                          className={cellInput.replace("font-mono tabular-nums ", "")}
                         />
                       </td>
                       <td className="max-w-[180px] px-2 py-3">
@@ -497,15 +511,27 @@ export function HsCloneBoard({
               </table>
             </div>
 
-            <div className="flex items-center justify-between">
-              <button
-                type="button"
-                onClick={addRow}
-                className="flex items-center gap-1.5 rounded-md border border-dashed border-line2 px-2.5 py-1.5 text-[11.5px] font-medium text-faint transition-colors hover:border-accent/50 hover:text-[#9db8ff]"
-              >
-                <PlusIcon className="h-3.5 w-3.5" />
-                Add source
-              </button>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5">
+                <input
+                  value={draftId}
+                  onChange={(e) => setDraftId(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") addSources();
+                  }}
+                  placeholder="Campaign ID(s) — paste one or a comma list"
+                  aria-label="Add source campaign ids"
+                  className="h-8 w-[280px] rounded-md border border-line bg-surface2 px-2 font-mono text-[12px] text-ink outline-none transition-colors hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
+                />
+                <button
+                  type="button"
+                  onClick={addSources}
+                  className="flex h-8 items-center gap-1.5 rounded-md border border-dashed border-line2 px-2.5 text-[11.5px] font-medium text-faint transition-colors hover:border-accent/50 hover:text-[#9db8ff]"
+                >
+                  <PlusIcon className="h-3.5 w-3.5" />
+                  Add
+                </button>
+              </div>
               <p className="text-[10.5px] text-faint">
                 Empty Bid = inherits the source’s (MIN_ROAS sources carry a ROAS decimal) · targeting & creatives inherit
               </p>
@@ -518,11 +544,13 @@ export function HsCloneBoard({
                 <div className="flex flex-col gap-1.5">
                   {validRows.map((r) => (
                     <p key={r.id} className="text-[12px] text-dim">
-                      <span className="font-mono text-[11px] text-faint">{r.campaignId}</span>{" "}
-                      <span className="text-ink">{r.info?.name ? r.info.name.slice(0, 60) : ""}</span> → {copiesN} cop
-                      {copiesN === 1 ? "y" : "ies"} @ ${moneyLabel(r.budget)}/day
+                      <span className="text-ink">
+                        {r.info?.name
+                          ? `${predictedCloneName(r.info.name, todaySaoPauloDDMM())}${r.suffix.trim() ? ` ${r.suffix.trim()}` : ""}`.slice(0, 110)
+                          : `#${r.campaignId}`}
+                      </span>{" "}
+                      → {copiesN} cop{copiesN === 1 ? "y" : "ies"} @ ${moneyLabel(r.budget)}/day
                       {r.bid.trim() ? ` · bid ${r.bid}` : " · bid inherited"}
-                      {r.suffix.trim() ? ` · “${r.suffix.trim()}”` : ""}
                     </p>
                   ))}
                   <p className="mt-1 border-t border-line pt-2 text-[12px] text-ink">
