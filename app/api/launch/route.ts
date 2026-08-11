@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { type Campaign, bidAmountMissing, bidKind, parseMoney } from "@/lib/types";
 import { conversionEventsFor } from "@/lib/catalog";
-import { partnerConfig, fullLandingUrl, type PartnerId } from "@/lib/partners";
+import { ROAS_PIXEL, partnerConfig, fullLandingUrl, type PartnerId } from "@/lib/partners";
 import {
   type LaunchBinds,
   adPayload,
@@ -304,6 +304,18 @@ export async function POST(req: Request) {
             ok: false,
             stage: "config",
             error: "pixel_not_on_account — this ad account does not carry the picked pixel (share it in BM first)",
+          },
+          { status: 400 },
+        );
+      }
+      // Owner rule (2026-08-11): min-ROAS may only optimize on the partner's value pixel — the
+      // one with real purchase-value history. Any other pixel is rejected before any claim/write.
+      if (bidKind(campaign.bidStrategy) === "roas" && pickedPixel !== ROAS_PIXEL.id) {
+        return NextResponse.json(
+          {
+            ok: false,
+            stage: "config",
+            error: `roas_pixel_required — min-ROAS launches run only on ${ROAS_PIXEL.name} (${ROAS_PIXEL.id})`,
           },
           { status: 400 },
         );

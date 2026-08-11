@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { partnerConfig, type PartnerId } from "@/lib/partners";
+import { ROAS_PIXEL, partnerConfig, type PartnerId } from "@/lib/partners";
 import { bidAmountMissing, bidKind, parseMoney } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
 import {
@@ -264,6 +264,14 @@ export async function POST(req: Request) {
           // Mirror the HS/launch guard: a min-ROAS goal above 100 (10 000%) is a typo, not a bid.
           if (bidKind(campaign.bidStrategy) === "roas" && parseMoney(campaign.bidCap) > 100) {
             throw new FbError("ROAS goal must be 0–100 on the clone row", { campaignId: edit.campaignId });
+          }
+          // Owner rule (2026-08-11): min-ROAS clones may only optimize on the partner's value
+          // pixel — same gate as /api/launch, before any claim/write.
+          if (bidKind(campaign.bidStrategy) === "roas" && editBinds.pixelId !== ROAS_PIXEL.id) {
+            throw new FbError(
+              `min-ROAS clones run only on ${ROAS_PIXEL.name} (${ROAS_PIXEL.id}) — pick it as the pixel`,
+              { campaignId: edit.campaignId },
+            );
           }
           if (campaign.countries.length === 0) {
             throw new FbError("source has no country targeting to clone — set a geo on the clone row", { campaignId: edit.campaignId });

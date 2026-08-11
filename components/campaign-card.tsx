@@ -26,7 +26,7 @@ import {
   pixelsFor,
 } from "@/lib/catalog";
 import { hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
-import { type LinkRole, type PartnerConfig, fullLandingUrl, landingUrlSegments, launchReadyOpts } from "@/lib/partners";
+import { type LinkRole, type PartnerConfig, ROAS_PIXEL, fullLandingUrl, landingUrlSegments, launchReadyOpts } from "@/lib/partners";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
 import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-adaccounts";
@@ -79,6 +79,8 @@ function missingRequirements(
   if (opts.adText && !c.copy.trim()) m.push("copy");
   if (parseMoney(c.budget) < 1) m.push("budget");
   if (bidAmountMissing(c)) m.push("bid cap");
+  if (opts.roasPixel && bidKind(c.bidStrategy) === "roas" && c.pixel !== opts.roasPixel)
+    m.push(`${ROAS_PIXEL.name} pixel`);
   if (!c.files.some((f) => f.kind === "video" || f.kind === "image")) m.push("creative");
   return m.length ? m : ["—"];
 }
@@ -234,6 +236,13 @@ export function CampaignCard({
     if (hsMode && c.profile && c.account) hs?.ensurePixels(c.profile, c.account);
   }, [hsMode, c.profile, c.account, hs]);
   const kind = bidKind(c.bidStrategy);
+  // Self-heal restored/copied min-ROAS drafts: the value-pixel pin is STATE, not just display —
+  // a draft restored with another pixel converges to the only ROAS-allowed one. Idempotent
+  // (patches only on mismatch), so the unstable `patch` identity is safe to leave out of deps.
+  const roasPixelDrift = !hsMode && partner.accountsFromToken && kind === "roas" && c.pixel !== ROAS_PIXEL.id;
+  useEffect(() => {
+    if (roasPixelDrift) onPatch(c.id, { pixel: ROAS_PIXEL.id });
+  }, [roasPixelDrift, onPatch, c.id]);
   const hsCurrency = hsMode ? hsData?.currencies?.[c.account] || "" : "";
   // The LION-validated name prefix is DERIVED (date + ACR + redirect label + geo) — it re-renders
   // live as the buyer flips redirect type or geo; the server rebuilds the exact same string.
@@ -441,7 +450,13 @@ export function CampaignCard({
                     <SearchSelect
                       value={c.account}
                       onChange={(v) =>
-                        patch({ account: v, pixel: defaultPixelFor(adAccounts ?? null, v, partner.preferredPixel) })
+                        patch({
+                          account: v,
+                          // A roas card keeps its pinned value pixel across account switches —
+                          // defaultPixelFor would swap it back to the FARM-1 preference.
+                          pixel:
+                            kind === "roas" ? ROAS_PIXEL.id : defaultPixelFor(adAccounts ?? null, v, partner.preferredPixel),
+                        })
                       }
                       options={adAccounts ?? []}
                       placeholder="Search account"
@@ -507,14 +522,17 @@ export function CampaignCard({
                 <Field
                   label="Pixel"
                   className={setupCol}
+                  hint={!hsMode && partner.accountsFromToken && kind === "roas" ? "pinned by min ROAS" : undefined}
                   error={
                     hsMode
                       ? c.account && Array.isArray(hsPixels) && hsPixels.length > 0 && !c.pixel
                         ? "Pick a pixel"
                         : undefined
-                      : partner.accountsFromToken && c.account && !c.pixel
-                        ? "Pick a pixel"
-                        : undefined
+                      : partner.accountsFromToken && kind === "roas" && c.pixel !== ROAS_PIXEL.id
+                        ? `min ROAS runs only on ${ROAS_PIXEL.name}`
+                        : partner.accountsFromToken && c.account && !c.pixel
+                          ? "Pick a pixel"
+                          : undefined
                   }
                 >
                   {hsMode ? (
@@ -531,6 +549,10 @@ export function CampaignCard({
                             : "Loading pixels…"
                       }
                     />
+                  ) : partner.accountsFromToken && kind === "roas" ? (
+                    // Min-ROAS: the value pixel is the ONLY allowed one — rendered locked, and the
+                    // switch to the strategy already patched c.pixel to it.
+                    <LockedField value={`${ROAS_PIXEL.name} · ${ROAS_PIXEL.id}`} hint="min ROAS" mono />
                   ) : partner.accountsFromToken ? (
                     <SearchSelect
                       value={c.pixel}
@@ -606,10 +628,16 @@ export function CampaignCard({
                     value={c.bidStrategy}
                     onChange={(e) => {
                       const bidStrategy = e.target.value;
-                      // Min-ROAS optimizes purchase value — the event pins to Purchase and (MO)
-                      // the optimization pins to conversions so the link keeps &fire=click.
+                      // Min-ROAS optimizes purchase value — the event pins to Purchase, (MO) the
+                      // optimization pins to conversions so the link keeps &fire=click, and the
+                      // pixel pins to the partner's value pixel (the only ROAS-allowed one).
                       if (bidKind(bidStrategy) === "roas") {
-                        patch({ bidStrategy, conversionEvent: "PURCHASE", optimization: "conversions" });
+                        patch({
+                          bidStrategy,
+                          conversionEvent: "PURCHASE",
+                          optimization: "conversions",
+                          ...(partner.accountsFromToken ? { pixel: ROAS_PIXEL.id } : {}),
+                        });
                       } else {
                         patch({ bidStrategy });
                       }

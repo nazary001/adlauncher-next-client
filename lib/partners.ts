@@ -91,6 +91,13 @@ const MKLEARN_LANDINGS: Landing[] = [
 const MAGICOFFERS_ACCOUNT: Bound = { id: "1297336295903991", name: "GC-Magicoffers-BR-1500" };
 const MAGICOFFERS_PIXEL: Bound = { id: "3288799954641310", name: "HS-Pixel-FARM-1" };
 
+/** The ONLY pixel min-ROAS launches may optimize on (owner rule 2026-08-11): the partner's HS
+ *  value pixel — real purchase-value history, shared to every MO account and live-probed
+ *  VO-eligible on 08-11. Everything else (never-fired GC-for-MO, FARM-1) is rejected for ROAS
+ *  even where technically eligible. Enforced in the card (pin + readiness), /api/launch and
+ *  /api/clone/run. */
+export const ROAS_PIXEL: Bound = { id: "4367956310124642", name: "VD-C1-HS-1" };
+
 export const PARTNERS: PartnerConfig[] = [
   {
     id: "br",
@@ -158,6 +165,7 @@ export function launchReadyOpts(p: PartnerConfig): {
   gcm: boolean;
   link: boolean;
   adText: boolean;
+  roasPixel: string;
 } {
   return {
     landing: p.usesGcm,
@@ -172,6 +180,8 @@ export function launchReadyOpts(p: PartnerConfig): {
     // LION builds ads from the typed destination link + title/copy — all hard-required by create/.
     link: Boolean(p.lionLaunch),
     adText: Boolean(p.lionLaunch),
+    // MO min-ROAS is pinned to the partner's value pixel; LION partners validate pixels their own way.
+    roasPixel: p.accountsFromToken ? ROAS_PIXEL.id : "",
   };
 }
 

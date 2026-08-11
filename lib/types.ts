@@ -156,6 +156,9 @@ type ReadyOpts = {
   link?: boolean;
   /** LION partners: title + primary text are hard-required by the create weapon. */
   adText?: boolean;
+  /** When set (MO), a min-ROAS card is ready ONLY with this exact pixel id — the partner's HS
+   *  value pixel; every other pixel fails value optimization or is banned by owner rule. */
+  roasPixel?: string;
 };
 
 /** A usable ad destination — http(s) and no whitespace inside. */
@@ -174,6 +177,7 @@ export function isReady(c: Campaign, opts: ReadyOpts = {}): boolean {
     gcm = false,
     link = false,
     adText = false,
+    roasPixel = "",
   } = opts;
   if (!c.name.trim() || c.countries.length === 0) return false;
   if (profile && !c.profile) return false;
@@ -190,6 +194,9 @@ export function isReady(c: Campaign, opts: ReadyOpts = {}): boolean {
   // (orphan + burnt gcm) — never let such a card count as launchable. $1 = Meta's USD daily floor.
   if (parseMoney(c.budget) < 1) return false;
   if (bidAmountMissing(c)) return false;
+  // Min-ROAS is pinned to the partner's value pixel (owner rule 2026-08-11) — any other pixel
+  // would be rejected by the launch route anyway, so the card must not read as launchable.
+  if (roasPixel && bidKind(c.bidStrategy) === "roas" && c.pixel !== roasPixel) return false;
   return true;
 }
 
