@@ -271,6 +271,36 @@ export async function lionSetCampaignStatus(
   }
 }
 
+/** Today in LION's timezone (America/Sao_Paulo) as YYYY-MM-DD — the metrics date param. */
+const saoPauloToday = (): string =>
+  new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" }).format(
+    new Date(),
+  );
+
+// campaign_bid map from metrics/ — the ONLY read that exposes a MIN_ROAS goal (details/ answers
+// adset_bid:null for those). The payload is huge (tens of thousands of rows), so it's fetched
+// lazily, kept as a slim id→bid map and cached 10 min.
+let bidsCache: { at: number; map: Map<string, number> } | null = null;
+
+async function lionMyBids(): Promise<Map<string, number>> {
+  if (bidsCache && Date.now() - bidsCache.at < TTL_MS) return bidsCache.map;
+  return dedupe("mybids", async () => {
+    const body = (await lionGet(`/api/facebook/campaigns/metrics/?date=${saoPauloToday()}`)) as unknown;
+    const rows = Array.isArray(body)
+      ? (body as Record<string, unknown>[])
+      : Array.isArray((body as Record<string, unknown> | null)?.campaigns)
+        ? ((body as Record<string, unknown>).campaigns as Record<string, unknown>[])
+        : [];
+    const map = new Map<string, number>();
+    for (const r of rows) {
+      const bid = r.campaign_bid;
+      if (typeof bid === "number" && bid > 0) map.set(String(r.campaign_id ?? ""), bid);
+    }
+    bidsCache = { at: Date.now(), map };
+    return map;
+  });
+}
+
 export type LionSourceInfo = {
   campaignId: string;
   name: string;
@@ -315,7 +345,7 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
     targeting.map((t) => [String(t.campaign_id ?? ""), (t.countries_code ?? t.countries ?? []).map(String)]),
   );
   const byId = new Map(details.map((d) => [String(d.campaign_id ?? ""), d]));
-  return campaignIds.map((cid) => {
+  const rows = campaignIds.map((cid) => {
     const d = byId.get(cid);
     if (!d) {
       return { campaignId: cid, name: "", status: "UNREADABLE", budget: null, bid: null, bidStrategy: "", adsCount: 0, countries: geoById.get(cid) ?? [] };
@@ -333,6 +363,22 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
       countries: geoById.get(cid) ?? [],
     };
   });
+  // MIN_ROAS goals never appear in details/ — metrics' campaign_bid is the only read that has
+  // them (verified live: 0.34/0.3/0.35 matched the weapon UI). Consulted only when needed.
+  if (rows.some((r) => r.bid == null && r.status !== "UNREADABLE")) {
+    try {
+      const bids = await lionMyBids();
+      for (const r of rows) {
+        if (r.bid == null) {
+          const b = bids.get(r.campaignId);
+          if (b != null) r.bid = b;
+        }
+      }
+    } catch {
+      /* metrics down — bids stay null, the UI says "inherits" */
+    }
+  }
+  return rows;
 }
 
 export type LionTaskStatus = {

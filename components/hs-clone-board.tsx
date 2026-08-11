@@ -64,6 +64,17 @@ function splitLionName(sourceName: string, ddmm: string): { prefix: string; tail
   return { prefix, tail: m[2].trim() };
 }
 
+/** Geo from the NAME's grammar (the `[CODES]` group after the redirect label) — the display
+ *  fallback for sources whose targeting/ answers an empty country list (worldwide runs). */
+function geoFromName(name: string, summary: (codes: string[]) => string): string {
+  const m = /API(?:\s*\(CLONE\))?\s*-\s*\([^)]*\)\s*-\s*\[([^\]]*)\]/.exec(name);
+  if (!m) return "";
+  const codes = m[1].split(",").map((x) => x.trim()).filter(Boolean);
+  if (codes.length === 0) return "";
+  if (codes.length === 1 && /^world$/i.test(codes[0])) return "World";
+  return summary(codes);
+}
+
 const freshRow = (campaignId: string, n: number): Row => ({
   id: `r${Date.now()}-${n}`,
   campaignId,
@@ -256,7 +267,11 @@ export function HsCloneBoard({
               d.taskIds.map((taskId, i) => ({
                 name: `${label}${d.taskIds!.length > 1 ? ` · copy ${i + 1}/${d.taskIds!.length}` : ""}`,
                 profile,
-                geo: r.info?.countries.length ? geoSummary(r.info.countries) : "inherited",
+                geo: r.info?.countries.length
+                  ? geoSummary(r.info.countries)
+                  : r.info?.name
+                    ? geoFromName(r.info.name, geoSummary) || "inherited"
+                    : "inherited",
                 budget: r.budget,
                 lionTaskId: String(taskId),
               })),
@@ -456,7 +471,11 @@ export function HsCloneBoard({
                         </div>
                       </td>
                       <td className="px-2 py-3 text-[11.5px] text-dim">
-                        {r.info?.countries.length ? geoSummary(r.info.countries) : r.info ? "inherited" : "—"}
+                        {r.info?.countries.length
+                          ? geoSummary(r.info.countries)
+                          : r.info?.name
+                            ? geoFromName(r.info.name, geoSummary) || "inherited"
+                            : "—"}
                       </td>
                       <td className="px-2 py-3 text-right font-mono text-[11.5px] tabular-nums text-dim">
                         {r.info?.budget != null ? `$${moneyLabel(r.info.budget)}` : "—"}
