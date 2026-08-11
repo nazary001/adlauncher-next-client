@@ -16,7 +16,8 @@ const FIELDS = [
   // sources on the ad set. Both are read — mapCampaign prefers the campaign's values.
   "daily_budget",
   "bid_strategy",
-  "adsets.limit(5){name,daily_budget,bid_strategy,bid_amount,billing_event,optimization_goal,promoted_object,targeting}",
+  "bid_constraints",
+  "adsets.limit(5){name,daily_budget,bid_strategy,bid_amount,bid_constraints,billing_event,optimization_goal,promoted_object,targeting}",
   "ads.limit(15){name,creative{id,video_id,thumbnail_url}}",
 ].join(",");
 
@@ -68,6 +69,10 @@ function mapCampaign(id: string, obj: Json): CloneSource {
   // Prefer the campaign's own budget/strategy (CBO source), fall back to the ad set (legacy).
   const budgetCents = num(obj.daily_budget) ?? num(adset.daily_budget);
   const bidCents = num(adset.bid_amount);
+  // Min-ROAS sources bid through bid_constraints (adset under CBO — probed 08-11; campaign as a
+  // fallback), not bid_amount: the ROAS column shows the floor / 10000 ("12000" → "1,2").
+  const constraints = (adset.bid_constraints ?? obj.bid_constraints ?? {}) as Json;
+  const roasFloor = num(constraints.roas_average_floor);
   const bidStrategy =
     typeof obj.bid_strategy === "string"
       ? obj.bid_strategy
@@ -97,7 +102,8 @@ function mapCampaign(id: string, obj: Json): CloneSource {
     ageMin: String(num(t.age_min) ?? 18),
     userOs,
     originalBudget: budgetCents != null ? moneyLabel(budgetCents / 100) : "",
-    originalRoas: bidCents != null ? moneyLabel(bidCents / 100) : "",
+    originalRoas:
+      roasFloor != null ? moneyLabel(roasFloor / 10000) : bidCents != null ? moneyLabel(bidCents / 100) : "",
     bidStrategy,
     objective: typeof obj.objective === "string" ? obj.objective : "OUTCOME_SALES",
     optimization,
