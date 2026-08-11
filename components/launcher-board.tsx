@@ -326,18 +326,18 @@ function LauncherInner({ user }: { user?: SessionUser }) {
   // Capped at the gcm pool size (codes 01–200) so a full wave can't leave a card without a code.
   const MAX_CARDS = GCM_POOL_MAX;
 
-  /** Wave builder: grow every card to `n` copies (fresh gcm each; primary text copied verbatim).
-   *  Clones open expanded so you can review them right away. `n` is the total-per-card multiplier. */
+  /** Wave builder: APPEND `n` new cards (owner switched from ×multiply 08-11), cycling through
+   *  the existing cards as templates — one template card → n identical copies, several cards →
+   *  copies round-robin. Fresh gcm each, primary text verbatim; clones open expanded. */
   const duplicateAll = (n: number) =>
     mutate((cs) => {
-      const out: Campaign[] = [];
-      for (const c of cs) {
-        out.push(c);
-        for (let k = 1; k < n && out.length < MAX_CARDS; k++) {
-          out.push({ ...c, id: `c${nextId.current++}`, collapsed: false, gcm: "" });
-        }
+      if (cs.length === 0) return cs;
+      const out = [...cs];
+      for (let k = 0; k < n && out.length < MAX_CARDS; k++) {
+        const src = cs[k % cs.length];
+        out.push({ ...src, id: `c${nextId.current++}`, collapsed: false, gcm: "" });
       }
-      return out.slice(0, MAX_CARDS);
+      return out;
     });
 
   const setAllCollapsed = (collapsed: boolean) =>
@@ -361,7 +361,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
                 {campaigns.length}
               </span>
 
-              {/* wave builder — turn a template into N copies at once */}
+              {/* wave builder — append N more copies at once */}
               <div className="ml-1 flex h-9 items-center overflow-hidden rounded-lg border border-line bg-surface">
                 <span className="px-2.5 text-[12px] font-medium text-dim">Duplicate all</span>
                 {[2, 5, 10].map((n) => (
@@ -374,7 +374,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
                       "hover:bg-accent/15 hover:text-[#9db8ff] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                     }
                   >
-                    ×{n}
+                    +{n}
                   </button>
                 ))}
               </div>
