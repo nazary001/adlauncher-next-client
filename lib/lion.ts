@@ -221,6 +221,9 @@ export async function lionDuplicate(args: {
   starting_budget: number;
   number_of_copies: number;
   name_suffix: string;
+  /** LION-UI semantics ("Roas Goal" money field): a plain number — ROAS decimal for MIN_ROAS
+   *  sources (1,20 = 120%). Omitted = inherit the source's bid (the safe default). */
+  starting_bid?: number;
 }): Promise<LionDuplicationResult> {
   const body = (await lionPost("/api/facebook/campaigns/duplicate/", {
     profile_slug: args.profile_slug,
@@ -233,6 +236,7 @@ export async function lionDuplicate(args: {
         starting_budget: args.starting_budget,
         number_of_copies: args.number_of_copies,
         name_suffix: args.name_suffix,
+        ...(args.starting_bid != null ? { starting_bid: args.starting_bid } : {}),
       },
     ],
   })) as Record<string, unknown> | null;
@@ -261,6 +265,70 @@ export async function lionSetCampaignStatus(
     if (/does not have permission/i.test(msg)) return { ok: true, alreadyActive: true };
     return { ok: false, message: msg };
   }
+}
+
+export type LionSourceInfo = {
+  campaignId: string;
+  name: string;
+  status: string;
+  /** MAJOR units (dollars) — LION reads are major, writes are cents (asymmetry, verified live). */
+  budget: number | null;
+  /** Ad set bid as LION reports it (number; ROAS decimal for MIN_ROAS sources). Null = none
+   *  (lowest cost) or unknown. */
+  bid: number | null;
+  /** Campaign-level bid strategy (details/ carries it) — names the empty-bid case. */
+  bidStrategy: string;
+  adsCount: number;
+  countries: string[];
+};
+
+/** Read source campaigns for the duplicator table: details/ (name, budget, adsets/ads) +
+ *  targeting/ (countries), both answering {campaignsData:[…]} ARRAYS (form gotcha, verified
+ *  07-13 — never index by campaign id). A source details/ can't read ("Campaign data not
+ *  found") is reported with status "UNREADABLE" — its duplicate would die the same way. */
+export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceInfo[]> {
+  if (campaignIds.length === 0) return [];
+  type DetailsRow = {
+    campaign_id?: string | number;
+    campaign_name?: string;
+    campaign_status?: string;
+    bid_strategy?: string;
+    campaign_budget?: number;
+    adsets?: Array<{ bid_amount?: number; adset_bid?: number; ads?: Array<Record<string, unknown>> }>;
+  };
+  type TargetingRow = { campaign_id?: string | number; countries_code?: string[]; countries?: string[] };
+  const [detailsBody, targetingBody] = await Promise.all([
+    lionPost("/api/facebook/campaigns/details/", { campaign_ids: campaignIds }) as Promise<Record<string, unknown> | null>,
+    lionGet(`/api/facebook/campaigns/targeting/?campaign_ids=${encodeURIComponent(JSON.stringify(campaignIds))}`) as Promise<
+      Record<string, unknown> | null
+    >,
+  ]);
+  const details = Array.isArray(detailsBody?.campaignsData) ? (detailsBody!.campaignsData as DetailsRow[]) : [];
+  const targeting = Array.isArray(targetingBody?.campaignsData)
+    ? (targetingBody!.campaignsData as TargetingRow[])
+    : [];
+  const geoById = new Map(
+    targeting.map((t) => [String(t.campaign_id ?? ""), (t.countries_code ?? t.countries ?? []).map(String)]),
+  );
+  const byId = new Map(details.map((d) => [String(d.campaign_id ?? ""), d]));
+  return campaignIds.map((cid) => {
+    const d = byId.get(cid);
+    if (!d) {
+      return { campaignId: cid, name: "", status: "UNREADABLE", budget: null, bid: null, bidStrategy: "", adsCount: 0, countries: geoById.get(cid) ?? [] };
+    }
+    const adsets = Array.isArray(d.adsets) ? d.adsets : [];
+    const bidRaw = adsets[0]?.bid_amount ?? adsets[0]?.adset_bid;
+    return {
+      campaignId: cid,
+      name: String(d.campaign_name ?? ""),
+      status: String(d.campaign_status ?? ""),
+      budget: typeof d.campaign_budget === "number" ? d.campaign_budget : null,
+      bid: typeof bidRaw === "number" ? bidRaw : null,
+      bidStrategy: String(d.bid_strategy ?? ""),
+      adsCount: adsets.reduce((s, a) => s + (Array.isArray(a.ads) ? a.ads.length : 0), 0),
+      countries: geoById.get(cid) ?? [],
+    };
+  });
 }
 
 export type LionTaskStatus = {

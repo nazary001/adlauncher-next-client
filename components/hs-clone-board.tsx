@@ -1,23 +1,37 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Header } from "./header";
 import { Field } from "./ui";
 import { SearchSelect } from "./search-select";
 import { useHs } from "./use-hs";
 import { useHsTaskManager } from "./hs-task-manager";
-import { limitMoney, parseMoney } from "@/lib/types";
+import { limitMoney, moneyLabel, parseMoney } from "@/lib/types";
+import { geoSummary } from "@/lib/catalog";
 import type { PartnerId } from "@/lib/partners";
-import { CopyIcon, PlusIcon, TrashIcon } from "./icons";
+import { CopyIcon, EyeIcon, PlusIcon, TrashIcon } from "./icons";
 import type { SessionUser } from "./user-menu";
 
 const MAX_COPIES = 20;
+const MAX_SOURCES = 30;
 
+/** One source campaign row: LION-read facts + the editable overrides. */
 type Row = {
   id: string;
   campaignId: string;
-  copies: string; // display string, clamped 1..20 on submit
-  budget: string; // display string, cents on the wire
+  /** LION details/targeting — null while loading, "UNREADABLE" status = duplicate would die too. */
+  info: {
+    name: string;
+    status: string;
+    countries: string[];
+    budget: number | null; // MAJOR $ (LION reads are major)
+    bid: number | null;
+    bidStrategy: string;
+    adsCount: number;
+  } | null;
+  loading: boolean;
+  bid: string; // editable override; "" = inherit from source (safe default)
+  budget: string; // editable, display string → cents on the wire
   suffix: string;
   state: "idle" | "sending" | "ok" | "error";
   msg?: string;
@@ -27,13 +41,30 @@ const cellInput =
   "h-8 w-full rounded-md border border-line bg-surface2 px-2 text-[12px] font-mono tabular-nums text-ink " +
   "outline-none transition-colors duration-150 hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15";
 
+const STRATEGY_SHORT: Record<string, string> = {
+  LOWEST_COST_WITHOUT_CAP: "lowest",
+  LOWEST_COST_WITH_BID_CAP: "bid cap",
+  COST_CAP: "cost cap",
+  LOWEST_COST_WITH_MIN_ROAS: "min ROAS",
+};
+
+const freshRow = (campaignId: string, suffix: string, n: number): Row => ({
+  id: `r${Date.now()}-${n}`,
+  campaignId,
+  info: null,
+  loading: false,
+  bid: "",
+  budget: "10",
+  suffix,
+  state: "idle",
+});
+
 /**
- * HS duplicator: clone existing LION campaigns through the duplicate weapon (playbook flow —
- * duplicate → creation-status → auto-activate). Binds are the same profile→account→page→pixel
- * cascade as HS launches; each row = one source campaign id × N copies. Submits are instant
- * (LION just enqueues), so successful rows land in the HS Task Manager already "submitted"
- * and ride its polling; bids inherit from the source on purpose (MIN_ROAS sources carry ROAS
- * decimals — overriding blindly is the 100× class mistake).
+ * HS duplicator, structured like LION's own duplicator UI: a Settings column (destination binds
+ * + global copies + Preview→Duplicate) and a Selected Campaigns table whose rows show the REAL
+ * source facts read from LION (name, countries, original budget/bid, creatives) next to the
+ * editable Bid/Budget/Suffix overrides. Submits go through /api/hs/duplicate; successful tasks
+ * land in the HS Task Manager already "submitted" and auto-activate after COMPLETED.
  */
 export function HsCloneBoard({
   user,
@@ -52,23 +83,17 @@ export function HsCloneBoard({
   const [account, setAccount] = useState("");
   const [page, setPage] = useState("");
   const [pixel, setPixel] = useState("");
+  const [copies, setCopies] = useState("1");
+  const [previewed, setPreviewed] = useState(false);
+  const [firing, setFiring] = useState(false);
+  const counter = useRef(1);
   const [rows, setRows] = useState<Row[]>(() => {
     const seeded = initialIds
       .filter((id) => /^\d{5,}$/.test(id))
-      .map((cid, i) => ({
-        id: `r${i + 1}`,
-        campaignId: cid,
-        copies: "1",
-        budget: "10",
-        suffix: user?.username ?? "",
-        state: "idle" as const,
-      }));
-    return seeded.length
-      ? seeded
-      : [{ id: "r1", campaignId: "", copies: "1", budget: "10", suffix: user?.username ?? "", state: "idle" }];
+      .slice(0, MAX_SOURCES)
+      .map((cid, i) => freshRow(cid, user?.username ?? "", i + 1));
+    return seeded.length ? seeded : [freshRow("", user?.username ?? "", 1)];
   });
-  const [firing, setFiring] = useState(false);
-  const nextId = { current: rows.length + 1 };
 
   const data = profile ? hs.dataFor(profile) : undefined;
   const pixels = profile && account ? hs.pixelsFor(profile, account) : undefined;
@@ -78,36 +103,95 @@ export function HsCloneBoard({
     setAccount("");
     setPage("");
     setPixel("");
+    setPreviewed(false);
     if (slug) hs.ensureProfile(slug);
   };
   const pickAccount = (id: string) => {
     setAccount(id);
     setPixel("");
+    setPreviewed(false);
     if (profile && id) hs.ensurePixels(profile, id);
   };
 
-  const patchRow = (id: string, p: Partial<Row>) =>
-    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p } : r)));
-  const addRow = () =>
-    setRows((rs) => [
-      ...rs,
-      {
-        id: `r${Date.now()}-${nextId.current++}`,
-        campaignId: "",
-        copies: "1",
-        budget: "10",
-        suffix: user?.username ?? "",
-        state: "idle",
-      },
-    ]);
-  const removeRow = (id: string) => setRows((rs) => (rs.length > 1 ? rs.filter((r) => r.id !== id) : rs));
+  const patchRow = useCallback(
+    (id: string, p: Partial<Row>) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p } : r))),
+    [],
+  );
+  const addRow = () => {
+    setRows((rs) => (rs.length >= MAX_SOURCES ? rs : [...rs, freshRow("", user?.username ?? "", ++counter.current)]));
+    setPreviewed(false);
+  };
+  const removeRow = (id: string) => {
+    setRows((rs) => (rs.length > 1 ? rs.filter((r) => r.id !== id) : rs));
+    setPreviewed(false);
+  };
+
+  // ---- source facts from LION (details + targeting), batched + debounced ----
+  const fetchedRef = useRef(new Set<string>());
+  useEffect(() => {
+    const want = rows.filter((r) => /^\d{5,}$/.test(r.campaignId.trim()) && !r.info && !r.loading);
+    const ids = [...new Set(want.map((r) => r.campaignId.trim()))].filter((id) => !fetchedRef.current.has(id));
+    if (ids.length === 0) return;
+    const timer = setTimeout(() => {
+      ids.forEach((id) => fetchedRef.current.add(id));
+      setRows((rs) => rs.map((r) => (ids.includes(r.campaignId.trim()) ? { ...r, loading: true } : r)));
+      void (async () => {
+        try {
+          const res = await fetch("/api/hs/sources", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids }),
+          });
+          const d = (await res.json().catch(() => ({}))) as {
+            ok?: boolean;
+            sources?: Array<{
+              campaignId: string;
+              name: string;
+              status: string;
+              countries: string[];
+              budget: number | null;
+              bid: number | null;
+              bidStrategy: string;
+              adsCount: number;
+            }>;
+          };
+          const byId = new Map((d.sources ?? []).map((s) => [s.campaignId, s]));
+          setRows((rs) =>
+            rs.map((r) => {
+              const s = byId.get(r.campaignId.trim());
+              if (!s) return ids.includes(r.campaignId.trim()) ? { ...r, loading: false } : r;
+              return {
+                ...r,
+                loading: false,
+                info: {
+                  name: s.name,
+                  status: s.status,
+                  countries: s.countries,
+                  budget: s.budget,
+                  bid: s.bid,
+                  bidStrategy: s.bidStrategy,
+                  adsCount: s.adsCount,
+                },
+                // Prefill the editable bid with the source's own (LION-UI does the same); the
+                // buyer clearing it back to "" means "inherit".
+                bid: r.bid || (s.bid != null ? String(s.bid).replace(".", ",") : ""),
+              };
+            }),
+          );
+        } catch {
+          ids.forEach((id) => fetchedRef.current.delete(id)); // retry on next edit
+          setRows((rs) => rs.map((r) => (ids.includes(r.campaignId.trim()) ? { ...r, loading: false } : r)));
+        }
+      })();
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [rows]);
 
   const bindsReady = Boolean(profile && account && page && pixel);
+  const copiesN = Math.min(MAX_COPIES, Math.max(1, Math.round(Number(copies) || 1)));
   const validRows = rows.filter((r) => /^\d{5,}$/.test(r.campaignId.trim()) && parseMoney(r.budget) >= 1);
-  const totalCopies = validRows.reduce(
-    (s, r) => s + Math.min(MAX_COPIES, Math.max(1, Math.round(Number(r.copies) || 1))),
-    0,
-  );
+  const unreadable = rows.filter((r) => r.info?.status === "UNREADABLE").length;
+  const totalClones = validRows.length * copiesN;
 
   async function duplicateAll() {
     if (!bindsReady || validRows.length === 0 || firing) return;
@@ -116,7 +200,6 @@ export function HsCloneBoard({
       for (const r of rows) {
         const cid = r.campaignId.trim();
         if (!/^\d{5,}$/.test(cid) || parseMoney(r.budget) < 1) continue;
-        const copies = Math.min(MAX_COPIES, Math.max(1, Math.round(Number(r.copies) || 1)));
         patchRow(r.id, { state: "sending", msg: undefined });
         try {
           const res = await fetch("/api/hs/duplicate", {
@@ -128,18 +211,20 @@ export function HsCloneBoard({
               page,
               pixel,
               campaignId: cid,
-              copies,
+              copies: copiesN,
               budget: r.budget,
+              bid: r.bid.trim(),
               nameSuffix: r.suffix.trim(),
             }),
           });
           const d = (await res.json().catch(() => ({}))) as { ok?: boolean; taskIds?: string[]; error?: string };
           if (d?.ok && Array.isArray(d.taskIds) && d.taskIds.length > 0) {
+            const label = r.info?.name || `#${cid}`;
             enqueueSubmitted(
               d.taskIds.map((taskId, i) => ({
-                name: `Clone of ${cid}${d.taskIds!.length > 1 ? ` · copy ${i + 1}/${d.taskIds!.length}` : ""}`,
+                name: `${label}${d.taskIds!.length > 1 ? ` · copy ${i + 1}/${d.taskIds!.length}` : ""}`,
                 profile,
-                geo: "inherited",
+                geo: r.info?.countries.length ? geoSummary(r.info.countries) : "inherited",
                 budget: r.budget,
                 lionTaskId: String(taskId),
               })),
@@ -173,21 +258,14 @@ export function HsCloneBoard({
     <>
       <Header partner={partner} onPartnerChange={changePartner} user={user} />
       <main className="flex-1">
-        <div className="mx-auto flex w-full max-w-[1100px] flex-col gap-5 px-4 pb-24 pt-6 sm:px-6">
-          <div className="flex items-center gap-2">
-            <h1 className="text-sm font-semibold text-ink">Duplicate campaigns · HS</h1>
-            <span className="rounded-md border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[11px] text-dim">
-              via LION
-            </span>
-          </div>
-
-          {/* destination binds — same cascade as HS launches */}
-          <section className="rounded-2xl border border-line bg-surface p-4">
-            <p className="pb-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-faint">
-              Destination
-            </p>
-            <div className="grid grid-cols-12 gap-3">
-              <Field label="Profile" className="col-span-12 md:col-span-3">
+        <div className="mx-auto grid w-full max-w-[1440px] items-start gap-6 px-4 pb-24 pt-6 sm:px-6 lg:grid-cols-[300px_minmax(0,1fr)]">
+          {/* ---- Settings (LION-duplicator structure: binds + copies + preview→duplicate) ---- */}
+          <aside className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-20">
+            <div className="flex flex-col gap-3 rounded-2xl border border-line bg-surface p-4">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-faint">
+                Settings
+              </span>
+              <Field label="Profile">
                 <SearchSelect
                   value={profile}
                   onChange={pickProfile}
@@ -196,7 +274,7 @@ export function HsCloneBoard({
                   emptyHint={hs.profiles?.length ? "No matches" : "Loading profiles…"}
                 />
               </Field>
-              <Field label="Account" className="col-span-12 md:col-span-3">
+              <Field label="Account">
                 <SearchSelect
                   value={account}
                   onChange={pickAccount}
@@ -205,95 +283,221 @@ export function HsCloneBoard({
                   emptyHint={!profile ? "Pick a profile first" : data ? "No enabled accounts" : "Loading…"}
                 />
               </Field>
-              <Field label="Page" className="col-span-12 md:col-span-3">
+              <Field label="Page">
                 <SearchSelect
                   value={page}
-                  onChange={setPage}
+                  onChange={(v) => {
+                    setPage(v);
+                    setPreviewed(false);
+                  }}
                   options={data?.pages ?? []}
                   placeholder="Search page"
                   emptyHint={!profile ? "Pick a profile first" : data ? "No pages" : "Loading…"}
                 />
               </Field>
-              <Field label="Pixel" className="col-span-12 md:col-span-3">
+              <Field label="Pixel">
                 <SearchSelect
                   value={pixel}
-                  onChange={setPixel}
+                  onChange={(v) => {
+                    setPixel(v);
+                    setPreviewed(false);
+                  }}
                   options={(pixels ?? []).map((p) => ({ value: p.id, label: p.name, meta: p.id }))}
                   placeholder="Search pixel"
                   emptyHint={!account ? "Pick an account first" : pixels ? "No pixels on this account" : "Loading…"}
                 />
               </Field>
-            </div>
-          </section>
+              <Field label="Number of copies" hint="per source campaign">
+                <input
+                  value={copies}
+                  onChange={(e) => {
+                    setCopies(e.target.value.replace(/\D/g, "").slice(0, 2));
+                    setPreviewed(false);
+                  }}
+                  inputMode="numeric"
+                  aria-label="Number of copies"
+                  className="h-9 w-full rounded-lg border border-line bg-surface2 px-3 text-[13px] font-mono tabular-nums text-ink outline-none transition-colors hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
+                />
+              </Field>
 
-          {/* source rows */}
-          <section className="overflow-hidden rounded-2xl border border-line bg-surface">
-            <div className="grid grid-cols-[minmax(0,1.4fr)_90px_110px_minmax(0,1fr)_minmax(0,1.2fr)_36px] items-center gap-2 border-b border-line px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-faint">
-              <span>Source campaign ID</span>
-              <span>Copies</span>
-              <span>Budget $</span>
-              <span>Name suffix</span>
-              <span>Status</span>
-              <span />
-            </div>
-            {rows.map((r) => (
-              <div
-                key={r.id}
-                className="grid grid-cols-[minmax(0,1.4fr)_90px_110px_minmax(0,1fr)_minmax(0,1.2fr)_36px] items-center gap-2 border-b border-line/60 px-4 py-2.5 last:border-b-0"
+              <button
+                type="button"
+                onClick={() => setPreviewed(true)}
+                disabled={!bindsReady || validRows.length === 0}
+                className={
+                  "mt-1 flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-accent/40 " +
+                  "bg-accent/10 text-[13px] font-semibold text-[#9db8ff] transition-all duration-150 " +
+                  "hover:border-accent/60 hover:bg-accent/20 active:scale-[0.98] " +
+                  "disabled:cursor-not-allowed disabled:opacity-40 " +
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                }
               >
-                <input
-                  value={r.campaignId}
-                  onChange={(e) => patchRow(r.id, { campaignId: e.target.value.replace(/\D/g, "") })}
-                  placeholder="1202538…"
-                  aria-label="Source campaign id"
-                  className={cellInput}
-                />
-                <input
-                  value={r.copies}
-                  onChange={(e) => patchRow(r.id, { copies: e.target.value.replace(/\D/g, "").slice(0, 2) })}
-                  aria-label="Copies"
-                  className={cellInput + " text-center"}
-                />
-                <input
-                  value={r.budget}
-                  onChange={(e) => patchRow(r.id, { budget: limitMoney(e.target.value, 10000) })}
-                  aria-label="Daily budget"
-                  className={cellInput}
-                />
-                <input
-                  value={r.suffix}
-                  onChange={(e) => patchRow(r.id, { suffix: e.target.value })}
-                  placeholder="suffix"
-                  aria-label="Name suffix"
-                  maxLength={80}
-                  className={cellInput.replace("font-mono tabular-nums ", "")}
-                />
-                <span
-                  className={
-                    "truncate text-[11.5px] " +
-                    (r.state === "error"
-                      ? "text-danger"
-                      : r.state === "ok"
-                        ? "text-launch2"
-                        : r.state === "sending"
-                          ? "text-[#9db8ff]"
-                          : "text-faint")
-                  }
-                  title={r.msg}
-                >
-                  {r.state === "sending" ? "Submitting…" : (r.msg ?? "—")}
-                </span>
+                <EyeIcon className="h-4 w-4" />
+                Generate preview
+              </button>
+              {previewed ? (
                 <button
                   type="button"
-                  aria-label="Remove row"
-                  onClick={() => removeRow(r.id)}
-                  className="flex h-7 w-7 items-center justify-center rounded-md text-faint transition-colors hover:bg-raise hover:text-danger"
+                  onClick={() => void duplicateAll()}
+                  disabled={!bindsReady || validRows.length === 0 || firing}
+                  className={
+                    "animate-pop-in flex h-11 w-full items-center justify-center gap-2 rounded-xl " +
+                    "bg-gradient-to-b from-launch2 to-launch text-[13.5px] font-bold text-[#032e20] " +
+                    "shadow-[0_8px_28px_rgba(16,185,129,0.35)] transition-all duration-150 " +
+                    "hover:shadow-[0_10px_36px_rgba(16,185,129,0.5)] hover:brightness-110 active:scale-[0.98] " +
+                    "disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none " +
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-launch2"
+                  }
                 >
-                  <TrashIcon className="h-3.5 w-3.5" />
+                  <CopyIcon className="h-4 w-4" />
+                  {firing ? "Submitting…" : `Duplicate ${totalClones} clone${totalClones === 1 ? "" : "s"}`}
                 </button>
-              </div>
-            ))}
-            <div className="flex items-center justify-between px-4 py-2.5">
+              ) : null}
+              <p className="text-center text-[10.5px] leading-relaxed text-faint">
+                {bindsReady
+                  ? previewed
+                    ? "Submits to LION · clones activate automatically"
+                    : "Preview first, then duplicate"
+                  : "Pick profile · account · page · pixel"}
+              </p>
+            </div>
+          </aside>
+
+          {/* ---- Selected campaigns ---- */}
+          <section className="flex min-w-0 flex-col gap-4">
+            <div className="flex items-center gap-2">
+              <h1 className="text-sm font-semibold text-ink">Selected campaigns</h1>
+              <span className="rounded-md border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[11px] text-dim">
+                {validRows.length}
+              </span>
+              {unreadable > 0 ? (
+                <span className="rounded-md border border-danger/30 bg-danger/10 px-1.5 py-0.5 text-[10.5px] text-danger">
+                  {unreadable} unreadable — their duplicates would fail too
+                </span>
+              ) : null}
+            </div>
+
+            <div className="overflow-x-auto rounded-2xl border border-line bg-surface">
+              <table className="w-full min-w-[880px] text-left">
+                <thead>
+                  <tr className="border-b border-line text-[10px] font-semibold uppercase tracking-[0.14em] text-faint">
+                    <th className="px-3 py-2 font-semibold">#</th>
+                    <th className="px-2 py-2 font-semibold">Source / Name</th>
+                    <th className="px-2 py-2 font-semibold">Countries</th>
+                    <th className="px-2 py-2 text-right font-semibold">Orig budget</th>
+                    <th className="px-2 py-2 text-right font-semibold">Orig bid</th>
+                    <th className="px-2 py-2 text-center font-semibold">Ads</th>
+                    <th className="px-2 py-2 font-semibold">Bid</th>
+                    <th className="px-2 py-2 font-semibold">Budget $</th>
+                    <th className="px-2 py-2 font-semibold">Suffix</th>
+                    <th className="px-2 py-2 font-semibold">Status</th>
+                    <th className="px-2 py-2" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r, i) => (
+                    <tr key={r.id} className="border-b border-line/60 align-top last:border-b-0">
+                      <td className="px-3 py-3 font-mono text-[11px] text-faint">{String(i + 1).padStart(2, "0")}</td>
+                      <td className="min-w-[240px] px-2 py-2.5">
+                        <input
+                          value={r.campaignId}
+                          onChange={(e) =>
+                            patchRow(r.id, {
+                              campaignId: e.target.value.replace(/\D/g, ""),
+                              info: null,
+                              state: "idle",
+                              msg: undefined,
+                            })
+                          }
+                          placeholder="Campaign ID (1202538…)"
+                          aria-label="Source campaign id"
+                          className={cellInput}
+                        />
+                        <p className="mt-1 line-clamp-2 break-all text-[11px] leading-snug text-dim" title={r.info?.name}>
+                          {r.loading ? "Loading from LION…" : r.info?.status === "UNREADABLE" ? (
+                            <span className="text-danger">LION can’t read this campaign</span>
+                          ) : (
+                            r.info?.name || "—"
+                          )}
+                        </p>
+                      </td>
+                      <td className="px-2 py-3 text-[11.5px] text-dim">
+                        {r.info?.countries.length ? geoSummary(r.info.countries) : r.info ? "inherited" : "—"}
+                      </td>
+                      <td className="px-2 py-3 text-right font-mono text-[11.5px] tabular-nums text-dim">
+                        {r.info?.budget != null ? `$${moneyLabel(r.info.budget)}` : "—"}
+                      </td>
+                      <td className="px-2 py-3 text-right font-mono text-[11.5px] tabular-nums text-dim">
+                        {r.info?.bid != null
+                          ? String(r.info.bid).replace(".", ",")
+                          : r.info?.bidStrategy
+                            ? (STRATEGY_SHORT[r.info.bidStrategy] ?? "—")
+                            : "—"}
+                      </td>
+                      <td className="px-2 py-3 text-center font-mono text-[11.5px] text-dim">
+                        {r.info ? r.info.adsCount : "—"}
+                      </td>
+                      <td className="w-[110px] px-2 py-2.5">
+                        <input
+                          value={r.bid}
+                          onChange={(e) => patchRow(r.id, { bid: limitMoney(e.target.value, 10000) })}
+                          placeholder="inherit"
+                          aria-label="Bid / ROAS goal"
+                          className={cellInput}
+                        />
+                      </td>
+                      <td className="w-[100px] px-2 py-2.5">
+                        <input
+                          value={r.budget}
+                          onChange={(e) => patchRow(r.id, { budget: limitMoney(e.target.value, 10000) })}
+                          aria-label="Daily budget"
+                          className={cellInput}
+                        />
+                      </td>
+                      <td className="min-w-[120px] px-2 py-2.5">
+                        <input
+                          value={r.suffix}
+                          onChange={(e) => patchRow(r.id, { suffix: e.target.value })}
+                          placeholder="suffix"
+                          aria-label="Name suffix"
+                          maxLength={80}
+                          className={cellInput.replace("font-mono tabular-nums ", "")}
+                        />
+                      </td>
+                      <td className="max-w-[180px] px-2 py-3">
+                        <span
+                          className={
+                            "block truncate text-[11px] " +
+                            (r.state === "error"
+                              ? "text-danger"
+                              : r.state === "ok"
+                                ? "text-launch2"
+                                : r.state === "sending"
+                                  ? "text-[#9db8ff]"
+                                  : "text-faint")
+                          }
+                          title={r.msg}
+                        >
+                          {r.state === "sending" ? "Submitting…" : (r.msg ?? "—")}
+                        </span>
+                      </td>
+                      <td className="px-2 py-2.5 text-center">
+                        <button
+                          type="button"
+                          aria-label="Remove row"
+                          onClick={() => removeRow(r.id)}
+                          className="flex h-7 w-7 items-center justify-center rounded-md text-faint transition-colors hover:bg-raise hover:text-danger"
+                        >
+                          <TrashIcon className="h-3.5 w-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex items-center justify-between">
               <button
                 type="button"
                 onClick={addRow}
@@ -303,30 +507,31 @@ export function HsCloneBoard({
                 Add source
               </button>
               <p className="text-[10.5px] text-faint">
-                Bid, targeting and creatives inherit from the source · clones activate automatically
+                Empty Bid = inherits the source’s (MIN_ROAS sources carry a ROAS decimal) · targeting & creatives inherit
               </p>
             </div>
-          </section>
 
-          <div className="flex items-center justify-end gap-3">
-            {!bindsReady ? (
-              <span className="text-[11.5px] text-warn">Pick profile · account · page · pixel first</span>
+            {/* preview — what exactly will be fired */}
+            {previewed ? (
+              <div className="animate-pop-in rounded-2xl border border-line bg-surface p-4">
+                <p className="pb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-faint">Preview</p>
+                <div className="flex flex-col gap-1.5">
+                  {validRows.map((r) => (
+                    <p key={r.id} className="text-[12px] text-dim">
+                      <span className="font-mono text-[11px] text-faint">{r.campaignId}</span>{" "}
+                      <span className="text-ink">{r.info?.name ? r.info.name.slice(0, 60) : ""}</span> → {copiesN} cop
+                      {copiesN === 1 ? "y" : "ies"} @ ${moneyLabel(r.budget)}/day
+                      {r.bid.trim() ? ` · bid ${r.bid}` : " · bid inherited"}
+                      {r.suffix.trim() ? ` · “${r.suffix.trim()}”` : ""}
+                    </p>
+                  ))}
+                  <p className="mt-1 border-t border-line pt-2 text-[12px] text-ink">
+                    {totalClones} clone{totalClones === 1 ? "" : "s"} → {account} · page {page} · pixel {pixel}
+                  </p>
+                </div>
+              </div>
             ) : null}
-            <button
-              type="button"
-              onClick={() => void duplicateAll()}
-              disabled={!bindsReady || validRows.length === 0 || firing}
-              className={
-                "flex h-10 items-center justify-center gap-2 rounded-xl border border-accent/40 bg-accent/15 px-5 " +
-                "text-[13px] font-semibold text-[#9db8ff] transition-all duration-150 hover:border-accent/60 " +
-                "hover:bg-accent/25 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 " +
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-              }
-            >
-              <CopyIcon className="h-4 w-4" />
-              {firing ? "Submitting…" : `Duplicate ${totalCopies} cop${totalCopies === 1 ? "y" : "ies"}`}
-            </button>
-          </div>
+          </section>
         </div>
       </main>
     </>

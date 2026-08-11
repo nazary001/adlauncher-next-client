@@ -38,6 +38,9 @@ export async function POST(req: Request): Promise<NextResponse> {
     campaignId?: string;
     copies?: number;
     budget?: string;
+    /** Optional bid override, LION-UI semantics (plain number; ROAS decimal for MIN_ROAS
+     *  sources). Empty/absent = inherit from the source — the safe default. */
+    bid?: string;
     nameSuffix?: string;
   };
   try {
@@ -64,6 +67,11 @@ export async function POST(req: Request): Promise<NextResponse> {
   // $1 floor mirrors the launch guard; budget rides as integer CENTS of the account currency.
   const budget = parseMoney(String(body.budget ?? ""));
   if (budget < 1 || budget > 10000) return bad("budget_invalid");
+  const bidRaw = String(body.bid ?? "").trim();
+  const bid = bidRaw ? parseMoney(bidRaw) : null;
+  if (bidRaw && (!Number.isFinite(bid) || (bid as number) <= 0 || (bid as number) > 10000)) {
+    return bad("bid_invalid");
+  }
 
   // ---- bind validation against LION's own data (cached 10 min) ----
   let data;
@@ -96,6 +104,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       starting_budget: Math.round(budget * 100),
       number_of_copies: copies,
       name_suffix: nameSuffix,
+      ...(bid != null ? { starting_bid: bid } : {}),
     });
     const taskIds = (result.task_ids ?? []).map(String).filter(Boolean);
     if ((result.result === "success" || taskIds.length > 0) && taskIds.length > 0) {
