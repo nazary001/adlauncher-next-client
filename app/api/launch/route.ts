@@ -430,7 +430,11 @@ export async function POST(req: Request) {
   }
 
   const name = `${campaign.namePrefix}${campaign.name}`.trim();
-  const conversions = campaign.optimization === "conversions";
+  // &fire=click follows the optimization — and min-ROAS ALWAYS optimizes purchase value, so the
+  // funnel must fire Purchase on click regardless of what optimization the client sent (the UI
+  // pins it, but the server is the truth: a stale/edited draft could still say "clicks", which
+  // would starve VALUE optimization of its purchase signal).
+  const conversions = campaign.optimization === "conversions" || bidKind(campaign.bidStrategy) === "roas";
 
   // Stream NDJSON stage events so the Task Manager can show live per-stage progress. The whole
   // pipeline runs under the FB retry budget (see FB_BUDGET_MS) so mid-wave throttles are waited
