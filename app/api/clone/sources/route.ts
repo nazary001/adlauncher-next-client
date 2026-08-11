@@ -16,7 +16,8 @@ const FIELDS = [
   // sources on the ad set. Both are read — mapCampaign prefers the campaign's values.
   "daily_budget",
   "bid_strategy",
-  "bid_constraints",
+  // bid_constraints exists ONLY on the ad set (probing a campaign-level read 400s the whole
+  // request — "nonexisting field", verified 08-11) — even CBO min-ROAS keeps the floor there.
   "adsets.limit(5){name,daily_budget,bid_strategy,bid_amount,bid_constraints,billing_event,optimization_goal,promoted_object,targeting}",
   "ads.limit(15){name,creative{id,video_id,thumbnail_url}}",
 ].join(",");
@@ -69,9 +70,9 @@ function mapCampaign(id: string, obj: Json): CloneSource {
   // Prefer the campaign's own budget/strategy (CBO source), fall back to the ad set (legacy).
   const budgetCents = num(obj.daily_budget) ?? num(adset.daily_budget);
   const bidCents = num(adset.bid_amount);
-  // Min-ROAS sources bid through bid_constraints (adset under CBO — probed 08-11; campaign as a
-  // fallback), not bid_amount: the ROAS column shows the floor / 10000 ("12000" → "1,2").
-  const constraints = (adset.bid_constraints ?? obj.bid_constraints ?? {}) as Json;
+  // Min-ROAS sources bid through the AD SET's bid_constraints, not bid_amount: the ROAS column
+  // shows the floor / 10000 ("12000" → "1,2").
+  const constraints = (adset.bid_constraints ?? {}) as Json;
   const roasFloor = num(constraints.roas_average_floor);
   const bidStrategy =
     typeof obj.bid_strategy === "string"
