@@ -6,7 +6,7 @@ import type { PixelInfo } from "./use-adaccounts";
 
 /** One LION profile's bind space, shaped for the pickers. */
 export type HsProfileData = {
-  /** value = "act_…" id; disabled accounts carry a danger tag and sort last. */
+  /** value = "act_…" id; ONLY enabled (status=1) accounts — disabled ones are dropped. */
   accounts: RichOption[];
   /** value = page id. */
   pages: RichOption[];
@@ -110,20 +110,20 @@ export function useHs(enabled: boolean): HsCatalog {
             locales?: { id: number; name: string }[];
           };
           if (!r.ok || !d?.ok) throw new Error(`HTTP ${r.status}`);
+          // Disabled accounts are DROPPED entirely (owner call 2026-08-11) — the picker offers
+          // only what can actually launch; the server refuses status≠1 anyway.
           const accounts = (d.accounts ?? [])
-            .map((a) => ({
-              opt: {
-                value: a.id,
-                label: a.name || a.id,
-                meta: a.id,
-                subLabel: `${a.id}${a.currency ? ` · ${a.currency}` : ""}`,
-                ...(a.status === 1 ? {} : { tag: "disabled", tagTone: "danger" as const }),
-              } satisfies RichOption,
-              active: a.status === 1,
-            }))
-            // Active accounts first — a launch into a disabled one is refused server-side anyway.
-            .sort((x, y) => Number(y.active) - Number(x.active) || x.opt.label.localeCompare(y.opt.label))
-            .map((x) => x.opt);
+            .filter((a) => a.status === 1)
+            .map(
+              (a) =>
+                ({
+                  value: a.id,
+                  label: a.name || a.id,
+                  meta: a.id,
+                  subLabel: `${a.id}${a.currency ? ` · ${a.currency}` : ""}`,
+                }) satisfies RichOption,
+            )
+            .sort((x, y) => x.label.localeCompare(y.label));
           const currencies: Record<string, string> = {};
           for (const a of d.accounts ?? []) currencies[a.id] = a.currency || "";
           const value: HsProfileData = {
