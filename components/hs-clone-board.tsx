@@ -475,7 +475,11 @@ export function HsCloneBoard({
                         <input
                           value={r.bid}
                           onChange={(e) => patchRow(r.id, { bid: limitMoney(e.target.value, 10000) })}
-                          placeholder="inherit"
+                          // LION's REST reads expose adset_bid for cap sources (prefilled) but NOT
+                          // a MIN_ROAS goal — empty inherits the source's own goal on duplicate.
+                          placeholder={
+                            r.info?.bidStrategy === "LOWEST_COST_WITH_MIN_ROAS" ? "inherits ROAS goal" : "inherit"
+                          }
                           aria-label="Bid / ROAS goal"
                           className={cellInput}
                         />
