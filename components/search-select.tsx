@@ -5,6 +5,37 @@ import { createPortal } from "react-dom";
 import { CheckIcon, SearchIcon, XIcon } from "./icons";
 import type { RichOption } from "@/lib/catalog";
 
+/** One clickable facet chip (niche / language) in the list's filter bar. */
+function FacetChip({
+  active,
+  onPick,
+  children,
+}: {
+  active: boolean;
+  onPick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      tabIndex={-1}
+      onMouseDown={(e) => {
+        // preventDefault keeps focus in the search input (blur would close the list).
+        e.preventDefault();
+        onPick();
+      }}
+      className={
+        "flex items-center rounded-full border px-2 py-[3px] text-[11px] font-medium transition-colors duration-100 " +
+        (active
+          ? "border-accent/50 bg-accent/20 text-[#9db8ff]"
+          : "border-line bg-surface text-dim hover:border-line2 hover:bg-raise/60 hover:text-ink")
+      }
+    >
+      {children}
+    </button>
+  );
+}
+
 export function SearchSelect({
   id,
   value,
@@ -15,6 +46,7 @@ export function SearchSelect({
   disabled,
   metaWhenClosed,
   warn,
+  facets,
 }: {
   id?: string;
   value: string;
@@ -27,11 +59,17 @@ export function SearchSelect({
   metaWhenClosed?: boolean;
   /** Amber "required" accent on the field (missing destination picks etc.). */
   warn?: boolean;
+  /** Facet bar at the top of the list: clickable chips for every `group` (niche) and every
+   *  distinct `tag` (language) with counts — built for catalogs that will keep growing. Chip
+   *  filters compose with the typed query. */
+  facets?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ left: number; width: number; top: number; up: boolean } | null>(null);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
+  const [groupFilter, setGroupFilter] = useState<string | null>(null);
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -83,16 +121,39 @@ export function SearchSelect({
   const q = query.trim().toLowerCase();
   // Searchable by label, meta, value (fanpages: the page id), group (landing niche) and the
   // exact tag ("es" → Spanish landings without also matching every label containing "es").
-  const filtered = q
-    ? opts.filter(
-        (o) =>
-          o.label.toLowerCase().includes(q) ||
-          o.meta?.toLowerCase().includes(q) ||
-          o.value.toLowerCase().includes(q) ||
-          o.group?.toLowerCase().includes(q) ||
-          o.tag?.toLowerCase() === q,
-      )
-    : opts;
+  // Facet chips (group / tag) compose with the typed query.
+  const filtered = opts.filter(
+    (o) =>
+      (!groupFilter || o.group === groupFilter) &&
+      (!tagFilter || o.tag === tagFilter) &&
+      (!q ||
+        o.label.toLowerCase().includes(q) ||
+        o.meta?.toLowerCase().includes(q) ||
+        o.value.toLowerCase().includes(q) ||
+        o.group?.toLowerCase().includes(q) ||
+        o.tag?.toLowerCase() === q),
+  );
+
+  // Facet inventories with counts — stable totals so chips don't jump around while filtering.
+  const groupFacets: Array<[string, number]> = [];
+  const tagFacets: Array<[string, number]> = [];
+  if (facets) {
+    const gc = new Map<string, number>();
+    const tc = new Map<string, number>();
+    for (const o of opts) {
+      if (o.group) gc.set(o.group, (gc.get(o.group) ?? 0) + 1);
+      if (o.tag) tc.set(o.tag, (tc.get(o.tag) ?? 0) + 1);
+    }
+    groupFacets.push(...gc);
+    tagFacets.push(...tc);
+  }
+
+  function closeList() {
+    setOpen(false);
+    setQuery("");
+    setGroupFilter(null);
+    setTagFilter(null);
+  }
 
   const toneCls = (tone?: RichOption["tagTone"]) =>
     tone === "danger"
@@ -112,8 +173,7 @@ export function SearchSelect({
 
   function pick(o: RichOption) {
     onChange(o.value);
-    setOpen(false);
-    setQuery("");
+    closeList();
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
@@ -131,8 +191,7 @@ export function SearchSelect({
       e.preventDefault();
       if (filtered[active]) pick(filtered[active]);
     } else if (e.key === "Escape") {
-      setOpen(false);
-      setQuery("");
+      closeList();
     }
   }
 
@@ -142,8 +201,7 @@ export function SearchSelect({
       className="relative"
       onBlur={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-          setOpen(false);
-          setQuery("");
+          closeList();
         }
       }}
     >
@@ -223,6 +281,65 @@ export function SearchSelect({
                 (pos.up ? "animate-drop-in-up" : "animate-drop-in")
               }
             >
+              {facets && (groupFacets.length > 0 || tagFacets.length > 1) ? (
+                <div className="flex flex-col gap-1.5 border-b border-line bg-surface2/60 px-2 py-2">
+                  {groupFacets.length > 0 ? (
+                    <div className="flex flex-wrap gap-1">
+                      <FacetChip
+                        active={!groupFilter}
+                        onPick={() => {
+                          setGroupFilter(null);
+                          setActive(0);
+                        }}
+                      >
+                        All
+                      </FacetChip>
+                      {groupFacets.map(([g, n]) => (
+                        <FacetChip
+                          key={g}
+                          active={groupFilter === g}
+                          onPick={() => {
+                            setGroupFilter((cur) => (cur === g ? null : g));
+                            setActive(0);
+                          }}
+                        >
+                          {g}
+                          <span className="ml-1 opacity-60">{n}</span>
+                        </FacetChip>
+                      ))}
+                    </div>
+                  ) : null}
+                  {tagFacets.length > 1 ? (
+                    <div className="flex flex-wrap items-center gap-1">
+                      <span className="mr-0.5 text-[9.5px] font-semibold uppercase tracking-[0.14em] text-faint">
+                        Lang
+                      </span>
+                      <FacetChip
+                        active={!tagFilter}
+                        onPick={() => {
+                          setTagFilter(null);
+                          setActive(0);
+                        }}
+                      >
+                        All
+                      </FacetChip>
+                      {tagFacets.map(([t, n]) => (
+                        <FacetChip
+                          key={t}
+                          active={tagFilter === t}
+                          onPick={() => {
+                            setTagFilter((cur) => (cur === t ? null : t));
+                            setActive(0);
+                          }}
+                        >
+                          {t}
+                          <span className="ml-1 opacity-60">{n}</span>
+                        </FacetChip>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               <div ref={listRef} className="max-h-72 overflow-y-auto p-1">
             {filtered.length === 0 ? (
               <p className="px-3 py-3 text-[12px] text-faint">{emptyHint}</p>
@@ -230,8 +347,9 @@ export function SearchSelect({
               filtered.map((o, i) => (
                 <Fragment key={o.value}>
                   {/* Section header whenever the (contiguous) group changes — landing niches etc.
-                      Headers are decoration only: keyboard nav walks the flat filtered list. */}
-                  {o.group && (i === 0 || filtered[i - 1].group !== o.group) ? (
+                      Headers are decoration only: keyboard nav walks the flat filtered list.
+                      Hidden while a niche chip is active (one group → the chip IS the header). */}
+                  {o.group && !groupFilter && (i === 0 || filtered[i - 1].group !== o.group) ? (
                     <p className="px-2.5 pb-1 pt-2.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-faint">
                       {o.group}
                     </p>

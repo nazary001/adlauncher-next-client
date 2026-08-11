@@ -781,7 +781,8 @@ export function CampaignCard({
                           onChange={(v) => patch({ landing: v })}
                           options={landingOptions}
                           placeholder="Search landing"
-                          emptyHint="No landings"
+                          emptyHint="No landings match"
+                          facets
                         />
                       </Field>
                       <Field label="Destination link">
