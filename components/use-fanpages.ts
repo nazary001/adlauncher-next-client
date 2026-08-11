@@ -25,15 +25,20 @@ const VOLUME_MAX_POLLS = 10;
  *
  * null = still loading (or fetch failed) → the picker renders its loading hint. Shared by the
  * launcher board and the clone board; the server re-validates every picked id on launch anyway.
+ *
+ * State is keyed by the hook inputs and only ever written from async fetch callbacks; a key
+ * mismatch (or enabled=false) IS the loading/reset state, so the effect never needs a
+ * synchronous setState reset (which the react-compiler lint flags as cascade-prone).
  */
 export function useFanpages(enabled: boolean, limit = 250): FanpageOption[] | null {
-  const [pages, setPages] = useState<FanpageOption[] | null>(null);
+  const key = String(limit);
+  const [state, setState] = useState<{ key: string; list: FanpageOption[] | null }>({
+    key,
+    list: null,
+  });
 
   useEffect(() => {
-    if (!enabled) {
-      setPages(null);
-      return;
-    }
+    if (!enabled) return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -48,16 +53,19 @@ export function useFanpages(enabled: boolean, limit = 250): FanpageOption[] | nu
         if (v?.ok && v.counts) {
           const counts = v.counts;
           missing = ids.filter((id) => typeof counts[id] !== "number").length;
-          setPages((prev) =>
-            prev
-              ? prev.map((o) => {
-                  const n = counts[o.value];
-                  if (typeof n !== "number") return o;
-                  const ratio = limit > 0 ? n / limit : 0;
-                  const tagTone: FanpageOption["tagTone"] =
-                    ratio >= 1 ? "danger" : ratio >= 0.8 ? "warn" : "dim";
-                  return { ...o, adCount: n, tag: `${n}/${limit}`, tagTone };
-                })
+          setState((prev) =>
+            prev.key === key && prev.list
+              ? {
+                  key,
+                  list: prev.list.map((o) => {
+                    const n = counts[o.value];
+                    if (typeof n !== "number") return o;
+                    const ratio = limit > 0 ? n / limit : 0;
+                    const tagTone: FanpageOption["tagTone"] =
+                      ratio >= 1 ? "danger" : ratio >= 0.8 ? "warn" : "dim";
+                    return { ...o, adCount: n, tag: `${n}/${limit}`, tagTone };
+                  }),
+                }
               : prev,
           );
         }
@@ -83,9 +91,12 @@ export function useFanpages(enabled: boolean, limit = 250): FanpageOption[] | nu
         if (!alive) return;
         if (r.ok && d?.ok && Array.isArray(d.pages)) {
           ids = d.pages.map((p) => p.id);
-          setPages(d.pages.map((p) => ({ value: p.id, label: p.name, meta: p.id, adCount: null })));
+          setState({
+            key,
+            list: d.pages.map((p) => ({ value: p.id, label: p.name, meta: p.id, adCount: null })),
+          });
         } else if (r.ok) {
-          setPages([]); // genuine empty / no-token answer
+          setState({ key, list: [] }); // genuine empty / no-token answer
           return;
         } else {
           throw new Error(`HTTP ${r.status}`); // transient → retry (stay in loading state)
@@ -95,7 +106,7 @@ export function useFanpages(enabled: boolean, limit = 250): FanpageOption[] | nu
         // A transient blip must NOT strand the picker on a false "No fanpages" with no recovery:
         // stay loading (null) and retry a few times.
         if (attempt < 4) timer = setTimeout(() => void load(attempt + 1), 4000);
-        else setPages([]);
+        else setState({ key, list: [] });
         return;
       }
       // Phase 2+: fill counts — decoration only; polls until every page has its number.
@@ -107,7 +118,7 @@ export function useFanpages(enabled: boolean, limit = 250): FanpageOption[] | nu
       alive = false;
       if (timer) clearTimeout(timer);
     };
-  }, [enabled, limit]);
+  }, [enabled, key, limit]);
 
-  return pages;
+  return enabled && state.key === key ? state.list : null;
 }

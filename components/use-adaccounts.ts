@@ -17,20 +17,24 @@ export type AdAccountOption = RichOption & { pixels: PixelInfo[] };
  *
  * null = still loading (or fetch failed) → the picker renders its loading hint. The server
  * re-validates every picked account/pixel on launch anyway.
+ *
+ * State is keyed by the hook inputs and only ever written from async fetch callbacks; a key
+ * mismatch (or enabled=false) IS the loading/reset state, so the effect never needs a
+ * synchronous setState reset (which the react-compiler lint flags as cascade-prone).
  */
 export function useAdAccounts(enabled: boolean, preferredPixel?: Bound): AdAccountOption[] | null {
-  const [accounts, setAccounts] = useState<AdAccountOption[] | null>(null);
   const preferredId = preferredPixel?.id;
   const preferredName = preferredPixel?.name;
+  const key = `${preferredId ?? ""}|${preferredName ?? ""}`;
+  const [state, setState] = useState<{ key: string; list: AdAccountOption[] | null }>({
+    key,
+    list: null,
+  });
 
   useEffect(() => {
-    if (!enabled) {
-      setAccounts(null);
-      return;
-    }
+    if (!enabled) return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    setAccounts(null); // (re)enter loading state
 
     async function load(attempt: number): Promise<void> {
       try {
@@ -42,8 +46,9 @@ export function useAdAccounts(enabled: boolean, preferredPixel?: Bound): AdAccou
         if (!alive) return;
         if (r.ok && d?.ok && Array.isArray(d.accounts)) {
           const short = (preferredName ?? "").replace(/^HS-Pixel-/, "") || "pixel"; // "HS-Pixel-FARM-1" → "FARM-1"
-          setAccounts(
-            d.accounts.map((a) => {
+          setState({
+            key,
+            list: d.accounts.map((a) => {
               const pixels = Array.isArray(a.pixels) ? a.pixels : [];
               const hasPreferred = !preferredId || pixels.some((p) => p.id === preferredId);
               // Tag semantics: no pixel at all = can't run conversions (danger); has the preferred
@@ -58,7 +63,7 @@ export function useAdAccounts(enabled: boolean, preferredPixel?: Bound): AdAccou
                     : {};
               return { value: String(a.id), label: String(a.name), meta: String(a.id), subLabel: String(a.id), pixels, ...tag };
             }),
-          );
+          });
           // Coverage check: the preferred pixel (FARM-1) lives on at least one account, so if NO
           // loaded account shows it, the server's pixel sweep was throttled/incomplete — keep
           // re-polling (the shown list is usable meanwhile) until the pixels fill in.
@@ -69,7 +74,7 @@ export function useAdAccounts(enabled: boolean, preferredPixel?: Bound): AdAccou
         }
         // HTTP 200 + ok:false = a genuine "no accounts / no token" answer → show the empty hint.
         if (r.ok) {
-          setAccounts([]);
+          setState({ key, list: [] });
           return;
         }
         throw new Error(`HTTP ${r.status}`); // 429/5xx → transient, retry below
@@ -78,7 +83,7 @@ export function useAdAccounts(enabled: boolean, preferredPixel?: Bound): AdAccou
         // A transient blip must NOT strand every card un-launchable with a false "No accounts on the
         // token" and no recovery: stay in the loading state (null) and retry a few times.
         if (attempt < 4) timer = setTimeout(() => void load(attempt + 1), 4000);
-        else setAccounts([]);
+        else setState({ key, list: [] });
       }
     }
 
@@ -87,9 +92,9 @@ export function useAdAccounts(enabled: boolean, preferredPixel?: Bound): AdAccou
       alive = false;
       if (timer) clearTimeout(timer);
     };
-  }, [enabled, preferredId, preferredName]);
+  }, [enabled, key, preferredId, preferredName]);
 
-  return accounts;
+  return enabled && state.key === key ? state.list : null;
 }
 
 /** Pixels of the picked account (empty while unknown). */

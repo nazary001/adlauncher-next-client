@@ -57,9 +57,50 @@ export async function findTaskRow(
 export type UpsertResult = { ok: true } | { ok: false; reason: "forbidden" | "store" | "not_configured"; detail?: string };
 
 /**
+ * Post-create verify: Strapi's app-level unique constraint has a TOCTOU window (proven live for
+ * gcm-map on 08-09, observed for launch-task on 08-10 — task c1b148e8… committed TWICE from a
+ * concurrent client save + server beat), so two simultaneous creates of one task_id can BOTH
+ * succeed. After winning a create, re-read the code's rows; if a twin exists, the OLDEST row
+ * (createdAt, then documentId — same total order every writer computes) is canonical: delete the
+ * caller-owned extras and fold this write's fields into the survivor. Best-effort — a failure
+ * here leaves at worst the pre-existing duplicate, never lost data.
+ */
+async function dedupeTaskRows(user: string, taskId: string, data: TaskRowData): Promise<void> {
+  try {
+    const res = await fetch(
+      `${STRAPI}/api/launch-tasks?filters[task_id][$eq]=${encodeURIComponent(taskId)}` +
+        `&fields[0]=task_id&fields[1]=owner&fields[2]=createdAt&sort[0]=createdAt:asc&sort[1]=documentId:asc&pagination[pageSize]=5`,
+      { headers: H(), cache: "no-store" },
+    );
+    if (!res.ok) return;
+    const body = (await res.json().catch(() => ({}))) as { data?: Array<Record<string, unknown>> };
+    const rows = body.data ?? [];
+    if (rows.length <= 1) return;
+    const [keep, ...extras] = rows;
+    for (const r of extras) {
+      const owner = r.owner ? String(r.owner) : null;
+      if (owner === user && r.documentId) {
+        await fetch(`${STRAPI}/api/launch-tasks/${r.documentId}`, { method: "DELETE", headers: H() });
+      }
+    }
+    const keepOwner = keep.owner ? String(keep.owner) : null;
+    if (keepOwner === user && keep.documentId) {
+      await fetch(`${STRAPI}/api/launch-tasks/${keep.documentId}`, {
+        method: "PUT",
+        headers: H(),
+        body: JSON.stringify({ data }),
+      });
+    }
+  } catch {
+    /* best-effort — the duplicate stays visible until the next write's verify */
+  }
+}
+
+/**
  * Upsert one task row by task_id on behalf of `user`.
  * Fail CLOSED: an existing row is writable only when its owner is readable AND it is the caller's.
- * A create that loses the unique-task_id race (two writers creating at once) re-finds and updates.
+ * A create that loses the unique-task_id race (two writers creating at once) re-finds and updates;
+ * a create that "wins" is verified for a committed twin (see dedupeTaskRows).
  */
 export async function upsertTaskRow(user: string, taskId: string, fields: TaskRowData): Promise<UpsertResult> {
   if (!storeConfigured()) return { ok: false, reason: "not_configured" };
@@ -82,7 +123,11 @@ export async function upsertTaskRow(user: string, taskId: string, fields: TaskRo
             // client's own save backfills it). Updates never touch it.
             body: JSON.stringify({ data: { queued_at: Date.now(), ...data } }),
           });
-      if (res.ok) return { ok: true };
+      if (res.ok) {
+        // Unique-constraint TOCTOU: a concurrent create may have committed a twin row — verify.
+        if (!existing) await dedupeTaskRows(user, taskId, data);
+        return { ok: true };
+      }
       // Lost the create race (unique task_id → 400): the row now exists — retry as an update.
       if (!existing && res.status === 400 && attempt === 0) continue;
       const err = await res.text().catch(() => "");
