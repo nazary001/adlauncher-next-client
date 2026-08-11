@@ -111,6 +111,11 @@ export const PARTNERS: PartnerConfig[] = [
     pagePlaceholder: "Search page",
     fanpages: [],
     launchNote: "Submits through LION",
+    // HS ships DORMANT on prod: the switcher unlocks only where NEXT_PUBLIC_HS_ENABLED=1 is
+    // baked into the build (.env.local locally; NOT set on Vercel until the LION_* env and a
+    // battle smoke land). NEXT_PUBLIC_* is inlined at build time — enabling HS on prod means
+    // setting the env var and redeploying, no code change.
+    inDevelopment: process.env.NEXT_PUBLIC_HS_ENABLED !== "1",
   },
   {
     id: "in",
