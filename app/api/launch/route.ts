@@ -21,6 +21,7 @@ import {
   isAdvertisablePage,
   isTokenAccount,
   withFbBudget,
+  withParentRetry,
 } from "@/lib/fb-graph";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import { taskWriter } from "@/lib/task-store";
@@ -84,19 +85,73 @@ async function uploadVideo(accountId: string, fileUrl: string, name: string): Pr
   return String(body.id);
 }
 
-// adimages has no file_url — the bytes must be posted (base64). Meta's own ad-image ceiling is
-// 30MB; anything bigger fails there anyway, so reject before buffering it into the function.
-const IMAGE_MAX_BYTES = 30 * 1024 * 1024;
+// Empirical adimages ceilings (probed live 2026-08-11 on this token): any side above ~9000px is
+// rejected (sub 2446496 "invalid image format"), and Meta re-encodes every upload — when ITS
+// output is still heavy it rejects with sub 1885355 "resized image too large" (a 9.3MB worst-case
+// source already failed; 8 buyer launches died on this in one day). 8MB/9000px keeps every upload
+// we allow inside what Meta demonstrably accepts. The dropzone enforces the same numbers, so
+// buyers hear it at drop time — this is the server-side backstop.
+const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const IMAGE_MAX_DIM = 9000;
 
-/** Upload a static image into the account's image library; returns its stable image_hash. */
-async function uploadImage(accountId: string, fileUrl: string): Promise<string> {
+/** Width/height from the image header: PNG (IHDR), JPEG (SOF frame scan), GIF, WebP (VP8/VP8L/
+ *  VP8X). Null when the format is unrecognized — the guard then lets Meta be the judge. */
+function imageDims(buf: Buffer): { w: number; h: number } | null {
+  if (buf.length > 24 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+    return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+  }
+  if (buf.length > 10 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) {
+    return { w: buf.readUInt16LE(6), h: buf.readUInt16LE(8) };
+  }
+  if (buf.length > 30 && buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WEBP") {
+    const fmt = buf.toString("ascii", 12, 16);
+    if (fmt === "VP8X") return { w: 1 + buf.readUIntLE(24, 3), h: 1 + buf.readUIntLE(27, 3) };
+    if (fmt === "VP8L") {
+      const b = buf.readUInt32LE(21);
+      return { w: 1 + (b & 0x3fff), h: 1 + ((b >> 14) & 0x3fff) };
+    }
+    if (fmt === "VP8 ") return { w: buf.readUInt16LE(26) & 0x3fff, h: buf.readUInt16LE(28) & 0x3fff };
+    return null;
+  }
+  if (buf.length > 4 && buf[0] === 0xff && buf[1] === 0xd8) {
+    let off = 2;
+    while (off + 9 < buf.length) {
+      if (buf[off] !== 0xff) return null;
+      const marker = buf[off + 1];
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        return { w: buf.readUInt16BE(off + 7), h: buf.readUInt16BE(off + 5) };
+      }
+      off += 2 + buf.readUInt16BE(off + 2);
+    }
+  }
+  return null;
+}
+
+/** Fetch + validate the image BEFORE anything is claimed or created: caught here it costs
+ *  nothing; caught at adimages it has already burned a gcm claim round-trip and 20s of wave. */
+async function fetchValidatedImage(fileUrl: string): Promise<Buffer> {
   const res = await fetch(fileUrl, { cache: "no-store" });
   if (!res.ok) throw new FbError(`image fetch failed (HTTP ${res.status})`, { fileUrl });
   const buf = Buffer.from(await res.arrayBuffer());
   if (buf.byteLength === 0) throw new FbError("image is empty", { fileUrl });
   if (buf.byteLength > IMAGE_MAX_BYTES) {
-    throw new FbError("image too large — Meta accepts ad images up to 30MB", { size: buf.byteLength });
+    throw new FbError(
+      `image too heavy (${(buf.byteLength / 1048576).toFixed(1)}MB) — Meta rejects these after its re-encode; compress under 8MB`,
+      { size: buf.byteLength },
+    );
   }
+  const dims = imageDims(buf);
+  if (dims && Math.max(dims.w, dims.h) > IMAGE_MAX_DIM) {
+    throw new FbError(
+      `image too large (${dims.w}×${dims.h}) — Meta rejects sides above ${IMAGE_MAX_DIM}px; export it smaller`,
+      dims,
+    );
+  }
+  return buf;
+}
+
+/** Upload a static image into the account's image library; returns its stable image_hash. */
+async function uploadImage(accountId: string, buf: Buffer): Promise<string> {
   const body = await fbPost(`act_${accountId}/adimages`, { bytes: buf.toString("base64") });
   // Response shape: { images: { bytes: { hash, ... } } } — key varies by upload method, so take
   // the first entry (same convention as the clone route's copy_from reader).
@@ -105,6 +160,7 @@ async function uploadImage(accountId: string, fileUrl: string): Promise<string> 
   if (!hash) throw new FbError("image upload returned no hash", body);
   return String(hash);
 }
+
 
 /** Wait until the uploaded video finishes processing (or throw on error/timeout). 6s cadence —
  *  status polls dominate a wave's call count on the dev-tier quota, so poll no faster than useful. */
@@ -358,6 +414,21 @@ export async function POST(req: Request) {
     );
   }
 
+  // Image launches: fetch + validate the creative BEFORE the stream — an oversized image must
+  // die here as a clean 400 (nothing claimed, no campaign shell), not 20s into the wave at
+  // adimages. The validated bytes ride into the stream so the Blob isn't fetched twice.
+  let imageBuf: Buffer | null = null;
+  if (mediaKind === "image") {
+    try {
+      imageBuf = await fetchValidatedImage(mediaUrl);
+    } catch (e) {
+      return NextResponse.json(
+        { ok: false, stage: "media", error: (e as FbError).message ?? String(e) },
+        { status: 400 },
+      );
+    }
+  }
+
   const name = `${campaign.namePrefix}${campaign.name}`.trim();
   const conversions = campaign.optimization === "conversions";
 
@@ -410,7 +481,7 @@ export async function POST(req: Request) {
         let thumbUrl = "";
         let imageHash = "";
         if (mediaKind === "image") {
-          imageHash = await uploadImage(binds.accountId, mediaUrl);
+          imageHash = await uploadImage(binds.accountId, imageBuf as Buffer); // validated pre-flight
           created.image_hash = imageHash;
         } else {
           videoId = await uploadVideo(binds.accountId, mediaUrl, `${name} · video`);
@@ -421,15 +492,14 @@ export async function POST(req: Request) {
         }
         const localeIds = await resolveLocales(campaign.locales);
 
-        // 3) campaign → adset → creative → ad, all PAUSED
+        // 3) campaign → adset → creative → ad, all ACTIVE (live on creation since 08-11)
         progress("campaign");
         const camp = await fbPost(`act_${binds.accountId}/campaigns`, campaignPayload(campaign, name));
         created.campaign_id = String(camp.id);
 
         progress("adset");
-        const adset = await createAdset(
-          `act_${binds.accountId}/adsets`,
-          adsetPayload(campaign, name, String(camp.id), binds, localeIds),
+        const adset = await withParentRetry(String(camp.id), () =>
+          createAdset(`act_${binds.accountId}/adsets`, adsetPayload(campaign, name, String(camp.id), binds, localeIds)),
         );
         created.adset_id = String(adset.id);
 
@@ -443,7 +513,9 @@ export async function POST(req: Request) {
         created.creative_id = String(creative.id);
 
         progress("ad");
-        const ad = await fbPost(`act_${binds.accountId}/ads`, adPayload(name, String(adset.id), String(creative.id)));
+        const ad = await withParentRetry(String(adset.id), () =>
+          fbPost(`act_${binds.accountId}/ads`, adPayload(name, String(adset.id), String(creative.id))),
+        );
         // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
         if (!ad.id) throw new FbError("ad create returned no id", ad);
         created.ad_id = String(ad.id);

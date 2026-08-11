@@ -647,6 +647,25 @@ async function resolveVolume(
   return toMap(pageIds, counts);
 }
 
+/** Meta replication race: creating a child object seconds after its parent can answer
+ *  "<parent id> is not a valid …" (code 100; live: Margo's ad set 2026-08-11, campaign created
+ *  18s earlier → orphan shell). The parent id appears IN the message (possibly digit-grouped
+ *  "120 249 …"), so match digits — locale-proof — and give Meta a few seconds to catch up.
+ *  Wrap adset-under-campaign and ad-under-adset creates in the launch/clone pipelines. */
+export async function withParentRetry<T>(parentId: string, fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const staleParent = String((e as FbError).message ?? "")
+        .replace(/\D/g, "")
+        .includes(parentId);
+      if (!staleParent || attempt >= 4) throw e;
+      await sleep(4000);
+    }
+  }
+}
+
 /**
  * POST a Graph path with form-encoding (nested objects/arrays are JSON-stringified, per the
  * Marketing API convention), with the same rate-limit backoff as fbGet. Throws FbError on failure.

@@ -11,6 +11,7 @@ import {
   isAdvertisablePage,
   isTokenAccount,
   withFbBudget,
+  withParentRetry,
 } from "@/lib/fb-graph";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import { taskWriter } from "@/lib/task-store";
@@ -300,9 +301,11 @@ export async function POST(req: Request) {
           created.campaign_id = String(camp.id);
 
           progress("adset");
-          const adset = await createAdset(
-            `act_${editBinds.accountId}/adsets`,
-            adsetPayload(campaign, edit.name, String(camp.id), editBinds, localeIds),
+          const adset = await withParentRetry(String(camp.id), () =>
+            createAdset(
+              `act_${editBinds.accountId}/adsets`,
+              adsetPayload(campaign, edit.name, String(camp.id), editBinds, localeIds),
+            ),
           );
           created.adset_id = String(adset.id);
 
@@ -314,7 +317,9 @@ export async function POST(req: Request) {
           created.creative_id = String(creative.id);
 
           progress("ad");
-          const ad = await fbPost(`act_${editBinds.accountId}/ads`, adPayload(edit.name, String(adset.id), String(creative.id)));
+          const ad = await withParentRetry(String(adset.id), () =>
+            fbPost(`act_${editBinds.accountId}/ads`, adPayload(edit.name, String(adset.id), String(creative.id))),
+          );
           // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
           if (!ad.id) throw new FbError("ad create returned no id", ad);
           created.ad_id = String(ad.id);

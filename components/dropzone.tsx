@@ -139,6 +139,23 @@ function CreativeCard({
   );
 }
 
+// Meta's real adimages ceilings, probed live 2026-08-11 (see /api/launch): sides above ~9000px
+// are rejected outright, and heavy sources die after Meta's re-encode ("resized image too
+// large" — 8 buyer launches in one day). Enforced HERE so the buyer hears it at drop time; the
+// launch route re-checks server-side.
+const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const IMAGE_MAX_DIM = 9000;
+
+/** Natural dimensions of a local image blob; null when it can't be decoded. */
+function imageSizeOf(url: string): Promise<{ w: number; h: number } | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+}
+
 export function Dropzone({
   id,
   files,
@@ -152,21 +169,41 @@ export function Dropzone({
   maxFiles?: number;
 }) {
   const [dragging, setDragging] = useState(false);
+  const [rejected, setRejected] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const counter = useRef(0);
+  const rejectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const atMax = maxFiles != null && files.length >= maxFiles;
 
-  function addFiles(list: FileList | null) {
+  async function addFiles(list: FileList | null) {
     if (!list || list.length === 0) return;
-    const added: FileItem[] = Array.from(list).map((f) => ({
-      id: `f${Date.now()}-${counter.current++}`,
-      name: f.name,
-      size: f.size,
-      kind: f.type.startsWith("image/") ? "image" : f.type.startsWith("video/") ? "video" : "other",
-      url: URL.createObjectURL(f),
-    }));
-    const merged = [...files, ...added];
-    onChange(maxFiles != null ? merged.slice(0, maxFiles) : merged);
+    const ok: FileItem[] = [];
+    const bad: string[] = [];
+    for (const f of Array.from(list)) {
+      const kind = f.type.startsWith("image/") ? "image" : f.type.startsWith("video/") ? "video" : "other";
+      const url = URL.createObjectURL(f);
+      if (kind === "image") {
+        if (f.size > IMAGE_MAX_BYTES) {
+          bad.push(`${f.name} — ${fmtSize(f.size)}: Meta rejects heavy images; compress under 8 MB`);
+          URL.revokeObjectURL(url);
+          continue;
+        }
+        const dims = await imageSizeOf(url);
+        if (dims && Math.max(dims.w, dims.h) > IMAGE_MAX_DIM) {
+          bad.push(`${f.name} — ${dims.w}×${dims.h}: Meta rejects sides above ${IMAGE_MAX_DIM}px; export it smaller`);
+          URL.revokeObjectURL(url);
+          continue;
+        }
+      }
+      ok.push({ id: `f${Date.now()}-${counter.current++}`, name: f.name, size: f.size, kind, url });
+    }
+    if (ok.length) {
+      const merged = [...files, ...ok];
+      onChange(maxFiles != null ? merged.slice(0, maxFiles) : merged);
+    }
+    setRejected(bad);
+    if (rejectTimer.current) clearTimeout(rejectTimer.current);
+    if (bad.length) rejectTimer.current = setTimeout(() => setRejected([]), 10_000);
   }
 
   const browse = () => inputRef.current?.click();
@@ -181,7 +218,7 @@ export function Dropzone({
     onDrop: (e: React.DragEvent) => {
       e.preventDefault();
       setDragging(false);
-      addFiles(e.dataTransfer.files);
+      void addFiles(e.dataTransfer.files);
     },
   };
 
@@ -194,11 +231,26 @@ export function Dropzone({
       accept="image/*,video/*"
       className="sr-only"
       onChange={(e) => {
-        addFiles(e.target.files);
+        void addFiles(e.target.files);
         e.target.value = "";
       }}
     />
   );
+
+  // Refused files, named with the reason — visible right where the buyer just dropped them.
+  const rejectNote =
+    rejected.length > 0 ? (
+      <div className="flex shrink-0 flex-col gap-1">
+        {rejected.map((m) => (
+          <p
+            key={m}
+            className="animate-pop-in rounded-lg border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-[10.5px] leading-snug text-danger"
+          >
+            {m}
+          </p>
+        ))}
+      </div>
+    ) : null;
 
   // ---------- empty ----------
   if (files.length === 0) {
@@ -245,6 +297,7 @@ export function Dropzone({
             ))}
           </span>
         </button>
+        {rejectNote}
       </div>
     );
   }
@@ -298,6 +351,7 @@ export function Dropzone({
           Add another creative
         </button>
       ) : null}
+      {rejectNote}
     </div>
   );
 }
