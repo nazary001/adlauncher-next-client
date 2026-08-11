@@ -1,12 +1,19 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { SESSION_COOKIE, verifySession } from "@/lib/session";
+import { sanitizePartnerId } from "@/lib/partners";
 import { LauncherBoard } from "@/components/launcher-board";
 
-export default async function Home() {
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ partner?: string | string[] }>;
+}) {
   const jar = await cookies();
   const session = verifySession(jar.get(SESSION_COOKIE)?.value);
   if (!session) redirect("/login");
+  // The picked partner rides in the URL (?partner=br|in) so a refresh stays where the buyer was.
+  const initialPartner = sanitizePartnerId((await searchParams).partner);
 
   return (
     <>
@@ -24,7 +31,7 @@ export default async function Home() {
         />
       </div>
 
-      <LauncherBoard user={{ username: session.username, role: session.role ?? null }} />
+      <LauncherBoard user={{ username: session.username, role: session.role ?? null }} initialPartner={initialPartner} />
     </>
   );
 }

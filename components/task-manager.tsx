@@ -27,7 +27,7 @@ import {
   ownerLastWrite,
 } from "@/lib/task-view";
 import type { SessionUser } from "./user-menu";
-import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, TrashIcon, XIcon } from "./icons";
+import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, XIcon } from "./icons";
 
 export type { LaunchTask } from "@/lib/task-view";
 
@@ -155,8 +155,6 @@ type TaskManagerValue = {
   enqueueClone: (args: CloneEnqueueArgs) => void;
   retry: (id: string) => void;
   retryAll: () => void;
-  remove: (id: string) => void;
-  clearFinished: () => void;
 };
 
 const Ctx = createContext<TaskManagerValue | null>(null);
@@ -245,23 +243,9 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
     saveChains.current.set(id, next);
   }, []);
 
-  const deleteRemote = useCallback((ids: string[]) => {
-    if (!ids.length) return;
-    // One retry, like saveRemote — a dropped DELETE would let the row outlive its 60s tombstone
-    // and resurrect a dismissed task on a later poll.
-    const call = () =>
-      fetch(`/api/launch-tasks?taskIds=${ids.map(encodeURIComponent).join(",")}`, { method: "DELETE" });
-    void (async () => {
-      try {
-        const res = await call();
-        if (res.ok) return;
-      } catch {
-        /* network — retry below */
-      }
-      await sleep(4000);
-      await call().catch(() => {});
-    })();
-  }, []);
+  // deleteRemote is gone with UI deletion (owner call 08-11): tasks leave Strapi only via
+  // admin cleanup, never from a buyer's drawer. The tombstone map stays — it still suppresses
+  // just-transitioned rows against a racing poll.
 
   /** Pull the whole team's tasks and merge them in. My in-session tasks stay authoritative; every
    *  other row mirrors the fetch (so a teammate's dismiss disappears here too). */
@@ -895,43 +879,15 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
     [patch, pump, saveRemote],
   );
 
-  const remove = useCallback(
-    (id: string) => {
-      const t = tasksRef.current.find((x) => x.id === id);
-      // Others' rows aren't mine to delete — visibility is shared, authority is not.
-      if (t && !(t.local || (!!me && t.owner === me))) return;
-      inputs.current.delete(id);
-      meta.current.delete(id);
-      queue.current = queue.current.filter((q) => q !== id);
-      tombstones.current.set(id, Date.now());
-      setTasks((ts) => ts.filter((x) => x.id !== id));
-      deleteRemote([id]);
-    },
-    [deleteRemote, me],
-  );
+  // No user-facing deletion: neither done tasks NOR errors are removable from the UI (owner
+  // call 2026-08-11 — failures stay visible to the whole team; cleanup is an admin action in
+  // Strapi, not a buyer button).
 
   const retryAll = useCallback(() => {
     // Retry only local errored tasks (restored ones lost their video) that did NOT create a
     // campaign — a partial success is not safely retryable (retry() also guards this).
     for (const t of tasksRef.current) if (t.status === "error" && t.local && !t.result?.campaignId) retry(t.id);
   }, [retry]);
-
-  /** Dismiss my FAILED tasks. Successful (done) tasks are a permanent record and cannot be removed —
-   *  only errors are dismissable. Others' rows aren't mine to delete either. */
-  const clearFinished = useCallback(() => {
-    const gone = new Set(
-      tasksRef.current
-        .filter((t) => t.status === "error" && (t.local || (!!me && t.owner === me)))
-        .map((t) => t.id),
-    );
-    gone.forEach((id) => {
-      inputs.current.delete(id);
-      meta.current.delete(id);
-      tombstones.current.set(id, Date.now());
-    });
-    setTasks((ts) => ts.filter((t) => !gone.has(t.id)));
-    deleteRemote([...gone]);
-  }, [deleteRemote, me]);
 
   // Display statuses resolved against owner liveness — a non-terminal row of a dead session shows
   // as "stale"/interrupted instead of running forever. nowTick is the render-safe clock: it lags
@@ -966,8 +922,6 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
     enqueueClone,
     retry,
     retryAll,
-    remove,
-    clearFinished,
   };
 
   return (
@@ -1044,7 +998,7 @@ const inBucket = (eff: EffStatus, f: Filter): boolean =>
         : eff === f;
 
 function TaskManagerPanel() {
-  const { tasks, counts, me, open, setOpen, retry, retryAll, remove, clearFinished } = useTaskManager();
+  const { tasks, counts, me, open, setOpen, retry, retryAll } = useTaskManager();
   const [filter, setFilter] = useState<Filter>("all");
   const [kindFilter, setKindFilter] = useState<KindFilter>("all");
   const [mineOnly, setMineOnly] = useState(false);
@@ -1071,8 +1025,6 @@ function TaskManagerPanel() {
 
   // Only local errors can actually retry (restored tasks lost their input); match retryAll.
   const retryable = tasks.filter((t) => t.status === "error" && t.local && !t.result?.campaignId).length;
-  // Failed tasks I can dismiss (mine). Successful ones are a permanent record — not removable.
-  const clearable = tasks.filter((t) => t.status === "error" && isMine(t)).length;
 
   // Mine toggle → kind split (New launches vs Duplicates) → status filter within that split.
   const scoped = mineOnly ? tasks.filter(isMine) : tasks;
@@ -1202,7 +1154,7 @@ function TaskManagerPanel() {
           ) : (
             <div className="flex flex-col gap-2">
               {shown.map((t) => (
-                <TaskRow key={t.id} task={t} me={me} now={now} onRetry={() => retry(t.id)} onRemove={() => remove(t.id)} />
+                <TaskRow key={t.id} task={t} me={me} now={now} onRetry={() => retry(t.id)} />
               ))}
             </div>
           )}
@@ -1224,14 +1176,6 @@ function TaskManagerPanel() {
                 Retry failed ({retryable})
               </button>
             ) : null}
-            <button
-              type="button"
-              onClick={clearFinished}
-              disabled={clearable === 0}
-              className="rounded-md px-2 py-1 text-[11.5px] font-medium text-dim transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              Clear failed
-            </button>
           </div>
         </div>
       </aside>
@@ -1269,13 +1213,11 @@ function TaskRow({
   me,
   now,
   onRetry,
-  onRemove,
 }: {
   task: ViewTask;
   me: string | null;
   now: number;
   onRetry: () => void;
-  onRemove: () => void;
 }) {
   const mine = task.local || (!!me && task.owner === me);
   const stages = stagesFor(task.kind);
@@ -1342,17 +1284,8 @@ function TaskRow({
               partial
             </span>
           ) : null}
-          {mine && error ? (
-            <button
-              type="button"
-              onClick={onRemove}
-              data-tip="Dismiss"
-              aria-label="Dismiss"
-              className="tip flex h-6 w-6 items-center justify-center rounded-md text-faint transition-colors hover:bg-raise hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            >
-              <TrashIcon className="h-3.5 w-3.5" />
-            </button>
-          ) : null}
+          {/* No Dismiss: error rows are a team-visible record (owner call 08-11) — failures
+              can't be quietly swept from the drawer. */}
         </div>
       </div>
 

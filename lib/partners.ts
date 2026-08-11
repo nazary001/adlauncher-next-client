@@ -160,6 +160,15 @@ export function partnerConfig(id: PartnerId): PartnerConfig {
   return PARTNERS.find((p) => p.id === id) ?? PARTNERS[0];
 }
 
+/** URL ?partner= → a partner id the switcher can actually be on: unknown values and
+ *  in-development partners fall back to MO. Shared by the launcher and clone pages so a
+ *  refresh keeps the picked partner instead of snapping back to MO. */
+export function sanitizePartnerId(raw: unknown): PartnerId {
+  const id = Array.isArray(raw) ? raw[0] : raw;
+  const p = PARTNERS.find((x) => x.id === String(id ?? ""));
+  return p && !p.inDevelopment ? p.id : "in";
+}
+
 /** Readiness requirements for a partner — single source for the card dot, the Launch bay and the
  *  launch filter, so a campaign can never count as "ready" while missing a required fanka,
  *  account or pixel. */

@@ -74,13 +74,13 @@ function fillAccountDefaults(
 
 /** Rendered inside the (app) layout's TaskManagerProvider — the queue lives up there so it
  *  survives navigating between the launcher and the clone board. */
-export function LauncherBoard({ user }: { user?: SessionUser }) {
-  return <LauncherInner user={user} />;
+export function LauncherBoard({ user, initialPartner = "in" }: { user?: SessionUser; initialPartner?: PartnerId }) {
+  return <LauncherInner user={user} initialPartner={initialPartner} />;
 }
 
-function LauncherInner({ user }: { user?: SessionUser }) {
+function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPartner: PartnerId }) {
   const { enqueue, tasks } = useTaskManager();
-  const [partnerId, setPartnerId] = useState<PartnerId>("in");
+  const [partnerId, setPartnerId] = useState<PartnerId>(initialPartner);
   // Codes already taken in the Strapi gcm registry. null = not loaded yet → assign nothing.
   const [reserved, setReserved] = useState<Set<string> | null>(null);
   // Count just sent to the Task Manager, shown as a brief confirmation (campaigns stay on the board).
@@ -258,6 +258,10 @@ function LauncherInner({ user }: { user?: SessionUser }) {
     setPartnerId(id);
     setCampaigns((cs) => normalize(cs, partnerConfig(id), reserved));
     setPreviewed(false);
+    // The pick rides in the URL so a refresh reopens on the same partner (no navigation).
+    const url = new URL(window.location.href);
+    url.searchParams.set("partner", id);
+    window.history.replaceState(null, "", url);
   }
 
   const patch = (id: string, p: Partial<Campaign>) =>

@@ -303,6 +303,10 @@ function CloneInner({
     setPartnerId(id);
     setSettings(defaultSettings(id));
     setPreviewed(false);
+    // The pick rides in the URL so a refresh reopens on the same partner (ids etc. preserved).
+    const url = new URL(window.location.href);
+    url.searchParams.set("partner", id);
+    window.history.replaceState(null, "", url);
   };
 
   const preview = flattenPreview(rows, settings.copies);

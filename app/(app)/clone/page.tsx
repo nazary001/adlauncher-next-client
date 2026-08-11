@@ -3,13 +3,11 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { SESSION_COOKIE, verifySession } from "@/lib/session";
 import { CloneBoard } from "@/components/clone-board";
-import type { PartnerId } from "@/lib/partners";
+import { type PartnerId, sanitizePartnerId } from "@/lib/partners";
 
 export const metadata: Metadata = {
   title: "Clone campaigns — Ad Launcher",
 };
-
-const VALID_PARTNERS: PartnerId[] = ["br", "in", "us"];
 
 /** Dedupe + trim the comma-separated campaign ids handed over in the link. */
 function parseIds(raw: string | string[] | undefined): string[] {
@@ -29,10 +27,9 @@ export default async function ClonePage({
 
   const sp = await searchParams;
   const ids = parseIds(sp.ids);
-  const partnerRaw = Array.isArray(sp.partner) ? sp.partner[0] : sp.partner;
-  const partner: PartnerId = VALID_PARTNERS.includes(partnerRaw as PartnerId)
-    ? (partnerRaw as PartnerId)
-    : "in";
+  // Shared sanitizer: unknown AND in-development partners fall back to MO (a stale prod URL
+  // must not open the board on a partner the switcher itself refuses).
+  const partner: PartnerId = sanitizePartnerId(sp.partner);
 
   return (
     <>
