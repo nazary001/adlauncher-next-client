@@ -59,9 +59,15 @@ export function targeting(c: Campaign, localeIds: number[]): Record<string, unkn
   // Meta rejects the ad set otherwise ("Custom age/gender selection is unavailable…").
   const special = c.category !== "";
 
-  t.geo_locations = c.countries.includes("WW")
+  const ww = c.countries.includes("WW");
+  t.geo_locations = ww
     ? { location_types: ["home", "recent"], country_groups: ["worldwide"] }
     : { location_types: ["home", "recent"], countries: c.countries };
+  // Worldwide always runs MINUS Taiwan + Singapore (owner rule 2026-08-11): without a verified
+  // advertiser Meta never delivers there anyway — it just demands "universal ads" declarations
+  // and soft-errors the regions. Excluding them outright keeps WW launches clean. Explicit
+  // country lists are untouched (picking TW/SG on purpose stays possible).
+  if (ww) t.excluded_geo_locations = { countries: ["TW", "SG"] };
 
   const ageMin = special ? 18 : parseInt(c.ageMin || "18", 10) || 18;
   t.age_min = ageMin;
