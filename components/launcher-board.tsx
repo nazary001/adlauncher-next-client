@@ -404,9 +404,8 @@ function LauncherInner({ user }: { user?: SessionUser }) {
                   type="button"
                   onClick={() => setCopyOpen(true)}
                   disabled={campaigns.length <= 1}
-                  data-tip={campaigns.length <= 1 ? "Add more campaigns to copy settings to" : undefined}
                   className={
-                    "tip flex h-9 items-center gap-2 rounded-lg border border-line bg-surface px-3.5 " +
+                    "flex h-9 items-center gap-2 rounded-lg border border-line bg-surface px-3.5 " +
                     "text-[13px] font-medium text-dim transition-all duration-150 " +
                     "hover:border-line2 hover:bg-surface2 hover:text-ink active:scale-[0.97] " +
                     "disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:bg-surface disabled:hover:text-dim " +

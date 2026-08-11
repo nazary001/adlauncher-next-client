@@ -155,16 +155,16 @@ export function CopySettingsModal({
   return (
     <div className="fixed inset-0 z-[90] flex items-center justify-center p-4">
       <div className="animate-fade-in absolute inset-0 bg-black/55 backdrop-blur-[2px]" onClick={onClose} />
-      <div className="animate-pop-in relative flex max-h-[85vh] w-full max-w-[520px] flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-[0_30px_80px_rgba(0,0,0,0.6)]">
+      <div className="animate-pop-in relative flex max-h-[88vh] w-full max-w-[640px] flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-[0_30px_80px_rgba(0,0,0,0.6)]">
         {/* header */}
-        <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
-          <div className="flex items-center gap-3">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-accent/25 to-accent2/25 text-[#9db8ff]">
-              <CopyIcon className="h-4 w-4" />
+        <div className="flex items-start justify-between gap-3 border-b border-line px-6 py-5">
+          <div className="flex items-center gap-3.5">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-accent/25 to-accent2/25 text-[#9db8ff]">
+              <CopyIcon className="h-5 w-5" />
             </span>
             <div>
-              <h2 className="text-[15px] font-semibold leading-tight text-ink">Copy settings to all campaigns</h2>
-              <p className="mt-1 text-[12px] text-dim">
+              <h2 className="text-[17px] font-semibold leading-tight text-ink">Copy settings to all campaigns</h2>
+              <p className="mt-1.5 text-[13px] text-dim">
                 From <span className="font-medium text-ink">campaign 01</span> →{" "}
                 {count > 0 ? (
                   <span className="text-ink">
@@ -181,22 +181,22 @@ export function CopySettingsModal({
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-faint transition-colors hover:bg-raise hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-faint transition-colors hover:bg-raise hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           >
             <XIcon className="h-4 w-4" />
           </button>
         </div>
 
         {/* select all / none */}
-        <div className="flex items-center justify-between border-b border-line px-5 py-2">
-          <span className="font-mono text-[11px] text-faint">
+        <div className="flex items-center justify-between border-b border-line px-6 py-2.5">
+          <span className="font-mono text-[12px] text-faint">
             {selected.size}/{fields.length} selected
           </span>
           <div className="flex items-center gap-1">
             <button
               type="button"
               onClick={() => setSelected(new Set(fields.map((f) => f.key as string)))}
-              className="rounded-md px-2 py-1 text-[11.5px] font-medium text-dim transition-colors hover:text-ink"
+              className="rounded-md px-2 py-1 text-[12.5px] font-medium text-dim transition-colors hover:text-ink"
             >
               Select all
             </button>
@@ -204,7 +204,7 @@ export function CopySettingsModal({
             <button
               type="button"
               onClick={() => setSelected(new Set())}
-              className="rounded-md px-2 py-1 text-[11.5px] font-medium text-dim transition-colors hover:text-ink"
+              className="rounded-md px-2 py-1 text-[12.5px] font-medium text-dim transition-colors hover:text-ink"
             >
               None
             </button>
@@ -212,10 +212,10 @@ export function CopySettingsModal({
         </div>
 
         {/* fields */}
-        <div className="flex-1 overflow-y-auto px-3 py-2">
+        <div className="flex-1 overflow-y-auto px-4 py-3">
           {grouped.map(({ g, items }) => (
-            <div key={g} className="mb-1">
-              <p className="px-2 pb-1 pt-2.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-faint">{g}</p>
+            <div key={g} className="mb-2">
+              <p className="px-2.5 pb-1.5 pt-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-faint">{g}</p>
               {items.map((f) => {
                 const checked = selected.has(f.key as string);
                 return (
@@ -223,18 +223,18 @@ export function CopySettingsModal({
                     key={f.key as string}
                     type="button"
                     onClick={() => toggle(f.key as string)}
-                    className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors duration-100 hover:bg-raise/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    className="flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left transition-colors duration-100 hover:bg-raise/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                   >
                     <span
                       className={
-                        "flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors " +
+                        "flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[5px] border transition-colors " +
                         (checked ? "border-accent bg-accent text-white" : "border-line2 bg-surface")
                       }
                     >
-                      {checked ? <CheckIcon className="h-3 w-3" /> : null}
+                      {checked ? <CheckIcon className="h-3.5 w-3.5" /> : null}
                     </span>
-                    <span className="flex-1 truncate text-[13px] text-ink">{f.label}</span>
-                    <span className="max-w-[48%] shrink-0 truncate text-right font-mono text-[11px] text-faint">
+                    <span className="flex-1 truncate text-[14px] text-ink">{f.label}</span>
+                    <span className="max-w-[50%] shrink-0 truncate text-right font-mono text-[12px] text-faint">
                       {f.preview(source)}
                     </span>
                   </button>
@@ -245,11 +245,11 @@ export function CopySettingsModal({
         </div>
 
         {/* footer */}
-        <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-3.5">
+        <div className="flex items-center justify-end gap-2.5 border-t border-line px-6 py-4">
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-dim transition-colors hover:border-line2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="rounded-lg border border-line bg-surface px-4 py-2.5 text-[14px] font-medium text-dim transition-colors hover:border-line2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           >
             Cancel
           </button>
@@ -258,12 +258,12 @@ export function CopySettingsModal({
             onClick={() => onApply([...selected] as (keyof Campaign)[])}
             disabled={selected.size === 0 || count === 0}
             className={
-              "flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/15 px-3.5 py-2 text-[13px] font-semibold " +
+              "flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/15 px-4 py-2.5 text-[14px] font-semibold " +
               "text-[#9db8ff] transition-all duration-150 hover:border-accent/60 hover:bg-accent/25 active:scale-[0.98] " +
               "disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             }
           >
-            <CopyIcon className="h-3.5 w-3.5" />
+            <CopyIcon className="h-4 w-4" />
             Copy to {count} campaign{count === 1 ? "" : "s"}
           </button>
         </div>

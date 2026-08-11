@@ -331,10 +331,12 @@ body {
     translate 0.15s ease-out;
   z-index: 60;
 }
-.tip:hover::after,
-.tip:focus-visible::after,
-.tip:hover::before,
-.tip:focus-visible::before {
+/* Bubble + arrow only when a data-tip is actually set — a conditional data-tip={undefined} used
+   to leave an EMPTY bubble popping over the button on hover. */
+.tip[data-tip]:hover::after,
+.tip[data-tip]:focus-visible::after,
+.tip[data-tip]:hover::before,
+.tip[data-tip]:focus-visible::before {
   opacity: 1;
   translate: -50% 0;
 }
