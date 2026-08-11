@@ -42,6 +42,8 @@ export async function POST(req: Request): Promise<NextResponse> {
      *  sources). Empty/absent = inherit from the source — the safe default. */
     bid?: string;
     nameSuffix?: string;
+    /** Full clone name (fixed grammar prefix + edited tail); absent = LION rebuilds it. */
+    name?: string;
   };
   try {
     body = (await req.json()) as typeof body;
@@ -56,6 +58,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   const campaignId = String(body.campaignId ?? "").trim();
   const copies = Number(body.copies ?? 1);
   const nameSuffix = String(body.nameSuffix ?? "").trim().slice(0, 80);
+  const name = String(body.name ?? "").trim().slice(0, 200);
 
   if (!profile) return bad("profile_required");
   if (!account) return bad("account_required");
@@ -105,6 +108,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       number_of_copies: copies,
       name_suffix: nameSuffix,
       ...(bid != null ? { starting_bid: bid } : {}),
+      ...(name ? { name } : {}),
     });
     const taskIds = (result.task_ids ?? []).map(String).filter(Boolean);
     if ((result.result === "success" || taskIds.length > 0) && taskIds.length > 0) {

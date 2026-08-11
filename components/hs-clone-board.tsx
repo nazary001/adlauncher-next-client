@@ -49,25 +49,29 @@ const STRATEGY_SHORT: Record<string, string> = {
   LOWEST_COST_WITH_MIN_ROAS: "min ROAS",
 };
 
-/** The clone name LION will rebuild: prefix re-dated to TODAY (Sao Paulo) + "(CLONE)" after
- *  API. Approximate (LION rebuilds by creative family and may drop random tails) but close —
- *  the buyer edits only the SUFFIX appended after it, exactly like the launcher's fixed
- *  name prefix. */
-function predictedCloneName(sourceName: string, ddmm: string): string {
-  if (!sourceName) return "";
-  let n = sourceName.replace(/^\[\d{2}\/\d{2}\]/, `[${ddmm}]`);
-  if (!/\(CLONE\)/.test(n)) n = n.replace(/API/, "API (CLONE)");
-  return n;
+/** Split a LION name by its validated grammar: the STRUCTURED prefix
+ *  `[DD/MM] (ACR) API[ (CLONE)] - (LABEL) - [CODES] - [LANG] - ...` stays fixed (re-dated to
+ *  today, "(CLONE)" ensured — that part LION owns), while the free-text TAIL after it is the
+ *  buyer's to replace. Unparseable names fall back to everything-is-tail. */
+function splitLionName(sourceName: string, ddmm: string): { prefix: string; tail: string } {
+  const m =
+    /^((?:\[\d{2}\/\d{2}\])\s*\([^)]*\)\s*API(?:\s*\(CLONE\))?\s*-\s*\([^)]*\)\s*(?:-\s*\[[^\]]*\]\s*)*-\s*)([\s\S]*)$/.exec(
+      sourceName,
+    );
+  if (!m) return { prefix: "", tail: sourceName };
+  let prefix = m[1].replace(/^\[\d{2}\/\d{2}\]/, `[${ddmm}]`);
+  if (!/\(CLONE\)/.test(prefix)) prefix = prefix.replace(/API/, "API (CLONE)");
+  return { prefix, tail: m[2].trim() };
 }
 
-const freshRow = (campaignId: string, suffix: string, n: number): Row => ({
+const freshRow = (campaignId: string, n: number): Row => ({
   id: `r${Date.now()}-${n}`,
   campaignId,
   info: null,
   loading: false,
   bid: "",
   budget: "10",
-  suffix,
+  suffix: "", // becomes the source's old TAIL once LION answers — an editable replacement
   state: "idle",
 });
 
@@ -104,7 +108,7 @@ export function HsCloneBoard({
     const seeded = initialIds
       .filter((id) => /^\d{5,}$/.test(id))
       .slice(0, MAX_SOURCES)
-      .map((cid, i) => freshRow(cid, user?.username ?? "", i + 1));
+      .map((cid, i) => freshRow(cid, i + 1));
     return seeded;
   });
 
@@ -137,7 +141,7 @@ export function HsCloneBoard({
       const have = new Set(rs.map((r) => r.campaignId));
       const fresh = ids
         .filter((id) => !have.has(id))
-        .map((id) => freshRow(id, user?.username ?? "", ++counter.current));
+        .map((id) => freshRow(id, ++counter.current));
       return [...rs, ...fresh].slice(0, MAX_SOURCES);
     });
     setDraftId("");
@@ -197,6 +201,8 @@ export function HsCloneBoard({
                 // Prefill the editable bid with the source's own (LION-UI does the same); the
                 // buyer clearing it back to "" means "inherit".
                 bid: r.bid || (s.bid != null ? String(s.bid).replace(".", ",") : ""),
+                // Prefill the editable TAIL with the source's old one (grammar split).
+                suffix: r.suffix || splitLionName(s.name, todaySaoPauloDDMM()).tail,
               };
             }),
           );
@@ -236,7 +242,11 @@ export function HsCloneBoard({
               copies: copiesN,
               budget: r.budget,
               bid: r.bid.trim(),
-              nameSuffix: r.suffix.trim(),
+              // Full name = fixed grammar prefix + the buyer's tail (replaces the old one).
+              // When the source couldn't be read there's no prefix — LION rebuilds the name.
+              ...(r.info?.name
+                ? { name: `${splitLionName(r.info.name, todaySaoPauloDDMM()).prefix}${r.suffix.trim()}`.trim() }
+                : {}),
             }),
           });
           const d = (await res.json().catch(() => ({}))) as { ok?: boolean; taskIds?: string[]; error?: string };
@@ -430,7 +440,7 @@ export function HsCloneBoard({
                             ) : r.info?.status === "UNREADABLE" ? (
                               <span className="text-danger">LION can’t read this campaign</span>
                             ) : r.info?.name ? (
-                              predictedCloneName(r.info.name, todaySaoPauloDDMM())
+                              splitLionName(r.info.name, todaySaoPauloDDMM()).prefix || r.info.name
                             ) : (
                               "—"
                             )}
@@ -438,7 +448,7 @@ export function HsCloneBoard({
                           <input
                             value={r.suffix}
                             onChange={(e) => patchRow(r.id, { suffix: e.target.value })}
-                            placeholder="suffix (editable)"
+                            placeholder="tail — edit to rename the clone"
                             aria-label="Name suffix"
                             maxLength={80}
                             className="mt-1.5 h-7 w-full rounded border border-line bg-surface px-2 text-[12px] text-ink outline-none transition-colors hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
@@ -546,7 +556,7 @@ export function HsCloneBoard({
                     <p key={r.id} className="text-[12px] text-dim">
                       <span className="text-ink">
                         {r.info?.name
-                          ? `${predictedCloneName(r.info.name, todaySaoPauloDDMM())}${r.suffix.trim() ? ` ${r.suffix.trim()}` : ""}`.slice(0, 110)
+                          ? `${splitLionName(r.info.name, todaySaoPauloDDMM()).prefix}${r.suffix.trim()}`.slice(0, 110)
                           : `#${r.campaignId}`}
                       </span>{" "}
                       → {copiesN} cop{copiesN === 1 ? "y" : "ies"} @ ${moneyLabel(r.budget)}/day

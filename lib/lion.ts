@@ -224,6 +224,9 @@ export async function lionDuplicate(args: {
   /** LION-UI semantics ("Roas Goal" money field): a plain number — ROAS decimal for MIN_ROAS
    *  sources (1,20 = 120%). Omitted = inherit the source's bid (the safe default). */
   starting_bid?: number;
+  /** Full clone name (structured prefix + edited tail) — LION's own duplicator UI edits the
+   *  whole name, so the field mirrors it; omitted = LION rebuilds the name itself. */
+  name?: string;
 }): Promise<LionDuplicationResult> {
   const body = (await lionPost("/api/facebook/campaigns/duplicate/", {
     profile_slug: args.profile_slug,
@@ -237,6 +240,7 @@ export async function lionDuplicate(args: {
         number_of_copies: args.number_of_copies,
         name_suffix: args.name_suffix,
         ...(args.starting_bid != null ? { starting_bid: args.starting_bid } : {}),
+        ...(args.name ? { name: args.name } : {}),
       },
     ],
   })) as Record<string, unknown> | null;
