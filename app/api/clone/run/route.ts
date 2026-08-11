@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { partnerConfig, type PartnerId } from "@/lib/partners";
-import { bidAmountMissing } from "@/lib/types";
+import { bidAmountMissing, bidKind, parseMoney } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
 import {
   FbError,
@@ -259,6 +259,10 @@ export async function POST(req: Request) {
           }
           if (bidAmountMissing(campaign)) {
             throw new FbError("source uses a bid cap but no ROAS goal was set on the clone row", { campaignId: edit.campaignId });
+          }
+          // Mirror the HS/launch guard: a min-ROAS goal above 100 (10 000%) is a typo, not a bid.
+          if (bidKind(campaign.bidStrategy) === "roas" && parseMoney(campaign.bidCap) > 100) {
+            throw new FbError("ROAS goal must be 0–100 on the clone row", { campaignId: edit.campaignId });
           }
           if (campaign.countries.length === 0) {
             throw new FbError("source has no country targeting to clone — set a geo on the clone row", { campaignId: edit.campaignId });

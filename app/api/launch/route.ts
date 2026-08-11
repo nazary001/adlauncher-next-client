@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { type Campaign, bidAmountMissing } from "@/lib/types";
+import { type Campaign, bidAmountMissing, bidKind, parseMoney } from "@/lib/types";
 import { conversionEventsFor } from "@/lib/catalog";
 import { partnerConfig, fullLandingUrl, type PartnerId } from "@/lib/partners";
 import {
@@ -319,6 +319,14 @@ export async function POST(req: Request) {
   if (bidAmountMissing(campaign)) {
     return NextResponse.json(
       { ok: false, stage: "config", error: "Bid amount required for the selected bid strategy" },
+      { status: 400 },
+    );
+  }
+  // Mirror the HS guard: a min-ROAS goal above 100 (10 000%) is a typo, not a bid. Rejected here
+  // so no campaign/gcm exists yet (Meta would only refuse at the ad-set step, orphaning both).
+  if (bidKind(campaign.bidStrategy) === "roas" && parseMoney(campaign.bidCap) > 100) {
+    return NextResponse.json(
+      { ok: false, stage: "config", error: "roas_goal_invalid — ROAS goal must be 0–100" },
       { status: 400 },
     );
   }
