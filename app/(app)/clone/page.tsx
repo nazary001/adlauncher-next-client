@@ -51,7 +51,11 @@ export default async function ClonePage({
       {partnerConfig(partner).lionLaunch ? (
         // HS clones go through LION's duplicate weapon — a different rail entirely (no Graph
         // token, no gcm), so it gets its own board.
-        <HsCloneBoard user={{ username: session.username, role: session.role ?? null }} partner={partner} />
+        <HsCloneBoard
+          user={{ username: session.username, role: session.role ?? null }}
+          partner={partner}
+          initialIds={ids}
+        />
       ) : (
         <CloneBoard
           user={{ username: session.username, role: session.role ?? null }}

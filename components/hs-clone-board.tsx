@@ -35,7 +35,16 @@ const cellInput =
  * and ride its polling; bids inherit from the source on purpose (MIN_ROAS sources carry ROAS
  * decimals — overriding blindly is the 100× class mistake).
  */
-export function HsCloneBoard({ user, partner }: { user?: SessionUser; partner: PartnerId }) {
+export function HsCloneBoard({
+  user,
+  partner,
+  initialIds = [],
+}: {
+  user?: SessionUser;
+  partner: PartnerId;
+  /** Source campaign ids handed over in the link (?ids=…) — one prefilled row each. */
+  initialIds?: string[];
+}) {
   const hs = useHs(true);
   const { enqueueSubmitted, setOpen } = useHsTaskManager();
 
@@ -43,9 +52,21 @@ export function HsCloneBoard({ user, partner }: { user?: SessionUser; partner: P
   const [account, setAccount] = useState("");
   const [page, setPage] = useState("");
   const [pixel, setPixel] = useState("");
-  const [rows, setRows] = useState<Row[]>([
-    { id: "r1", campaignId: "", copies: "1", budget: "10", suffix: user?.username ?? "", state: "idle" },
-  ]);
+  const [rows, setRows] = useState<Row[]>(() => {
+    const seeded = initialIds
+      .filter((id) => /^\d{5,}$/.test(id))
+      .map((cid, i) => ({
+        id: `r${i + 1}`,
+        campaignId: cid,
+        copies: "1",
+        budget: "10",
+        suffix: user?.username ?? "",
+        state: "idle" as const,
+      }));
+    return seeded.length
+      ? seeded
+      : [{ id: "r1", campaignId: "", copies: "1", budget: "10", suffix: user?.username ?? "", state: "idle" }];
+  });
   const [firing, setFiring] = useState(false);
   const nextId = { current: rows.length + 1 };
 
