@@ -180,7 +180,7 @@ function LauncherInner({ user }: { user?: SessionUser }) {
 
   /** Non-blocking launch: every launchable campaign is captured + dropped into the Task Manager
    *  instantly, then flies off the board so you can keep building. The queue creates them one by
-   *  one (PAUSED) in the background. */
+   *  one (ACTIVE since 08-11) in the background. */
   function launch() {
     const opts = launchReadyOpts(partner);
     const launchable = campaigns.filter((c) => isLaunchable(c, opts));

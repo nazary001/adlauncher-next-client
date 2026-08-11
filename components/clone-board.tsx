@@ -308,7 +308,7 @@ function CloneInner({
   const preview = flattenPreview(rows, settings.copies);
 
   /** Queue each clone (rows × copies) into the Task Manager, which builds them one at a time
-   *  (PAUSED) with live stages / errors / retry — the same queue and pipeline as launches. */
+   *  (ACTIVE since 08-11) with live stages / errors / retry — the same queue and pipeline as launches. */
   const duplicate = () => {
     if (destinationMissing) return; // the button is disabled too — belt and suspenders
     const total = Math.max(1, Math.floor(settings.copies) || 1);
@@ -520,7 +520,7 @@ function CloneInner({
                   }
                 >
                   <CopyIcon className="h-4 w-4" />
-                  {`Duplicate ${preview.length} ${preview.length === 1 ? "clone" : "clones"} · PAUSED`}
+                  {`Duplicate ${preview.length} ${preview.length === 1 ? "clone" : "clones"} · goes LIVE`}
                 </button>
               ) : null}
 
@@ -542,7 +542,7 @@ function CloneInner({
               {previewed ? (
                 <p className="text-center text-[11px] text-faint">
                   {rows.length} {rows.length === 1 ? "campaign" : "campaigns"} × {settings.copies} ={" "}
-                  <span className="font-mono text-dim">{preview.length}</span> clones · created paused
+                  <span className="font-mono text-dim">{preview.length}</span> clones · created live
                 </p>
               ) : null}
 

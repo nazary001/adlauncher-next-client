@@ -104,7 +104,9 @@ export function campaignPayload(c: Campaign, name: string): Record<string, unkno
   return {
     name,
     objective: c.objective,
-    status: "PAUSED",
+    // ACTIVE on creation (owner decision 2026-08-11) — waves used to launch PAUSED and get a
+    // separate mass-activation pass every evening; now they go straight to review/delivery.
+    status: "ACTIVE",
     special_ad_categories: specialAdCategories(c),
     daily_budget: money(c.budget),
     bid_strategy: c.bidStrategy,
@@ -126,7 +128,7 @@ export function adsetPayload(
     campaign_id: campaignId,
     billing_event: "IMPRESSIONS",
     optimization_goal: optimizationGoal(c),
-    status: "PAUSED",
+    status: "ACTIVE", // launches go live immediately (2026-08-11) — see campaignPayload
     targeting: targeting(c, localeIds),
   };
 
@@ -231,6 +233,6 @@ export function adPayload(name: string, adsetId: string, creativeId: string): Re
     name,
     adset_id: adsetId,
     creative: { creative_id: creativeId },
-    status: "PAUSED",
+    status: "ACTIVE", // launches go live immediately (2026-08-11) — see campaignPayload
   };
 }

@@ -1287,8 +1287,8 @@ function TaskRow({
 
   const statusLabel = done
     ? task.kind === "clone"
-      ? "Duplicated · paused"
-      : "Launched · paused"
+      ? "Duplicated · live"
+      : "Launched · live"
     : error
       ? task.error || "Failed"
       : stale

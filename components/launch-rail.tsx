@@ -195,7 +195,7 @@ export function LaunchRail({
               {readyCount > 0
                 ? partner.lionLaunch
                   ? "Queued to HS Task Manager · LION builds the ads"
-                  : "Queued to Task Manager · creates paused"
+                  : "Queued to Task Manager · goes live on create"
                 : `${partner.launchNote} · needs a creative`}
             </p>
           )}
