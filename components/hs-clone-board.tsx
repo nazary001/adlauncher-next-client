@@ -64,6 +64,16 @@ function splitLionName(sourceName: string, ddmm: string): { prefix: string; tail
   return { prefix, tail: m[2].trim() };
 }
 
+/** Default tail = the source's old tail + " - <owner>" (the buyer duplicating it), matching the
+ *  historical LION naming ("… Cars en Alex Nazar"). Editable afterwards; skips the append when
+ *  the tail already ends with the owner name so a re-fetch can't double it. */
+function withOwner(tail: string, owner: string): string {
+  const o = owner.trim();
+  if (!o) return tail;
+  if (!tail) return o;
+  return tail.toLowerCase().endsWith(o.toLowerCase()) ? tail : `${tail} - ${o}`;
+}
+
 /** Geo from the NAME's grammar (the `[CODES]` group after the redirect label) — the display
  *  fallback for sources whose targeting/ answers an empty country list (worldwide runs). */
 function geoFromName(name: string, summary: (codes: string[]) => string): string {
@@ -212,8 +222,8 @@ export function HsCloneBoard({
                 // Prefill the editable bid with the source's own (LION-UI does the same); the
                 // buyer clearing it back to "" means "inherit".
                 bid: r.bid || (s.bid != null ? String(s.bid).replace(".", ",") : ""),
-                // Prefill the editable TAIL with the source's old one (grammar split).
-                suffix: r.suffix || splitLionName(s.name, todaySaoPauloDDMM()).tail,
+                // Prefill the editable TAIL with the source's old one + the owner's name.
+                suffix: r.suffix || withOwner(splitLionName(s.name, todaySaoPauloDDMM()).tail, user?.username ?? ""),
               };
             }),
           );
@@ -224,7 +234,7 @@ export function HsCloneBoard({
       })();
     }, 500);
     return () => clearTimeout(timer);
-  }, [rows]);
+  }, [rows, user?.username]);
 
   const bindsReady = Boolean(profile && account && page && pixel);
   const copiesN = Math.min(MAX_COPIES, Math.max(1, Math.round(Number(copies) || 1)));
