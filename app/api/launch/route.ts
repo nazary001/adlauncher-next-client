@@ -93,6 +93,27 @@ async function uploadVideo(accountId: string, fileUrl: string, name: string): Pr
 // buyers hear it at drop time — this is the server-side backstop.
 const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 const IMAGE_MAX_DIM = 9000;
+// What sub 1885355 ("resized image too large") ACTUALLY meters is the pixel stream, not the
+// file: probed 08-11 — a 10MB PNG whose bytes sit in ancillary chunks passes, while ~9MB of
+// IDAT dies (boundary between 5.7MB OK and 9.3MB reject). 7MB keeps a safety margin. The
+// dropzone re-encodes big images to ≤2000px anyway; this is the raw-API backstop.
+const IMAGE_MAX_IDAT_BYTES = 7 * 1024 * 1024;
+
+/** Total PNG pixel-stream (IDAT) bytes; null for non-PNG (a JPEG's file size ≈ its pixel
+ *  stream — no padding trick exists there, IMAGE_MAX_BYTES covers it). */
+function pngIdatBytes(buf: Buffer): number | null {
+  if (!(buf.length > 24 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47)) return null;
+  let off = 8;
+  let total = 0;
+  while (off + 8 <= buf.length) {
+    const len = buf.readUInt32BE(off);
+    const type = buf.toString("ascii", off + 4, off + 8);
+    if (type === "IDAT") total += len;
+    if (type === "IEND") break;
+    off += 12 + len;
+  }
+  return total;
+}
 
 /** Width/height from the image header: PNG (IHDR), JPEG (SOF frame scan), GIF, WebP (VP8/VP8L/
  *  VP8X). Null when the format is unrecognized — the guard then lets Meta be the judge. */
@@ -145,6 +166,13 @@ async function fetchValidatedImage(fileUrl: string): Promise<Buffer> {
     throw new FbError(
       `image too large (${dims.w}×${dims.h}) — Meta rejects sides above ${IMAGE_MAX_DIM}px; export it smaller`,
       dims,
+    );
+  }
+  const idat = pngIdatBytes(buf);
+  if (idat !== null && idat > IMAGE_MAX_IDAT_BYTES) {
+    throw new FbError(
+      `image pixel data too heavy (${(idat / 1048576).toFixed(1)}MB) — Meta rejects it after its re-encode; export at smaller dimensions or as JPEG`,
+      { idat },
     );
   }
   return buf;

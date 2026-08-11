@@ -139,21 +139,66 @@ function CreativeCard({
   );
 }
 
-// Meta's real adimages ceilings, probed live 2026-08-11 (see /api/launch): sides above ~9000px
-// are rejected outright, and heavy sources die after Meta's re-encode ("resized image too
-// large" — 8 buyer launches in one day). Enforced HERE so the buyer hears it at drop time; the
-// launch route re-checks server-side.
-const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
-const IMAGE_MAX_DIM = 9000;
+// Meta's adimages rejection ("resized image too large", sub 1885355 — 12 buyer launches killed
+// on 08-11 alone) meters the PIXEL STREAM after Meta's own re-encode, not the file size: probed
+// live, a 3MB max-entropy 1080² passes while the same content at 2000² (11MB) dies, and a 10MB
+// file whose bytes sit in a non-pixel chunk passes. No source-size cap can truly prevent it —
+// so oversized images are RE-ENCODED here instead of rejected: scaled to ≤2000px (Meta
+// recommends 1080; ads never need more) and recompressed, which lands far under every probed
+// limit. Rejection remains only for undecodable files over the server's hard caps.
+const IMG_RECODE_SIDE = 2000;
+const IMG_RECODE_BYTES = 3 * 1024 * 1024;
+const IMAGE_MAX_BYTES = 8 * 1024 * 1024; // server backstop — mirrors /api/launch
 
-/** Natural dimensions of a local image blob; null when it can't be decoded. */
-function imageSizeOf(url: string): Promise<{ w: number; h: number } | null> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
-    img.onerror = () => resolve(null);
-    img.src = url;
-  });
+/**
+ * Downscale + recompress an image file so Meta's re-encode can never call it too large.
+ * JPEG (q0.92, white matte) for opaque images, PNG when transparency is real. Returns the
+ * original file untouched when it's already small, or null when the file can't be decoded.
+ */
+async function recodeImage(f: File): Promise<File | null> {
+  const bmp = await createImageBitmap(f).catch(() => null);
+  if (!bmp) return null;
+  const needs = f.size > IMG_RECODE_BYTES || Math.max(bmp.width, bmp.height) > IMG_RECODE_SIDE;
+  if (!needs) {
+    bmp.close();
+    return f;
+  }
+  const scale = Math.min(1, IMG_RECODE_SIDE / Math.max(bmp.width, bmp.height));
+  const w = Math.max(1, Math.round(bmp.width * scale));
+  const h = Math.max(1, Math.round(bmp.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return f;
+  ctx.drawImage(bmp, 0, 0, w, h);
+  bmp.close();
+  // Transparency check (JPEG has none — flattening a transparent creative onto black would
+  // wreck it; those stay PNG). JPEG sources can't be transparent, skip the pixel scan.
+  let hasAlpha = false;
+  if (f.type !== "image/jpeg") {
+    const data = ctx.getImageData(0, 0, w, h).data;
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] < 250) {
+        hasAlpha = true;
+        break;
+      }
+    }
+  }
+  if (!hasAlpha) {
+    // White matte BEHIND the pixels (destination-over), then export as JPEG.
+    ctx.globalCompositeOperation = "destination-over";
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, w, h);
+  }
+  const type = hasAlpha ? "image/png" : "image/jpeg";
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, 0.92));
+  if (!blob) return f;
+  const name = f.name.replace(/\.[a-z0-9]+$/i, "") + (hasAlpha ? ".png" : ".jpg");
+  const out = new File([blob], name, { type });
+  // A recompress that somehow grew the file keeps the (already-small-enough?) original only
+  // when the original is genuinely smaller AND within limits; otherwise the recode wins.
+  return out.size < f.size || f.size > IMAGE_MAX_BYTES ? out : f;
 }
 
 export function Dropzone({
@@ -179,23 +224,20 @@ export function Dropzone({
     if (!list || list.length === 0) return;
     const ok: FileItem[] = [];
     const bad: string[] = [];
-    for (const f of Array.from(list)) {
+    for (const raw of Array.from(list)) {
+      let f = raw;
       const kind = f.type.startsWith("image/") ? "image" : f.type.startsWith("video/") ? "video" : "other";
-      const url = URL.createObjectURL(f);
       if (kind === "image") {
-        if (f.size > IMAGE_MAX_BYTES) {
-          bad.push(`${f.name} — ${fmtSize(f.size)}: Meta rejects heavy images; compress under 8 MB`);
-          URL.revokeObjectURL(url);
-          continue;
-        }
-        const dims = await imageSizeOf(url);
-        if (dims && Math.max(dims.w, dims.h) > IMAGE_MAX_DIM) {
-          bad.push(`${f.name} — ${dims.w}×${dims.h}: Meta rejects sides above ${IMAGE_MAX_DIM}px; export it smaller`);
-          URL.revokeObjectURL(url);
+        const recoded = await recodeImage(f);
+        if (recoded) {
+          f = recoded; // oversized images auto-shrink instead of erroring at Meta
+        } else if (f.size > IMAGE_MAX_BYTES) {
+          // Undecodable AND over the server's hard cap — nothing we can do client-side.
+          bad.push(`${f.name} — ${fmtSize(f.size)}: can't be read for recompression; export it under 8 MB`);
           continue;
         }
       }
-      ok.push({ id: `f${Date.now()}-${counter.current++}`, name: f.name, size: f.size, kind, url });
+      ok.push({ id: `f${Date.now()}-${counter.current++}`, name: f.name, size: f.size, kind, url: URL.createObjectURL(f) });
     }
     if (ok.length) {
       const merged = [...files, ...ok];
