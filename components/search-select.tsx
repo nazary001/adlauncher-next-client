@@ -115,6 +115,11 @@ export function SearchSelect({
   const [active, setActive] = useState(0);
   const [groupFilter, setGroupFilter] = useState<string | null>(null);
   const [tagFilter, setTagFilter] = useState<string | null>(null);
+  // Measured content height → the list animates its size on every filter change (height:auto
+  // can't transition, so an explicit pixel height is kept in sync via ResizeObserver).
+  const [listH, setListH] = useState<number | null>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
+  const LIST_MAX_H = 288; // = max-h-72
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -198,6 +203,7 @@ export function SearchSelect({
     setQuery("");
     setGroupFilter(null);
     setTagFilter(null);
+    setListH(null); // reopening starts at natural size (no stale height to glide from)
   }
 
   const toneCls = (tone?: RichOption["tagTone"]) =>
@@ -215,6 +221,20 @@ export function SearchSelect({
       ?.querySelector<HTMLElement>(`[data-idx="${active}"]`)
       ?.scrollIntoView({ block: "nearest" });
   }, [active, open]);
+
+  // Follow the content's real height (chip/query filtering, remounting cascades) so the list
+  // GLIDES to its new size instead of snapping. The observed wrapper is stable across the
+  // cascade remounts; height resets on close so reopening starts from natural size.
+  useEffect(() => {
+    if (!open) return;
+    const el = innerRef.current;
+    if (!el) return;
+    // No sync measure: ResizeObserver delivers the initial size asynchronously on observe(),
+    // which also keeps setState out of the effect body (react-compiler cascade rule).
+    const ro = new ResizeObserver(() => setListH(Math.min(el.offsetHeight, LIST_MAX_H)));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [open]);
 
   function pick(o: RichOption) {
     onChange(o.value);
@@ -384,9 +404,17 @@ export function SearchSelect({
                   </div>
                 </div>
               ) : null}
-              <div ref={listRef} className="max-h-72 overflow-y-auto p-1">
+              <div
+                ref={listRef}
+                style={listH != null ? { height: listH } : undefined}
+                className="max-h-72 overflow-y-auto transition-[height] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
+              >
+                <div ref={innerRef}>
+                  {/* Keyed by the chip filters: flipping a chip remounts the rows so the stagger
+                      cascade replays; typing keeps the DOM stable (no flashing while searching). */}
+                  <div key={`${groupFilter ?? ""}|${tagFilter ?? ""}`} className="p-1">
             {filtered.length === 0 ? (
-              <div className="flex flex-col items-start gap-1.5 px-3 py-3">
+              <div className="animate-pop-in flex flex-col items-start gap-1.5 px-3 py-3">
                 <p className="text-[12px] text-faint">{emptyHint}</p>
                 {groupFilter || tagFilter ? (
                   <button
@@ -411,7 +439,10 @@ export function SearchSelect({
                       Headers are decoration only: keyboard nav walks the flat filtered list.
                       Hidden while a niche chip is active (one group → the chip IS the header). */}
                   {o.group && !groupFilter && (i === 0 || filtered[i - 1].group !== o.group) ? (
-                    <p className="px-2.5 pb-1 pt-2.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-faint">
+                    <p
+                      style={{ animationDelay: `${Math.min(i, 14) * 16}ms` }}
+                      className="animate-row-in px-2.5 pb-1 pt-2.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-faint"
+                    >
                       {o.group}
                     </p>
                   ) : null}
@@ -419,7 +450,7 @@ export function SearchSelect({
                   // Two-line option: label on top; the muted sub-line (e.g. account id) + status
                   // tag below — lets long names + id + a FARM marker all fit without truncation.
                   <div
-
+                    style={{ animationDelay: `${Math.min(i, 14) * 16}ms` }}
                     data-idx={i}
                     role="option"
                     aria-selected={o.value === value}
@@ -429,7 +460,7 @@ export function SearchSelect({
                     }}
                     onMouseEnter={() => setActive(i)}
                     className={
-                      "flex cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors duration-100 " +
+                      "animate-row-in flex cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors duration-100 " +
                       (i === active ? "bg-accent/10 text-ink" : "text-dim")
                     }
                   >
@@ -448,7 +479,7 @@ export function SearchSelect({
                   </div>
                 ) : (
                   <div
-
+                    style={{ animationDelay: `${Math.min(i, 14) * 16}ms` }}
                     data-idx={i}
                     role="option"
                     aria-selected={o.value === value}
@@ -458,7 +489,7 @@ export function SearchSelect({
                     }}
                     onMouseEnter={() => setActive(i)}
                     className={
-                      "flex cursor-pointer items-center justify-between gap-3 rounded-lg px-2.5 py-2 text-[13px] transition-colors duration-100 " +
+                      "animate-row-in flex cursor-pointer items-center justify-between gap-3 rounded-lg px-2.5 py-2 text-[13px] transition-colors duration-100 " +
                       (i === active ? "bg-accent/10 text-ink" : "text-dim")
                     }
                   >
@@ -479,7 +510,9 @@ export function SearchSelect({
                 </Fragment>
               ))
             )}
-          </div>
+                  </div>
+                </div>
+              </div>
             </div>,
             document.body,
           )
