@@ -235,11 +235,23 @@ export function HsCloneBoard({
   async function duplicateAll() {
     if (!bindsReady || validRows.length === 0 || firing) return;
     setFiring(true);
+    // Flatten to SINGLE-COPY shots (row × copy) and fire them ONE AT A TIME with a random 1–3s
+    // gap. Firing a whole wave at once is exactly what makes Facebook temporarily block the
+    // executor profile; single copies + jitter is the front-line defence (playbook: ~1 shot/s).
+    const shots = validRows.flatMap((r) => Array.from({ length: copiesN }, (_, copy) => ({ r, copy })));
+    const done = new Map<string, number>();
+    const failed = new Map<string, string>();
     try {
-      for (const r of rows) {
+      for (let i = 0; i < shots.length; i++) {
+        const { r } = shots[i];
         const cid = r.campaignId.trim();
-        if (!/^\d{5,}$/.test(cid) || parseMoney(r.budget) < 1) continue;
-        patchRow(r.id, { state: "sending", msg: undefined });
+        // A source that already preflight-rejected won't accept its remaining copies either —
+        // skip them instantly (no wasted shot, no wasted gap).
+        if (failed.has(r.id)) continue;
+        patchRow(r.id, {
+          state: "sending",
+          msg: `sending ${(done.get(r.id) ?? 0) + 1}/${copiesN}…`,
+        });
         try {
           const res = await fetch("/api/hs/duplicate", {
             method: "POST",
@@ -250,7 +262,7 @@ export function HsCloneBoard({
               page,
               pixel,
               campaignId: cid,
-              copies: copiesN,
+              copies: 1, // one shot per request → controllable pacing, gentler on the profile
               budget: r.budget,
               bid: r.bid.trim(),
               // Full name = fixed grammar prefix + the buyer's tail (replaces the old one).
@@ -264,8 +276,8 @@ export function HsCloneBoard({
           if (d?.ok && Array.isArray(d.taskIds) && d.taskIds.length > 0) {
             const label = r.info?.name || `#${cid}`;
             enqueueSubmitted(
-              d.taskIds.map((taskId, i) => ({
-                name: `${label}${d.taskIds!.length > 1 ? ` · copy ${i + 1}/${d.taskIds!.length}` : ""}`,
+              d.taskIds.map((taskId) => ({
+                name: copiesN > 1 ? `${label} · copy ${(done.get(r.id) ?? 0) + 1}/${copiesN}` : label,
                 profile,
                 geo: r.info?.countries.length
                   ? geoSummary(r.info.countries)
@@ -276,17 +288,23 @@ export function HsCloneBoard({
                 lionTaskId: String(taskId),
               })),
             );
-            patchRow(r.id, { state: "ok", msg: `${d.taskIds.length} task${d.taskIds.length === 1 ? "" : "s"} → HS Tasks` });
+            done.set(r.id, (done.get(r.id) ?? 0) + 1);
+            patchRow(r.id, { state: "ok", msg: `${done.get(r.id)}/${copiesN} → HS Tasks` });
           } else {
             // LION's preflight reason is the actionable text ("No valid creative URL…" =
-            // object-story source, not duplicable; "Page not found in account data"; …).
+            // object-story source, not duplicable; "Page not found in account data"; …). One
+            // preflight rejection kills the whole family — stop retrying its remaining copies.
+            failed.set(r.id, d?.error ?? `HTTP ${res.status}`);
             patchRow(r.id, { state: "error", msg: d?.error ?? `HTTP ${res.status}` });
           }
         } catch (e) {
+          failed.set(r.id, String((e as Error).message ?? e));
           patchRow(r.id, { state: "error", msg: String((e as Error).message ?? e) });
         }
-        // polite pacing between LION submits, matching the launch queue's spirit
-        await new Promise((done) => setTimeout(done, 400));
+        // Random 1–3s gap before the next shot (skip after the last).
+        if (i < shots.length - 1) {
+          await new Promise((wait) => setTimeout(wait, 1000 + Math.random() * 2000));
+        }
       }
       setOpen(true); // the drawer shows live creation stages + auto-activation
     } finally {

@@ -66,6 +66,17 @@ const stageIndex = (stage: string): number => {
   return i < 0 ? 0 : i;
 };
 
+/** Turn a raw LION task error into something a buyer can act on. "Temporarily blocked" /
+ *  "restricted" is Facebook blocking the executor PROFILE (playbook), not the account — the shot
+ *  can't land until it lifts, so the advice is to wait or switch to another profile. */
+function humaniseLionNote(raw: string): string {
+  const s = raw.toLowerCase();
+  if (/temporarily blocked|been blocked|restricted/.test(s)) {
+    return "Facebook temporarily blocked this profile — pause a bit, or duplicate through another profile";
+  }
+  return raw;
+}
+
 /** LION creation-status → local stage key + human label. */
 const LION_STAGE: Record<string, { key: string; label: string }> = {
   PENDING: { key: "queue", label: "Queued on LION" },
@@ -76,8 +87,12 @@ const LION_STAGE: Record<string, { key: string; label: string }> = {
 
 // Blob uploads have no server deadline — bound them like the MO manager does.
 const UPLOAD_TIMEOUT_MS = 5 * 60_000;
-// LION queues tasks; a small gap keeps the submits polite without slowing waves down.
-const TASK_GAP_MS = 2_000;
+// Gap between consecutive LION submits — RANDOM 1–3s per gap (owner call 2026-08-12): a jittered
+// cadence looks less bot-like and, more importantly, spacing the shots is the front-line defence
+// against Facebook temporarily blocking the executor PROFILE when a whole wave fires at once.
+const TASK_GAP_MIN_MS = 1_000;
+const TASK_GAP_MAX_MS = 3_000;
+const taskGapMs = () => TASK_GAP_MIN_MS + Math.random() * (TASK_GAP_MAX_MS - TASK_GAP_MIN_MS);
 // Status polling cadence (drawer open / closed). One batched call covers every pending task.
 const POLL_OPEN_MS = 8_000;
 const POLL_CLOSED_MS = 20_000;
@@ -280,7 +295,8 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       while (queue.current.length) {
         const id = queue.current.shift() as string;
         await runTask(id);
-        if (queue.current.length) await new Promise((r) => setTimeout(r, TASK_GAP_MS));
+        // Re-rolled 1–3s per gap so every next submit lands on its own jitter.
+        if (queue.current.length) await new Promise((r) => setTimeout(r, taskGapMs()));
       }
     } finally {
       working.current = false;
@@ -396,7 +412,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
             // ad ids fill in while CREATING_ADS runs — show the live count early
             ...(r.adIds.length ? { adCount: r.adIds.length } : {}),
             ...(r.campaignId ? { campaignId: r.campaignId } : {}),
-            lionNote: r.error ?? undefined,
+            lionNote: r.error ? humaniseLionNote(r.error) : undefined,
           };
         }),
       );
@@ -880,11 +896,14 @@ function HsTaskRow({
         {done && t.campaignId ? <CopyCampaignId id={t.campaignId} /> : null}
       </div>
 
-      {/* non-terminal LION error — their tasker retries; surface it as a warning, not a failure */}
+      {/* non-terminal LION note — their tasker keeps trying; surface as a warning, not a failure.
+          A profile block already reads as advice, so it isn't prefixed with "LION retrying". */}
       {t.status === "submitted" && t.lionNote ? (
         <p className="mt-1.5 flex items-start gap-1.5 rounded-md border border-warn/25 bg-warn/5 px-2 py-1 text-[10.5px] leading-relaxed text-warn">
           <AlertIcon className="mt-px h-3 w-3 shrink-0" />
-          <span className="min-w-0 break-words">LION retrying: {t.lionNote}</span>
+          <span className="min-w-0 break-words">
+            {/blocked this profile/.test(t.lionNote) ? t.lionNote : `LION retrying: ${t.lionNote}`}
+          </span>
         </p>
       ) : null}
     </div>
