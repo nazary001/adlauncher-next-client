@@ -68,6 +68,13 @@ const MKLEARN_LANDINGS: Landing[] = [
   { slug: "curso-marketing-digital", title: "Curso de Marketing Digital", lang: "ES" },
   { slug: "paying-twice-for-netflix", title: "Paying Twice for Netflix", lang: "EN" },
   { slug: "retiree-health-coverage", title: "Retiree Health Coverage", lang: "EN" },
+  { slug: "never-do-this-on-a-plane", title: "Never Do This on a Plane", lang: "EN" },
+  { slug: "secret-code-in-your-passport", title: "Secret Code in Your Passport", lang: "EN" },
+  { slug: "hidden-rooms-on-cruise-ships", title: "Hidden Rooms on Cruise Ships", lang: "EN" },
+  { slug: "never-book-this-cruise-cabin", title: "Never Book This Cruise Cabin", lang: "EN" },
+  { slug: "veneers-implants-abroad", title: "Veneers & Implants Abroad", lang: "EN" },
+  { slug: "flew-abroad-for-new-teeth", title: "Flew Abroad for New Teeth", lang: "EN" },
+  { slug: "world-capital-of-cheap-dentistry", title: "World Capital of Cheap Dentistry", lang: "EN" },
 ];
 
 // Indians defaults (verified live on the system-user token 2026-08-08): the token sees 16 ACTIVE
