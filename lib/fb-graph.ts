@@ -401,7 +401,17 @@ const VOLUME_L1_MS = 60_000;
 const COUNTS_CONCURRENCY = 3;
 const COUNTS_STAGGER_MS = 120;
 
-/** The shared row's shape (cvalue of app-cache key `fanpage-volume:<accountId>`). */
+// ⚠️ Meta's ads_volume counters went dark for this Business (~2026-08-10): every page_id-filtered
+// read answers 0 — current_account_ads_running_or_in_review_count included — for pages with
+// provably delivering ads (verified live 08-11: page with 5 ACTIVE/PENDING_REVIEW ads → 0 on
+// v21/v23/v24). The sweep therefore cross-checks reality: a per-account /ads tally attributes
+// every running-or-in-review ad to its creative's page, and each page's count is lifted to
+// max(ads_volume, tally). ads_volume stays in the sweep because only IT sees other Businesses'
+// ads against the page limit (cross-BM total) — the day Meta heals it, max() makes it win again;
+// until then the tally is an honest lower bound instead of a flat 0.
+const TALLY_STATUSES = new Set(["ACTIVE", "PENDING_REVIEW", "IN_PROCESS"]);
+
+/** The shared row's shape (cvalue of app-cache key `fanpage-volume:v2:<accountId>`). */
 type VolumeState = {
   counts: Record<string, number | null>;
   /** When this state stops being trusted (success → +15 min, total failure → +5 min). */
@@ -452,7 +462,80 @@ async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<
     }
   };
   await Promise.all(Array.from({ length: Math.min(COUNTS_CONCURRENCY, pageIds.length) }, worker));
+
+  // Reality cross-check (see TALLY_STATUSES note): lift every swept page to at least its real
+  // running/in-review ad count. Filling a null hole with a tally number is deliberate — the tally
+  // DID verify the page token-wide, and the full sweep re-runs each TTL anyway.
+  const tally = await tallyRunningAdsByPage();
+  if (tally) {
+    for (const id of pageIds) {
+      const real = tally.get(id) ?? 0;
+      const v = counts.get(id);
+      counts.set(id, typeof v === "number" ? Math.max(v, real) : real);
+    }
+  }
   return counts;
+}
+
+/** Real running/in-review ads per page, tallied from every ACTIVE token account's /ads edge
+ *  (~15 paginated reads — cheaper than the 60-call ads_volume sweep it backstops). Lower bound
+ *  only: it sees just this token's accounts, never other Businesses advertising the same page.
+ *  Single-shot per hop like the volume sweep (no retry ladder), aborts on the first rate-limit
+ *  answer, one broken account doesn't sink the rest. null = tally unusable (no account covered). */
+async function tallyRunningAdsByPage(): Promise<Map<string, number> | null> {
+  let accounts: TokenAdAccount[];
+  try {
+    accounts = await tokenAdAccounts();
+  } catch {
+    return null;
+  }
+  if (accounts.length === 0) return null;
+  const tally = new Map<string, number>();
+  let next = 0;
+  let throttled = false;
+  let covered = 0;
+  const worker = async () => {
+    while (!throttled) {
+      const i = next++;
+      if (i >= accounts.length) return;
+      try {
+        let after = "";
+        for (let hop = 0; hop < 10; hop++) {
+          const res = await fetch(
+            `${FB}/act_${accounts[i].id}/ads?fields=effective_status,creative{object_story_spec{page_id},object_story_id}&limit=200${after ? `&after=${encodeURIComponent(after)}` : ""}`,
+            { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
+          );
+          const body = (await res.json().catch(() => ({}))) as Json;
+          const err = body.error as { code?: number } | undefined;
+          if ((err && RATE_LIMIT_CODES.has(err.code ?? -1)) || res.status === 429 || res.status >= 500) {
+            throttled = true;
+            return;
+          }
+          if (err) break;
+          type AdRow = {
+            effective_status?: string;
+            creative?: { object_story_spec?: { page_id?: string }; object_story_id?: string };
+          };
+          for (const ad of (body.data as AdRow[] | undefined) ?? []) {
+            if (!TALLY_STATUSES.has(ad?.effective_status ?? "")) continue;
+            // Launcher-built ads carry the page in object_story_spec; post-promoting ads carry it
+            // as the "<pageId>_<postId>" story id prefix.
+            const pid = ad.creative?.object_story_spec?.page_id ?? ad.creative?.object_story_id?.split("_")[0] ?? "";
+            if (pid) tally.set(String(pid), (tally.get(String(pid)) ?? 0) + 1);
+          }
+          if (hop === 0) covered++;
+          const nxt = nextAfter(body.paging as { cursors?: { after?: string }; next?: string } | undefined);
+          if (!nxt || nxt === after) break;
+          after = nxt;
+        }
+      } catch {
+        /* this account stays uncounted */
+      }
+      await pause(COUNTS_STAGGER_MS);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(COUNTS_CONCURRENCY, accounts.length) }, worker));
+  return covered > 0 ? tally : null;
 }
 
 const toMap = (pageIds: string[], counts: Record<string, number | null>): Map<string, number | null> =>
@@ -474,7 +557,9 @@ function setVolumeL1(key: string, state: VolumeState, hasL2: boolean): void {
  * 5 minutes; previous numbers survive failed refreshes (stale beats empty).
  */
 export async function pageAdCounts(accountId: string, pageIds: string[]): Promise<Map<string, number | null>> {
-  const key = `fanpage-volume:${accountId}`;
+  // v2: key bumped when the tally cross-check shipped, so rows of trusted all-zeros written by the
+  // pre-fix sweep (Meta counter outage) expire out of the picture instead of being served on.
+  const key = `fanpage-volume:v2:${accountId}`;
   const now = Date.now();
 
   if (volumeL1 && volumeL1.key === key && now < volumeL1.state.expiresAt) {
