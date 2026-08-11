@@ -1,5 +1,5 @@
 import type { Campaign } from "./types";
-import { parseMoney } from "./types";
+import { bidKind, parseMoney } from "./types";
 
 /** Resolved, server-enforced binds for a launch (locked partner values). */
 export type LaunchBinds = {
@@ -12,8 +12,11 @@ export type LaunchBinds = {
 
 export const money = (v: string): number => Math.round(parseMoney(v) * 100); // major → cents
 
-/** conversions optimize for the pixel event; clicks optimize for link clicks. */
+/** conversions optimize for the pixel event; clicks for link clicks; a min-ROAS strategy
+ *  REQUIRES the VALUE goal (live-probed 2026-08-11: OFFSITE_CONVERSIONS is rejected with
+ *  sub 2490487 whose text itself names the recipe — floor + goal VALUE). */
 export function optimizationGoal(c: Campaign): string {
+  if (bidKind(c.bidStrategy) === "roas") return "VALUE";
   return c.optimization === "conversions" ? "OFFSITE_CONVERSIONS" : "LINK_CLICKS";
 }
 
@@ -22,21 +25,22 @@ export function specialAdCategories(c: Campaign): string[] {
   return c.category ? [c.category] : [];
 }
 
-/** Bid cap only carries a bid_amount; lowest-cost has none. */
+/** Only cap strategies carry a bid_amount; lowest-cost has none, min-ROAS bids through
+ *  bid_constraints instead (see adsetPayload). */
 export function bidAmountCents(c: Campaign): number | undefined {
-  if (c.bidStrategy === "LOWEST_COST_WITHOUT_CAP") return undefined;
+  if (bidKind(c.bidStrategy) !== "cap") return undefined;
   const cents = money(c.bidCap);
   return cents > 0 ? cents : undefined;
 }
 
-/** Bid strategies the payload builder can faithfully rebuild. Others (e.g. LOWEST_COST_WITH_MIN_ROAS,
- *  which needs a roas_average_floor we don't emit) must be rejected BEFORE any FB write — cloning an
- *  arbitrary live source could import one, and Meta would reject the ad set after the campaign
- *  exists, orphaning it and burning a gcm code. */
+/** Bid strategies the payload builder can faithfully rebuild. Anything else must be rejected
+ *  BEFORE any FB write — cloning an arbitrary live source could import one, and Meta would
+ *  reject the ad set after the campaign exists, orphaning it and burning a gcm code. */
 export const SUPPORTED_BID_STRATEGIES = new Set([
   "LOWEST_COST_WITHOUT_CAP",
   "LOWEST_COST_WITH_BID_CAP",
   "COST_CAP",
+  "LOWEST_COST_WITH_MIN_ROAS",
 ]);
 
 /** Placement encodes a placement set (FULL vs COMPLIANCE) + optional gender suffix. */
@@ -129,11 +133,20 @@ export function adsetPayload(
   const bid = bidAmountCents(c);
   if (bid !== undefined) p.bid_amount = bid;
 
+  // Min ROAS bids through bid_constraints instead of bid_amount; the floor is ROAS × 10000
+  // (1,20 → 12000). Live-probed 2026-08-11 on BR-1500: VALUE goal + floor + PURCHASE is the
+  // exact combination Meta accepts (bid_amount alongside would be a different, unprobed shape).
+  const roas = bidKind(c.bidStrategy) === "roas";
+  if (roas) {
+    p.bid_constraints = { roas_average_floor: Math.round(parseMoney(c.bidCap) * 10000) };
+  }
+
   // The promoted pixel needs its event for BOTH conversions and clicks — LINK_CLICKS with a
   // pixel-only promoted_object is an invalid combination. optimization_goal already encodes
-  // whether we optimize for conversions or clicks.
+  // whether we optimize for conversions or clicks. Min ROAS optimizes purchase VALUE — the
+  // event is pinned server-side no matter what the client sent.
   if (binds.pixelId) {
-    p.promoted_object = { pixel_id: binds.pixelId, custom_event_type: c.conversionEvent };
+    p.promoted_object = { pixel_id: binds.pixelId, custom_event_type: roas ? "PURCHASE" : c.conversionEvent };
   }
 
   // Worldwide reach includes regulated locations (Taiwan, Singapore) that each require a self-

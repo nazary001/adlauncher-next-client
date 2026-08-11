@@ -1,7 +1,7 @@
 // Pure builders for HS (LION) launches — importable from both the card preview and the server
 // route, so the name/payload the buyer sees is byte-identical to what LION receives. No env, no IO.
 
-import { type Campaign, parseMoney } from "./types";
+import { type Campaign, bidKind, parseMoney } from "./types";
 
 /** LION validates the `(REDIR_LABEL)` name segment against redirect_type with this exact map. */
 export const HS_REDIRECT_LABELS: Record<string, string> = {
@@ -9,14 +9,6 @@ export const HS_REDIRECT_LABELS: Record<string, string> = {
   "META ADX": "#ADX [META]",
   "#ADX": "#ADX",
 };
-
-/** Bid semantics per strategy: `cap` takes cents, `roas` takes a ROAS decimal (1.2 = 120%,
- *  conversion event forced to PURCHASE — weapon parity), `none` bids automatically. */
-export function hsBidKind(strategy: string): "none" | "cap" | "roas" {
-  if (strategy === "LOWEST_COST_WITH_MIN_ROAS") return "roas";
-  if (strategy === "LOWEST_COST_WITH_BID_CAP" || strategy === "COST_CAP") return "cap";
-  return "none";
-}
 
 /** The board's WW pseudo-code → LION's `"WORLD"` sentinel; ISO codes pass through. */
 export function hsCountryCodes(countries: string[]): string[] {
@@ -73,7 +65,7 @@ export function hsCampaignError(c: Campaign, creatives: string[]): string | null
   if (creatives.some((u) => !isHttpUrl(u))) return "creative_url_invalid";
   // $1 floor mirrors the MO guard — a 0-cent budget would create a task doomed at FB.
   if (parseMoney(c.budget) < 1) return "budget_too_low";
-  const kind = hsBidKind(c.bidStrategy);
+  const kind = bidKind(c.bidStrategy);
   const bid = parseMoney(c.bidCap);
   if (kind === "cap" && bid <= 0) return "bid_required";
   if (kind === "roas" && (bid <= 0 || bid > 100)) return "roas_goal_invalid";
@@ -95,7 +87,7 @@ export function hsCreatePayload(
   acr: string,
   ddmm: string,
 ): Record<string, unknown> {
-  const kind = hsBidKind(c.bidStrategy);
+  const kind = bidKind(c.bidStrategy);
   const bidRaw = parseMoney(c.bidCap);
   const localeById = new Map(profileLocales.map((l) => [String(l.id), l.name]));
   // c.locales stores FB locale ids as strings; unknown ids (profile switched) are dropped.

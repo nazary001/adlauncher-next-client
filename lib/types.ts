@@ -114,9 +114,33 @@ export function limitMoney(raw: string, max: number): string {
   return parseMoney(s) > max ? moneyLabel(max) : s;
 }
 
+/** Cash-register entry for decimal-heavy money fields (bid cap / ROAS goal): typed digits fill
+ *  hundredths from the right — "5" → "0,05", "50" → "0,50", "120" → "1,20" — so the separator
+ *  places itself and a missed comma can never inflate a bid 100× ($0,50 typed as "50" → $50).
+ *  The whole string re-reads as bare digits every keystroke (separator keys are no-ops, deleting
+ *  shifts right), clamped to `max` like limitMoney. Budgets stay on limitMoney — integer-first
+ *  fields ("7" = $7) would be maddening in this mode. */
+export function limitMoneyCents(raw: string, max: number): string {
+  const digits = raw.replace(/\D/g, "").slice(0, 8);
+  if (!digits) return "";
+  const cents = Math.min(parseInt(digits, 10), Math.round(max * 100));
+  const s = String(cents).padStart(3, "0");
+  return `${s.slice(0, -2)},${s.slice(-2)}`;
+}
+
+/** Bid semantics per strategy: `cap` takes a money amount (cents at FB), `roas` takes a ROAS
+ *  decimal (1,20 = 120%; event forced to PURCHASE, optimization goal VALUE), `none` bids
+ *  automatically. Shared by MO (Graph API) and HS (LION) — a strategy means the same on both
+ *  rails, only the submit channel differs. */
+export function bidKind(strategy: string): "none" | "cap" | "roas" {
+  if (strategy === "LOWEST_COST_WITH_MIN_ROAS") return "roas";
+  if (strategy === "LOWEST_COST_WITH_BID_CAP" || strategy === "COST_CAP") return "cap";
+  return "none";
+}
+
 /** Cap-based bid strategies (bid cap / cost cap) need a positive bid amount; without it Meta
- *  rejects the ad set ("Bid amount required for the bid strategy provided"). Lowest-cost bids
- *  automatically and needs none. */
+ *  rejects the ad set ("Bid amount required for the bid strategy provided"). Min-ROAS equally
+ *  needs its positive ROAS goal (same field). Lowest-cost bids automatically and needs none. */
 export function bidAmountMissing(c: Campaign): boolean {
   return c.bidStrategy !== "LOWEST_COST_WITHOUT_CAP" && parseMoney(c.bidCap) <= 0;
 }

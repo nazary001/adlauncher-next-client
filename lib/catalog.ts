@@ -58,11 +58,9 @@ export const BID_STRATEGIES: Option[] = [
   { value: "LOWEST_COST_WITHOUT_CAP", label: "Lowest cost" },
   { value: "LOWEST_COST_WITH_BID_CAP", label: "Lowest cost + bid cap" },
   { value: "COST_CAP", label: "Cost cap" },
-];
-
-/** LION's weapon additionally offers min-ROAS (bid = ROAS decimal, event pinned to Purchase). */
-export const HS_BID_STRATEGIES: Option[] = [
-  ...BID_STRATEGIES,
+  // Min ROAS: bid = ROAS decimal, event pinned to Purchase. MO submits it straight to Meta
+  // (VALUE optimization + roas_average_floor, live-probed 2026-08-11); LION's weapon offers
+  // the same strategy for HS — one shared list.
   { value: "LOWEST_COST_WITH_MIN_ROAS", label: "Lowest cost + min ROAS" },
 ];
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { Campaign } from "@/lib/types";
-import { bidAmountMissing, fullName, isHttpUrl, isLaunchable, limitMoney, moneyLabel, parseMoney } from "@/lib/types";
+import { bidAmountMissing, bidKind, fullName, isHttpUrl, isLaunchable, limitMoney, limitMoneyCents, moneyLabel, parseMoney } from "@/lib/types";
 import {
   AGES,
   BID_STRATEGIES,
@@ -12,7 +12,6 @@ import {
   COUNTRIES,
   COUNTRY_PRESETS,
   CTAS,
-  HS_BID_STRATEGIES,
   LOCALES,
   OBJECTIVES,
   OPTIMIZATIONS,
@@ -26,7 +25,7 @@ import {
   pagesFor,
   pixelsFor,
 } from "@/lib/catalog";
-import { hsBidKind, hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
+import { hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { type LinkRole, type PartnerConfig, fullLandingUrl, landingUrlSegments, launchReadyOpts } from "@/lib/partners";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
@@ -234,7 +233,7 @@ export function CampaignCard({
   useEffect(() => {
     if (hsMode && c.profile && c.account) hs?.ensurePixels(c.profile, c.account);
   }, [hsMode, c.profile, c.account, hs]);
-  const hsKind = hsBidKind(c.bidStrategy);
+  const kind = bidKind(c.bidStrategy);
   const hsCurrency = hsMode ? hsData?.currencies?.[c.account] || "" : "";
   // The LION-validated name prefix is DERIVED (date + ACR + redirect label + geo) — it re-renders
   // live as the buyer flips redirect type or geo; the server rebuilds the exact same string.
@@ -584,14 +583,21 @@ export function CampaignCard({
                   <Field
                     label="Optimization"
                     className="col-span-6 md:col-span-3"
-                    hint={conversions ? "link gets &fire=click" : undefined}
+                    hint={
+                      kind === "roas"
+                        ? "pinned by min ROAS"
+                        : conversions
+                          ? "link gets &fire=click"
+                          : undefined
+                    }
                   >
                     <Select
-                      value={c.optimization}
+                      value={kind === "roas" ? "conversions" : c.optimization}
                       onChange={(e) =>
                         patch({ optimization: e.target.value as Campaign["optimization"] })
                       }
                       options={OPTIMIZATIONS}
+                      disabled={kind === "roas"}
                     />
                   </Field>
                 ) : null}
@@ -600,26 +606,27 @@ export function CampaignCard({
                     value={c.bidStrategy}
                     onChange={(e) => {
                       const bidStrategy = e.target.value;
-                      // Min-ROAS optimizes purchase value — LION pins the event to Purchase.
-                      if (hsMode && hsBidKind(bidStrategy) === "roas") {
-                        patch({ bidStrategy, conversionEvent: "PURCHASE" });
+                      // Min-ROAS optimizes purchase value — the event pins to Purchase and (MO)
+                      // the optimization pins to conversions so the link keeps &fire=click.
+                      if (bidKind(bidStrategy) === "roas") {
+                        patch({ bidStrategy, conversionEvent: "PURCHASE", optimization: "conversions" });
                       } else {
                         patch({ bidStrategy });
                       }
                     }}
-                    options={hsMode ? HS_BID_STRATEGIES : BID_STRATEGIES}
+                    options={BID_STRATEGIES}
                   />
                 </Field>
                 <Field
                   label="Conversion event"
                   className={hsMode ? "col-span-6 md:col-span-4" : "col-span-6 md:col-span-3"}
-                  hint={hsMode && hsKind === "roas" ? "pinned by min ROAS" : undefined}
+                  hint={kind === "roas" ? "pinned by min ROAS" : undefined}
                 >
                   <Select
-                    value={hsMode && hsKind === "roas" ? "PURCHASE" : c.conversionEvent}
+                    value={kind === "roas" ? "PURCHASE" : c.conversionEvent}
                     onChange={(e) => patch({ conversionEvent: e.target.value })}
                     options={conversionEventsFor(c.objective)}
-                    disabled={hsMode && hsKind === "roas"}
+                    disabled={kind === "roas"}
                   />
                 </Field>
                 <Field
@@ -635,13 +642,13 @@ export function CampaignCard({
                   />
                 </Field>
                 <Field
-                  label={hsMode && hsKind === "roas" ? "ROAS goal *" : bidCapEnabled ? "Bid cap *" : "Bid cap"}
+                  label={kind === "roas" ? "ROAS goal *" : bidCapEnabled ? "Bid cap *" : "Bid cap"}
                   className="col-span-6"
                   hint={
-                    hsMode && hsKind === "roas"
-                      ? "1,20 = 120% ROAS"
+                    kind === "roas"
+                      ? "1,20 = 120% ROAS · type 120"
                       : bidCapEnabled
-                        ? undefined
+                        ? "Digits fill cents — 50 → 0,50"
                         : "Lowest cost bids automatically"
                   }
                   error={bidAmountMissing(c) ? "Required for this bid strategy" : undefined}
@@ -649,9 +656,9 @@ export function CampaignCard({
                   <MoneyInput
                     value={c.bidCap}
                     onChange={(e) =>
-                      patch({ bidCap: limitMoney(e.target.value, hsMode && hsKind === "roas" ? 100 : 1000) })
+                      patch({ bidCap: limitMoneyCents(e.target.value, kind === "roas" ? 100 : 1000) })
                     }
-                    placeholder={hsMode && hsKind === "roas" ? "1,20" : "0,50"}
+                    placeholder={kind === "roas" ? "1,20" : "0,50"}
                     disabled={!bidCapEnabled}
                     maxLength={7}
                   />
