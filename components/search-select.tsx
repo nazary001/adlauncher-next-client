@@ -5,8 +5,53 @@ import { createPortal } from "react-dom";
 import { CheckIcon, SearchIcon, XIcon } from "./icons";
 import type { RichOption } from "@/lib/catalog";
 
-/** One clickable facet chip (niche / language) in the list's filter bar. */
-function FacetChip({
+/** Niche chip in the facet bar — glassy pill with a count badge; active = accent gradient glow. */
+function NicheChip({
+  active,
+  onPick,
+  count,
+  children,
+}: {
+  active: boolean;
+  onPick: () => void;
+  count?: number;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      tabIndex={-1}
+      onMouseDown={(e) => {
+        // preventDefault keeps focus in the search input (blur would close the list).
+        e.preventDefault();
+        onPick();
+      }}
+      className={
+        "group/chip flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium " +
+        "transition-all duration-150 active:scale-[0.94] " +
+        (active
+          ? "border-accent/50 bg-gradient-to-b from-accent/25 to-accent2/15 text-[#a8bfff] " +
+            "shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_0_14px_rgba(61,127,255,0.22)]"
+          : "border-line/80 bg-surface/70 text-dim hover:-translate-y-[1px] hover:border-line2 hover:bg-raise/70 hover:text-ink")
+      }
+    >
+      {children}
+      {count != null ? (
+        <span
+          className={
+            "rounded-md px-1 font-mono text-[9.5px] tabular-nums leading-[14px] transition-colors " +
+            (active ? "bg-white/10 text-[#c3d2ff]" : "bg-black/25 text-faint group-hover/chip:text-dim")
+          }
+        >
+          {count}
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
+/** Language segment button — lives in the compact segmented control at the bar's right edge. */
+function LangSeg({
   active,
   onPick,
   children,
@@ -20,15 +65,15 @@ function FacetChip({
       type="button"
       tabIndex={-1}
       onMouseDown={(e) => {
-        // preventDefault keeps focus in the search input (blur would close the list).
         e.preventDefault();
         onPick();
       }}
       className={
-        "flex items-center rounded-full border px-2 py-[3px] text-[11px] font-medium transition-colors duration-100 " +
+        "rounded-full px-2 py-[3px] font-mono text-[10px] font-semibold uppercase tracking-wide " +
+        "transition-all duration-150 " +
         (active
-          ? "border-accent/50 bg-accent/20 text-[#9db8ff]"
-          : "border-line bg-surface text-dim hover:border-line2 hover:bg-raise/60 hover:text-ink")
+          ? "bg-accent/25 text-[#a8bfff] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
+          : "text-faint hover:text-ink")
       }
     >
       {children}
@@ -282,10 +327,13 @@ export function SearchSelect({
               }
             >
               {facets && (groupFacets.length > 0 || tagFacets.length > 1) ? (
-                <div className="flex flex-col gap-1.5 border-b border-line bg-surface2/60 px-2 py-2">
-                  {groupFacets.length > 0 ? (
-                    <div className="flex flex-wrap gap-1">
-                      <FacetChip
+                <div className="relative border-b border-line px-2.5 pb-2.5 pt-2">
+                  {/* Soft cockpit backdrop: raised gradient + a faint accent bloom top-left. */}
+                  <span className="pointer-events-none absolute inset-0 bg-gradient-to-b from-raise/60 to-transparent" />
+                  <span className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_12%_0%,rgba(61,127,255,0.10),transparent_55%)]" />
+                  <div className="relative flex items-start justify-between gap-2">
+                    <div className="flex flex-1 flex-wrap gap-1.5">
+                      <NicheChip
                         active={!groupFilter}
                         onPick={() => {
                           setGroupFilter(null);
@@ -293,56 +341,69 @@ export function SearchSelect({
                         }}
                       >
                         All
-                      </FacetChip>
+                      </NicheChip>
                       {groupFacets.map(([g, n]) => (
-                        <FacetChip
+                        <NicheChip
                           key={g}
                           active={groupFilter === g}
+                          count={n}
                           onPick={() => {
                             setGroupFilter((cur) => (cur === g ? null : g));
                             setActive(0);
                           }}
                         >
                           {g}
-                          <span className="ml-1 opacity-60">{n}</span>
-                        </FacetChip>
+                        </NicheChip>
                       ))}
                     </div>
-                  ) : null}
-                  {tagFacets.length > 1 ? (
-                    <div className="flex flex-wrap items-center gap-1">
-                      <span className="mr-0.5 text-[9.5px] font-semibold uppercase tracking-[0.14em] text-faint">
-                        Lang
-                      </span>
-                      <FacetChip
-                        active={!tagFilter}
-                        onPick={() => {
-                          setTagFilter(null);
-                          setActive(0);
-                        }}
-                      >
-                        All
-                      </FacetChip>
-                      {tagFacets.map(([t, n]) => (
-                        <FacetChip
-                          key={t}
-                          active={tagFilter === t}
+                    {tagFacets.length > 1 ? (
+                      <div className="flex shrink-0 items-center gap-0.5 self-start rounded-full border border-line bg-surface p-[3px] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                        <LangSeg
+                          active={!tagFilter}
                           onPick={() => {
-                            setTagFilter((cur) => (cur === t ? null : t));
+                            setTagFilter(null);
                             setActive(0);
                           }}
                         >
-                          {t}
-                          <span className="ml-1 opacity-60">{n}</span>
-                        </FacetChip>
-                      ))}
-                    </div>
-                  ) : null}
+                          All
+                        </LangSeg>
+                        {tagFacets.map(([t]) => (
+                          <LangSeg
+                            key={t}
+                            active={tagFilter === t}
+                            onPick={() => {
+                              setTagFilter((cur) => (cur === t ? null : t));
+                              setActive(0);
+                            }}
+                          >
+                            {t}
+                          </LangSeg>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               ) : null}
               <div ref={listRef} className="max-h-72 overflow-y-auto p-1">
             {filtered.length === 0 ? (
-              <p className="px-3 py-3 text-[12px] text-faint">{emptyHint}</p>
+              <div className="flex flex-col items-start gap-1.5 px-3 py-3">
+                <p className="text-[12px] text-faint">{emptyHint}</p>
+                {groupFilter || tagFilter ? (
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      setGroupFilter(null);
+                      setTagFilter(null);
+                      setActive(0);
+                    }}
+                    className="text-[11.5px] font-medium text-[#9db8ff] transition-colors hover:text-ink"
+                  >
+                    Clear filters
+                  </button>
+                ) : null}
+              </div>
             ) : (
               filtered.map((o, i) => (
                 <Fragment key={o.value}>
