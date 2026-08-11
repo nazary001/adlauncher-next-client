@@ -11,9 +11,9 @@ export type AdAccountOption = RichOption & { pixels: PixelInfo[] };
 
 /**
  * ACTIVE ad accounts the launch token can use (value = account_id digits; meta = id, searchable),
- * each carrying its pixel list for the dependent pixel picker. Accounts that MISS the partner's
- * preferred pixel (the one the landing actually fires) get a warn tag — conversion launches
- * there optimize blind, buyers should see that before picking.
+ * each carrying its pixel list for the dependent pixel picker. Rows render PLAIN (owner call
+ * 2026-08-11 — no green preferred-pixel badges); only a pixel-less account gets a danger tag,
+ * since conversion launches there are impossible.
  *
  * null = still loading (or fetch failed) → the picker renders its loading hint. The server
  * re-validates every picked account/pixel on launch anyway.
@@ -45,22 +45,13 @@ export function useAdAccounts(enabled: boolean, preferredPixel?: Bound): AdAccou
         };
         if (!alive) return;
         if (r.ok && d?.ok && Array.isArray(d.accounts)) {
-          const short = (preferredName ?? "").replace(/^HS-Pixel-/, "") || "pixel"; // "HS-Pixel-FARM-1" → "FARM-1"
           setState({
             key,
             list: d.accounts.map((a) => {
               const pixels = Array.isArray(a.pixels) ? a.pixels : [];
-              const hasPreferred = !preferredId || pixels.some((p) => p.id === preferredId);
-              // Tag semantics: no pixel at all = can't run conversions (danger); has the preferred
-              // pixel = green marker. An account with some OTHER pixel is FINE now (the buy link
-              // carries &pixel=<that pixel> so the funnel fires it and CAPI matches the adset) — no
-              // warning, that was only true before the URL-pixel funnel.
+              // Only a pixel-less account is flagged (danger) — conversions can't run there.
               const tag: Partial<Pick<AdAccountOption, "tag" | "tagTone">> =
-                pixels.length === 0
-                  ? { tag: "no pixel", tagTone: "danger" }
-                  : preferredId && hasPreferred
-                    ? { tag: short, tagTone: "ok" }
-                    : {};
+                pixels.length === 0 ? { tag: "no pixel", tagTone: "danger" } : {};
               return { value: String(a.id), label: String(a.name), meta: String(a.id), subLabel: String(a.id), pixels, ...tag };
             }),
           });
