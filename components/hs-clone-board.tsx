@@ -263,6 +263,11 @@ export function HsCloneBoard({
           msg: `sending ${(done.get(r.id) ?? 0) + 1}/${copiesN}…`,
         });
         try {
+          const geo = r.info?.countries.length
+            ? geoSummary(r.info.countries)
+            : r.info?.name
+              ? geoFromName(r.info.name, geoSummary) || "inherited"
+              : "inherited";
           const res = await fetch("/api/hs/duplicate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -275,6 +280,7 @@ export function HsCloneBoard({
               copies: 1, // one shot per request → controllable pacing, gentler on the profile
               budget: r.budget,
               bid: r.bid.trim(),
+              geo, // for the stamped shared-task row's label
               // Full name = fixed grammar prefix + the buyer's tail (replaces the old one).
               // When the source couldn't be read there's no prefix — LION rebuilds the name.
               ...(r.info?.name
@@ -282,20 +288,26 @@ export function HsCloneBoard({
                 : {}),
             }),
           });
-          const d = (await res.json().catch(() => ({}))) as { ok?: boolean; taskIds?: string[]; error?: string };
-          if (d?.ok && Array.isArray(d.taskIds) && d.taskIds.length > 0) {
+          const d = (await res.json().catch(() => ({}))) as {
+            ok?: boolean;
+            rows?: { taskId: string; lionTaskId: string }[];
+            taskIds?: string[];
+            error?: string;
+          };
+          // The server minted a client task id per copy and already stamped its Strapi row — carry
+          // those ids into the Task Manager so its rows match. Fall back to taskIds (LION ids) if
+          // an older server build didn't return the pairs.
+          const rows = d?.rows ?? (d?.taskIds ?? []).map((lionTaskId) => ({ taskId: undefined as unknown as string, lionTaskId }));
+          if (d?.ok && rows.length > 0) {
             const label = r.info?.name || `#${cid}`;
             enqueueSubmitted(
-              d.taskIds.map((taskId) => ({
+              rows.map((row) => ({
+                taskId: row.taskId,
                 name: copiesN > 1 ? `${label} · copy ${(done.get(r.id) ?? 0) + 1}/${copiesN}` : label,
                 profile,
-                geo: r.info?.countries.length
-                  ? geoSummary(r.info.countries)
-                  : r.info?.name
-                    ? geoFromName(r.info.name, geoSummary) || "inherited"
-                    : "inherited",
+                geo,
                 budget: r.budget,
-                lionTaskId: String(taskId),
+                lionTaskId: String(row.lionTaskId),
               })),
             );
             done.set(r.id, (done.get(r.id) ?? 0) + 1);

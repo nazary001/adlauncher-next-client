@@ -2,9 +2,11 @@
 
 // Independent task manager for the HS (LION) partner. Deliberately NOT the MO task manager:
 // an HS launch is a single submit — LION's weapon builds campaign/adset/ads on ITS side — so the
-// lifecycle is upload → submit → poll LION's creation-status. After the submit the durable state
-// lives in LION (the task id), which localStorage carries across reloads; there is no Strapi row
-// and no team-shared view here (v1, per owner brief: submit and show the result).
+// lifecycle is upload → submit → poll LION's creation-status. TEAM-SHARED (2026-08-12): every row
+// is persisted to Strapi (the shared launch-task collection tagged partner="br", via /api/hs-tasks
+// + server-side stamps in /api/hs/{launch,duplicate}) so the whole team sees every HS launch and
+// clone. Only the owner's session polls LION + auto-activates + can retry; teammates mirror the
+// store. localStorage stays as an offline fallback for my own rows.
 
 import {
   createContext,
@@ -18,7 +20,7 @@ import {
 import { upload } from "@vercel/blob/client";
 import { type Campaign, type FileItem, moneyLabel } from "@/lib/types";
 import type { SessionUser } from "./user-menu";
-import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, TrashIcon, XIcon } from "./icons";
+import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, XIcon } from "./icons";
 
 // ---------- model ----------
 
@@ -30,6 +32,11 @@ export type HsTask = {
   profile: string;
   geo: string;
   budget: string;
+  /** Username that launched/duplicated this. Shared view shows everyone's; only my own rows poll
+   *  LION + auto-activate, and only I can retry them. */
+  owner?: string | null;
+  /** Server-side updatedAt (ms) of the Strapi row — the liveness signal behind `stale`. */
+  updatedMs?: number;
   /** "launch" (create weapon, default for restored rows) or "duplicate" (clone weapon —
    *  enters at "submitted" and auto-activates after COMPLETED, clones are born PAUSED). */
   kind?: "launch" | "duplicate";
@@ -100,9 +107,101 @@ const POLL_CLOSED_MS = 20_000;
 const NOT_FOUND_GRACE_MS = 3 * 60_000;
 // A task still not terminal after this long stops polling and asks the buyer to check LION.
 const PENDING_CAP_MS = 60 * 60_000;
+// Shared-view cadence: pull the team's HS rows continuously so the drawer is truthful even for
+// tasks I didn't start. Ids just deleted are ignored in merges briefly so an in-flight fetch
+// can't resurrect them. An owner counts as live while any of their rows was written < STALE_MS ago.
+const SHARED_POLL_OPEN_MS = 6_000;
+const SHARED_POLL_CLOSED_MS = 20_000;
+const TOMBSTONE_MS = 60_000;
+const STALE_MS = 180_000;
+// Re-upsert my in-flight tasks every 25s so the row's updatedAt keeps bumping — that's how
+// teammates tell a live-but-stuck task (LION still "creating") from a dead session.
+const HEARTBEAT_MS = 25_000;
 
 const LS_BASE = "adlauncher.hstasks";
 const lsKeyFor = (user?: SessionUser) => (user?.username ? `${LS_BASE}.${user.username}` : LS_BASE);
+
+// ---- Strapi row (partner="br" in the shared launch-task collection) ↔ HS task mapping ----
+// The store's status enum is queued|running|done|error|interrupted; HS adds "submitted" (queued
+// on LION) → running, and "unknown" (gave up) → interrupted. LION fields ride in reused columns
+// (link=LION task id, gcm=kind, ad_id=ad count) — see /api/hs-tasks + stampHsTaskRow.
+type HsRemoteRow = {
+  id: string;
+  owner: string | null;
+  name: string;
+  geo: string;
+  budget: string;
+  status: string;
+  stage: string | null;
+  lionTaskId: string | null;
+  kind: string | null;
+  campaignId: string | null;
+  adsetId: string | null;
+  adCount: number | null;
+  error: string | null;
+  queued_at: number | null;
+  started_at: number | null;
+  finished_at: number | null;
+  updated_ms: number | null;
+};
+
+function statusToStore(s: HsTaskStatus): string {
+  if (s === "submitted") return "running";
+  if (s === "unknown") return "interrupted";
+  return s; // queued|running|done|error pass through
+}
+
+/** Strapi row → HS task (restore). A non-terminal row that still carries a LION id resumes at
+ *  "submitted" so polling picks it back up; one that lost its id is treated as interrupted. */
+function fromRemote(r: HsRemoteRow): HsTask {
+  const raw = r.status;
+  let status: HsTaskStatus;
+  if (raw === "done") status = "done";
+  else if (raw === "error") status = "error";
+  else if (raw === "interrupted") status = "unknown";
+  else if (raw === "queued") status = "queued";
+  else status = r.lionTaskId ? "submitted" : "running"; // "running" from the store
+  return {
+    id: r.id,
+    owner: r.owner,
+    name: r.name || "",
+    profile: "",
+    geo: r.geo || "",
+    budget: r.budget || "",
+    kind: r.kind === "duplicate" ? "duplicate" : "launch",
+    status,
+    stage: r.stage || (status === "submitted" ? "queue" : "upload"),
+    lionTaskId: r.lionTaskId || undefined,
+    campaignId: r.campaignId || undefined,
+    adsetId: r.adsetId || undefined,
+    adCount: r.adCount ?? undefined,
+    error:
+      r.error ||
+      (raw === "interrupted" ? "Interrupted — the submitting session went offline" : undefined),
+    queuedAt: r.queued_at ?? Date.now(),
+    startedAt: r.started_at ?? undefined,
+    submittedAt: r.lionTaskId ? (r.started_at ?? r.queued_at ?? undefined) : undefined,
+    finishedAt: r.finished_at ?? undefined,
+    updatedMs: r.updated_ms ?? undefined,
+    local: false,
+  };
+}
+
+/** Merge the team's fetched rows into the in-memory list: my in-session tasks stay authoritative,
+ *  every other row mirrors the fetch (present → shown, absent → gone). Newest first; array keeps
+ *  its identity when nothing changed so a quiet poll re-renders nothing. */
+function mergeShared(cur: HsTask[], fetched: HsTask[], tombstones: ReadonlySet<string>): HsTask[] {
+  const curById = new Map(cur.map((c) => [c.id, c]));
+  const byId = new Map<string, HsTask>();
+  for (const f of fetched) {
+    if (!f.id || tombstones.has(f.id)) continue;
+    const prev = curById.get(f.id);
+    byId.set(f.id, prev && prev.local ? prev : prev && prev.updatedMs === f.updatedMs ? prev : f);
+  }
+  for (const c of cur) if (c.local) byId.set(c.id, c);
+  const next = [...byId.values()].sort((a, b) => b.queuedAt - a.queuedAt || (a.id < b.id ? 1 : -1));
+  return next.length === cur.length && next.every((t, i) => t === cur[i]) ? cur : next;
+}
 
 export type HsEnqueueArgs = {
   campaign: Campaign;
@@ -113,8 +212,10 @@ export type HsEnqueueArgs = {
   budget: string;
 };
 
-/** A duplicate already submitted to LION (the duplicate POST is instant) — one row per LION task. */
+/** A duplicate already submitted to LION (the duplicate POST is instant) — one row per LION task.
+ *  `taskId` is the server-minted id whose Strapi row was already stamped by /api/hs/duplicate. */
 export type HsSubmittedRow = {
+  taskId?: string;
   name: string;
   profile: string;
   geo: string;
@@ -125,6 +226,10 @@ export type HsSubmittedRow = {
 type HsTaskManagerValue = {
   tasks: HsTask[];
   counts: { active: number; done: number; failed: number; running: number; total: number };
+  /** Current user — labels task owners in the shared view and gates own-only actions. */
+  me: string | null;
+  /** Est. server clock (Date.now()+skew) at the last fetch — for owner-liveness (stale) judging. */
+  estServerNow: number;
   open: boolean;
   setOpen: (v: boolean) => void;
   enqueue: (args: HsEnqueueArgs) => void;
@@ -132,8 +237,6 @@ type HsTaskManagerValue = {
   enqueueSubmitted: (rows: HsSubmittedRow[]) => void;
   retry: (id: string) => void;
   retryAll: () => void;
-  remove: (id: string) => void;
-  clearFinished: () => void;
 };
 
 const Ctx = createContext<HsTaskManagerValue | null>(null);
@@ -150,8 +253,11 @@ type TaskInput = { campaign: Campaign; files: FileItem[] };
 
 export function HsTaskManagerProvider({ children, user }: { children: React.ReactNode; user?: SessionUser }) {
   const lsKey = lsKeyFor(user);
+  const me = user?.username ?? null;
   const [tasks, setTasks] = useState<HsTask[]>([]);
   const [open, setOpen] = useState(false);
+  const [skew, setSkew] = useState(0);
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const inputs = useRef(new Map<string, TaskInput>());
   const queue = useRef<string[]>([]);
   const working = useRef(false);
@@ -162,6 +268,12 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
   const loadedRef = useRef(false);
   const lastPollRef = useRef(0);
   const pollBusyRef = useRef(false);
+  // Shared-store sync: static fields per task, per-task save chains, tombstones for just-fired
+  // deletes, last shared fetch time, server-clock skew for stale detection.
+  const meta = useRef(new Map<string, Record<string, unknown>>());
+  const saveChains = useRef(new Map<string, Promise<unknown>>());
+  const tombstones = useRef(new Map<string, number>());
+  const lastSharedPollRef = useRef(0);
   useEffect(() => {
     tasksRef.current = tasks;
   }, [tasks]);
@@ -173,43 +285,162 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     setTasks((ts) => ts.map((t) => (t.id === id ? { ...t, ...p } : t)));
   }, []);
 
-  // Restore once. Submitted tasks resume polling (the LION id is the durable handle); tasks that
-  // never reached LION lost their creative blobs with the old session → interrupted.
+  const noteSkew = useCallback((serverNow: number) => {
+    const s = serverNow - Date.now();
+    setSkew((prev) => (Math.abs(prev - s) > 3000 ? s : prev));
+  }, []);
+
+  /** Upsert one task's state to Strapi (partner="br"), chained PER TASK so transitions land in
+   *  order. Static fields (name/geo/budget/kind) come from `meta`; `dyn` carries what changed. */
+  const saveRemote = useCallback(
+    (id: string, dyn: Record<string, unknown>) => {
+      const payload = { task_id: id, ...(meta.current.get(id) ?? {}), ...dyn };
+      const post = () =>
+        fetch("/api/hs-tasks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      const prev = saveChains.current.get(id) ?? Promise.resolve();
+      const next = prev
+        .catch(() => {})
+        .then(async () => {
+          try {
+            const res = await post();
+            if (res.ok || res.status === 400 || res.status === 401 || res.status === 403) return;
+          } catch {
+            /* network — retry once */
+          }
+          await new Promise((r) => setTimeout(r, 4000));
+          await post().catch(() => {});
+        });
+      saveChains.current.set(id, next);
+    },
+    [],
+  );
+
+  /** Map a task's current state into the store's field set (LION fields in reused columns). */
+  const dynOf = useCallback(
+    (t: HsTask): Record<string, unknown> => ({
+      status: statusToStore(t.status),
+      stage: t.stage,
+      link: t.lionTaskId ?? null,
+      gcm: t.kind ?? "launch",
+      campaign_id: t.campaignId ?? null,
+      adset_id: t.adsetId ?? null,
+      ad_id: t.adCount ?? null,
+      error: t.error ?? t.lionNote ?? null,
+      queued_at: t.queuedAt,
+      started_at: t.submittedAt ?? t.startedAt ?? null,
+      finished_at: t.finishedAt ?? null,
+    }),
+    [],
+  );
+
+  /** Pull the team's HS tasks and merge them in. Others' rows mirror the fetch; mine stay mine. */
+  const loadRemote = useCallback(() => {
+    fetch("/api/hs-tasks")
+      .then(async (r) => {
+        if (!r.ok) return;
+        const d = (await r.json().catch(() => null)) as { ok?: boolean; now?: number; tasks?: HsRemoteRow[] } | null;
+        if (!d?.ok || !Array.isArray(d.tasks)) return;
+        if (typeof d.now === "number") noteSkew(d.now);
+        const cutoff = Date.now() - TOMBSTONE_MS;
+        for (const [id, ts] of tombstones.current) if (ts < cutoff) tombstones.current.delete(id);
+        const fetched = d.tasks.map(fromRemote);
+        const tomb = new Set(tombstones.current.keys());
+        setTasks((cur) => mergeShared(cur, fetched, tomb));
+      })
+      .catch(() => {});
+  }, [noteSkew]);
+
+  // Restore once: the team's Strapi rows win; localStorage is the offline fallback for my own.
   useEffect(() => {
+    let localSnap: HsTask[] = [];
     try {
       const raw = localStorage.getItem(lsKey);
       if (raw) {
-        const snap = (JSON.parse(raw) as HsTask[]).map((t): HsTask => {
-          if (t.status === "queued" || t.status === "running") {
-            return {
-              ...t,
-              local: false,
-              status: "error",
-              error: "Interrupted — page closed before the submit reached LION",
-              finishedAt: t.finishedAt ?? Date.now(),
-            };
-          }
-          return { ...t, local: false };
-        });
-        // Safe setState-in-effect: one-shot mount restore from localStorage (external system) —
-        // it never re-runs (lsKey is stable per session) so it cannot cascade.
-        // eslint-disable-next-line react-hooks/set-state-in-effect
-        setTasks(snap);
+        localSnap = (JSON.parse(raw) as HsTask[]).map((t): HsTask =>
+          t.status === "queued" || t.status === "running"
+            ? {
+                ...t,
+                local: false,
+                status: "error",
+                error: "Interrupted — page closed before the submit reached LION",
+                finishedAt: t.finishedAt ?? Date.now(),
+              }
+            : { ...t, local: false },
+        );
       }
     } catch {
       /* ignore */
     }
-    loadedRef.current = true;
-  }, [lsKey]);
+    fetch("/api/hs-tasks")
+      .then(async (r) => (r.ok ? ((await r.json()) as { ok?: boolean; now?: number; tasks?: HsRemoteRow[] }) : null))
+      .then((d) => {
+        if (d?.now) noteSkew(d.now);
+        const fetched = Array.isArray(d?.tasks) ? d!.tasks.map(fromRemote) : [];
+        setTasks((cur) => mergeShared(mergeShared(cur, localSnap, new Set()), fetched, new Set()));
+        loadedRef.current = true;
+      })
+      .catch(() => {
+        setTasks((cur) => mergeShared(cur, localSnap, new Set()));
+        loadedRef.current = true;
+      });
+  }, [lsKey, noteSkew]);
+
+  // Shared-store polling: keep the team's rows fresh (faster while the drawer is open).
+  useEffect(() => {
+    const tick = () => {
+      if (document.hidden) return;
+      const interval = openRef.current ? SHARED_POLL_OPEN_MS : SHARED_POLL_CLOSED_MS;
+      if (Date.now() - lastSharedPollRef.current < interval - 300) return;
+      lastSharedPollRef.current = Date.now();
+      loadRemote();
+    };
+    const iv = window.setInterval(tick, SHARED_POLL_OPEN_MS);
+    const onVis = () => {
+      if (!document.hidden) {
+        lastSharedPollRef.current = Date.now();
+        loadRemote();
+      }
+    };
+    window.addEventListener("focus", onVis);
+    document.addEventListener("visibilitychange", onVis);
+    // Coarse tick so stale detection advances even with the drawer closed.
+    const clock = window.setInterval(() => setNowTick(Date.now()), 10_000);
+    return () => {
+      window.clearInterval(iv);
+      window.clearInterval(clock);
+      window.removeEventListener("focus", onVis);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [loadRemote]);
 
   useEffect(() => {
     if (!loadedRef.current) return;
     try {
-      localStorage.setItem(lsKey, JSON.stringify(tasks));
+      // Persist only MY tasks (offline fallback for my own rows) — teammates' rows come from
+      // Strapi, so localStorage never mirrors the whole team.
+      localStorage.setItem(lsKey, JSON.stringify(tasks.filter((t) => t.local || (!!me && t.owner === me))));
     } catch {
       /* quota/disabled */
     }
-  }, [tasks, lsKey]);
+  }, [tasks, lsKey, me]);
+
+  // Heartbeat: bump my in-flight rows' updatedAt so a live-but-stuck task doesn't read as offline.
+  useEffect(() => {
+    const iv = window.setInterval(() => {
+      if (document.hidden) return;
+      for (const t of tasksRef.current) {
+        const mine = t.local || (!!me && t.owner === me);
+        if (mine && (t.status === "queued" || t.status === "running" || t.status === "submitted")) {
+          saveRemote(t.id, dynOf(t));
+        }
+      }
+    }, HEARTBEAT_MS);
+    return () => window.clearInterval(iv);
+  }, [me, saveRemote, dynOf]);
 
   // ---- worker (single-flight) ----
 
@@ -255,12 +486,13 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
           }
         }
 
-        // 2) One submit — LION answers fast (it just enqueues a weapon task).
+        // 2) One submit — LION answers fast (it just enqueues a weapon task). taskId lets the
+        // server stamp the shared row the instant LION accepts it (durability).
         patch(id, { stage: "submit" });
         const res = await fetch("/api/hs/launch", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ campaign: input.campaign, creatives: urls }),
+          body: JSON.stringify({ campaign: input.campaign, creatives: urls, taskId: id }),
         });
         const d = (await res.json().catch(() => null)) as
           | { ok?: boolean; lionTaskId?: string; name?: string; error?: string }
@@ -268,24 +500,31 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         if (!d?.ok || !d.lionTaskId) {
           throw new Error(d?.error || `HTTP ${res.status}`);
         }
+        const submittedAt = Date.now();
+        const nm = d.name ?? undefined;
         patch(id, {
           status: "submitted",
           stage: "queue",
           lionTaskId: d.lionTaskId,
           lionStatus: "PENDING",
-          ...(d.name ? { name: d.name } : {}),
-          submittedAt: Date.now(),
+          ...(nm ? { name: nm } : {}),
+          submittedAt,
+        });
+        if (nm) meta.current.set(id, { ...(meta.current.get(id) ?? {}), name: nm });
+        saveRemote(id, {
+          status: "running",
+          stage: "queue",
+          link: d.lionTaskId,
+          started_at: submittedAt,
         });
         inputs.current.delete(id); // LION owns it now — nothing left to retry locally
       } catch (e) {
-        patch(id, {
-          status: "error",
-          finishedAt: Date.now(),
-          error: e instanceof Error ? e.message : String(e),
-        });
+        const msg = e instanceof Error ? e.message : String(e);
+        patch(id, { status: "error", finishedAt: Date.now(), error: msg });
+        saveRemote(id, { status: "error", error: msg, finished_at: Date.now() });
       }
     },
-    [patch],
+    [patch, saveRemote],
   );
 
   const pump = useCallback(async () => {
@@ -307,19 +546,19 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
 
   const poll = useCallback(async () => {
     if (pollBusyRef.current) return;
+    // Only MY tasks poll LION + auto-activate; teammates' rows come from the shared store instead.
+    const mine = (t: HsTask) => t.local || (!!me && t.owner === me);
     const now = Date.now();
-    // Age out tasks that have been "creating" for an hour — stop burning polls, tell the buyer.
-    const aged = tasksRef.current.filter(
-      (t) => t.status === "submitted" && t.submittedAt && now - t.submittedAt > PENDING_CAP_MS,
-    );
-    for (const t of aged) {
-      patch(t.id, {
-        status: "unknown",
-        finishedAt: t.submittedAt! + PENDING_CAP_MS,
-        error: "Still not finished on LION after 60 min — check the LION dashboard",
-      });
+    // Age out MY tasks stuck "creating" for an hour — stop burning polls, tell the buyer.
+    for (const t of tasksRef.current) {
+      if (mine(t) && t.status === "submitted" && t.submittedAt && now - t.submittedAt > PENDING_CAP_MS) {
+        const finishedAt = t.submittedAt + PENDING_CAP_MS;
+        const error = "Still not finished on LION after 60 min — check the LION dashboard";
+        patch(t.id, { status: "unknown", finishedAt, error });
+        saveRemote(t.id, dynOf({ ...t, status: "unknown", finishedAt, error }));
+      }
     }
-    const pending = tasksRef.current.filter((t) => t.status === "submitted" && t.lionTaskId);
+    const pending = tasksRef.current.filter((t) => mine(t) && t.status === "submitted" && t.lionTaskId);
     if (pending.length === 0) return;
     const pendingById = new Map(pending.map((t) => [t.lionTaskId as string, t]));
     pollBusyRef.current = true;
@@ -344,9 +583,8 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         | null;
       if (!d?.ok || !Array.isArray(d.tasks)) return;
       const byLionId = new Map(d.tasks.map((t) => [t.taskId, t]));
-      // Duplicate clones are born PAUSED (birth status is unpredictable — playbook) → the moment
-      // a duplicate task COMPLETEs, flip its campaign ACTIVE. Fired once per task, outside the
-      // state updater; a failed flip surfaces as a warning note, not a task failure.
+      // Duplicate clones are born PAUSED (birth status unpredictable — playbook) → activate the
+      // moment a duplicate task COMPLETEs. Once per task; a failed flip is a note, not a failure.
       for (const r of d.tasks) {
         const t = pendingById.get(r.taskId);
         if (!t || t.kind !== "duplicate") continue;
@@ -361,67 +599,72 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         })
           .then(async (res) => {
             const a = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-            if (!a?.ok) patch(taskId, { lionNote: `activation failed — flip it ACTIVE in LION (${a?.error ?? res.status})` });
+            if (!a?.ok) {
+              const lionNote = `activation failed — flip it ACTIVE in LION (${a?.error ?? res.status})`;
+              patch(taskId, { lionNote });
+              const base = tasksRef.current.find((x) => x.id === taskId);
+              if (base) saveRemote(taskId, dynOf({ ...base, lionNote }));
+            }
           })
           .catch(() => patch(taskId, { lionNote: "activation failed — flip it ACTIVE in LION" }));
       }
-      setTasks((ts) =>
-        ts.map((t) => {
-          if (t.status !== "submitted" || !t.lionTaskId) return t;
-          const r = byLionId.get(t.lionTaskId);
-          if (!r) return t;
-          if (r.status === "COMPLETED") {
-            return {
-              ...t,
-              status: "done",
-              stage: "ads",
-              lionStatus: r.status,
-              lionNote: undefined,
-              campaignId: r.campaignId ?? undefined,
-              adsetId: r.adsetId ?? undefined,
-              adCount: r.adIds.length,
-              finishedAt: Date.now(),
-            };
-          }
-          if (r.status === "NO_COUNTRIES_LEFT") {
-            return {
-              ...t,
+      // Compute each pending task's new fields once, apply to state, then persist MY updates.
+      const updates = new Map<string, Partial<HsTask>>();
+      for (const t of pending) {
+        const r = byLionId.get(t.lionTaskId as string);
+        if (!r) continue;
+        if (r.status === "COMPLETED") {
+          updates.set(t.id, {
+            status: "done",
+            stage: "ads",
+            lionStatus: r.status,
+            lionNote: undefined,
+            campaignId: r.campaignId ?? undefined,
+            adsetId: r.adsetId ?? undefined,
+            adCount: r.adIds.length,
+            finishedAt: Date.now(),
+          });
+        } else if (r.status === "NO_COUNTRIES_LEFT") {
+          updates.set(t.id, {
+            status: "error",
+            lionStatus: r.status,
+            error: "LION: no eligible countries left for this campaign",
+            finishedAt: Date.now(),
+          });
+        } else if (r.status === "NOT_FOUND") {
+          if (t.submittedAt && Date.now() - t.submittedAt > NOT_FOUND_GRACE_MS) {
+            updates.set(t.id, {
               status: "error",
               lionStatus: r.status,
-              error: "LION: no eligible countries left for this campaign",
+              error: "LION does not know this task (NOT_FOUND)",
               finishedAt: Date.now(),
-            };
+            });
           }
-          if (r.status === "NOT_FOUND") {
-            if (t.submittedAt && Date.now() - t.submittedAt > NOT_FOUND_GRACE_MS) {
-              return {
-                ...t,
-                status: "error",
-                lionStatus: r.status,
-                error: "LION does not know this task (NOT_FOUND)",
-                finishedAt: Date.now(),
-              };
-            }
-            return t; // replication lag right after submit — keep waiting
-          }
+          // else: replication lag right after submit — keep waiting, no change
+        } else {
           const mapped = LION_STAGE[r.status];
-          return {
-            ...t,
+          updates.set(t.id, {
             lionStatus: r.status,
             stage: mapped?.key ?? t.stage,
-            // ad ids fill in while CREATING_ADS runs — show the live count early
             ...(r.adIds.length ? { adCount: r.adIds.length } : {}),
             ...(r.campaignId ? { campaignId: r.campaignId } : {}),
             lionNote: r.error ? humaniseLionNote(r.error) : undefined,
-          };
-        }),
-      );
+          });
+        }
+      }
+      if (updates.size) {
+        setTasks((ts) => ts.map((t) => (updates.has(t.id) ? { ...t, ...updates.get(t.id) } : t)));
+        for (const t of pending) {
+          const p = updates.get(t.id);
+          if (p) saveRemote(t.id, dynOf({ ...t, ...p }));
+        }
+      }
     } catch {
       /* transient — next tick retries */
     } finally {
       pollBusyRef.current = false;
     }
-  }, [patch]);
+  }, [patch, me, saveRemote, dynOf]);
 
   useEffect(() => {
     const tick = () => {
@@ -461,7 +704,9 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     (args: HsEnqueueArgs) => {
       const id =
         (globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)) + Date.now().toString(36);
+      const now = Date.now();
       inputs.current.set(id, { campaign: args.campaign, files: args.files });
+      meta.current.set(id, { name: args.name, geo: args.geo, budget: args.budget, gcm: "launch" });
       setTasks((ts) => [
         {
           id,
@@ -469,41 +714,65 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
           profile: args.profile,
           geo: args.geo,
           budget: args.budget,
+          owner: me,
+          kind: "launch" as const,
           status: "queued" as const,
           stage: "upload",
-          queuedAt: Date.now(),
+          queuedAt: now,
           local: true,
         },
         ...ts,
       ]);
+      // Show the queued row to the team immediately; the runner's submit fills in the LION id.
+      saveRemote(id, { status: "queued", stage: "upload", gcm: "launch", queued_at: now });
       queue.current.push(id);
       void pump();
     },
-    [pump],
+    [pump, me, saveRemote],
   );
 
-  const enqueueSubmitted = useCallback((rows: HsSubmittedRow[]) => {
-    if (rows.length === 0) return;
-    const now = Date.now();
-    const fresh: HsTask[] = rows.map((r, i) => ({
-      id:
-        (globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)) +
-        now.toString(36) +
-        i.toString(36),
-      name: r.name,
-      profile: r.profile,
-      geo: r.geo,
-      budget: r.budget,
-      kind: "duplicate" as const,
-      status: "submitted" as const,
-      stage: "queue",
-      lionTaskId: r.lionTaskId,
-      queuedAt: now,
-      submittedAt: now,
-      local: true,
-    }));
-    setTasks((ts) => [...fresh, ...ts]);
-  }, []);
+  const enqueueSubmitted = useCallback(
+    (rows: HsSubmittedRow[]) => {
+      if (rows.length === 0) return;
+      const now = Date.now();
+      const fresh: HsTask[] = rows.map((r, i) => {
+        // Use the server-minted id when present (the duplicate route already stamped the row);
+        // otherwise generate one and stamp it here.
+        const id =
+          r.taskId ??
+          (globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)) + now.toString(36) + i.toString(36);
+        meta.current.set(id, { name: r.name, geo: r.geo, budget: r.budget, gcm: "duplicate" });
+        return {
+          id,
+          name: r.name,
+          profile: r.profile,
+          geo: r.geo,
+          budget: r.budget,
+          owner: me,
+          kind: "duplicate" as const,
+          status: "submitted" as const,
+          stage: "queue",
+          lionTaskId: r.lionTaskId,
+          queuedAt: now,
+          submittedAt: now,
+          local: true,
+        };
+      });
+      setTasks((ts) => [...fresh, ...ts]);
+      // Belt over the server stamp (harmless idempotent upsert) — guarantees the row exists.
+      for (const t of fresh) {
+        saveRemote(t.id, {
+          status: "running",
+          stage: "queue",
+          link: t.lionTaskId ?? null,
+          gcm: "duplicate",
+          queued_at: now,
+          started_at: now,
+        });
+      }
+    },
+    [me, saveRemote],
+  );
 
   const retry = useCallback(
     (id: string) => {
@@ -514,10 +783,11 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       if (t.lionTaskId || !inputs.current.has(id)) return;
       if (queue.current.includes(id)) return;
       patch(id, { status: "queued", stage: "upload", error: undefined, startedAt: undefined, finishedAt: undefined });
+      saveRemote(id, { status: "queued", stage: "upload", error: null, finished_at: null });
       queue.current.push(id);
       void pump();
     },
-    [patch, pump],
+    [patch, pump, saveRemote],
   );
 
   const retryAll = useCallback(() => {
@@ -526,20 +796,8 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     }
   }, [retry]);
 
-  const remove = useCallback((id: string) => {
-    inputs.current.delete(id);
-    queue.current = queue.current.filter((q) => q !== id);
-    setTasks((ts) => ts.filter((t) => t.id !== id));
-  }, []);
-
-  const clearFinished = useCallback(() => {
-    setTasks((ts) => {
-      for (const t of ts) {
-        if (t.status === "done" || t.status === "error" || t.status === "unknown") inputs.current.delete(t.id);
-      }
-      return ts.filter((t) => t.status !== "done" && t.status !== "error" && t.status !== "unknown");
-    });
-  }, []);
+  // Est. server clock at last fetch — teammates' liveness is judged on it, not the local clock.
+  const estServerNow = nowTick + skew;
 
   const counts = useMemo(() => {
     let active = 0,
@@ -558,14 +816,14 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
   const value: HsTaskManagerValue = {
     tasks,
     counts,
+    me,
+    estServerNow,
     open,
     setOpen,
     enqueue,
     enqueueSubmitted,
     retry,
     retryAll,
-    remove,
-    clearFinished,
   };
 
   return (
@@ -632,8 +890,9 @@ function fmtElapsed(ms: number): string {
 }
 
 function HsTaskManagerPanel() {
-  const { tasks, counts, open, setOpen, retry, retryAll, remove, clearFinished } = useHsTaskManager();
+  const { tasks, counts, me, estServerNow, open, setOpen, retry, retryAll } = useHsTaskManager();
   const [filter, setFilter] = useState<Filter>("all");
+  const [mineOnly, setMineOnly] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -662,9 +921,10 @@ function HsTaskManagerPanel() {
           ? t.status === "done"
           : t.status === "error" || t.status === "unknown";
 
-  const shown = tasks.filter(inBucket);
+  const isMine = (t: HsTask) => t.local || (!!me && t.owner === me);
+  const scoped = mineOnly ? tasks.filter(isMine) : tasks;
+  const shown = scoped.filter(inBucket);
   const retryable = tasks.filter((t) => t.status === "error" && !t.lionTaskId && t.local).length;
-  const clearable = counts.done + counts.failed;
 
   const tabs: { key: Filter; label: string; n: number }[] = [
     { key: "all", label: "All", n: tasks.length },
@@ -706,7 +966,7 @@ function HsTaskManagerPanel() {
           <Stat label="Failed" n={counts.failed} tone="text-danger" />
         </div>
 
-        {/* filter tabs */}
+        {/* filter tabs + mine toggle */}
         <div className="flex items-center gap-1 px-3 pt-3">
           {tabs.map((tab) => (
             <button
@@ -722,6 +982,17 @@ function HsTaskManagerPanel() {
               <span className="font-mono text-[10.5px] text-faint">{tab.n}</span>
             </button>
           ))}
+          <button
+            type="button"
+            aria-pressed={mineOnly}
+            onClick={() => setMineOnly((v) => !v)}
+            className={
+              "ml-auto rounded-lg px-2.5 py-1.5 text-[12px] font-medium transition-colors duration-150 " +
+              (mineOnly ? "bg-accent/15 text-[#9db8ff]" : "text-faint hover:text-dim")
+            }
+          >
+            Mine
+          </button>
         </div>
 
         {/* list */}
@@ -740,7 +1011,7 @@ function HsTaskManagerPanel() {
           ) : (
             <div className="flex flex-col gap-2">
               {shown.map((t) => (
-                <HsTaskRow key={t.id} task={t} now={now} onRetry={() => retry(t.id)} onRemove={() => remove(t.id)} />
+                <HsTaskRow key={t.id} task={t} me={me} estServerNow={estServerNow} now={now} onRetry={() => retry(t.id)} />
               ))}
             </div>
           )}
@@ -751,29 +1022,36 @@ function HsTaskManagerPanel() {
           <span className="text-[10.5px] text-faint">
             {counts.running > 0 ? "Processing…" : counts.active > 0 ? "Waiting in queue" : "Idle"}
           </span>
-          <div className="flex items-center gap-1.5">
-            {retryable > 0 ? (
-              <button
-                type="button"
-                onClick={retryAll}
-                className="flex items-center gap-1.5 rounded-md border border-danger/30 px-2 py-1 text-[11.5px] font-medium text-danger transition-colors hover:bg-danger/10"
-              >
-                <RetryIcon className="h-3.5 w-3.5" />
-                Retry failed ({retryable})
-              </button>
-            ) : null}
+          {retryable > 0 ? (
             <button
               type="button"
-              onClick={clearFinished}
-              disabled={clearable === 0}
-              className="rounded-md px-2 py-1 text-[11.5px] font-medium text-dim transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+              onClick={retryAll}
+              className="flex items-center gap-1.5 rounded-md border border-danger/30 px-2 py-1 text-[11.5px] font-medium text-danger transition-colors hover:bg-danger/10"
             >
-              Clear finished
+              <RetryIcon className="h-3.5 w-3.5" />
+              Retry failed ({retryable})
             </button>
-          </div>
+          ) : null}
         </div>
       </aside>
     </div>
+  );
+}
+
+/** Owner label in the shared drawer — "you" for my rows, a colour-tagged name for teammates'. */
+function HsOwnerChip({ owner, mine }: { owner: string | null | undefined; mine: boolean }) {
+  if (mine) return <span className="shrink-0 text-dim">you</span>;
+  const name = owner || "—";
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360;
+  return (
+    <span
+      className="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-[1px]"
+      style={{ color: `hsl(${h} 75% 72%)`, background: `hsl(${h} 70% 60% / 0.14)` }}
+    >
+      <span className="h-1.5 w-1.5 rounded-full" style={{ background: `hsl(${h} 75% 62%)` }} />
+      {name}
+    </span>
   );
 }
 
@@ -788,19 +1066,29 @@ function Stat({ label, n, tone }: { label: string; n: number; tone: string }) {
 
 function HsTaskRow({
   task: t,
+  me,
+  estServerNow,
   now,
   onRetry,
-  onRemove,
 }: {
   task: HsTask;
+  me: string | null;
+  estServerNow: number;
   now: number;
   onRetry: () => void;
-  onRemove: () => void;
 }) {
+  const mine = t.local || (!!me && t.owner === me);
   const done = t.status === "done";
   const error = t.status === "error";
   const unknown = t.status === "unknown";
-  const running = t.status === "running" || t.status === "submitted";
+  // A teammate's non-terminal task whose session stopped writing (> STALE_MS) reads as "stale".
+  const stale =
+    !mine &&
+    !done &&
+    !error &&
+    !unknown &&
+    (!t.updatedMs || estServerNow - t.updatedMs > STALE_MS);
+  const running = (t.status === "running" || t.status === "submitted") && !stale;
   const idx = stageIndex(t.stage);
   const end = t.finishedAt ?? now;
   const elapsed = t.startedAt ? Math.max(0, end - t.startedAt) : 0;
@@ -830,12 +1118,22 @@ function HsTaskRow({
           <p className="truncate text-[12.5px] font-medium text-ink" title={t.name}>
             {t.name || "Untitled campaign"}
           </p>
-          <p className="mt-0.5 truncate font-mono text-[10.5px] text-faint">
-            {(t.profile || "—").replace("globecoders-", "")} · {t.geo} · ${moneyLabel(t.budget)}
+          <p className="mt-0.5 flex items-center gap-1.5 truncate font-mono text-[10.5px] text-faint">
+            <HsOwnerChip owner={t.owner} mine={mine} />
+            <span className="truncate">
+              {(t.profile || "—").replace("globecoders-", "")} · {t.geo} · ${moneyLabel(t.budget)}
+            </span>
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
+          {stale ? (
+            <span className="rounded-md border border-warn/25 bg-warn/5 px-1.5 py-0.5 text-[9.5px] font-medium text-warn">
+              session offline
+            </span>
+          ) : null}
           <span className="font-mono text-[10.5px] tabular-nums text-faint">{fmtElapsed(elapsed)}</span>
+          {/* Retry is own-only (needs the local creative inputs); no Dismiss — errors are a
+              permanent team-visible record (parity with the MO drawer). */}
           {error && t.local && !t.lionTaskId ? (
             <button
               type="button"
@@ -845,17 +1143,6 @@ function HsTaskRow({
               className="tip flex h-6 w-6 items-center justify-center rounded-md text-faint transition-colors hover:bg-raise hover:text-[#9db8ff] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             >
               <RetryIcon className="h-3.5 w-3.5" />
-            </button>
-          ) : null}
-          {done || error || unknown ? (
-            <button
-              type="button"
-              onClick={onRemove}
-              data-tip="Dismiss"
-              aria-label="Dismiss"
-              className="tip flex h-6 w-6 items-center justify-center rounded-md text-faint transition-colors hover:bg-raise hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            >
-              <TrashIcon className="h-3.5 w-3.5" />
             </button>
           ) : null}
         </div>

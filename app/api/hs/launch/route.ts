@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import type { Campaign } from "@/lib/types";
-import { hsCampaignError, hsCreatePayload, todaySaoPauloDDMM } from "@/lib/hs-launch";
+import { hsCampaignError, hsCountryCodes, hsCreatePayload, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
+import { stampHsTaskRow } from "@/lib/task-store";
 import {
   LION_ACR,
   LionError,
@@ -27,17 +28,19 @@ const bad = (error: string, status = 400) => NextResponse.json({ ok: false, erro
  * on the weapon side, so it gets refused here instead.
  */
 export async function POST(req: Request): Promise<NextResponse> {
-  if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
+  const session = sessionFromCookieHeader(req.headers.get("cookie"));
+  if (!session) {
     return bad("unauthorized", 401);
   }
   if (!lionConfigured()) return bad("lion_not_configured", 500);
 
-  let body: { campaign?: Campaign; creatives?: unknown };
+  let body: { campaign?: Campaign; creatives?: unknown; taskId?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
     return bad("bad_json");
   }
+  const taskId = typeof body.taskId === "string" && /^[\w-]{6,64}$/.test(body.taskId) ? body.taskId : null;
   const c = body.campaign;
   if (!c || typeof c !== "object") return bad("campaign_required");
   const creatives = Array.isArray(body.creatives)
@@ -84,12 +87,21 @@ export async function POST(req: Request): Promise<NextResponse> {
       campaign: payload,
     });
     if (result.result === "success" && result.task_id) {
-      return NextResponse.json({
-        ok: true,
-        lionTaskId: String(result.task_id),
-        name: String(payload.campaign_name),
-        currency: account.currency || "USD",
-      });
+      const lionTaskId = String(result.task_id);
+      const name = String(payload.campaign_name);
+      // Durability: record the row server-side the instant LION accepts it, so the team sees the
+      // launch and its poll can resume from the LION id even if this browser closes now.
+      if (taskId) {
+        await stampHsTaskRow(session.username, {
+          taskId,
+          name,
+          geo: hsCountryCodes(c.countries).join(", "),
+          budget: c.budget,
+          lionTaskId,
+          kind: "launch",
+        });
+      }
+      return NextResponse.json({ ok: true, lionTaskId, name, currency: account.currency || "USD" });
     }
     // Per-campaign rejection — LION's reason is the actionable text (name mismatch, missing field…).
     return bad(result.reason || `LION rejected the campaign (${result.result})`);

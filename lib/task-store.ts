@@ -140,6 +140,33 @@ export async function upsertTaskRow(user: string, taskId: string, fields: TaskRo
 }
 
 /**
+ * Server-side stamp of a freshly-submitted HS task into the shared store (partner="br"). Called
+ * right after LION accepts a create/duplicate so the team sees the row — and can resume its
+ * polling from the durable LION id in `link` — even if the submitting browser dies immediately.
+ * LION fields ride in reused columns: `link` = LION task id, `gcm` = kind (launch|duplicate),
+ * `ad_id` = ad count. Best-effort; the client saver is the fallback.
+ */
+export async function stampHsTaskRow(
+  user: string,
+  row: { taskId: string; name: string; geo: string; budget: string; lionTaskId: string; kind: "launch" | "duplicate" },
+): Promise<void> {
+  if (!storeConfigured()) return;
+  const now = Date.now();
+  await upsertTaskRow(user, row.taskId, {
+    partner: "br",
+    name: row.name,
+    geo: row.geo,
+    budget: row.budget,
+    status: "running", // HS "submitted" (queued on LION) maps to the store's running
+    stage: "queue",
+    link: row.lionTaskId,
+    gcm: row.kind,
+    queued_at: now,
+    started_at: now,
+  }).catch(() => {});
+}
+
+/**
  * Non-blocking, ordered task-row writer for the launch/clone runners: each write() chains after
  * the previous so status transitions land in order without ever delaying the FB pipeline; flush()
  * awaits the tail — call it before closing the stream so Vercel can't freeze the function with a

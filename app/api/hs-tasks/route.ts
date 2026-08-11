@@ -2,17 +2,16 @@ import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { findTaskRow, pickTaskFields, storeConfigured, upsertTaskRow } from "@/lib/task-store";
 
-// A pagehide-beacon batch (25 rows) or a bulk clear is ~2 Strapi round-trips per row — the
-// platform default duration (~15s) could cut the tail off mid-write, leaving half a wave unmarked.
+// HS tasks share the `launch-task` collection (no separate deploy), tagged partner="br" so they
+// live alongside MO rows without colliding — the MO reader excludes "br", this reader takes only
+// "br". Same shared-visibility + owner-authority model as /api/launch-tasks.
 export const maxDuration = 60;
 
-// Server-only: the Strapi token never reaches the browser.
 const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
 const TOKEN = process.env.STRAPI_TOKEN ?? "";
 const H = () => ({ Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" });
+const HS_PARTNER = "br";
 
-// Shared-view window: the drawer shows the team's last 7 days. Strapi clamps pageSize to 100
-// (probe-verified), so restore pages through up to 3 pages instead of silently truncating.
 const WINDOW_MS = 7 * 24 * 3_600_000;
 const PAGE_SIZE = 100;
 const MAX_PAGES = 3;
@@ -25,24 +24,23 @@ const num = (v: unknown): number | undefined => {
   return Number.isFinite(n) ? n : undefined;
 };
 
-/** Strapi row → client-facing task (biginteger timestamps come back as strings → numbers).
- *  `updated_ms` (Strapi updatedAt) is the liveness signal behind the client's stale detection. */
+/** Strapi row → HS client task. LION-specific fields ride in reused columns: the durable LION
+ *  task id in `link`, the kind (launch|duplicate) in `gcm`, the ad count in `ad_id`. */
 function toClient(r: Row): Row {
   const updated = typeof r.updatedAt === "string" ? Date.parse(r.updatedAt) : NaN;
   return {
     id: r.task_id,
     owner: r.owner ?? null,
     name: r.name ?? "",
-    partner: r.partner ?? null,
-    gcm: r.gcm ?? "",
     geo: r.geo ?? "",
     budget: r.budget ?? "",
     status: r.status ?? "queued",
     stage: r.stage ?? null,
-    campaign_id: r.campaign_id ?? null,
-    adset_id: r.adset_id ?? null,
-    ad_id: r.ad_id ?? null,
-    link: r.link ?? null,
+    lionTaskId: r.link ?? null,
+    kind: r.gcm ?? null,
+    campaignId: r.campaign_id ?? null,
+    adsetId: r.adset_id ?? null,
+    adCount: num(r.ad_id) ?? null,
     error: r.error ?? null,
     queued_at: num(r.queued_at) ?? null,
     started_at: num(r.started_at) ?? null,
@@ -51,18 +49,12 @@ function toClient(r: Row): Row {
   };
 }
 
-/** The caller's identity. Reads are team-wide but still authenticated; writes are owner-scoped. */
 function callerOf(req: Request): string | null {
   const session = sessionFromCookieHeader(req.headers.get("cookie"));
   return session?.username ? String(session.username) : null;
 }
 
-/**
- * GET → the whole team's tasks from the last 7 days (newest first) for restore + live refresh.
- * Every logged-in user sees everyone's launches and clones (visibility is shared); mutations
- * (POST/DELETE) stay owner-scoped, so you can still only change your own rows. `now` (server
- * clock) + per-row `updated_ms` let the client judge owner liveness without trusting local clocks.
- */
+/** GET → the team's HS tasks from the last 7 days (shared view). */
 export async function GET(req: Request) {
   const user = callerOf(req);
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
@@ -72,15 +64,13 @@ export async function GET(req: Request) {
     const rows: Row[] = [];
     for (let page = 1; page <= MAX_PAGES; page++) {
       const res = await fetch(
-        // HS tasks share this collection tagged partner="br" (see /api/hs-tasks) — exclude them
-        // so the MO drawer only ever shows MO launches/clones.
-        `${STRAPI}/api/launch-tasks?filters[owner][$notNull]=true&filters[partner][$ne]=br&filters[queued_at][$gte]=${cutoff}` +
-          `&sort[0]=queued_at:desc&pagination[page]=${page}&pagination[pageSize]=${PAGE_SIZE}`,
+        `${STRAPI}/api/launch-tasks?filters[partner][$eq]=${HS_PARTNER}&filters[owner][$notNull]=true` +
+          `&filters[queued_at][$gte]=${cutoff}&sort[0]=queued_at:desc&pagination[page]=${page}&pagination[pageSize]=${PAGE_SIZE}`,
         { headers: H(), cache: "no-store" },
       );
       if (!res.ok) {
         if (rows.length === 0) return NextResponse.json({ ok: false, tasks: [], status: res.status });
-        break; // keep what we have — a partial list beats none for a later page's hiccup
+        break;
       }
       const body = await res.json().catch(() => ({}));
       const data = (body.data ?? []) as Row[];
@@ -93,12 +83,7 @@ export async function GET(req: Request) {
   }
 }
 
-/**
- * POST → upsert by task_id (create if new, update if the row already exists).
- * Body: a single task object, or { tasks: [...] } — the batch form serves the pagehide beacon
- * that marks this session's in-flight rows interrupted in one shot.
- * Rows belong to the session user: creates are stamped, foreign updates are refused.
- */
+/** POST → upsert one HS task by task_id (partner forced to "br", owner from the session). */
 export async function POST(req: Request) {
   const user = callerOf(req);
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
@@ -110,17 +95,17 @@ export async function POST(req: Request) {
   if (items.length === 0 || items.length > 25) {
     return NextResponse.json({ ok: false, reason: "bad_batch" }, { status: 400 });
   }
-
   if (items.some((item) => !String(item.task_id ?? ""))) {
     return NextResponse.json({ ok: false, reason: "no_task_id" }, { status: 400 });
   }
   let forbidden = false;
   let failed: string | null = null;
-  // Distinct task_ids have no ordering dependency between them — write in parallel chunks so a
-  // full beacon batch completes well inside the function budget.
   for (let i = 0; i < items.length; i += 8) {
     const results = await Promise.all(
-      items.slice(i, i + 8).map((item) => upsertTaskRow(user, String(item.task_id), pickTaskFields(item))),
+      items.slice(i, i + 8).map((item) =>
+        // partner:"br" is forced here — the wire never sets it, so an MO row can't masquerade as HS.
+        upsertTaskRow(user, String(item.task_id), { ...pickTaskFields(item), partner: HS_PARTNER }),
+      ),
     );
     for (const r of results) {
       if (!r.ok) {
@@ -134,20 +119,18 @@ export async function POST(req: Request) {
   return NextResponse.json({ ok: true });
 }
 
-/** DELETE ?taskId=X (or ?taskIds=a,b,c) → remove the caller's row(s); foreign rows are skipped. */
+/** DELETE ?taskIds=… → remove the caller's HS rows (foreign rows skipped). Kept for parity/admin;
+ *  the drawer itself never deletes (errors are a permanent team-visible record). */
 export async function DELETE(req: Request) {
   const user = callerOf(req);
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   if (!storeConfigured()) return NextResponse.json({ ok: false, reason: "not_configured" }, { status: 500 });
-  const url = new URL(req.url);
-  const ids = (url.searchParams.get("taskIds") ?? url.searchParams.get("taskId") ?? "")
+  const ids = (new URL(req.url).searchParams.get("taskIds") ?? new URL(req.url).searchParams.get("taskId") ?? "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
   if (ids.length === 0) return NextResponse.json({ ok: false, reason: "no_task_id" }, { status: 400 });
-
   try {
-    // Parallel chunks — a bulk "clear failed" can carry dozens of ids.
     for (let i = 0; i < ids.length; i += 8) {
       await Promise.all(
         ids.slice(i, i + 8).map(async (id) => {

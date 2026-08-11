@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { parseMoney } from "@/lib/types";
 import { sessionFromCookieHeader } from "@/lib/session";
+import { stampHsTaskRow } from "@/lib/task-store";
 import {
   LionError,
   lionAccountPixels,
@@ -25,7 +26,8 @@ const bad = (error: string, status = 400) => NextResponse.json({ ok: false, erro
  * preflight rejections (object-story creatives, dead sources) come back as the actionable text.
  */
 export async function POST(req: Request): Promise<NextResponse> {
-  if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
+  const session = sessionFromCookieHeader(req.headers.get("cookie"));
+  if (!session) {
     return bad("unauthorized", 401);
   }
   if (!lionConfigured()) return bad("lion_not_configured", 500);
@@ -44,6 +46,8 @@ export async function POST(req: Request): Promise<NextResponse> {
     nameSuffix?: string;
     /** Full clone name (fixed grammar prefix + edited tail); absent = LION rebuilds it. */
     name?: string;
+    /** Source geo for the stamped task row's label (display only). */
+    geo?: string;
   };
   try {
     body = (await req.json()) as typeof body;
@@ -112,7 +116,26 @@ export async function POST(req: Request): Promise<NextResponse> {
     });
     const taskIds = (result.task_ids ?? []).map(String).filter(Boolean);
     if ((result.result === "success" || taskIds.length > 0) && taskIds.length > 0) {
-      return NextResponse.json({ ok: true, taskIds, currency: acct.currency || "USD" });
+      // Server-mint a client task id per copy and stamp each row NOW (durability): the team sees
+      // the clones and their polls resume from the LION ids even if this browser closes. Returned
+      // as {taskId ↔ lionTaskId} pairs so the client's Task Manager rows use the same ids.
+      const rows = taskIds.map((lionTaskId) => ({
+        taskId: `hsd-${crypto.randomUUID()}`,
+        lionTaskId,
+      }));
+      await Promise.all(
+        rows.map((r, i) =>
+          stampHsTaskRow(session.username, {
+            taskId: r.taskId,
+            name: name || `Clone of ${campaignId}${rows.length > 1 ? ` · copy ${i + 1}/${rows.length}` : ""}`,
+            geo: String(body.geo ?? "").slice(0, 40) || "inherited",
+            budget: String(body.budget ?? ""),
+            lionTaskId: r.lionTaskId,
+            kind: "duplicate",
+          }),
+        ),
+      );
+      return NextResponse.json({ ok: true, rows, taskIds, currency: acct.currency || "USD" });
     }
     // Preflight rejection — LION's reason is the actionable text ("No valid creative URL found
     // in campaign ads" = object-story source → not duplicable; dead/unreadable source; …).
