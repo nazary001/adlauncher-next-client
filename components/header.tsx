@@ -88,10 +88,10 @@ export function Header({
         </div>
         <PartnerSwitcher value={partner} onChange={onPartnerChange} />
         <div className="flex items-center gap-2.5 justify-self-end">
-          {/* HS keeps its own independent queue (LION submits) — its button appears next to the
-              team Tasks button while the HS partner is active. */}
-          {partnerConfig(partner).lionLaunch ? <HsTaskManagerButton /> : null}
-          <TaskManagerButton />
+          {/* Only the active partner's queue button shows: HS (LION submits) has its own
+              independent manager, everyone else shares the team Tasks queue. Both providers stay
+              mounted in the app layout, so the hidden queue keeps working across the switch. */}
+          {partnerConfig(partner).lionLaunch ? <HsTaskManagerButton /> : <TaskManagerButton />}
           <PlatformTabs />
           {user ? <UserMenu user={user} /> : null}
         </div>
