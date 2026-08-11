@@ -81,15 +81,14 @@ const MKLEARN_LANDINGS: Landing[] = [
   { slug: "world-capital-of-cheap-dentistry", title: "World Capital of Cheap Dentistry", lang: "EN" },
 ];
 
-// Indians defaults (verified live on the system-user token 2026-08-08): the token sees 16 ACTIVE
-// GC-Magicoffers-BR-* accounts — the ACCOUNT is picked per campaign (/api/adaccounts), defaulting
-// to BR-1500. ⚠️ The MK Learn tracking pixel HS-Pixel-FARM-1 (the one the landing actually fires;
-// last_fired confirmed) is shared ONLY to BR-1500 today — the other 15 accounts carry just the
-// never-fired "GC for MO Pixel", so conversion launches there optimize blind until the partner
-// shares FARM-1 wider. The pixel field therefore offers the chosen account's own pixels and
-// auto-picks FARM-1 whenever it's present.
+// Indians defaults: the token sees the ACTIVE GC-Magicoffers-BR-* accounts — the ACCOUNT is
+// picked per campaign (/api/adaccounts), defaulting to BR-1500. Pixel policy (owner, 2026-08-11):
+// bid/lowest launches keep a free pixel CHOICE but default to "GC for MO Pixel" (shared to every
+// account; the buy link carries &pixel=<id> so the funnel fires whichever is picked), while
+// min-ROAS is PINNED to ROAS_PIXEL below. HS-Pixel-FARM-1 (the funnel's original tracking pixel,
+// BR-1500 only) stays selectable by hand.
 const MAGICOFFERS_ACCOUNT: Bound = { id: "1297336295903991", name: "GC-Magicoffers-BR-1500" };
-const MAGICOFFERS_PIXEL: Bound = { id: "3288799954641310", name: "HS-Pixel-FARM-1" };
+const MO_DEFAULT_PIXEL: Bound = { id: "3075610185982313", name: "GC for MO Pixel" };
 
 /** The ONLY pixel min-ROAS launches may optimize on (owner rule 2026-08-11): the partner's HS
  *  value pixel — real purchase-value history, shared to every MO account and live-probed
@@ -128,7 +127,7 @@ export const PARTNERS: PartnerConfig[] = [
     fanpagesFromToken: true,
     accountsFromToken: true,
     defaultAccount: MAGICOFFERS_ACCOUNT,
-    preferredPixel: MAGICOFFERS_PIXEL,
+    preferredPixel: MO_DEFAULT_PIXEL,
     launchNote: "Submits directly via Graph API",
     pageAdLimit: 250,
     maxCreatives: 1,

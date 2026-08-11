@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Campaign, FileItem } from "@/lib/types";
-import { firstMedia, fullName, isLaunchable, makeCampaign } from "@/lib/types";
+import { bidKind, firstMedia, fullName, isLaunchable, makeCampaign } from "@/lib/types";
 import { geoSummary } from "@/lib/catalog";
 import {
   GCM_POOL_MAX,
@@ -58,7 +58,10 @@ function fillAccountDefaults(
     }
     let pixel = c.pixel;
     const pixels = adAccounts.find((a) => a.value === account)?.pixels ?? [];
-    if (!pixel || !pixels.some((p) => p.id === pixel)) {
+    // Min-ROAS cards are pinned to the value pixel — never re-fill them, even if this account's
+    // list misses it (the launch route's pixel_not_on_account then names the real problem
+    // instead of a silent swap ping-ponging with the card's pin effect).
+    if (bidKind(c.bidStrategy) !== "roas" && (!pixel || !pixels.some((p) => p.id === pixel))) {
       pixel = defaultPixelFor(adAccounts, account, partner.preferredPixel);
     }
     if (account === c.account && pixel === c.pixel) return c;

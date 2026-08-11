@@ -639,7 +639,14 @@ export function CampaignCard({
                           ...(partner.accountsFromToken ? { pixel: ROAS_PIXEL.id } : {}),
                         });
                       } else {
-                        patch({ bidStrategy });
+                        // Leaving min-ROAS unlocks the pixel back to the partner default (bid
+                        // launches keep the choice, defaulting to GC for MO).
+                        patch({
+                          bidStrategy,
+                          ...(kind === "roas" && partner.accountsFromToken
+                            ? { pixel: defaultPixelFor(adAccounts ?? null, c.account, partner.preferredPixel) }
+                            : {}),
+                        });
                       }
                     }}
                     options={BID_STRATEGIES}
