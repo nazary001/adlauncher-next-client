@@ -280,6 +280,9 @@ export function HsCloneBoard({
               copies: 1, // one shot per request → controllable pacing, gentler on the profile
               budget: r.budget,
               bid: r.bid.trim(),
+              // Fallback for the server's bid scaling (its own details/ re-read wins) — the bid
+              // rides in HUMAN units and is scaled to LION's Meta-native wire unit server-side.
+              ...(r.info?.bidStrategy ? { bidStrategy: r.info.bidStrategy } : {}),
               geo, // for the stamped shared-task row's label
               // Full name = fixed grammar prefix + the buyer's tail (replaces the old one).
               // When the source couldn't be read there's no prefix — LION rebuilds the name.
@@ -534,8 +537,10 @@ export function HsCloneBoard({
                         <input
                           value={r.bid}
                           onChange={(e) => patchRow(r.id, { bid: limitMoney(e.target.value, 10000) })}
-                          // LION's REST reads expose adset_bid for cap sources (prefilled) but NOT
-                          // a MIN_ROAS goal — empty inherits the source's own goal on duplicate.
+                          // HUMAN units, same as LION's reads prefill them: ROAS decimal for
+                          // MIN_ROAS sources (0,34 = 34%), $ for cap sources. The duplicate route
+                          // scales to Meta-native wire units by the source's strategy — never
+                          // type pre-scaled values here. Empty inherits the source's own bid.
                           placeholder={
                             r.info?.bidStrategy === "LOWEST_COST_WITH_MIN_ROAS" ? "inherits ROAS goal" : "inherit"
                           }
@@ -606,7 +611,7 @@ export function HsCloneBoard({
                 </button>
               </div>
               <p className="text-[10.5px] text-faint">
-                Empty Bid = inherits the source’s (MIN_ROAS sources carry a ROAS decimal) · targeting & creatives inherit
+                Empty Bid = inherits the source’s · MIN_ROAS sources take a ROAS decimal (0,34 = 34%), cap sources $ · targeting & creatives inherit
               </p>
             </div>
 

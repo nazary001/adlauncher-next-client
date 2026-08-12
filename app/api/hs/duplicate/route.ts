@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
-import { parseMoney } from "@/lib/types";
+import { bidKind, parseMoney } from "@/lib/types";
+import { hsWireBid } from "@/lib/hs-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { stampHsTaskRow } from "@/lib/task-store";
 import {
   LionError,
   lionAccountPixels,
+  lionBidStrategy,
   lionConfigured,
   lionDuplicate,
   lionProfileData,
@@ -40,9 +42,13 @@ export async function POST(req: Request): Promise<NextResponse> {
     campaignId?: string;
     copies?: number;
     budget?: string;
-    /** Optional bid override, LION-UI semantics (plain number; ROAS decimal for MIN_ROAS
-     *  sources). Empty/absent = inherit from the source — the safe default. */
+    /** Optional bid override in HUMAN units (ROAS decimal for MIN_ROAS sources, 0,34 = 34%;
+     *  $ amount for cap sources). Scaled to LION's Meta-native wire unit HERE, by the source's
+     *  bid strategy. Empty/absent = inherit from the source — the safe default. */
     bid?: string;
+    /** The source's bid strategy as the board read it — FALLBACK only; the server re-reads
+     *  details/ and its answer wins (a mis-scaled bid is a silent 100×/10000× mistake). */
+    bidStrategy?: string;
     nameSuffix?: string;
     /** Full clone name (fixed grammar prefix + edited tail); absent = LION rebuilds it. */
     name?: string;
@@ -100,6 +106,27 @@ export async function POST(req: Request): Promise<NextResponse> {
   }
   if (!pixels.some((p) => p.id === pixel)) return bad("pixel_not_on_account");
 
+  // ---- bid override → Meta-native wire unit (only when a bid was typed) ----
+  // LION forwards starting_bid to the Graph verbatim (hsWireBid doc), so the human decimal must
+  // be scaled by the SOURCE's strategy: ROAS × 10000, cap $ × 100. The strategy is re-read from
+  // LION here (authoritative); the board's snapshot only covers the "source unreadable right
+  // now" lag. No resolvable strategy, or a lowest-cost source → refuse rather than guess: an
+  // unscaled/mis-scaled bid creates a wedged CREATING_ADSET task (live 08-10) or a silently
+  // absurd bid, and "clear the Bid to inherit" is always available.
+  let startingBid: number | undefined;
+  if (bid != null) {
+    const clientStrategy = String(body.bidStrategy ?? "").trim();
+    const strategy = (await lionBidStrategy(campaignId)) || clientStrategy;
+    if (!strategy) return bad("bid_strategy_unresolved_clear_bid_to_inherit");
+    const kind = bidKind(strategy);
+    if (kind === "none") return bad("bid_not_applicable_to_lowest_cost_source");
+    // ROAS goals live in 0.001..1000 at Meta; the board caps at 100 (create-side parity).
+    if (kind === "roas" && bid > 100) return bad("roas_goal_invalid");
+    const wire = hsWireBid(bid, strategy);
+    if (wire == null) return bad("bid_invalid");
+    startingBid = wire;
+  }
+
   // ---- submit ----
   try {
     const result = await lionDuplicate({
@@ -111,7 +138,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       starting_budget: Math.round(budget * 100),
       number_of_copies: copies,
       name_suffix: nameSuffix,
-      ...(bid != null ? { starting_bid: bid } : {}),
+      ...(startingBid != null ? { starting_bid: startingBid } : {}),
       ...(name ? { name } : {}),
     });
     const taskIds = (result.task_ids ?? []).map(String).filter(Boolean);

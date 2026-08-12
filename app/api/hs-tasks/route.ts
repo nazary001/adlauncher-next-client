@@ -100,12 +100,22 @@ export async function POST(req: Request) {
   }
   let forbidden = false;
   let failed: string | null = null;
+  // Failure states never get another write after them, so a failure-write for a row that no
+  // longer exists can only be a stale client resurrecting an admin-deleted zombie (live 08-12:
+  // a sleeping tab's 60-min cap re-created rows deleted minutes earlier). Skip the create; a
+  // legit first-write is always queued/running/submitted (client) or the server-side stamp.
+  // "done" stays writable as a first write — losing a real completion would be worse.
+  const failureStates = new Set(["error", "interrupted"]);
   for (let i = 0; i < items.length; i += 8) {
     const results = await Promise.all(
-      items.slice(i, i + 8).map((item) =>
+      items.slice(i, i + 8).map(async (item) => {
+        const fields = pickTaskFields(item);
+        if (failureStates.has(String(fields.status ?? "")) && !(await findTaskRow(String(item.task_id)))) {
+          return { ok: true as const };
+        }
         // partner:"br" is forced here — the wire never sets it, so an MO row can't masquerade as HS.
-        upsertTaskRow(user, String(item.task_id), { ...pickTaskFields(item), partner: HS_PARTNER }),
-      ),
+        return upsertTaskRow(user, String(item.task_id), { ...fields, partner: HS_PARTNER });
+      }),
     );
     for (const r of results) {
       if (!r.ok) {

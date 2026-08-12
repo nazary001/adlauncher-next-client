@@ -75,10 +75,31 @@ export function hsCampaignError(c: Campaign, creatives: string[]): string | null
 export type HsLocale = { id: number; name: string };
 
 /**
+ * LION write-side bid units are META-NATIVE minor units — LION forwards the value to the Graph
+ * verbatim: cap strategies take integer CENTS (Meta bid_amount), MIN_ROAS takes the ROAS floor
+ * × 10000 as an integer (Meta bid_constraints.roas_average_floor). Their own weapon UI scales the
+ * human decimal client-side before POSTing. Sending the human decimal instead wedges the task at
+ * CREATING_ADSET in a retry loop — Meta answers "roas_average_floor … should be larger than or
+ * equal to 0.001 and smaller than or equal to 1000 … integer and scaled up 10000x" (live 08-10:
+ * three GLO-01 tasks; weapon launches with identical goals sailed through the same day, so the
+ * backend provably does NOT scale). Reads stay MAJOR/decimal (details 2.45 == metrics 2.45).
+ *
+ * `bid` here is the human decimal from the card (ROAS 1,20 = 120%; cap $ amount) → scaled to the
+ * wire unit per strategy. Null = strategy takes no bid (lowest cost) or a non-positive value.
+ */
+export function hsWireBid(bid: number, strategy: string): number | null {
+  if (!Number.isFinite(bid) || bid <= 0) return null;
+  const kind = bidKind(strategy);
+  if (kind === "roas") return Math.round(bid * 10000);
+  if (kind === "cap") return Math.round(bid * 100);
+  return null;
+}
+
+/**
  * The per-campaign object of LION's `POST /api/facebook/campaigns/create/`.
- * Money: integer cents of the ad-account currency (write-side convention, verified live) — except
- * a MIN_ROAS bid, which is the ROAS decimal. `url_tags` stays empty: LION auto-builds the tracking
- * query from redirect_type (HS runs its own landings — no gcm here).
+ * Money: integer cents of the ad-account currency (write-side convention, verified live); a
+ * MIN_ROAS bid is the ROAS floor × 10000 (Meta-native — see hsWireBid). `url_tags` stays empty:
+ * LION auto-builds the tracking query from redirect_type (HS runs its own landings — no gcm here).
  */
 export function hsCreatePayload(
   c: Campaign,
@@ -88,7 +109,7 @@ export function hsCreatePayload(
   ddmm: string,
 ): Record<string, unknown> {
   const kind = bidKind(c.bidStrategy);
-  const bidRaw = parseMoney(c.bidCap);
+  const wireBid = hsWireBid(parseMoney(c.bidCap), c.bidStrategy);
   const localeById = new Map(profileLocales.map((l) => [String(l.id), l.name]));
   // c.locales stores FB locale ids as strings; unknown ids (profile switched) are dropped.
   const locales = c.locales
@@ -103,8 +124,7 @@ export function hsCreatePayload(
     cta: c.cta,
     link: c.link.trim(),
     daily_budget: Math.round(parseMoney(c.budget) * 100),
-    ...(kind === "cap" ? { bid: Math.round(bidRaw * 100) } : {}),
-    ...(kind === "roas" ? { bid: Math.round(bidRaw * 100) / 100 } : {}),
+    ...(wireBid != null ? { bid: wireBid } : {}),
     bid_strategy: c.bidStrategy,
     objective: c.objective,
     conversion_event: kind === "roas" ? "PURCHASE" : c.conversionEvent,

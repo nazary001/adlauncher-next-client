@@ -47,6 +47,9 @@ export type HsTask = {
   lionStatus?: string;
   /** Non-terminal error LION reported (its tasker retries) — shown as a warning, not a failure. */
   lionNote?: string;
+  /** Consecutive polls that answered the SAME lionNote — a deterministic validation error that
+   *  survives several retries is wedged for good (client-only counter, never persisted). */
+  noteStreak?: number;
   campaignId?: string;
   adsetId?: string;
   adCount?: number;
@@ -82,6 +85,14 @@ function humaniseLionNote(raw: string): string {
     return "Facebook temporarily blocked this profile — pause a bit, or duplicate through another profile";
   }
   return raw;
+}
+
+/** Meta VALUE-validation rejections are deterministic per payload — LION's tasker re-sends the
+ *  same stored value on every retry, so the loop can never succeed (proven live 08-10/12: decimal
+ *  ROAS floors wedged CREATING_ADSET indefinitely). Scoped to the bid-constraint class only:
+ *  broader "invalid …" texts can be transient (e.g. the campaign-id replication race). */
+function isPermanentLionError(raw: string): boolean {
+  return /roas.?average.?floor|bid constraint/i.test(raw);
 }
 
 /** LION creation-status → local stage key + human label. */
@@ -237,6 +248,8 @@ type HsTaskManagerValue = {
   enqueueSubmitted: (rows: HsSubmittedRow[]) => void;
   retry: (id: string) => void;
   retryAll: () => void;
+  /** Owner-only removal of a terminal error/unknown row (wedged-task cleanup). */
+  dismiss: (id: string) => void;
 };
 
 const Ctx = createContext<HsTaskManagerValue | null>(null);
@@ -300,6 +313,9 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
+          // A request left hanging by a network drop / laptop sleep would freeze this task's
+          // save chain forever (writes are chained per task) — bound it instead.
+          signal: AbortSignal.timeout(20_000),
         });
       const prev = saveChains.current.get(id) ?? Promise.resolve();
       const next = prev
@@ -319,9 +335,16 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     [],
   );
 
-  /** Map a task's current state into the store's field set (LION fields in reused columns). */
+  /** Map a task's current state into the store's field set (LION fields in reused columns).
+   *  The static identity (name/geo/budget) rides in EVERY save, not only in `meta` (which is
+   *  empty for restored tasks): a save that races an admin row-deletion re-CREATES the row, and
+   *  without these fields that resurrection is a nameless "Untitled · $0" stub (live 08-12).
+   *  Empty values are skipped so a stub-restored task can never blank a good stored name. */
   const dynOf = useCallback(
     (t: HsTask): Record<string, unknown> => ({
+      ...(t.name ? { name: t.name } : {}),
+      ...(t.geo ? { geo: t.geo } : {}),
+      ...(t.budget ? { budget: t.budget } : {}),
       status: statusToStore(t.status),
       stage: t.stage,
       link: t.lionTaskId ?? null,
@@ -339,7 +362,9 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
 
   /** Pull the team's HS tasks and merge them in. Others' rows mirror the fetch; mine stay mine. */
   const loadRemote = useCallback(() => {
-    fetch("/api/hs-tasks")
+    // Timeout matters: while this fetch hangs, absent (deleted) rows are never merged OUT, so
+    // localStorage-restored zombies survive and their polling/heartbeat resurrects them.
+    fetch("/api/hs-tasks", { signal: AbortSignal.timeout(20_000) })
       .then(async (r) => {
         if (!r.ok) return;
         const d = (await r.json().catch(() => null)) as { ok?: boolean; now?: number; tasks?: HsRemoteRow[] } | null;
@@ -375,7 +400,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     } catch {
       /* ignore */
     }
-    fetch("/api/hs-tasks")
+    fetch("/api/hs-tasks", { signal: AbortSignal.timeout(20_000) })
       .then(async (r) => (r.ok ? ((await r.json()) as { ok?: boolean; now?: number; tasks?: HsRemoteRow[] }) : null))
       .then((d) => {
         if (d?.now) noteSkew(d.now);
@@ -545,11 +570,13 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
   // ---- LION status polling (one batched call for every pending task) ----
 
   const poll = useCallback(async () => {
-    if (pollBusyRef.current) return;
     // Only MY tasks poll LION + auto-activate; teammates' rows come from the shared store instead.
     const mine = (t: HsTask) => t.local || (!!me && t.owner === me);
     const now = Date.now();
-    // Age out MY tasks stuck "creating" for an hour — stop burning polls, tell the buyer.
+    // Age out MY tasks stuck "creating" for an hour — stop burning polls, tell the buyer. This
+    // runs BEFORE the busy latch: pure state work that must fire even if a status fetch is stuck
+    // (live 08-12: a request hung overnight kept the latch closed, so a wedged task ticked for
+    // 400+ minutes with the cap never firing).
     for (const t of tasksRef.current) {
       if (mine(t) && t.status === "submitted" && t.submittedAt && now - t.submittedAt > PENDING_CAP_MS) {
         const finishedAt = t.submittedAt + PENDING_CAP_MS;
@@ -558,6 +585,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         saveRemote(t.id, dynOf({ ...t, status: "unknown", finishedAt, error }));
       }
     }
+    if (pollBusyRef.current) return;
     const pending = tasksRef.current.filter((t) => mine(t) && t.status === "submitted" && t.lionTaskId);
     if (pending.length === 0) return;
     const pendingById = new Map(pending.map((t) => [t.lionTaskId as string, t]));
@@ -567,6 +595,9 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ taskIds: [...new Set(pending.map((t) => t.lionTaskId as string))] }),
+        // Unbounded fetches freeze the whole poller: the busy latch above only reopens in the
+        // `finally`, which a hung request never reaches. 20s >> the route's LION reads.
+        signal: AbortSignal.timeout(20_000),
       });
       const d = (await res.json().catch(() => null)) as
         | {
@@ -643,13 +674,32 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
           // else: replication lag right after submit — keep waiting, no change
         } else {
           const mapped = LION_STAGE[r.status];
-          updates.set(t.id, {
-            lionStatus: r.status,
-            stage: mapped?.key ?? t.stage,
-            ...(r.adIds.length ? { adCount: r.adIds.length } : {}),
-            ...(r.campaignId ? { campaignId: r.campaignId } : {}),
-            lionNote: r.error ? humaniseLionNote(r.error) : undefined,
-          });
+          const note = r.error ? humaniseLionNote(r.error) : undefined;
+          // Same note answered by N consecutive polls; a fresh/changed note restarts the count.
+          const noteStreak = note ? (note === t.lionNote ? (t.noteStreak ?? 1) + 1 : 1) : 0;
+          if (note && r.error && noteStreak >= 3 && isPermanentLionError(r.error)) {
+            // Deterministic validation error surviving 3 polls (~0.5–1 min) = wedged for good —
+            // fail the task now instead of ticking "creating" until the 60-min cap.
+            updates.set(t.id, {
+              status: "error",
+              lionStatus: r.status,
+              stage: mapped?.key ?? t.stage,
+              lionNote: undefined,
+              noteStreak: 0,
+              error: `Wedged on LION — its retry re-sends the same rejected value: ${note}`,
+              finishedAt: Date.now(),
+              ...(r.campaignId ? { campaignId: r.campaignId } : {}),
+            });
+          } else {
+            updates.set(t.id, {
+              lionStatus: r.status,
+              stage: mapped?.key ?? t.stage,
+              ...(r.adIds.length ? { adCount: r.adIds.length } : {}),
+              ...(r.campaignId ? { campaignId: r.campaignId } : {}),
+              lionNote: note,
+              noteStreak,
+            });
+          }
         }
       }
       if (updates.size) {
@@ -796,6 +846,20 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     }
   }, [retry]);
 
+  /** Owner-only removal of a TERMINAL row (error/unknown). Order matters: tombstone the id (an
+   *  in-flight shared fetch can't re-add it), drop it from state (heartbeat/poll stop writing it
+   *  — THAT is what breaks the delete→resurrect ping-pong, live 08-12), then delete the Strapi
+   *  row. Done rows are not dismissable — real results stay as the team record. */
+  const dismiss = useCallback((id: string) => {
+    tombstones.current.set(id, Date.now());
+    setTasks((ts) => ts.filter((t) => t.id !== id));
+    inputs.current.delete(id);
+    void fetch(`/api/hs-tasks?taskId=${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      signal: AbortSignal.timeout(20_000),
+    }).catch(() => {});
+  }, []);
+
   // Est. server clock at last fetch — teammates' liveness is judged on it, not the local clock.
   const estServerNow = nowTick + skew;
 
@@ -824,6 +888,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     enqueueSubmitted,
     retry,
     retryAll,
+    dismiss,
   };
 
   return (
@@ -890,7 +955,7 @@ function fmtElapsed(ms: number): string {
 }
 
 function HsTaskManagerPanel() {
-  const { tasks, counts, me, estServerNow, open, setOpen, retry, retryAll } = useHsTaskManager();
+  const { tasks, counts, me, estServerNow, open, setOpen, retry, retryAll, dismiss } = useHsTaskManager();
   const [filter, setFilter] = useState<Filter>("all");
   const [mineOnly, setMineOnly] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -1011,7 +1076,15 @@ function HsTaskManagerPanel() {
           ) : (
             <div className="flex flex-col gap-2">
               {shown.map((t) => (
-                <HsTaskRow key={t.id} task={t} me={me} estServerNow={estServerNow} now={now} onRetry={() => retry(t.id)} />
+                <HsTaskRow
+                  key={t.id}
+                  task={t}
+                  me={me}
+                  estServerNow={estServerNow}
+                  now={now}
+                  onRetry={() => retry(t.id)}
+                  onDismiss={() => dismiss(t.id)}
+                />
               ))}
             </div>
           )}
@@ -1070,12 +1143,14 @@ function HsTaskRow({
   estServerNow,
   now,
   onRetry,
+  onDismiss,
 }: {
   task: HsTask;
   me: string | null;
   estServerNow: number;
   now: number;
   onRetry: () => void;
+  onDismiss: () => void;
 }) {
   const mine = t.local || (!!me && t.owner === me);
   const done = t.status === "done";
@@ -1132,8 +1207,7 @@ function HsTaskRow({
             </span>
           ) : null}
           <span className="font-mono text-[10.5px] tabular-nums text-faint">{fmtElapsed(elapsed)}</span>
-          {/* Retry is own-only (needs the local creative inputs); no Dismiss — errors are a
-              permanent team-visible record (parity with the MO drawer). */}
+          {/* Retry is own-only (needs the local creative inputs). */}
           {error && t.local && !t.lionTaskId ? (
             <button
               type="button"
@@ -1143,6 +1217,20 @@ function HsTaskRow({
               className="tip flex h-6 w-6 items-center justify-center rounded-md text-faint transition-colors hover:bg-raise hover:text-[#9db8ff] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             >
               <RetryIcon className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
+          {/* Dismiss is own-only and TERMINAL-failure-only (error/unknown): wedged-task cleanup.
+              It also breaks the delete→resurrect ping-pong — removing the row from state stops
+              the heartbeat writing it (live 08-12). Done rows stay: results are the team record. */}
+          {(error || unknown) && mine ? (
+            <button
+              type="button"
+              onClick={onDismiss}
+              data-tip="Remove from list"
+              aria-label="Remove from list"
+              className="tip flex h-6 w-6 items-center justify-center rounded-md text-faint transition-colors hover:bg-raise hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              <XIcon className="h-3.5 w-3.5" />
             </button>
           ) : null}
         </div>

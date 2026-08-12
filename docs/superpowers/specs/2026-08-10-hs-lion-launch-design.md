@@ -41,8 +41,13 @@ Key differences from the MO (Indians) flow:
 - **Campaign name is validated server-side**: `[DD/MM] (ACR) API - (REDIR_LABEL) - [CODES] - <text>`;
   ACR must match the token's user; CODES must equal the body's `country_codes` (order-insensitive).
   Redirect labels: `HIGH ADX → #ADX [HIGH]`, `META ADX → #ADX [META]`, `#ADX → #ADX`.
-- Money on write = **integer cents** of the account currency. `LOWEST_COST_WITH_MIN_ROAS` is the
-  exception: bid = ROAS decimal (1.20 = 120%), conversion event forced PURCHASE (weapon parity).
+- Money on write = **integer cents** of the account currency. Bids are **Meta-native and passed
+  to the Graph verbatim** (corrected 2026-08-12 after the 08-10 live failures): cap strategies =
+  integer cents, `LOWEST_COST_WITH_MIN_ROAS` = ROAS floor **× 10000 as an integer** (0.34 →
+  3400 — Meta's `bid_constraints.roas_average_floor`). ~~bid = ROAS decimal~~ was wrong: a
+  decimal wedges the task at CREATING_ADSET ("roas_average_floor … not valid" retry loop);
+  LION's own weapon UI scales the human decimal client-side. Conversion event still forced
+  PURCHASE for MIN_ROAS (weapon parity). Reads stay major/decimal (details 2.45 == metrics 2.45).
 - Dates in `America/Sao_Paulo` — the `[DD/MM]` prefix uses that timezone.
 
 ## Architecture
@@ -54,8 +59,9 @@ Key differences from the MO (Indians) flow:
   small retry on network/5xx. Module-level TTL caches (10 min): profiles list, profile-data per
   slug, pixels per (slug, account). Cache also serves the launch route's bind validation.
 - **`lib/hs-launch.ts`** — pure builders (unit-tested): São Paulo `DD/MM`, name prefix/full name,
-  `WW → ["WORLD"]` mapping, create-payload builder (cents, ROAS decimal, locales pairs,
-  `url_tags:""`), campaign validation (`hsCampaignError`).
+  `WW → ["WORLD"]` mapping, create-payload builder (cents; bids via `hsWireBid` — Meta-native
+  integers, see the contract note above; locales pairs, `url_tags:""`), campaign validation
+  (`hsCampaignError`).
 - **Routes** (all Node runtime, proxy-gated + inline session check):
   - `GET /api/hs/profiles` → `{ok, acr, profiles:[slug…]}`
   - `GET /api/hs/profile-data?slug=` → `{ok, accounts, pages, locales}`
@@ -129,8 +135,8 @@ break the launch. Housekeeping of the Blob store is a follow-up.
 
 ## Testing
 
-1. Unit (tsx): name/prefix builder, payload builder (cents, ROAS decimal, WW→WORLD, locales,
-   category/user_os passthrough), validation matrix.
+1. Unit (tsx): name/prefix builder, payload builder (cents, Meta-native bids — ROAS ×10000 /
+   cap cents, WW→WORLD, locales, category/user_os passthrough), validation matrix.
 2. Mock-LION E2E: local mock server (scratchpad) + dev server with `LION_BASE=http://127.0.0.1:…`;
    minted `adl_session` cookie; full launch + every bind-validation branch + status polling.
 3. Live read-only against real LION: profiles / profile-data / pixels through `/api/hs/*`

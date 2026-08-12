@@ -206,11 +206,9 @@ export type LionDuplicationResult = {
 /**
  * Clone ONE existing LION campaign into the picked binds (playbook-proven flow: duplicate →
  * creation-status → activate). `starting_budget` is integer CENTS of the account currency
- * (write-side convention); the bid is NOT sent — it inherits from the source (a MIN_ROAS
- * source takes a ROAS decimal there, so overriding blindly is a 100× class mistake). LION
- * rebuilds the clone's name itself (re-dated prefix + "(CLONE)" marker) and appends
- * `name_suffix`. Preflight rejections (object-story creatives → "No valid creative URL…")
- * come back in duplication_results with a reason and create NOTHING.
+ * (write-side convention). LION rebuilds the clone's name itself (re-dated prefix + "(CLONE)"
+ * marker) and appends `name_suffix`. Preflight rejections (object-story creatives → "No valid
+ * creative URL…") come back in duplication_results with a reason and create NOTHING.
  */
 export async function lionDuplicate(args: {
   profile_slug: string;
@@ -221,8 +219,11 @@ export async function lionDuplicate(args: {
   starting_budget: number;
   number_of_copies: number;
   name_suffix: string;
-  /** LION-UI semantics ("Roas Goal" money field): a plain number — ROAS decimal for MIN_ROAS
-   *  sources (1,20 = 120%). Omitted = inherit the source's bid (the safe default). */
+  /** META-NATIVE integer, forwarded to the Graph verbatim (same passthrough as create's `bid`,
+   *  see lib/hs-launch hsWireBid): CENTS for cap sources, ROAS floor × 10000 for MIN_ROAS
+   *  sources (0,34 → 3400). A human decimal here wedges the task at CREATING_ADSET (Meta
+   *  "roas_average_floor … not valid" retry loop — live 08-10). Omitted = inherit the source's
+   *  bid (the safe default). */
   starting_bid?: number;
   /** Full clone name (structured prefix + edited tail) — LION's own duplicator UI edits the
    *  whole name, so the field mirrors it; omitted = LION rebuilds the name itself. */
@@ -307,8 +308,9 @@ export type LionSourceInfo = {
   status: string;
   /** MAJOR units (dollars) — LION reads are major, writes are cents (asymmetry, verified live). */
   budget: number | null;
-  /** Ad set bid as LION reports it (number; ROAS decimal for MIN_ROAS sources). Null = none
-   *  (lowest cost) or unknown. */
+  /** Ad set bid as LION reports it — MAJOR/decimal like all LION reads (cap $2.45 reads as
+   *  2.45, verified 08-12 details==metrics; MIN_ROAS goals are the ROAS decimal, e.g. 0.34).
+   *  Null = none (lowest cost) or unknown. */
   bid: number | null;
   /** Campaign-level bid strategy (details/ carries it) — names the empty-bid case. */
   bidStrategy: string;
@@ -379,6 +381,25 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
     }
   }
   return rows;
+}
+
+/** The one fact the duplicate route needs about a source before scaling a bid override: its
+ *  bid strategy (campaign-level, details/ carries it). "" = source unreadable right now
+ *  ("Campaign data not found" — known LION lag on fresh campaigns). Uncached: one submit-time
+ *  read, and a stale answer here would mis-scale a bid 100×/10000×. */
+export async function lionBidStrategy(campaignId: string): Promise<string> {
+  try {
+    const body = (await lionPost("/api/facebook/campaigns/details/", {
+      campaign_ids: [campaignId],
+    })) as Record<string, unknown> | null;
+    const rows = Array.isArray(body?.campaignsData)
+      ? (body!.campaignsData as Array<{ campaign_id?: string | number; bid_strategy?: string }>)
+      : [];
+    const row = rows.find((r) => String(r.campaign_id ?? "") === campaignId);
+    return String(row?.bid_strategy ?? "");
+  } catch {
+    return "";
+  }
 }
 
 export type LionTaskStatus = {
