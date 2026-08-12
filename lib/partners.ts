@@ -82,6 +82,7 @@ const MKLEARN_LANDINGS: Landing[] = [
   { slug: "veneers-implants-abroad", title: "Veneers & Implants Abroad", lang: "EN", niche: "Dental" },
   { slug: "flew-abroad-for-new-teeth", title: "Flew Abroad for New Teeth", lang: "EN", niche: "Dental" },
   { slug: "world-capital-of-cheap-dentistry", title: "World Capital of Cheap Dentistry", lang: "EN", niche: "Dental" },
+  { slug: "paid-to-film-your-cleaning", title: "Paid to Film Your Cleaning", lang: "EN", niche: "Side Gigs" },
 ];
 
 // Indians defaults: the token sees the ACTIVE GC-Magicoffers-BR-* accounts — the ACCOUNT is
