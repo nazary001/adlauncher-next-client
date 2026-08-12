@@ -332,11 +332,15 @@ export async function POST(req: Request) {
           if (!ad.id) throw new FbError("ad create returned no id", ad);
           created.ad_id = String(ad.id);
 
-          await backfillGcm(claim.documentId, {
-            campaign_id: created.campaign_id,
-            adset_id: created.adset_id,
-            ad_id: created.ad_id,
-          });
+          await backfillGcm(
+            claim.documentId,
+            {
+              campaign_id: created.campaign_id,
+              adset_id: created.adset_id,
+              ad_id: created.ad_id,
+            },
+            claim.gcm,
+          );
 
           ok++;
           settled = true;
@@ -360,14 +364,18 @@ export async function POST(req: Request) {
             if (created.campaign_id)
               // "retired" — the registry's status enum is active|retired; "failed" is rejected by
               // Strapi (the whole PUT 400s and backfillGcm swallows it, losing the note AND the ids).
-              await backfillGcm(claim.documentId, {
-                status: "retired",
-                notes: `clone failed: ${err.message}`,
-                // Record what DID get created so the orphaned PAUSED campaign is traceable by code.
-                campaign_id: created.campaign_id,
-                ...(created.adset_id ? { adset_id: created.adset_id } : {}),
-              });
-            else await deleteGcm(claim.documentId);
+              await backfillGcm(
+                claim.documentId,
+                {
+                  status: "retired",
+                  notes: `clone failed: ${err.message}`,
+                  // Record what DID get created so the orphaned PAUSED campaign is traceable by code.
+                  campaign_id: created.campaign_id,
+                  ...(created.adset_id ? { adset_id: created.adset_id } : {}),
+                },
+                claim.gcm,
+              );
+            else await deleteGcm(claim.documentId, claim.gcm);
           }
           settled = true;
           tw.write({

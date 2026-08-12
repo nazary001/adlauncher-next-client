@@ -68,11 +68,93 @@ async function wonClaim(gcm: string, documentId: string): Promise<boolean> {
   }
 }
 
+// ---- binding ledger (gcm-binding-logs) ------------------------------------------------------
+// Append-only epoch history: one row per campaign that held a code, bound_at..released_at
+// (null = current holder). hs-tools reads it to attribute per-day revenue across code reuse
+// (spec: MKLearn docs/superpowers/specs/2026-08-12-gcm-recycle-ledger-design.md). Every write
+// here is BEST-EFFORT — the ledger is bookkeeping, a hiccup must never break a launch.
+
+/** Binding facts the ledger mirrors; the registry-only `status` field must never reach it
+ *  (Strapi rejects unknown attributes with a 400 for the WHOLE PUT). */
+const LEDGER_FIELDS = new Set([
+  "campaign_id",
+  "adset_id",
+  "ad_id",
+  "campaign_name",
+  "landing",
+  "notes",
+]);
+
+/** Open a fresh epoch for a just-won claim. */
+async function ledgerOpen(gcm: string, meta: Json): Promise<void> {
+  try {
+    await fetch(`${STRAPI}/api/gcm-binding-logs`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${STRAPI_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        data: {
+          gcm,
+          bound_at: new Date().toISOString(),
+          reason: "claim",
+          campaign_name: (meta.campaign_name as string | null) ?? null,
+          landing: (meta.landing as string | null) ?? null,
+        },
+      }),
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** documentId of the code's OPEN epoch (released_at null), newest first, or null. */
+async function ledgerOpenRow(gcm: string): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `${STRAPI}/api/gcm-binding-logs?filters[gcm][$eq]=${gcm}&filters[released_at][$null]=true` +
+        `&sort=createdAt:desc&pagination[pageSize]=1&fields[0]=gcm`,
+      { headers: { Authorization: `Bearer ${STRAPI_TOKEN}` }, cache: "no-store" },
+    );
+    if (!res.ok) return null;
+    const body = (await res.json().catch(() => ({}))) as {
+      data?: Array<{ documentId?: string }>;
+    };
+    return body?.data?.[0]?.documentId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Mirror binding facts (FB ids / failure notes) into the code's open epoch. */
+async function ledgerPatch(gcm: string, patch: Json): Promise<void> {
+  const data: Json = {};
+  for (const [k, v] of Object.entries(patch)) if (LEDGER_FIELDS.has(k)) data[k] = v;
+  if (Object.keys(data).length === 0) return;
+  const doc = await ledgerOpenRow(gcm);
+  if (!doc) return;
+  await fetch(`${STRAPI}/api/gcm-binding-logs/${doc}`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${STRAPI_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ data }),
+  }).catch(() => {});
+}
+
+/** Drop the open epoch — a claim that failed before ANY FB resource existed never carried
+ *  traffic, so it is noise, not history. */
+async function ledgerDrop(gcm: string): Promise<void> {
+  const doc = await ledgerOpenRow(gcm);
+  if (!doc) return;
+  await fetch(`${STRAPI}/api/gcm-binding-logs/${doc}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${STRAPI_TOKEN}` },
+  }).catch(() => {});
+}
+
 /**
  * Reserve a gcm code (01–200: 2-digit padded below 100, plain 3-digit above — the buy-link contract
  * gcm=N accepts 1..200 since 2026-08-10). Tries `desired`, then walks to the next free code on a
  * unique-violation OR a lost concurrent race. Returns the code claimed + the Strapi documentId
- * (for later id back-fill / release). Race-safe (see wonClaim).
+ * (for later id back-fill / release). Race-safe (see wonClaim). A won claim also opens the code's
+ * ledger epoch (bound_at = now) for per-day revenue attribution.
  */
 export async function claimGcm(
   desired: string,
@@ -88,14 +170,26 @@ export async function claimGcm(
     const res = await fetch(`${STRAPI}/api/gcm-maps`, {
       method: "POST",
       headers: { Authorization: `Bearer ${STRAPI_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ data: { gcm, platform: "facebook", status: "active", ...meta } }),
+      body: JSON.stringify({
+        data: {
+          gcm,
+          platform: "facebook",
+          status: "active",
+          bound_at: new Date().toISOString(),
+          ...meta,
+        },
+      }),
     });
     if (res.ok) {
       const body = await res.json().catch(() => ({}));
       const documentId: string | null = body?.data?.documentId ?? null;
       // Can't verify without a documentId → keep it (best-effort, pre-fix behaviour).
-      if (!documentId || (await wonClaim(gcm, documentId))) return { gcm, documentId };
+      if (!documentId || (await wonClaim(gcm, documentId))) {
+        await ledgerOpen(gcm, meta);
+        return { gcm, documentId };
+      }
       // Lost a concurrent race for this code → release our loser row and try the next candidate.
+      // (No ledger row exists for the loser — ledgerOpen only runs after a confirmed win.)
       await deleteGcm(documentId);
       continue;
     }
@@ -108,19 +202,25 @@ export async function claimGcm(
   throw new Error(`gcm pool exhausted — no free code 01–${GCM_POOL_MAX}`);
 }
 
-export async function backfillGcm(documentId: string | null, patch: Json): Promise<void> {
-  if (!documentId) return;
-  await fetch(`${STRAPI}/api/gcm-maps/${documentId}`, {
-    method: "PUT",
-    headers: { Authorization: `Bearer ${STRAPI_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ data: patch }),
-  }).catch(() => {});
+/** Patch the registry row; when `gcm` is given, mirror the binding facts into its open ledger
+ *  epoch too (FB ids after a create, failure notes on a kept-retired row). */
+export async function backfillGcm(documentId: string | null, patch: Json, gcm?: string): Promise<void> {
+  if (documentId) {
+    await fetch(`${STRAPI}/api/gcm-maps/${documentId}`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${STRAPI_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ data: patch }),
+    }).catch(() => {});
+  }
+  if (gcm) await ledgerPatch(gcm, patch);
 }
 
-/** Release a claimed code (delete the row) when a clone fails before any FB resource is created. */
-export async function deleteGcm(documentId: string): Promise<void> {
+/** Release a claimed code (delete the row) when a launch/clone fails before any FB resource is
+ *  created. Pass `gcm` to also drop the code's open ledger epoch (never-carried-traffic noise). */
+export async function deleteGcm(documentId: string, gcm?: string): Promise<void> {
   await fetch(`${STRAPI}/api/gcm-maps/${documentId}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${STRAPI_TOKEN}` },
   }).catch(() => {});
+  if (gcm) await ledgerDrop(gcm);
 }
