@@ -167,10 +167,14 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     return () => window.removeEventListener("focus", onFocus);
   }, [refreshGcm]);
 
-  // Fold every code an actually-completed launch claimed back into the reserved set. The server is
-  // the source of truth for the real code (it may differ from the optimistic preview if the mount
-  // snapshot was stale), so later batches never re-preview a code already taken this session. Stays
-  // null while the registry hasn't loaded (→ keep assigning nothing).
+  // Fold the codes of launches completed SINCE the last registry snapshot back into the reserved
+  // set — the registry fetch is throttled (15s), so a wave finishing between refreshes must not
+  // re-preview its own codes. ONLY post-snapshot completions count: older done tasks are already
+  // reflected in the registry — and since codes are recyclable (released codes return to the pool,
+  // 08-12), re-reserving every historical done task's code would phantom-fill the pool (live bug:
+  // 86 taken in the registry, banner claimed 196 — the shared Task Manager's history re-added 110
+  // long-released codes). The registry snapshot stays the source of truth; stays null while it
+  // hasn't loaded (→ keep assigning nothing).
   useEffect(() => {
     // Safe setState-in-effect: the functional updater returns the SAME reference when nothing new is
     // added, so it never re-renders (let alone cascades); it only grows `reserved` when a launch
@@ -180,7 +184,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       if (!prev) return prev;
       let set: Set<string> | null = null;
       for (const t of tasks) {
-        const g = t.status === "done" ? t.result?.gcm : undefined;
+        const fresh = t.status === "done" && (t.finishedAt ?? 0) > lastGcmFetch.current;
+        const g = fresh ? t.result?.gcm : undefined;
         if (g && !prev.has(g)) {
           set = set ?? new Set(prev);
           set.add(g);
