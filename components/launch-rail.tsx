@@ -13,6 +13,7 @@ export function LaunchRail({
   hsAcr,
   previewed,
   justQueued,
+  poolFree,
   onJump,
   onPreview,
   onLaunch,
@@ -24,6 +25,8 @@ export function LaunchRail({
   previewed: boolean;
   /** Count just sent to the Task Manager — shows a brief confirmation; campaigns stay on the board. */
   justQueued: number;
+  /** Free gcm codes left in the registry pool (null while loading). 0 → launching hard-blocked. */
+  poolFree?: number | null;
   /** Jump the page to a campaign card and focus-pulse it. */
   onJump: (id: string) => void;
   onPreview: () => void;
@@ -33,6 +36,9 @@ export function LaunchRail({
   const opts = launchReadyOpts(partner);
   const readyCount = campaigns.filter((c) => isLaunchable(c, opts)).length;
   const allReady = campaigns.length > 0 && readyCount === campaigns.length;
+  // Registry pool exhausted → the button locks even for cards holding stale code previews: with
+  // every code row taken, their claims can only fail server-side (claimGcm walks 400s then throws).
+  const gcmBlocked = Boolean(partner.usesGcm) && poolFree === 0;
   const ddmm = partner.lionLaunch ? todaySaoPauloDDMM() : "";
   const nameOf = (c: Campaign) =>
     partner.lionLaunch ? (c.name.trim() ? hsFullName(c, hsAcr ?? "", ddmm) : "") : fullName(c);
@@ -171,7 +177,7 @@ export function LaunchRail({
             <button
               type="button"
               onClick={onLaunch}
-              disabled={readyCount === 0}
+              disabled={readyCount === 0 || gcmBlocked}
               className={
                 "animate-pop-in group flex h-11 w-full items-center justify-center gap-2 rounded-xl " +
                 "bg-gradient-to-b from-launch2 to-launch text-[13.5px] font-bold text-[#032e20] " +
@@ -186,7 +192,11 @@ export function LaunchRail({
             </button>
           ) : null}
 
-          {justQueued > 0 ? (
+          {gcmBlocked ? (
+            <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">
+              No free gcm codes left — launching is blocked until codes are freed in the registry.
+            </p>
+          ) : justQueued > 0 ? (
             <p className="animate-pop-in text-center text-[11px] font-medium leading-relaxed text-launch2">
               ✓ {justQueued} sent to Task Manager · still here to tweak &amp; relaunch
             </p>

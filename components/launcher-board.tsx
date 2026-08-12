@@ -33,6 +33,10 @@ function todayDDMM(): string {
   return `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
+/** Free-pool warning threshold: at or below this many free gcm codes the board shows the early
+ *  amber banner, so designers know BEFORE building a wave that it may not fit. 0 = hard block. */
+const GCM_LOW_WATER = 15;
+
 /** gcm auto-claim (skipping registry-reserved codes) + single account/pixel/fanpage pinning. */
 function normalize(rows: Campaign[], partner: PartnerConfig, reserved: Set<string> | null): Campaign[] {
   const withGcm = partner.usesGcm ? assignGcmCodes(rows, reserved) : rows;
@@ -101,6 +105,11 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   const nextId = useRef(2);
   const partner = partnerConfig(partnerId);
   const anyExpanded = campaigns.some((c) => !c.collapsed);
+  // Free codes left in the 01–200 registry pool (null until the registry loads). `reserved` is the
+  // live used-set — refreshed on focus and grown by completed launches — so this count updates
+  // without extra requests. Drives the exhaustion banner and the Launch hard-block below.
+  const poolFree = reserved ? Math.max(0, GCM_POOL_MAX - reserved.size) : null;
+  const gcmExhausted = Boolean(partner.usesGcm) && poolFree === 0;
   // Token fanpages for the per-card fanka picker (Indians), each with its live N/limit fill tag.
   const fanpages = useFanpages(Boolean(partner.fanpagesFromToken), partner.pageAdLimit ?? 250);
   // Token ad accounts (with their pixels) for the account/pixel pickers.
@@ -185,6 +194,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
    *  instantly, then flies off the board so you can keep building. The queue creates them one by
    *  one (ACTIVE since 08-11) in the background. */
   function launch() {
+    // Pool exhausted → nothing may launch: stale card previews would only burn failed claims
+    // (the rail button is disabled too; claimGcm server-side is the last-resort guard).
+    if (gcmExhausted) return;
     const opts = launchReadyOpts(partner);
     const launchable = campaigns.filter((c) => isLaunchable(c, opts));
     if (launchable.length === 0) return;
@@ -360,6 +372,32 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     <>
       <Header partner={partnerId} onPartnerChange={changePartner} user={user} />
       <main className="flex-1">
+        {/* Free-pool alert, first thing on the board: designers must see BEFORE building cards
+            that launches are (about to be) blocked. Red = pool exhausted (Launch disabled),
+            amber = running low. gcm partners only; hidden until the registry loads. */}
+        {partner.usesGcm && poolFree !== null && poolFree <= GCM_LOW_WATER ? (
+          <div className="mx-auto w-full max-w-[1440px] px-4 pt-4 sm:px-6">
+            <div
+              role="alert"
+              className={
+                "flex items-center gap-3 rounded-xl border px-4 py-3 text-[13px] font-semibold " +
+                (poolFree === 0
+                  ? "border-danger/45 bg-danger/10 text-danger"
+                  : "border-warn/40 bg-warn/10 text-warn")
+              }
+            >
+              <span
+                className={
+                  "h-2 w-2 shrink-0 animate-pulse rounded-full " +
+                  (poolFree === 0 ? "bg-danger" : "bg-warn")
+                }
+              />
+              {poolFree === 0
+                ? `No free gcm codes left — all ${GCM_POOL_MAX} are in use. Launching is blocked until codes are freed in the registry.`
+                : `Only ${poolFree} free gcm code${poolFree === 1 ? "" : "s"} left of ${GCM_POOL_MAX} — a bigger wave won't fit.`}
+            </div>
+          </div>
+        ) : null}
         <div className="mx-auto grid w-full max-w-[1440px] items-start gap-6 px-4 pb-24 pt-6 sm:px-6 lg:grid-cols-[minmax(0,1fr)_330px]">
           <section className="flex min-w-0 flex-col gap-4">
             <div className="flex flex-wrap items-center gap-2">
@@ -477,6 +515,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
             hsAcr={hs.acr}
             previewed={previewed}
             justQueued={justQueued}
+            poolFree={poolFree}
             onJump={jumpTo}
             onPreview={() => setPreviewed(true)}
             onLaunch={launch}
