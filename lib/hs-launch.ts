@@ -2,6 +2,7 @@
 // route, so the name/payload the buyer sees is byte-identical to what LION receives. No env, no IO.
 
 import { type Campaign, bidKind, parseMoney } from "./types";
+import type { LinkSegment } from "./partners";
 
 /** LION validates the `(REDIR_LABEL)` name segment against redirect_type with this exact map. */
 export const HS_REDIRECT_LABELS: Record<string, string> = {
@@ -9,6 +10,34 @@ export const HS_REDIRECT_LABELS: Record<string, string> = {
   "META ADX": "#ADX [META]",
   "#ADX": "#ADX",
 };
+
+/**
+ * Destination-link builder for HS creates (mirrors MO's segments→join one-truth pattern): the
+ * pasted landing gets the team's tracking tail appended — `utm_source=facebook`, the
+ * `{{campaign.id}}` Meta URL macro (Facebook substitutes it at click time, braces must stay
+ * RAW), `mb=<acr>` and `pixel=<the picked pixel>`. LION passes the link to Meta verbatim (its
+ * docs' "url_tags auto-build" lives only in the weapon UI — verified live 08-13). A base that
+ * already carries `utm_source=` is treated as fully built and goes out untouched, so pasting an
+ * old campaign's complete link can't double-append the tail.
+ */
+export function hsLinkSegments(baseRaw: string, pixelId: string, acr: string): LinkSegment[] {
+  const base = baseRaw.trim();
+  if (!base) return [];
+  if (/[?&]utm_source=/.test(base)) return [{ text: base, role: "slug" }];
+  const sep = base.includes("?") ? "&" : "?";
+  return [
+    { text: base, role: "slug" },
+    { text: `${sep}utm_source=facebook&utm_campaign={{campaign.id}}&mb=${(acr || "GLO-01").toLowerCase()}`, role: "params" },
+    { text: `&pixel=${pixelId}`, role: "pixel" },
+  ];
+}
+
+/** Full ad link = the segments joined — what the launch payload sends and Copy copies. */
+export function hsFinalLink(base: string, pixelId: string, acr: string): string {
+  return hsLinkSegments(base, pixelId, acr)
+    .map((s) => s.text)
+    .join("");
+}
 
 /** The board's WW pseudo-code → LION's `"WORLD"` sentinel; ISO codes pass through. */
 export function hsCountryCodes(countries: string[]): string[] {
@@ -122,7 +151,9 @@ export function hsCreatePayload(
     title: c.title.trim(),
     copy: c.copy.trim(),
     cta: c.cta,
-    link: c.link.trim(),
+    // The wire link is BUILT here, never pasted raw: base landing + tracking tail + the card's
+    // pixel (same segments the card previews — one source of truth).
+    link: hsFinalLink(c.link, c.pixel, acr),
     daily_budget: Math.round(parseMoney(c.budget) * 100),
     ...(wireBid != null ? { bid: wireBid } : {}),
     bid_strategy: c.bidStrategy,

@@ -25,7 +25,7 @@ import {
   pagesFor,
   pixelsFor,
 } from "@/lib/catalog";
-import { hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
+import { hsFinalLink, hsLinkSegments, hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { type LinkRole, type PartnerConfig, ROAS_PIXEL, fullLandingUrl, landingUrlSegments, launchReadyOpts } from "@/lib/partners";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
@@ -175,6 +175,46 @@ function LockedField({ value, hint, mono }: { value: string; hint?: string; mono
   );
 }
 
+/** The tracking-link preview's Copy control — one look for the MO and HS builders. */
+function CopyLinkButton({
+  copied,
+  disabled,
+  title,
+  onClick,
+}: {
+  copied: boolean;
+  disabled: boolean;
+  title?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={disabled ? title : undefined}
+      aria-label={copied ? "Link copied to clipboard" : "Copy link to clipboard"}
+      className={
+        "group inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-semibold " +
+        "transition-all duration-200 active:scale-[0.94] focus-visible:outline-none " +
+        "focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40 " +
+        (copied
+          ? "animate-copy-flash border-launch/40 bg-launch/15 text-launch2"
+          : "border-line2 bg-raise text-dim hover:border-accent/50 hover:bg-accent/10 hover:text-ink")
+      }
+    >
+      <span className="relative inline-flex h-3.5 w-3.5 items-center justify-center">
+        {copied ? (
+          <CheckIcon key="copied" className="animate-check h-3.5 w-3.5" />
+        ) : (
+          <CopyIcon className="h-3.5 w-3.5 transition-transform duration-200 group-hover:-translate-y-px group-active:scale-90" />
+        )}
+      </span>
+      <span className="w-12 text-left">{copied ? "Copied" : "Copy"}</span>
+    </button>
+  );
+}
+
 export function CampaignCard({
   campaign: c,
   index,
@@ -286,12 +326,19 @@ export function CampaignCard({
     tagTone: l.lang === "ES" ? ("ok" as const) : ("dim" as const),
   }));
   const conversions = c.optimization === "conversions";
-  const derivedLink = fullLandingUrl(partner, c.landing, c.gcm, conversions, c.pixel);
+  // HS derives its link from the pasted base + tracking tail + picked pixel; MO from the landing
+  // catalog. Either way this string is exactly what launches (and what Copy copies).
+  const derivedLink = hsMode
+    ? isHttpUrl(c.link)
+      ? hsFinalLink(c.link, c.pixel, hs?.acr ?? "")
+      : ""
+    : fullLandingUrl(partner, c.landing, c.gcm, conversions, c.pixel);
 
   // Copy is offered only once the link is COMPLETE — for gcm partners that means a claimed code, so
   // the button never yields a "?gcm=" link with an empty code (which is also why the preview shows a
   // "…" placeholder until the code lands: preview and Copy now agree — nothing to copy until ready).
-  const linkCopyable = Boolean(derivedLink) && (!partner.usesGcm || Boolean(c.gcm));
+  // HS: same contract — no copy until the pixel is picked (the tail ends in pixel=<id>).
+  const linkCopyable = Boolean(derivedLink) && (hsMode ? Boolean(c.pixel) : !partner.usesGcm || Boolean(c.gcm));
   function copyLink() {
     if (!linkCopyable) return;
     navigator.clipboard?.writeText(derivedLink);
@@ -826,30 +873,12 @@ export function CampaignCard({
                                 <span className="select-none font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
                                   Tracking link
                                 </span>
-                                <button
-                                  type="button"
-                                  onClick={copyLink}
+                                <CopyLinkButton
+                                  copied={copied}
                                   disabled={!linkCopyable}
-                                  title={linkCopyable ? undefined : "Waiting for a gcm code…"}
-                                  aria-label={copied ? "Link copied to clipboard" : "Copy link to clipboard"}
-                                  className={
-                                    "group inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-semibold " +
-                                    "transition-all duration-200 active:scale-[0.94] focus-visible:outline-none " +
-                                    "focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40 " +
-                                    (copied
-                                      ? "animate-copy-flash border-launch/40 bg-launch/15 text-launch2"
-                                      : "border-line2 bg-raise text-dim hover:border-accent/50 hover:bg-accent/10 hover:text-ink")
-                                  }
-                                >
-                                  <span className="relative inline-flex h-3.5 w-3.5 items-center justify-center">
-                                    {copied ? (
-                                      <CheckIcon key="copied" className="animate-check h-3.5 w-3.5" />
-                                    ) : (
-                                      <CopyIcon className="h-3.5 w-3.5 transition-transform duration-200 group-hover:-translate-y-px group-active:scale-90" />
-                                    )}
-                                  </span>
-                                  <span className="w-12 text-left">{copied ? "Copied" : "Copy"}</span>
-                                </button>
+                                  title="Waiting for a gcm code…"
+                                  onClick={copyLink}
+                                />
                               </div>
                             </>
                           ) : (
@@ -863,16 +892,42 @@ export function CampaignCard({
                   ) : (
                     <Field
                       label="Destination link"
-                      hint={hsMode ? "LION appends its tracking (url_tags) from the redirect type" : undefined}
+                      hint={hsMode ? "paste the bare landing — tracking + the picked pixel are appended" : undefined}
                       error={hsMode && c.link.trim() !== "" && !isHttpUrl(c.link) ? "Must be an http(s) URL" : undefined}
                     >
-                      <TextInput
-                        value={c.link}
-                        onChange={(e) => patch({ link: e.target.value })}
-                        maxLength={2000}
-                        placeholder="https://…"
-                        className="font-mono text-[12px]"
-                      />
+                      <div>
+                        <TextInput
+                          value={c.link}
+                          onChange={(e) => patch({ link: e.target.value })}
+                          maxLength={2000}
+                          placeholder="https://…"
+                          className="font-mono text-[12px]"
+                        />
+                        {/* HS link builder preview — the EXACT link the launch will send (same
+                            segments the payload joins); pixel slot mirrors the Pixel field live. */}
+                        {hsMode && isHttpUrl(c.link) ? (
+                          <div className="mt-2 overflow-hidden rounded-lg border border-line bg-surface2/50">
+                            <div className="max-h-24 select-all overflow-y-auto break-all px-3 py-2 font-mono text-[11px] leading-relaxed">
+                              {hsLinkSegments(c.link, c.pixel || "…", hs?.acr ?? "").map((seg, i) => (
+                                <span key={i} className={LINK_ROLE_CLASS[seg.role]}>
+                                  {seg.text}
+                                </span>
+                              ))}
+                            </div>
+                            <div className="flex items-center justify-between gap-2 border-t border-line bg-surface/50 px-2 py-1.5">
+                              <span className="select-none font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
+                                Final launch link
+                              </span>
+                              <CopyLinkButton
+                                copied={copied}
+                                disabled={!linkCopyable}
+                                title="Pick a pixel first"
+                                onClick={copyLink}
+                              />
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
                     </Field>
                   )}
                   {!hsMode ? (
