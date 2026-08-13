@@ -43,15 +43,21 @@ export function pickTaskFields(body: Record<string, unknown>): TaskRowData {
 
 export async function findTaskRow(
   taskId: string,
-): Promise<{ documentId: string; owner: string | null } | null> {
+): Promise<{ documentId: string; owner: string | null; status: string | null } | null> {
   const res = await fetch(
-    `${STRAPI}/api/launch-tasks?filters[task_id][$eq]=${encodeURIComponent(taskId)}&fields[0]=task_id&fields[1]=owner&pagination[pageSize]=1`,
+    `${STRAPI}/api/launch-tasks?filters[task_id][$eq]=${encodeURIComponent(taskId)}&fields[0]=task_id&fields[1]=owner&fields[2]=status&pagination[pageSize]=1`,
     { headers: H(), cache: "no-store" },
   );
   if (!res.ok) return null;
   const body = await res.json().catch(() => ({}));
   const row = body?.data?.[0];
-  return row?.documentId ? { documentId: row.documentId, owner: row.owner ? String(row.owner) : null } : null;
+  return row?.documentId
+    ? {
+        documentId: row.documentId,
+        owner: row.owner ? String(row.owner) : null,
+        status: row.status ? String(row.status) : null,
+      }
+    : null;
 }
 
 export type UpsertResult = { ok: true } | { ok: false; reason: "forbidden" | "store" | "not_configured"; detail?: string };

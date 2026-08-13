@@ -110,8 +110,14 @@ export async function POST(req: Request) {
     const results = await Promise.all(
       items.slice(i, i + 8).map(async (item) => {
         const fields = pickTaskFields(item);
-        if (failureStates.has(String(fields.status ?? "")) && !(await findTaskRow(String(item.task_id)))) {
-          return { ok: true as const };
+        const incoming = String(fields.status ?? "");
+        if (incoming !== "done") {
+          const existing = await findTaskRow(String(item.task_id));
+          if (!existing && failureStates.has(incoming)) return { ok: true as const };
+          // done is TERMINAL: a stale tab's heartbeat, 60-min cap or late error must never
+          // demote a row that already recorded the real completion (live 08-13: tasks the
+          // buyer saw finish were re-written to "Still not finished after 60 min").
+          if (existing?.status === "done") return { ok: true as const };
         }
         // partner:"br" is forced here — the wire never sets it, so an MO row can't masquerade as HS.
         return upsertTaskRow(user, String(item.task_id), { ...fields, partner: HS_PARTNER });

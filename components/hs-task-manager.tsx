@@ -124,6 +124,12 @@ const POLL_CLOSED_MS = 20_000;
 const NOT_FOUND_GRACE_MS = 3 * 60_000;
 // A task still not terminal after this long stops polling and asks the buyer to check LION.
 const PENDING_CAP_MS = 60 * 60_000;
+// Reality-check window: once a pending task knows its campaignId, the poll periodically reads
+// the campaign ITSELF (details/) — LION's task record is not a reliable finish signal (live
+// 08-13: WORLD-create beneficiary retries kept records "creating" for 45+ min / forever while
+// the ads were live within minutes, and finished records prune to NOT_FOUND).
+const VERIFY_AFTER_MS = 90_000;
+const VERIFY_EVERY_MS = 40_000;
 // Shared-view cadence: pull the team's HS rows continuously so the drawer is truthful even for
 // tasks I didn't start. Ids just deleted are ignored in merges briefly so an in-flight fetch
 // can't resurrect them. An owner counts as live while any of their rows was written < STALE_MS ago.
@@ -287,6 +293,9 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
   const loadedRef = useRef(false);
   const lastPollRef = useRef(0);
   const pollBusyRef = useRef(false);
+  // Last time a poll piggybacked the campaign reality check (details/ is heavier than
+  // creation-status — one throttled batch, not every 8s tick).
+  const verifyAtRef = useRef(0);
   // Shared-store sync: static fields per task, per-task save chains, tombstones for just-fired
   // deletes, last shared fetch time, server-clock skew for stale detection.
   const meta = useRef(new Map<string, Record<string, unknown>>());
@@ -595,12 +604,28 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     const pending = tasksRef.current.filter((t) => mine(t) && t.status === "submitted" && t.lionTaskId);
     if (pending.length === 0) return;
     const pendingById = new Map(pending.map((t) => [t.lionTaskId as string, t]));
+    // Campaign-known tasks past the verify window get their campaign read directly this round
+    // (throttled — details/ is heavier than creation-status); NOT_FOUND records verify every
+    // round: the record is gone, reality is the only signal left.
+    const dueForVerify = now - verifyAtRef.current > VERIFY_EVERY_MS;
+    const verifyIds = [
+      ...new Set(
+        pending
+          .filter((t) => t.campaignId && t.submittedAt && now - t.submittedAt > VERIFY_AFTER_MS)
+          .filter((t) => dueForVerify || t.lionStatus === "NOT_FOUND")
+          .map((t) => t.campaignId as string),
+      ),
+    ];
+    if (verifyIds.length && dueForVerify) verifyAtRef.current = now;
     pollBusyRef.current = true;
     try {
       const res = await fetch("/api/hs/status", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskIds: [...new Set(pending.map((t) => t.lionTaskId as string))] }),
+        body: JSON.stringify({
+          taskIds: [...new Set(pending.map((t) => t.lionTaskId as string))],
+          ...(verifyIds.length ? { verifyCampaignIds: verifyIds } : {}),
+        }),
         // Unbounded fetches freeze the whole poller: the busy latch above only reopens in the
         // `finally`, which a hung request never reaches. 20s >> the route's LION reads.
         signal: AbortSignal.timeout(20_000),
@@ -608,6 +633,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       const d = (await res.json().catch(() => null)) as
         | {
             ok?: boolean;
+            campaigns?: Record<string, { status: string; adsCount: number }>;
             tasks?: {
               taskId: string;
               status: string;
@@ -621,14 +647,11 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       if (!d?.ok || !Array.isArray(d.tasks)) return;
       const byLionId = new Map(d.tasks.map((t) => [t.taskId, t]));
       // Duplicate clones are born PAUSED (birth status unpredictable — playbook) → activate the
-      // moment a duplicate task COMPLETEs. Once per task; a failed flip is a note, not a failure.
-      for (const r of d.tasks) {
-        const t = pendingById.get(r.taskId);
-        if (!t || t.kind !== "duplicate") continue;
-        if (r.status !== "COMPLETED" || !r.campaignId || activatedRef.current.has(t.id)) continue;
-        activatedRef.current.add(t.id);
-        const campaignId = r.campaignId;
-        const taskId = t.id;
+      // moment a duplicate finishes, whether the task record said so or the reality check did.
+      // Once per task; a failed flip is a note, not a failure.
+      const activateDuplicate = (taskId: string, campaignId: string) => {
+        if (activatedRef.current.has(taskId)) return;
+        activatedRef.current.add(taskId);
         void fetch("/api/hs/activate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -644,12 +667,35 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
             }
           })
           .catch(() => patch(taskId, { lionNote: "activation failed — flip it ACTIVE in LION" }));
+      };
+      for (const r of d.tasks) {
+        const t = pendingById.get(r.taskId);
+        if (!t || t.kind !== "duplicate") continue;
+        if (r.status !== "COMPLETED" || !r.campaignId) continue;
+        activateDuplicate(t.id, r.campaignId);
       }
       // Compute each pending task's new fields once, apply to state, then persist MY updates.
       const updates = new Map<string, Partial<HsTask>>();
       for (const t of pending) {
         const r = byLionId.get(t.lionTaskId as string);
         if (!r) continue;
+        // Reality wins over the task record: the campaign exists and carries ads → the launch
+        // happened, however wedged (beneficiary retry loop) or pruned (NOT_FOUND) the record is.
+        // Same done shape as the COMPLETED branch below.
+        const camp = t.campaignId ? d.campaigns?.[t.campaignId] : undefined;
+        if (r.status !== "COMPLETED" && camp && camp.adsCount > 0) {
+          if (t.kind === "duplicate") activateDuplicate(t.id, t.campaignId as string);
+          updates.set(t.id, {
+            status: "done",
+            stage: "ads",
+            lionStatus: "COMPLETED",
+            lionNote: undefined,
+            noteStreak: 0,
+            adCount: camp.adsCount,
+            finishedAt: Date.now(),
+          });
+          continue;
+        }
         if (r.status === "COMPLETED") {
           updates.set(t.id, {
             status: "done",
@@ -669,15 +715,19 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
             finishedAt: Date.now(),
           });
         } else if (r.status === "NOT_FOUND") {
-          if (t.submittedAt && Date.now() - t.submittedAt > NOT_FOUND_GRACE_MS) {
+          // A known campaignId means LION accepted the shot and built the campaign — its pruned
+          // record is not a failure. The reality check above settles it (details/ lags on fresh
+          // campaigns), the 60-min cap backstops. Only never-got-anywhere tasks error here.
+          if (!t.campaignId && t.submittedAt && Date.now() - t.submittedAt > NOT_FOUND_GRACE_MS) {
             updates.set(t.id, {
               status: "error",
               lionStatus: r.status,
               error: "LION does not know this task (NOT_FOUND)",
               finishedAt: Date.now(),
             });
+          } else if (t.lionStatus !== r.status) {
+            updates.set(t.id, { lionStatus: r.status }); // remember NOT_FOUND → verify every round
           }
-          // else: replication lag right after submit — keep waiting, no change
         } else {
           const mapped = LION_STAGE[r.status];
           const note = r.error ? humaniseLionNote(r.error) : undefined;

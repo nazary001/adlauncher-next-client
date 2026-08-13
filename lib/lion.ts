@@ -455,3 +455,33 @@ export async function lionCreationStatus(taskIds: string[]): Promise<LionTaskSta
   })) as Record<string, unknown> | null;
   return Array.isArray(body?.tasks) ? (body!.tasks as LionTaskStatus[]) : [];
 }
+
+export type LionCampaignReality = { status: string; adsCount: number };
+
+/** Reality check behind the task manager's poll: does the campaign itself exist and carry ads?
+ *  LION's creation-status record is NOT a reliable proxy for that — on WORLD creates its
+ *  beneficiary retry loop keeps the record "creating" for 45+ min after the ads are live, and
+ *  finished records get pruned to NOT_FOUND (both live 08-13) — while details/ reads the real
+ *  tree. "UNREADABLE" = details answered nothing for the id (deleted, or the known fresh-campaign
+ *  lag) — the caller keeps waiting rather than concluding anything from it. Uncached: callers
+ *  throttle, and a stale answer here would mislabel a live launch. */
+export async function lionCampaignAds(campaignIds: string[]): Promise<Record<string, LionCampaignReality>> {
+  if (campaignIds.length === 0) return {};
+  type Row = { campaign_id?: string | number; campaign_status?: string; adsets?: Array<{ ads?: unknown[] }> };
+  const body = (await lionPost("/api/facebook/campaigns/details/", {
+    campaign_ids: campaignIds,
+  })) as Record<string, unknown> | null;
+  const rows = Array.isArray(body?.campaignsData) ? (body!.campaignsData as Row[]) : [];
+  const out: Record<string, LionCampaignReality> = {};
+  for (const id of campaignIds) out[id] = { status: "UNREADABLE", adsCount: 0 };
+  for (const r of rows) {
+    const id = str(r.campaign_id);
+    if (!id) continue;
+    const adsets = Array.isArray(r.adsets) ? r.adsets : [];
+    out[id] = {
+      status: str(r.campaign_status),
+      adsCount: adsets.reduce((s, a) => s + (Array.isArray(a.ads) ? a.ads.length : 0), 0),
+    };
+  }
+  return out;
+}
