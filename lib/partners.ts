@@ -44,6 +44,8 @@ export type PartnerConfig = {
    *  token) and the pixel auto-picked when the chosen account carries it. */
   defaultAccount?: Bound;
   preferredPixel?: Bound;
+  /** redirectType a fresh card is born with (overrides makeCampaign's global default). */
+  defaultRedirect?: string;
   /** When set, the flow is pinned to a single account/pixel — fields render locked. */
   lockedAccount?: Bound;
   lockedPixel?: Bound;
@@ -116,6 +118,8 @@ export const PARTNERS: PartnerConfig[] = [
     fanpages: [],
     launchNote: "Submits through LION",
     pageAdLimit: 250,
+    // HS launches default to the HIGH-ADX redirect (owner call 08-13) — META ADX stays pickable.
+    defaultRedirect: "HIGH ADX",
     // HS ships DORMANT on prod: the switcher unlocks only where NEXT_PUBLIC_HS_ENABLED=1 is
     // baked into the build (.env.local locally; NOT set on Vercel until the LION_* env and a
     // battle smoke land). NEXT_PUBLIC_* is inlined at build time — enabling HS on prod means

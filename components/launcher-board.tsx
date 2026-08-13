@@ -43,6 +43,14 @@ function normalize(rows: Campaign[], partner: PartnerConfig, reserved: Set<strin
   return applyPartnerLocks(withGcm, partner);
 }
 
+/** Fresh card with the partner's own defaults on top of makeCampaign's (e.g. HS is born with the
+ *  HIGH-ADX redirect — owner call 08-13). Duplicates copy their source instead, on purpose. */
+function freshCard(id: string, partner: PartnerConfig, owner: string): Campaign {
+  const c = makeCampaign(id, namePrefixFor(partner, todayDDMM()), owner);
+  if (partner.defaultRedirect) c.redirectType = partner.defaultRedirect;
+  return c;
+}
+
 /** Token-account partners: fill an empty/invalid account with the partner default (else the first
  *  token account) and keep the pixel on something the chosen account actually carries. Pure —
  *  returns the SAME array when nothing changes. */
@@ -94,11 +102,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const hlTimer = useRef<number | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>(() =>
-    normalize(
-      [makeCampaign("c1", namePrefixFor(partnerConfig("in"), todayDDMM()), user?.username ?? "")],
-      partnerConfig("in"),
-      null,
-    ),
+    normalize([freshCard("c1", partnerConfig(initialPartner), user?.username ?? "")], partnerConfig(initialPartner), null),
   );
   const [previewed, setPreviewed] = useState(false);
   const [copyOpen, setCopyOpen] = useState(false);
@@ -300,8 +304,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   };
 
   const add = () => {
-    const prefix = namePrefixFor(partner, todayDDMM());
-    mutate((cs) => [...cs, makeCampaign(`c${nextId.current++}`, prefix, user?.username ?? "")]);
+    mutate((cs) => [...cs, freshCard(`c${nextId.current++}`, partner, user?.username ?? "")]);
   };
 
   const duplicate = (id: string) =>
@@ -368,7 +371,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     setCampaigns((cs) => cs.map((c) => ({ ...c, collapsed })));
 
   const removeAll = () =>
-    mutate(() => [makeCampaign(`c${nextId.current++}`, namePrefixFor(partner, todayDDMM()), user?.username ?? "")]);
+    mutate(() => [freshCard(`c${nextId.current++}`, partner, user?.username ?? "")]);
 
   /** Copy one card's creatives onto every card — build a wave, drop the video once, apply to all. */
   const applyFilesToAll = (files: FileItem[]) => mutate((cs) => cs.map((c) => ({ ...c, files })));
