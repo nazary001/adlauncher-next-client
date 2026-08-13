@@ -136,11 +136,12 @@ export function HsCloneBoard({
   const data = profile ? hs.dataFor(profile) : undefined;
   const pixels = profile && account ? hs.pixelsFor(profile, account) : undefined;
 
-  // A one-pixel account needs no picking — the field DERIVES the lone id the moment the list
-  // lands (no effect write: the react-compiler lint rejects sync setState in effects, and a
-  // derived value can't ever lag the list). A real user pick (multi list) still wins via state.
+  // A one-pixel account needs no picking — the field DERIVES the lone id (no effect write: the
+  // react-compiler lint rejects sync setState in effects, and a derived value can't ever lag the
+  // list), but only once the page is picked (owner ask 08-13 — the pixel belongs at the fanka
+  // step, not right after the account). A real user pick (multi list) still wins via state.
   const onlyPixel = Array.isArray(pixels) && pixels.length === 1 ? pixels[0].id : "";
-  const effectivePixel = pixel || onlyPixel;
+  const effectivePixel = pixel || (page ? onlyPixel : "");
 
   const pickProfile = (slug: string) => {
     setProfile(slug);

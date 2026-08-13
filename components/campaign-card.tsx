@@ -243,14 +243,26 @@ export function CampaignCard({
   useEffect(() => {
     if (roasPixelDrift) onPatch(c.id, { pixel: ROAS_PIXEL.id });
   }, [roasPixelDrift, onPatch, c.id]);
-  // HS: a one-pixel account needs no picking — the moment its list lands, the field self-fills
-  // (and converges back if a stale draft carries some other id). Same drift idiom as above.
+  // HS: a one-pixel account needs no picking — the field self-fills, but only ONCE THE FANKA IS
+  // PICKED (owner ask 08-13: an id materialising right after the account read as noise — the
+  // pixel belongs at the fanka step). Converges back if a stale draft carries some other id.
   const hsOnlyPixel =
-    hsMode && c.account && Array.isArray(hsPixels) && hsPixels.length === 1 ? hsPixels[0].id : "";
+    hsMode && c.account && c.page && Array.isArray(hsPixels) && hsPixels.length === 1
+      ? hsPixels[0].id
+      : "";
   const hsPixelDrift = Boolean(hsOnlyPixel) && c.pixel !== hsOnlyPixel;
   useEffect(() => {
     if (hsPixelDrift) onPatch(c.id, { pixel: hsOnlyPixel });
   }, [hsPixelDrift, hsOnlyPixel, onPatch, c.id]);
+  // A stored pixel the account's (FARM-filtered) list doesn't offer would sit in the closed
+  // field as raw digits and submit a bind the picker can't display — clear it; the autofill
+  // above then re-fills the right one when the list is a single pixel.
+  const hsPixelUnlisted =
+    hsMode && Boolean(c.account) && Array.isArray(hsPixels) && Boolean(c.pixel) &&
+    !hsPixels.some((p) => p.id === c.pixel);
+  useEffect(() => {
+    if (hsPixelUnlisted) onPatch(c.id, { pixel: "" });
+  }, [hsPixelUnlisted, onPatch, c.id]);
   const hsCurrency = hsMode ? hsData?.currencies?.[c.account] || "" : "";
   // The LION-validated name prefix is DERIVED (date + ACR + redirect label + geo) — it re-renders
   // live as the buyer flips redirect type or geo; the server rebuilds the exact same string.
@@ -540,7 +552,9 @@ export function CampaignCard({
                   hint={!hsMode && partner.accountsFromToken && kind === "roas" ? "pinned by min ROAS" : undefined}
                   error={
                     hsMode
-                      ? c.account && Array.isArray(hsPixels) && hsPixels.length > 0 && !c.pixel
+                      ? // Quiet until the fanka is picked — that's where the pixel step starts
+                        // (single-pixel accounts then self-fill and never show this nag).
+                        c.account && c.page && Array.isArray(hsPixels) && hsPixels.length > 0 && !c.pixel
                         ? "Pick a pixel"
                         : undefined
                       : partner.accountsFromToken && kind === "roas" && c.pixel !== ROAS_PIXEL.id
@@ -552,7 +566,9 @@ export function CampaignCard({
                 >
                   {hsMode ? (
                     <SearchSelect
-                      value={c.pixel}
+                      // While the pixel list is still loading there is no name to show — the raw
+                      // id would render as bare digits, so the field shows its placeholder instead.
+                      value={Array.isArray(hsPixels) ? c.pixel : ""}
                       onChange={(v) => patch({ pixel: v })}
                       options={(hsPixels ?? []).map((p) => ({ value: p.id, label: p.name, meta: p.id }))}
                       placeholder="Search pixel"
