@@ -243,6 +243,14 @@ export function CampaignCard({
   useEffect(() => {
     if (roasPixelDrift) onPatch(c.id, { pixel: ROAS_PIXEL.id });
   }, [roasPixelDrift, onPatch, c.id]);
+  // HS: a one-pixel account needs no picking — the moment its list lands, the field self-fills
+  // (and converges back if a stale draft carries some other id). Same drift idiom as above.
+  const hsOnlyPixel =
+    hsMode && c.account && Array.isArray(hsPixels) && hsPixels.length === 1 ? hsPixels[0].id : "";
+  const hsPixelDrift = Boolean(hsOnlyPixel) && c.pixel !== hsOnlyPixel;
+  useEffect(() => {
+    if (hsPixelDrift) onPatch(c.id, { pixel: hsOnlyPixel });
+  }, [hsPixelDrift, hsOnlyPixel, onPatch, c.id]);
   const hsCurrency = hsMode ? hsData?.currencies?.[c.account] || "" : "";
   // The LION-validated name prefix is DERIVED (date + ACR + redirect label + geo) — it re-renders
   // live as the buyer flips redirect type or geo; the server rebuilds the exact same string.

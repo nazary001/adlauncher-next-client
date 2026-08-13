@@ -302,6 +302,41 @@ async function lionMyBids(): Promise<Map<string, number>> {
   });
 }
 
+// Ads-per-fanpage tally — the HS "N/250" fill badge feed. LION has no per-page volume read, so
+// the tally reduces today's metrics (the same multi-MB payload lionMyBids reads): every ACTIVE
+// campaign contributes its ads to its page_id bucket. object_story_ids is 1:1 with the
+// campaign's ads on this pool (verified live 08-13: 0 of 13.5k ACTIVE rows lacked it) — the
+// max(1, …) floor covers a row that materializes before its stories do. Only campaigns this
+// token's LION user sees are counted (the whole GLO-01 team — the dominant load on these
+// pages), so like MO's tally backstop the number is an honest lower bound of what Meta's
+// per-page limit meters. Cached slim (page → count), never the raw rows.
+let pageVolumeCache: { at: number; counts: Record<string, number> } | null = null;
+
+export async function lionPageAdCounts(): Promise<Record<string, number>> {
+  if (pageVolumeCache && Date.now() - pageVolumeCache.at < TTL_MS) return pageVolumeCache.counts;
+  return dedupe("pagevolume", async () => {
+    const body = (await lionGet(`/api/facebook/campaigns/metrics/?date=${saoPauloToday()}`)) as unknown;
+    const rows = Array.isArray(body)
+      ? (body as Record<string, unknown>[])
+      : Array.isArray((body as Record<string, unknown> | null)?.campaigns)
+        ? ((body as Record<string, unknown>).campaigns as Record<string, unknown>[])
+        : [];
+    // An empty answer is a LION hiccup (or the São Paulo midnight reset), not "every page is
+    // free" — throw so the client leaves badges off instead of painting believable zeros.
+    if (rows.length === 0) throw new LionError("LION metrics returned no rows", undefined, null);
+    const counts: Record<string, number> = {};
+    for (const r of rows) {
+      if (str(r.campaign_status) !== "ACTIVE") continue;
+      const pid = str(r.page_id);
+      if (!pid) continue;
+      const stories = Array.isArray(r.object_story_ids) ? r.object_story_ids.length : 0;
+      counts[pid] = (counts[pid] ?? 0) + Math.max(1, stories);
+    }
+    pageVolumeCache = { at: Date.now(), counts };
+    return counts;
+  });
+}
+
 export type LionSourceInfo = {
   campaignId: string;
   name: string;

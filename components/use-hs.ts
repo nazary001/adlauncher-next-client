@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RichOption } from "@/lib/catalog";
+import { partnerConfig } from "@/lib/partners";
 import type { PixelInfo } from "./use-adaccounts";
 
 /** One LION profile's bind space, shaped for the pickers. */
@@ -38,6 +39,13 @@ const EMPTY: HsCatalog = {
   ensurePixels: () => {},
 };
 
+// Meta's per-page ad limit the fill badge meters against (same convention as MO's picker).
+const PAGE_AD_LIMIT = partnerConfig("br").pageAdLimit ?? 250;
+// One retry ladder for the volume map: the server answer is complete when it lands (no
+// per-page holes like MO's Graph sweep), so a success is final — only failures re-ask.
+const VOLUME_RETRY_MS = 15_000;
+const VOLUME_MAX_TRIES = 4;
+
 /**
  * LION catalog feed for the HS partner: profiles + ACR once, then per-profile bind data and
  * per-account pixels on demand (each card `ensure*`s what it shows). Failed loads clear their
@@ -48,6 +56,9 @@ export function useHs(enabled: boolean): HsCatalog {
   const [profiles, setProfiles] = useState<RichOption[] | null>(null);
   const [data, setData] = useState<Map<string, HsProfileData | null>>(new Map());
   const [pixels, setPixels] = useState<Map<string, PixelInfo[] | null>>(new Map());
+  // page id → active-ads count, one global map for every profile (mirrors of one pool).
+  // null = not landed (yet / at all) → pages render untagged, exactly like MO's loading state.
+  const [pageCounts, setPageCounts] = useState<Record<string, number> | null>(null);
   // Fetch guards live in refs, NOT in the state maps: a state-updater runs whenever React gets to
   // it, so "claim the slot inside the updater" races the render and can silently never start the
   // fetch. Refs are synchronous — one caller wins, everyone else no-ops.
@@ -81,6 +92,40 @@ export function useHs(enabled: boolean): HsCatalog {
         // partner with an empty profile picker until F5.
         if (attempt < 5) timer = setTimeout(() => void load(attempt + 1), 5000);
         else setProfiles([]);
+      }
+    }
+
+    void load(0);
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [enabled]);
+
+  // Fill-badge feed: fetch the global page→ads map once per mount; failures retry a few times
+  // (the cold server read is a slow LION metrics reduce), then give up — badges are decoration.
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    async function load(attempt: number): Promise<void> {
+      try {
+        const r = await fetch("/api/hs/page-volume");
+        const d = (await r.json().catch(() => ({}))) as {
+          ok?: boolean;
+          counts?: Record<string, number>;
+        };
+        if (!alive) return;
+        if (r.ok && d?.ok && d.counts) {
+          setPageCounts(d.counts);
+          return;
+        }
+        throw new Error(`HTTP ${r.status}`);
+      } catch {
+        if (alive && attempt < VOLUME_MAX_TRIES) {
+          timer = setTimeout(() => void load(attempt + 1), VOLUME_RETRY_MS);
+        }
       }
     }
 
@@ -128,7 +173,15 @@ export function useHs(enabled: boolean): HsCatalog {
           for (const a of d.accounts ?? []) currencies[a.id] = a.currency || "";
           const value: HsProfileData = {
             accounts,
-            pages: (d.pages ?? []).map((p) => ({ value: p.id, label: p.name || p.id, meta: p.id })),
+            // subLabel switches the picker row to the two-line layout (name on top; id + fill
+            // badge below) — same idiom as the accounts picker, so long page names don't truncate
+            // against the id and the N/limit tag. meta stays for id-search and the closed input.
+            pages: (d.pages ?? []).map((p) => ({
+              value: p.id,
+              label: p.name || p.id,
+              meta: p.id,
+              subLabel: p.id,
+            })),
             locales: (d.locales ?? []).map((l) => ({ id: String(l.id), name: l.name })),
             currencies,
           };
@@ -169,7 +222,12 @@ export function useHs(enabled: boolean): HsCatalog {
           if (!r.ok || !d?.ok || !Array.isArray(d.pixels)) throw new Error(`HTTP ${r.status}`);
           failedAt.current.delete(key);
           doneRef.current.add(key);
-          setPixels((m) => new Map(m).set(mapKey, d.pixels ?? []));
+          // FARM accounts carry service pixels next to the FARM one (S-1, union-*; live scan
+          // 08-13) — owner rule: wherever a FARM-named pixel exists it is the ONLY offerable
+          // choice, the rest are hidden. Accounts without one (single VD-C1-HS-1) pass through.
+          const all = d.pixels ?? [];
+          const farm = all.filter((p) => /farm/i.test(p.name));
+          setPixels((m) => new Map(m).set(mapKey, farm.length > 0 ? farm : all));
         } catch {
           failedAt.current.set(key, Date.now() + FAIL_COOLDOWN_MS);
           setPixels((m) => {
@@ -185,7 +243,32 @@ export function useHs(enabled: boolean): HsCatalog {
     [enabled],
   );
 
-  const dataFor = useCallback((slug: string) => (slug ? data.get(slug) : undefined), [data]);
+  // Same badge grammar as MO's fanpage picker (use-fanpages): right-aligned "N/limit", dim →
+  // warn ≥80% → danger ≥100%. A page missing from the map counted 0 active ads — that is a
+  // real (and the most useful) number, so it tags "0/limit" rather than staying blank.
+  const decorated = useMemo(() => {
+    if (!pageCounts) return data;
+    const next = new Map<string, HsProfileData | null>();
+    for (const [slug, d] of data) {
+      next.set(
+        slug,
+        d && {
+          ...d,
+          pages: d.pages.map((p) => {
+            const n = pageCounts[p.value] ?? 0;
+            const ratio = PAGE_AD_LIMIT > 0 ? n / PAGE_AD_LIMIT : 0;
+            const tagTone: RichOption["tagTone"] = ratio >= 1 ? "danger" : ratio >= 0.8 ? "warn" : "dim";
+            // Full pages stay listed (the red count explains itself) but can't be picked — a
+            // launch would just burn against Meta's per-page ad limit.
+            return { ...p, tag: `${n}/${PAGE_AD_LIMIT}`, tagTone, disabled: ratio >= 1 };
+          }),
+        },
+      );
+    }
+    return next;
+  }, [data, pageCounts]);
+
+  const dataFor = useCallback((slug: string) => (slug ? decorated.get(slug) : undefined), [decorated]);
   const pixelsFor = useCallback(
     (slug: string, account: string) => (slug && account ? pixels.get(`${slug}|${account}`) : undefined),
     [pixels],

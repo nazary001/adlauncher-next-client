@@ -136,6 +136,12 @@ export function HsCloneBoard({
   const data = profile ? hs.dataFor(profile) : undefined;
   const pixels = profile && account ? hs.pixelsFor(profile, account) : undefined;
 
+  // A one-pixel account needs no picking — the field DERIVES the lone id the moment the list
+  // lands (no effect write: the react-compiler lint rejects sync setState in effects, and a
+  // derived value can't ever lag the list). A real user pick (multi list) still wins via state.
+  const onlyPixel = Array.isArray(pixels) && pixels.length === 1 ? pixels[0].id : "";
+  const effectivePixel = pixel || onlyPixel;
+
   const pickProfile = (slug: string) => {
     setProfile(slug);
     setAccount("");
@@ -236,7 +242,7 @@ export function HsCloneBoard({
     return () => clearTimeout(timer);
   }, [rows, user?.username]);
 
-  const bindsReady = Boolean(profile && account && page && pixel);
+  const bindsReady = Boolean(profile && account && page && effectivePixel);
   const copiesN = Math.min(MAX_COPIES, Math.max(1, Math.round(Number(copies) || 1)));
   const validRows = rows.filter((r) => /^\d{5,}$/.test(r.campaignId.trim()) && parseMoney(r.budget) >= 1);
   const unreadable = rows.filter((r) => r.info?.status === "UNREADABLE").length;
@@ -275,7 +281,7 @@ export function HsCloneBoard({
               profile,
               account,
               page,
-              pixel,
+              pixel: effectivePixel,
               campaignId: cid,
               copies: 1, // one shot per request → controllable pacing, gentler on the profile
               budget: r.budget,
@@ -387,7 +393,7 @@ export function HsCloneBoard({
               </Field>
               <Field label="Pixel">
                 <SearchSelect
-                  value={pixel}
+                  value={effectivePixel}
                   onChange={(v) => {
                     setPixel(v);
                     setPreviewed(false);
@@ -632,7 +638,7 @@ export function HsCloneBoard({
                     </p>
                   ))}
                   <p className="mt-1 border-t border-line pt-2 text-[12px] text-ink">
-                    {totalClones} clone{totalClones === 1 ? "" : "s"} → {account} · page {page} · pixel {pixel}
+                    {totalClones} clone{totalClones === 1 ? "" : "s"} → {account} · page {page} · pixel {effectivePixel}
                   </p>
                 </div>
               </div>

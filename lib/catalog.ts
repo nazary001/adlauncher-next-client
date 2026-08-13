@@ -13,6 +13,9 @@ export type RichOption = {
   /** Right-aligned status tag on the option row (e.g. fanka fill "12/250", "FARM"); not searched. */
   tag?: string;
   tagTone?: "dim" | "ok" | "warn" | "danger";
+  /** Unpickable but still listed (e.g. a fanka at its ad limit): renders translucent, ignores
+   *  clicks, keyboard nav skips over it. */
+  disabled?: boolean;
 };
 export type Country = { code: string; name: string };
 export type CountryPreset = { label: string; codes: string[] };

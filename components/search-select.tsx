@@ -237,8 +237,16 @@ export function SearchSelect({
   }, [open]);
 
   function pick(o: RichOption) {
+    if (o.disabled) return; // unpickable row (e.g. fanka at its ad limit)
     onChange(o.value);
     closeList();
+  }
+
+  /** Next enabled index walking from `from` in `dir`; stays put when only disabled rows remain. */
+  function stepActive(from: number, dir: 1 | -1) {
+    let i = from + dir;
+    while (i >= 0 && i < filtered.length && filtered[i].disabled) i += dir;
+    return i >= 0 && i < filtered.length ? i : from;
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
@@ -248,10 +256,10 @@ export function SearchSelect({
     }
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActive((a) => Math.min(a + 1, filtered.length - 1));
+      setActive((a) => stepActive(a, 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setActive((a) => Math.max(a - 1, 0));
+      setActive((a) => stepActive(a, -1));
     } else if (e.key === "Enter") {
       e.preventDefault();
       if (filtered[active]) pick(filtered[active]);
@@ -454,14 +462,19 @@ export function SearchSelect({
                     data-idx={i}
                     role="option"
                     aria-selected={o.value === value}
+                    aria-disabled={o.disabled || undefined}
                     onMouseDown={(e) => {
-                      e.preventDefault();
+                      e.preventDefault(); // keep focus in the search input either way
                       pick(o);
                     }}
-                    onMouseEnter={() => setActive(i)}
+                    onMouseEnter={() => {
+                      if (!o.disabled) setActive(i);
+                    }}
                     className={
-                      "animate-row-in flex cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors duration-100 " +
-                      (i === active ? "bg-accent/10 text-ink" : "text-dim")
+                      "animate-row-in flex flex-col gap-0.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors duration-100 " +
+                      (o.disabled
+                        ? "cursor-not-allowed text-dim opacity-40"
+                        : "cursor-pointer " + (i === active ? "bg-accent/10 text-ink" : "text-dim"))
                     }
                   >
                     <div className="flex items-center justify-between gap-2">
@@ -483,14 +496,19 @@ export function SearchSelect({
                     data-idx={i}
                     role="option"
                     aria-selected={o.value === value}
+                    aria-disabled={o.disabled || undefined}
                     onMouseDown={(e) => {
-                      e.preventDefault();
+                      e.preventDefault(); // keep focus in the search input either way
                       pick(o);
                     }}
-                    onMouseEnter={() => setActive(i)}
+                    onMouseEnter={() => {
+                      if (!o.disabled) setActive(i);
+                    }}
                     className={
-                      "animate-row-in flex cursor-pointer items-center justify-between gap-3 rounded-lg px-2.5 py-2 text-[13px] transition-colors duration-100 " +
-                      (i === active ? "bg-accent/10 text-ink" : "text-dim")
+                      "animate-row-in flex items-center justify-between gap-3 rounded-lg px-2.5 py-2 text-[13px] transition-colors duration-100 " +
+                      (o.disabled
+                        ? "cursor-not-allowed text-dim opacity-40"
+                        : "cursor-pointer " + (i === active ? "bg-accent/10 text-ink" : "text-dim"))
                     }
                   >
                     <span className="truncate">{o.label}</span>

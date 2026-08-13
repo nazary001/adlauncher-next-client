@@ -78,11 +78,17 @@ const stageIndex = (stage: string): number => {
 
 /** Turn a raw LION task error into something a buyer can act on. "Temporarily blocked" /
  *  "restricted" is Facebook blocking the executor PROFILE (playbook), not the account — the shot
- *  can't land until it lifts, so the advice is to wait or switch to another profile. */
+ *  can't land until it lifts, so the advice is to wait or switch to another profile.
+ *  "Enter the person or organization being promoted…" is Meta's EU-DSA beneficiary check on
+ *  WORLD-targeted shots — transient: LION's executor fills it in on retry (verified live 08-13,
+ *  self-healed in ~35s), so it reads as normal progress, not as a scary Meta error. */
 function humaniseLionNote(raw: string): string {
   const s = raw.toLowerCase();
   if (/temporarily blocked|been blocked|restricted/.test(s)) {
     return "Facebook temporarily blocked this profile — pause a bit, or duplicate through another profile";
+  }
+  if (/person or organization being promoted/.test(s)) {
+    return "LION is launching the campaign — waiting for it to finish";
   }
   return raw;
 }
@@ -1272,12 +1278,15 @@ function HsTaskRow({
       </div>
 
       {/* non-terminal LION note — their tasker keeps trying; surface as a warning, not a failure.
-          A profile block already reads as advice, so it isn't prefixed with "LION retrying". */}
+          Humanised notes (profile block, beneficiary wait) already read as full sentences, so
+          they skip the "LION retrying" prefix. */}
       {t.status === "submitted" && t.lionNote ? (
         <p className="mt-1.5 flex items-start gap-1.5 rounded-md border border-warn/25 bg-warn/5 px-2 py-1 text-[10.5px] leading-relaxed text-warn">
           <AlertIcon className="mt-px h-3 w-3 shrink-0" />
           <span className="min-w-0 break-words">
-            {/blocked this profile/.test(t.lionNote) ? t.lionNote : `LION retrying: ${t.lionNote}`}
+            {/blocked this profile|launching the campaign/.test(t.lionNote)
+              ? t.lionNote
+              : `LION retrying: ${t.lionNote}`}
           </span>
         </p>
       ) : null}
