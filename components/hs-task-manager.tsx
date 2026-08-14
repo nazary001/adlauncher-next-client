@@ -1,12 +1,16 @@
 "use client";
 
 // Independent task manager for the HS (LION) partner. Deliberately NOT the MO task manager:
-// an HS launch is a single submit — LION's weapon builds campaign/adset/ads on ITS side — so the
-// lifecycle is upload → submit → poll LION's creation-status. TEAM-SHARED (2026-08-12): every row
-// is persisted to Strapi (the shared launch-task collection tagged partner="br", via /api/hs-tasks
-// + server-side stamps in /api/hs/{launch,duplicate}) so the whole team sees every HS launch and
-// clone. Only the owner's session polls LION + auto-activates + can retry; teammates mirror the
-// store. localStorage stays as an offline fallback for my own rows.
+// an HS launch is a single submit — LION's weapon builds campaign/adset/ads on ITS side. For
+// LAUNCHES the lifecycle ENDS at LION acceptance (owner call 08-14): upload → submit → done
+// ("Sent to LION"), nobody polls the weapon's answer — results are checked in LION itself, and
+// the tab can close the moment the row turns green. DUPLICATES keep the full submitted → poll →
+// auto-activate lifecycle (their wave pump runs it server-side; the poll here finishes what the
+// pump's budget didn't). TEAM-SHARED (2026-08-12): every row is persisted to Strapi (the shared
+// launch-task collection tagged partner="br", via /api/hs-tasks + server-side stamps in
+// /api/hs/{launch,duplicate}) so the whole team sees every HS launch and clone. Only the owner's
+// session polls LION + auto-activates + can retry; teammates mirror the store. localStorage
+// stays as an offline fallback for my own rows.
 
 import {
   createContext,
@@ -580,22 +584,26 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         if (!d?.ok || !d.lionTaskId) {
           throw new Error(d?.error || `HTTP ${res.status}`);
         }
+        // LION accepted = FINAL for launches (owner call 08-14): nobody babysits the weapon's
+        // answer — the row goes green here and the result is checked in LION itself. (Duplicates
+        // keep their submitted→poll lifecycle; their pump auto-activates born-PAUSED clones.)
         const submittedAt = Date.now();
         const nm = d.name ?? undefined;
         patch(id, {
-          status: "submitted",
+          status: "done",
           stage: "queue",
           lionTaskId: d.lionTaskId,
-          lionStatus: "PENDING",
           ...(nm ? { name: nm } : {}),
           submittedAt,
+          finishedAt: submittedAt,
         });
         if (nm) meta.current.set(id, { ...(meta.current.get(id) ?? {}), name: nm });
         saveRemote(id, {
-          status: "running",
+          status: "done",
           stage: "queue",
           link: d.lionTaskId,
           started_at: submittedAt,
+          finished_at: submittedAt,
         });
         inputs.current.delete(id); // LION owns it now — nothing left to retry locally
       } catch (e) {
@@ -1186,8 +1194,8 @@ function HsTaskManagerPanel() {
               </span>
               <p className="text-[13px] font-medium text-dim">Nothing here yet</p>
               <p className="max-w-[250px] text-[11.5px] leading-relaxed text-faint">
-                HS launches land here: creatives upload, the campaign is submitted to LION and its
-                weapon builds it — progress streams in live.
+                HS launches land here: creatives upload and the campaign is handed to LION — a
+                green row means LION accepted it; the build itself finishes on LION&apos;s side.
               </p>
             </div>
           ) : (
@@ -1285,8 +1293,12 @@ function HsTaskRow({
   const end = t.finishedAt ?? now;
   const elapsed = t.startedAt ? Math.max(0, end - t.startedAt) : 0;
 
+  // A done row that never learned its campaign (launches finalize at LION acceptance, 08-14)
+  // reads "Sent to LION"; rows the pollers/pump finished keep the richer label.
   const statusLabel = done
-    ? `Created on LION${t.adCount ? ` · ${t.adCount} ad${t.adCount === 1 ? "" : "s"}` : ""}`
+    ? t.campaignId || t.adCount
+      ? `Created on LION${t.adCount ? ` · ${t.adCount} ad${t.adCount === 1 ? "" : "s"}` : ""}`
+      : "Sent to LION"
     : error
       ? t.error || "Failed"
       : unknown

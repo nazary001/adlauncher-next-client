@@ -147,10 +147,12 @@ export async function upsertTaskRow(user: string, taskId: string, fields: TaskRo
 
 /**
  * Server-side stamp of a freshly-submitted HS task into the shared store (partner="br"). Called
- * right after LION accepts a create/duplicate so the team sees the row — and can resume its
- * polling from the durable LION id in `link` — even if the submitting browser dies immediately.
- * LION fields ride in reused columns: `link` = LION task id, `gcm` = kind (launch|duplicate),
- * `ad_id` = ad count. Best-effort; the client saver is the fallback.
+ * right after LION accepts a create/duplicate so the team sees the row even if the submitting
+ * browser dies immediately. For LAUNCHES acceptance IS the terminal outcome (owner call 08-14:
+ * nobody waits on LION's answer — results are checked in LION itself), so the row lands "done";
+ * duplicates stay "running" — their wave pump / the pollers advance them from the durable LION
+ * id in `link`. LION fields ride in reused columns: `link` = LION task id, `gcm` = kind
+ * (launch|duplicate), `ad_id` = ad count. Best-effort; the client saver is the fallback.
  */
 export async function stampHsTaskRow(
   user: string,
@@ -163,12 +165,13 @@ export async function stampHsTaskRow(
     name: row.name,
     geo: row.geo,
     budget: row.budget,
-    status: "running", // HS "submitted" (queued on LION) maps to the store's running
+    status: row.kind === "launch" ? "done" : "running",
     stage: "queue",
     link: row.lionTaskId,
     gcm: row.kind,
     queued_at: now,
     started_at: now,
+    ...(row.kind === "launch" ? { finished_at: now } : {}),
   }).catch(() => {});
 }
 
