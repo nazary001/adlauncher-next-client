@@ -3,6 +3,7 @@ import { after } from "next/server";
 import { bidKind, parseMoney } from "@/lib/types";
 import { hsWireBid } from "@/lib/hs-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
+import { readAppCache, writeAppCache } from "@/lib/app-cache";
 import { stampHsTaskRow, upsertTaskRow } from "@/lib/task-store";
 import {
   LionError,
@@ -19,7 +20,9 @@ import {
 export const runtime = "nodejs";
 // The batch path keeps working AFTER the response (`after()` pump: jittered submits + status
 // polling + clone activation) — the route's maxDuration is that pump's whole time budget.
-export const maxDuration = 300;
+// 800s = the Fluid-compute ceiling (fluid confirmed ON for this project 08-14): submits for a
+// full 45-shot wave take ~4 min, the rest is polling headroom for LION's slow days.
+export const maxDuration = 800;
 
 const MAX_COPIES = 20;
 // Batch cap: ~5s per shot (jitter + LION latency) must fit the pump's window with room for the
@@ -27,7 +30,7 @@ const MAX_COPIES = 20;
 const MAX_SHOTS = 45;
 // Stop the pump this many ms after the request started — headroom under maxDuration so the last
 // row writes land before the platform freezes the function.
-const PUMP_BUDGET_MS = 270_000;
+const PUMP_BUDGET_MS = 770_000;
 
 const bad = (error: string, status = 400) => NextResponse.json({ ok: false, error }, { status });
 
@@ -147,6 +150,14 @@ export async function POST(req: Request): Promise<NextResponse> {
   if (Array.isArray(body.shots)) {
     if (body.shots.length === 0) return bad("shots_required");
     if (body.shots.length > MAX_SHOTS) return bad(`too_many_shots_max_${MAX_SHOTS}`);
+    // Wave idempotency: the board keeps ONE waveId per prepared wave and re-sends it on a
+    // retry-click after a lost answer. A claimed wave NEVER pumps twice — the re-POST just
+    // points back at the rows already stamped. Shot task ids derive from it for the same reason
+    // (a re-stamp upserts, it can't mint duplicate rows). Absent waveId (curl, older tab) mints
+    // a random one — no idempotency, but nothing breaks.
+    const waveIdRaw = String((body as { waveId?: unknown }).waveId ?? "").trim();
+    if (waveIdRaw && !/^[a-zA-Z0-9-]{8,64}$/.test(waveIdRaw)) return bad("wave_id_invalid");
+    const waveId = waveIdRaw || crypto.randomUUID();
     const shots: BatchShot[] = [];
     for (const raw of body.shots) {
       const campaignId = String(raw?.campaignId ?? "").trim();
@@ -167,11 +178,43 @@ export async function POST(req: Request): Promise<NextResponse> {
         name: String(raw?.name ?? "").trim().slice(0, 200),
         geo: String(raw?.geo ?? "").slice(0, 40) || "inherited",
         label: String(raw?.label ?? "").trim().slice(0, 200),
-        taskId: `hsd-${crypto.randomUUID()}`,
+        taskId: `hsd-${waveId}-${shots.length}`,
       });
     }
     const binds = await validateBinds(profile, account, page, pixel);
     if ("error" in binds) return binds.error;
+
+    // Claim the wave BEFORE stamping/pumping. An already-claimed wave means a previous POST
+    // (whose answer the client may have lost) is/was already pumping these exact shots — starting
+    // a second pump would double every campaign, so the re-POST answers success and stops.
+    // Best-effort by design (app-cache degrades to null on outages): the human retry-click this
+    // guards against is seconds later, well inside the read path.
+    const waveKey = `hs-wave:${waveId}`;
+    const existing = await readAppCache<{ at: number }>(waveKey);
+    if (existing?.value?.at) {
+      return NextResponse.json({
+        ok: true,
+        queued: shots.length,
+        alreadyAccepted: true,
+        rows: shots.map((s) => ({ taskId: s.taskId })),
+        currency: binds.currency,
+      });
+    }
+    const claimed = await writeAppCache(waveKey, { at: Date.now(), n: shots.length });
+    if (claimed === null) {
+      // Lost the unique-ckey race → someone else claimed this wave between read and write.
+      const winner = await readAppCache<{ at: number }>(waveKey);
+      if (winner?.value?.at) {
+        return NextResponse.json({
+          ok: true,
+          queued: shots.length,
+          alreadyAccepted: true,
+          rows: shots.map((s) => ({ taskId: s.taskId })),
+          currency: binds.currency,
+        });
+      }
+      // Store unavailable — proceed without idempotency rather than blocking the wave.
+    }
 
     // Rows land in the shared store BEFORE the response — the team (and this buyer's next tab)
     // sees the wave as queued even if the browser closes on the very next tick.
@@ -414,7 +457,14 @@ async function pumpBatch(
         for (const s of pending) {
           const r = byId.get(s.lionTaskId as string);
           if (!r) continue;
-          if (r.campaign_id) s.cloneId = String(r.campaign_id);
+          if (r.campaign_id && !s.cloneId) {
+            s.cloneId = String(r.campaign_id);
+            // Persist the clone id the moment it exists: if LION then takes HOURS (congestion)
+            // and prunes the finished record before anyone watches again, a later tab can still
+            // find the campaign via the reality check and activate it — without this the clone
+            // could sit PAUSED unnoticed.
+            await rowWrite(user, s.taskId, { campaign_id: s.cloneId });
+          }
           if (r.status === "COMPLETED" && r.campaign_id) {
             await finalize(s, String(r.campaign_id), (r.ad_ids ?? []).length || 1);
           } else if (r.status === "NO_COUNTRIES_LEFT") {

@@ -121,9 +121,14 @@ const taskGapMs = () => TASK_GAP_MIN_MS + Math.random() * (TASK_GAP_MAX_MS - TAS
 const POLL_OPEN_MS = 8_000;
 const POLL_CLOSED_MS = 20_000;
 // NOT_FOUND right after submit can be replication lag — only settle it after a grace window.
-const NOT_FOUND_GRACE_MS = 3 * 60_000;
+// Generous on purpose (owner call 08-14): under congestion LION's read side lags far behind
+// accepted tasks, and a false NOT_FOUND error would strand a real campaign unactivated.
+const NOT_FOUND_GRACE_MS = 15 * 60_000;
 // A task still not terminal after this long stops polling and asks the buyer to check LION.
-const PENDING_CAP_MS = 60 * 60_000;
+// LION under load can legitimately chew on a task for HOURS (owner call 08-14) — the cap only
+// exists to stop polling forever-wedged tasks, and the poll is ONE batched call per cycle, so a
+// long window costs almost nothing.
+const PENDING_CAP_MS = 3 * 60 * 60_000;
 // Reality-check window: once a pending task knows its campaignId, the poll periodically reads
 // the campaign ITSELF (details/) — LION's task record is not a reliable finish signal (live
 // 08-13: WORLD-create beneficiary retries kept records "creating" for 45+ min / forever while
@@ -600,7 +605,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     for (const t of tasksRef.current) {
       if (mine(t) && t.status === "submitted" && t.submittedAt && now - t.submittedAt > PENDING_CAP_MS) {
         const finishedAt = t.submittedAt + PENDING_CAP_MS;
-        const error = "Still not finished on LION after 60 min — check the LION dashboard";
+        const error = "Still not finished on LION after 3 h — check the LION dashboard";
         patch(t.id, { status: "unknown", finishedAt, error });
         saveRemote(t.id, dynOf({ ...t, status: "unknown", finishedAt, error }));
       }

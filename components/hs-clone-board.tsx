@@ -125,6 +125,11 @@ export function HsCloneBoard({
   const [firing, setFiring] = useState(false);
   const [draftId, setDraftId] = useState("");
   const counter = useRef(1);
+  // One waveId per PREPARED wave (same binds + same shots): a retry-click after a lost answer
+  // re-sends the same id, and the server's wave claim makes the re-POST a no-op instead of a
+  // second pump (double campaigns). Cleared on confirmed success; regenerated when the wave
+  // content changes.
+  const waveRef = useRef<{ sig: string; id: string } | null>(null);
   const [rows, setRows] = useState<Row[]>(() => {
     const seeded = initialIds
       .filter((id) => /^\d{5,}$/.test(id))
@@ -291,14 +296,19 @@ export function HsCloneBoard({
       }));
     });
     validRows.forEach((r) => patchRow(r.id, { state: "sending", msg: "queuing on server…" }));
+    const sig = JSON.stringify({ profile, account, page, pixel: effectivePixel, shots });
+    if (!waveRef.current || waveRef.current.sig !== sig) {
+      waveRef.current = { sig, id: crypto.randomUUID() };
+    }
     try {
       const res = await fetch("/api/hs/duplicate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profile, account, page, pixel: effectivePixel, shots }),
+        body: JSON.stringify({ profile, account, page, pixel: effectivePixel, shots, waveId: waveRef.current.id }),
       });
       const d = (await res.json().catch(() => ({}))) as { ok?: boolean; queued?: number; error?: string };
       if (d?.ok) {
+        waveRef.current = null; // accepted — the next wave is a new wave
         // Preflight answers now land on the task rows (shared store), not here — the drawer is
         // the place to watch; the board rows just confirm the hand-off.
         validRows.forEach((r) =>

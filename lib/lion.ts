@@ -21,12 +21,16 @@ export class LionError extends Error {
 export const lionConfigured = (): boolean => Boolean(TOKEN && LION_ACR);
 
 /** Fetch with auth + one retry on network errors / 5xx (LION lags routinely per live memory).
- *  4xx bodies are surfaced verbatim — they carry the actionable reason. */
-async function lionFetch(path: string, init?: RequestInit): Promise<unknown> {
+ *  4xx bodies are surfaced verbatim — they carry the actionable reason.
+ *  `attempts=1` disables the retry — REQUIRED for campaign-creating writes: a network error or
+ *  5xx is an AMBIGUOUS outcome (LION may have accepted the task before the answer was lost), and
+ *  re-sending such a call can create a second campaign. Reads and idempotent status/budget
+ *  writes keep the retry. */
+async function lionFetch(path: string, init?: RequestInit, attempts = 2): Promise<unknown> {
   if (!TOKEN) throw new LionError("LION_TOKEN is not configured");
   const url = `${BASE}${path}`;
   let lastErr: unknown;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     try {
       const res = await fetch(url, {
         ...init,
@@ -45,7 +49,7 @@ async function lionFetch(path: string, init?: RequestInit): Promise<unknown> {
         body = text; // LION sends some errors as plain text (e.g. 404 with a sentence)
       }
       if (res.ok) return body;
-      if (res.status >= 500 && attempt === 0) {
+      if (res.status >= 500 && attempt < attempts - 1) {
         lastErr = new LionError(`LION ${res.status}`, res.status, body);
         await new Promise((r) => setTimeout(r, 1500));
         continue;
@@ -58,7 +62,7 @@ async function lionFetch(path: string, init?: RequestInit): Promise<unknown> {
     } catch (e) {
       if (e instanceof LionError && e.status && e.status < 500) throw e;
       lastErr = e;
-      if (attempt === 0) {
+      if (attempt < attempts - 1) {
         await new Promise((r) => setTimeout(r, 1500));
         continue;
       }
@@ -70,6 +74,11 @@ async function lionFetch(path: string, init?: RequestInit): Promise<unknown> {
 export const lionGet = (path: string): Promise<unknown> => lionFetch(path);
 export const lionPost = (path: string, body: unknown): Promise<unknown> =>
   lionFetch(path, { method: "POST", body: JSON.stringify(body) });
+/** Campaign-CREATING writes go out exactly once — an ambiguous failure (network cut, 5xx) is
+ *  reported as an error and NEVER re-sent: LION may have already accepted the task, and a resend
+ *  would build a second campaign. The buyer re-fires consciously after checking. */
+const lionPostOnce = (path: string, body: unknown): Promise<unknown> =>
+  lionFetch(path, { method: "POST", body: JSON.stringify(body) }, 1);
 
 // ---------- typed reads (cached) ----------
 
@@ -180,7 +189,7 @@ export async function lionCreateCampaign(binds: {
   pixel_id: string;
   campaign: Record<string, unknown>;
 }): Promise<LionCreateResult> {
-  const body = (await lionPost("/api/facebook/campaigns/create/", {
+  const body = (await lionPostOnce("/api/facebook/campaigns/create/", {
     profile_slug: binds.profile_slug,
     account_id: binds.account_id,
     page_id: binds.page_id,
@@ -229,7 +238,7 @@ export async function lionDuplicate(args: {
    *  whole name, so the field mirrors it; omitted = LION rebuilds the name itself. */
   name?: string;
 }): Promise<LionDuplicationResult> {
-  const body = (await lionPost("/api/facebook/campaigns/duplicate/", {
+  const body = (await lionPostOnce("/api/facebook/campaigns/duplicate/", {
     profile_slug: args.profile_slug,
     account_id: args.account_id,
     page_id: args.page_id,
