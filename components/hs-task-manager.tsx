@@ -129,6 +129,10 @@ const NOT_FOUND_GRACE_MS = 15 * 60_000;
 // exists to stop polling forever-wedged tasks, and the poll is ONE batched call per cycle, so a
 // long window costs almost nothing.
 const PENDING_CAP_MS = 3 * 60 * 60_000;
+// A shared row still WITHOUT a LION task id can only be advanced by its own session (launch
+// tab) or its wave's server pump (≤13 min window) — once both are provably gone it can never
+// progress, so it ages out much sooner than the LION-side cap. ×2+ the pump window.
+const NEVER_SUBMITTED_CAP_MS = 30 * 60_000;
 // Reality-check window: once a pending task knows its campaignId, the poll periodically reads
 // the campaign ITSELF (details/) — LION's task record is not a reliable finish signal (live
 // 08-13: WORLD-create beneficiary retries kept records "creating" for 45+ min / forever while
@@ -224,9 +228,16 @@ function mergeShared(cur: HsTask[], fetched: HsTask[], tombstones: ReadonlySet<s
   for (const f of fetched) {
     if (!f.id || tombstones.has(f.id)) continue;
     const prev = curById.get(f.id);
-    byId.set(f.id, prev && prev.local ? prev : prev && prev.updatedMs === f.updatedMs ? prev : f);
+    // A LOCAL error/unknown task with NO LION id whose remote row DOES carry one is a submit
+    // whose answer got lost after landing (the server stamps the row before responding): the
+    // store is the truth — adopting it resumes polling and retires any retry affordance, which
+    // would double-create.
+    const lostAnswer =
+      !!prev?.local && (prev.status === "error" || prev.status === "unknown") && !prev.lionTaskId && !!f.lionTaskId;
+    byId.set(f.id, prev && prev.local && !lostAnswer ? prev : prev && prev.updatedMs === f.updatedMs ? prev : f);
   }
-  for (const c of cur) if (c.local) byId.set(c.id, c);
+  // Local tasks absent from the fetch stay; ids already decided above keep that decision.
+  for (const c of cur) if (c.local && !byId.has(c.id)) byId.set(c.id, c);
   const next = [...byId.values()].sort((a, b) => b.queuedAt - a.queuedAt || (a.id < b.id ? 1 : -1));
   return next.length === cur.length && next.every((t, i) => t === cur[i]) ? cur : next;
 }
@@ -287,6 +298,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
   const [tasks, setTasks] = useState<HsTask[]>([]);
   const [open, setOpen] = useState(false);
   const [skew, setSkew] = useState(0);
+  const skewRef = useRef(0);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const inputs = useRef(new Map<string, TaskInput>());
   const queue = useRef<string[]>([]);
@@ -320,6 +332,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
 
   const noteSkew = useCallback((serverNow: number) => {
     const s = serverNow - Date.now();
+    skewRef.current = s; // ref mirror for non-render consumers (the poll's staleness gate)
     setSkew((prev) => (Math.abs(prev - s) > 3000 ? s : prev));
   }, []);
 
@@ -539,11 +552,28 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         // 2) One submit — LION answers fast (it just enqueues a weapon task). taskId lets the
         // server stamp the shared row the instant LION accepts it (durability).
         patch(id, { stage: "submit" });
-        const res = await fetch("/api/hs/launch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ campaign: input.campaign, creatives: urls, taskId: id }),
-        });
+        let res: Response;
+        try {
+          res = await fetch("/api/hs/launch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ campaign: input.campaign, creatives: urls, taskId: id }),
+            signal: AbortSignal.timeout(90_000),
+          });
+        } catch (e) {
+          // NETWORK-class failure (cut / timeout): ambiguous — the server may have already landed
+          // this create on LION (where it is exactly-once and will NOT be re-sent). A one-click
+          // Retry here could build a SECOND campaign (review 08-14), so this is terminal-unknown,
+          // not a retryable error. If the submit DID land, the server-stamped shared row carries
+          // the LION id and mergeShared adopts it over this task within seconds — polling then
+          // finishes the story. No remote write: the row (if any) is already more truthful.
+          const msg = `Connection lost mid-submit — check this row in HS Tasks / LION before re-firing (${
+            (e as Error).message ?? e
+          })`;
+          patch(id, { status: "unknown", finishedAt: Date.now(), error: msg });
+          inputs.current.delete(id); // never offer a one-click resubmit of an ambiguous outcome
+          return;
+        }
         const d = (await res.json().catch(() => null)) as
           | { ok?: boolean; lionTaskId?: string; name?: string; error?: string }
           | null;
@@ -603,16 +633,24 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     // (live 08-12: a request hung overnight kept the latch closed, so a wedged task ticked for
     // 400+ minutes with the cap never firing).
     for (const t of tasksRef.current) {
-      // Two stranded classes age out here: submitted rows LION never finished, AND batch rows
-      // whose server pump died BEFORE the shot went out (link empty → they restore as "running"
-      // with no lionTaskId, so neither polling nor the submitted-gate ever touches them — a
-      // review 08-14 caught them ticking forever).
-      const neverSubmitted = t.kind === "duplicate" && !t.local && t.status === "running" && !t.lionTaskId;
+      // Two stranded classes age out here (both caught ticking forever by reviews 08-14):
+      // 1) submitted rows LION never finished — generous 3h cap (LION can be slow, not dead);
+      // 2) ADOPTED "running" rows with NO LION id — a dead launch tab (closed before its submit)
+      //    or a dead wave pump left them; nothing can ever advance them, so a short cap.
+      //    Live sessions are excluded by !local: a tab's own in-flight tasks are `local` there.
+      // A row whose updatedAt is still being bumped belongs to a LIVE session (another of my
+      // tabs mid-upload heartbeats it) — never short-cap those; only provably dead rows age out.
+      const rowFresh = !!t.updatedMs && Date.now() + skewRef.current - t.updatedMs < STALE_MS;
+      const neverSubmitted =
+        !t.local && (t.status === "running" || t.status === "queued") && !t.lionTaskId && !rowFresh;
       const capFrom = t.submittedAt ?? t.queuedAt;
-      if (mine(t) && (t.status === "submitted" || neverSubmitted) && capFrom && now - capFrom > PENDING_CAP_MS) {
-        const finishedAt = capFrom + PENDING_CAP_MS;
+      const capMs = neverSubmitted ? NEVER_SUBMITTED_CAP_MS : PENDING_CAP_MS;
+      if (mine(t) && (t.status === "submitted" || neverSubmitted) && capFrom && now - capFrom > capMs) {
+        const finishedAt = capFrom + capMs;
         const error = neverSubmitted
-          ? "Never reached LION — the wave's server window closed before this shot; re-fire it in the duplicator"
+          ? t.kind === "duplicate"
+            ? "Never reached LION — the wave's server window closed before this shot; re-fire it in the duplicator"
+            : "Interrupted — the submitting session closed before this launch reached LION; fire the card again"
           : "Still not finished on LION after 3 h — check the LION dashboard";
         const status = neverSubmitted ? ("error" as const) : ("unknown" as const);
         patch(t.id, { status, finishedAt, error });

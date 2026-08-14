@@ -35,7 +35,13 @@ const bad = (error: string, status = 400) => NextResponse.json({ ok: false, erro
 
 // Same-instance backstop for the wave claim: survives between requests on a warm function, so a
 // double-POST landing on the same instance short-circuits even before the app-cache read.
+// Bounded (review 08-14): a wave's retry window is seconds, so wiping the set on overflow only
+// costs a fallthrough to the app-cache read — idempotency itself never depends on this cache.
 const claimedWaves = new Set<string>();
+function rememberWave(waveId: string): void {
+  if (claimedWaves.size > 1000) claimedWaves.clear();
+  claimedWaves.add(waveId);
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const jitter = () => 1000 + Math.random() * 2000;
@@ -202,7 +208,7 @@ export async function POST(req: Request): Promise<NextResponse> {
     if (claimedWaves.has(waveId)) return alreadyAccepted();
     const existing = await readAppCache<{ at: number }>(waveKey);
     if (existing?.value?.at) {
-      claimedWaves.add(waveId);
+      rememberWave(waveId);
       return alreadyAccepted();
     }
 
@@ -233,7 +239,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       // Lost the unique-ckey race → someone else claimed this wave between read and write.
       const winner = await readAppCache<{ at: number }>(waveKey);
       if (winner?.value?.at) {
-        claimedWaves.add(waveId);
+        rememberWave(waveId);
         return alreadyAccepted();
       }
       // Store unavailable → FAIL CLOSED (review 08-14): without a persisted claim, a retry of
@@ -242,7 +248,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       // any landed, are harmless upserts of the same ids.)
       return bad("task_store_unavailable_wave_not_fired", 503);
     }
-    claimedWaves.add(waveId);
+    rememberWave(waveId);
 
     const user = session.username;
     const deadline = startedAt + PUMP_BUDGET_MS;
