@@ -40,6 +40,10 @@ async function lionFetch(path: string, init?: RequestInit, attempts = 2): Promis
           ...(init?.headers ?? {}),
         },
         cache: "no-store",
+        // A hung LION socket must not eat a whole function window (the duplicate pump fires up
+        // to 45 sequential calls). Aborting a WRITE is the same ambiguous outcome as a network
+        // cut — exactly-once callers surface it as an error and never resend.
+        signal: AbortSignal.timeout(60_000),
       });
       const text = await res.text();
       let body: unknown = null;

@@ -603,8 +603,12 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     // (live 08-12: a request hung overnight kept the latch closed, so a wedged task ticked for
     // 400+ minutes with the cap never firing).
     for (const t of tasksRef.current) {
-      if (mine(t) && t.status === "submitted" && t.submittedAt && now - t.submittedAt > PENDING_CAP_MS) {
-        const finishedAt = t.submittedAt + PENDING_CAP_MS;
+      // submittedAt for rows the server pump submitted; queuedAt covers rows whose pump died
+      // BEFORE the shot went out (link never set → no submittedAt) — without the fallback such
+      // a row would tick "running" forever, capped by nothing.
+      const capFrom = t.submittedAt ?? t.queuedAt;
+      if (mine(t) && t.status === "submitted" && capFrom && now - capFrom > PENDING_CAP_MS) {
+        const finishedAt = capFrom + PENDING_CAP_MS;
         const error = "Still not finished on LION after 3 h — check the LION dashboard";
         patch(t.id, { status: "unknown", finishedAt, error });
         saveRemote(t.id, dynOf({ ...t, status: "unknown", finishedAt, error }));

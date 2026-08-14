@@ -178,46 +178,31 @@ export async function POST(req: Request): Promise<NextResponse> {
         name: String(raw?.name ?? "").trim().slice(0, 200),
         geo: String(raw?.geo ?? "").slice(0, 40) || "inherited",
         label: String(raw?.label ?? "").trim().slice(0, 200),
-        taskId: `hsd-${waveId}-${shots.length}`,
+        // Zero-padded index: the drawer breaks queued_at ties by STRING id, so "-10" must not
+        // sort between "-01" and "-02" (waves share one stamp timestamp).
+        taskId: `hsd-${waveId}-${String(shots.length).padStart(2, "0")}`,
       });
     }
     const binds = await validateBinds(profile, account, page, pixel);
     if ("error" in binds) return binds.error;
 
-    // Claim the wave BEFORE stamping/pumping. An already-claimed wave means a previous POST
-    // (whose answer the client may have lost) is/was already pumping these exact shots — starting
-    // a second pump would double every campaign, so the re-POST answers success and stops.
-    // Best-effort by design (app-cache degrades to null on outages): the human retry-click this
-    // guards against is seconds later, well inside the read path.
-    const waveKey = `hs-wave:${waveId}`;
-    const existing = await readAppCache<{ at: number }>(waveKey);
-    if (existing?.value?.at) {
-      return NextResponse.json({
+    const alreadyAccepted = () =>
+      NextResponse.json({
         ok: true,
         queued: shots.length,
         alreadyAccepted: true,
         rows: shots.map((s) => ({ taskId: s.taskId })),
         currency: binds.currency,
       });
-    }
-    const claimed = await writeAppCache(waveKey, { at: Date.now(), n: shots.length });
-    if (claimed === null) {
-      // Lost the unique-ckey race → someone else claimed this wave between read and write.
-      const winner = await readAppCache<{ at: number }>(waveKey);
-      if (winner?.value?.at) {
-        return NextResponse.json({
-          ok: true,
-          queued: shots.length,
-          alreadyAccepted: true,
-          rows: shots.map((s) => ({ taskId: s.taskId })),
-          currency: binds.currency,
-        });
-      }
-      // Store unavailable — proceed without idempotency rather than blocking the wave.
-    }
 
-    // Rows land in the shared store BEFORE the response — the team (and this buyer's next tab)
-    // sees the wave as queued even if the browser closes on the very next tick.
+    const waveKey = `hs-wave:${waveId}`;
+    const existing = await readAppCache<{ at: number }>(waveKey);
+    if (existing?.value?.at) return alreadyAccepted();
+
+    // Rows land in the shared store BEFORE the claim and the response: the team (and this
+    // buyer's next tab) sees the wave as queued even if the browser closes on the very next
+    // tick, and a crash between stamping and claiming stays retryable (the re-POST re-stamps
+    // the SAME wave-derived ids — pure upserts — and then claims and pumps normally).
     await Promise.all(
       shots.map((s) =>
         stampHsTaskRow(session.username, {
@@ -230,6 +215,19 @@ export async function POST(req: Request): Promise<NextResponse> {
         }),
       ),
     );
+
+    // Claim the wave — the ONE gate before the pump. An already-claimed wave means another POST
+    // (whose answer the client may have lost) already started this exact pump — starting a second
+    // one would double every campaign, so the re-POST answers success and stops. Best-effort by
+    // design (app-cache degrades to null on outages): the human retry-click this guards against
+    // comes seconds later, well inside the read path.
+    const claimed = await writeAppCache(waveKey, { at: Date.now(), n: shots.length });
+    if (claimed === null) {
+      // Lost the unique-ckey race → someone else claimed this wave between read and write.
+      const winner = await readAppCache<{ at: number }>(waveKey);
+      if (winner?.value?.at) return alreadyAccepted();
+      // Store unavailable — proceed without idempotency rather than blocking the wave.
+    }
 
     const user = session.username;
     const deadline = startedAt + PUMP_BUDGET_MS;
@@ -410,7 +408,9 @@ async function pumpBatch(
         const lionTaskId = (result.task_ids ?? []).map(String).filter(Boolean)[0];
         if (lionTaskId) {
           s.lionTaskId = lionTaskId;
-          await rowWrite(user, s.taskId, { link: lionTaskId });
+          // started_at = the REAL submit moment (rows are stamped minutes earlier): the drawer's
+          // elapsed timer and the 3h cap then measure time ON LION, not time in our queue.
+          await rowWrite(user, s.taskId, { link: lionTaskId, started_at: Date.now() });
         } else {
           // Preflight rejection kills the whole family (object-story creatives, dead source…).
           const reason = result.reason || `LION rejected the duplicate (${result.result ?? "no result"})`;
