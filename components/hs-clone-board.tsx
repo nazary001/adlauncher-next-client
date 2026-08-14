@@ -114,7 +114,7 @@ export function HsCloneBoard({
   initialIds?: string[];
 }) {
   const hs = useHs(true);
-  const { enqueueSubmitted, setOpen } = useHsTaskManager();
+  const { setOpen } = useHsTaskManager();
 
   const [profile, setProfile] = useState("");
   const [account, setAccount] = useState("");
@@ -249,96 +249,69 @@ export function HsCloneBoard({
   const unreadable = rows.filter((r) => r.info?.status === "UNREADABLE").length;
   const totalClones = validRows.length * copiesN;
 
+  // The server pump takes the whole wave in ONE call and paces/polls/activates it after the
+  // response (fire-and-forget, owner ask 08-14) — its shot cap must fit the pump's time budget.
+  const MAX_SHOTS_PER_FIRE = 45;
+
   async function duplicateAll() {
     if (!bindsReady || validRows.length === 0 || firing) return;
+    if (totalClones > MAX_SHOTS_PER_FIRE) {
+      alert(
+        `That's ${totalClones} clones — the server fires at most ${MAX_SHOTS_PER_FIRE} per wave. ` +
+          "Lower the copies or remove some rows and fire in two waves.",
+      );
+      return;
+    }
     setFiring(true);
-    // Flatten to SINGLE-COPY shots (row × copy) and fire them ONE AT A TIME with a random 1–3s
-    // gap. Firing a whole wave at once is exactly what makes Facebook temporarily block the
-    // executor profile; single copies + jitter is the front-line defence (playbook: ~1 shot/s).
-    const shots = validRows.flatMap((r) => Array.from({ length: copiesN }, (_, copy) => ({ r, copy })));
-    const done = new Map<string, number>();
-    const failed = new Map<string, string>();
+    // ONE batch POST: the server stamps every row into the shared store, answers immediately and
+    // keeps working in the background — jittered single-copy submits, status polling and clone
+    // activation all happen server-side, so the tab may be closed right after this resolves.
+    const shots = validRows.flatMap((r) => {
+      const cid = r.campaignId.trim();
+      const geo = r.info?.countries.length
+        ? geoSummary(r.info.countries)
+        : r.info?.name
+          ? geoFromName(r.info.name, geoSummary) || "inherited"
+          : "inherited";
+      const label = r.info?.name || `#${cid}`;
+      return Array.from({ length: copiesN }, (_, copy) => ({
+        campaignId: cid,
+        budget: r.budget,
+        bid: r.bid.trim(),
+        // Fallback for the server's bid scaling (its own details/ re-read wins) — the bid
+        // rides in HUMAN units and is scaled to LION's Meta-native wire unit server-side.
+        ...(r.info?.bidStrategy ? { bidStrategy: r.info.bidStrategy } : {}),
+        geo,
+        // Full name = fixed grammar prefix + the buyer's tail (replaces the old one).
+        // When the source couldn't be read there's no prefix — LION rebuilds the name.
+        ...(r.info?.name
+          ? { name: `${splitLionName(r.info.name, todaySaoPauloDDMM()).prefix}${r.suffix.trim()}`.trim() }
+          : {}),
+        label: copiesN > 1 ? `${label} · copy ${copy + 1}/${copiesN}` : label,
+      }));
+    });
+    validRows.forEach((r) => patchRow(r.id, { state: "sending", msg: "queuing on server…" }));
     try {
-      for (let i = 0; i < shots.length; i++) {
-        const { r } = shots[i];
-        const cid = r.campaignId.trim();
-        // A source that already preflight-rejected won't accept its remaining copies either —
-        // skip them instantly (no wasted shot, no wasted gap).
-        if (failed.has(r.id)) continue;
-        patchRow(r.id, {
-          state: "sending",
-          msg: `sending ${(done.get(r.id) ?? 0) + 1}/${copiesN}…`,
-        });
-        try {
-          const geo = r.info?.countries.length
-            ? geoSummary(r.info.countries)
-            : r.info?.name
-              ? geoFromName(r.info.name, geoSummary) || "inherited"
-              : "inherited";
-          const res = await fetch("/api/hs/duplicate", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              profile,
-              account,
-              page,
-              pixel: effectivePixel,
-              campaignId: cid,
-              copies: 1, // one shot per request → controllable pacing, gentler on the profile
-              budget: r.budget,
-              bid: r.bid.trim(),
-              // Fallback for the server's bid scaling (its own details/ re-read wins) — the bid
-              // rides in HUMAN units and is scaled to LION's Meta-native wire unit server-side.
-              ...(r.info?.bidStrategy ? { bidStrategy: r.info.bidStrategy } : {}),
-              geo, // for the stamped shared-task row's label
-              // Full name = fixed grammar prefix + the buyer's tail (replaces the old one).
-              // When the source couldn't be read there's no prefix — LION rebuilds the name.
-              ...(r.info?.name
-                ? { name: `${splitLionName(r.info.name, todaySaoPauloDDMM()).prefix}${r.suffix.trim()}`.trim() }
-                : {}),
-            }),
-          });
-          const d = (await res.json().catch(() => ({}))) as {
-            ok?: boolean;
-            rows?: { taskId: string; lionTaskId: string }[];
-            taskIds?: string[];
-            error?: string;
-          };
-          // The server minted a client task id per copy and already stamped its Strapi row — carry
-          // those ids into the Task Manager so its rows match. Fall back to taskIds (LION ids) if
-          // an older server build didn't return the pairs.
-          const rows = d?.rows ?? (d?.taskIds ?? []).map((lionTaskId) => ({ taskId: undefined as unknown as string, lionTaskId }));
-          if (d?.ok && rows.length > 0) {
-            const label = r.info?.name || `#${cid}`;
-            enqueueSubmitted(
-              rows.map((row) => ({
-                taskId: row.taskId,
-                name: copiesN > 1 ? `${label} · copy ${(done.get(r.id) ?? 0) + 1}/${copiesN}` : label,
-                profile,
-                geo,
-                budget: r.budget,
-                lionTaskId: String(row.lionTaskId),
-              })),
-            );
-            done.set(r.id, (done.get(r.id) ?? 0) + 1);
-            patchRow(r.id, { state: "ok", msg: `${done.get(r.id)}/${copiesN} → HS Tasks` });
-          } else {
-            // LION's preflight reason is the actionable text ("No valid creative URL…" =
-            // object-story source, not duplicable; "Page not found in account data"; …). One
-            // preflight rejection kills the whole family — stop retrying its remaining copies.
-            failed.set(r.id, d?.error ?? `HTTP ${res.status}`);
-            patchRow(r.id, { state: "error", msg: d?.error ?? `HTTP ${res.status}` });
-          }
-        } catch (e) {
-          failed.set(r.id, String((e as Error).message ?? e));
-          patchRow(r.id, { state: "error", msg: String((e as Error).message ?? e) });
-        }
-        // Random 1–3s gap before the next shot (skip after the last).
-        if (i < shots.length - 1) {
-          await new Promise((wait) => setTimeout(wait, 1000 + Math.random() * 2000));
-        }
+      const res = await fetch("/api/hs/duplicate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile, account, page, pixel: effectivePixel, shots }),
+      });
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; queued?: number; error?: string };
+      if (d?.ok) {
+        // Preflight answers now land on the task rows (shared store), not here — the drawer is
+        // the place to watch; the board rows just confirm the hand-off.
+        validRows.forEach((r) =>
+          patchRow(r.id, { state: "ok", msg: `${copiesN}/${copiesN} queued — safe to close the tab` }),
+        );
+        setOpen(true); // the drawer mirrors the server's progress from the shared store
+      } else {
+        const msg = d?.error ?? `HTTP ${res.status}`;
+        validRows.forEach((r) => patchRow(r.id, { state: "error", msg }));
       }
-      setOpen(true); // the drawer shows live creation stages + auto-activation
+    } catch (e) {
+      const msg = String((e as Error).message ?? e);
+      validRows.forEach((r) => patchRow(r.id, { state: "error", msg }));
     } finally {
       setFiring(false);
     }

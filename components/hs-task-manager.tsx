@@ -469,12 +469,17 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
   }, [tasks, lsKey, me]);
 
   // Heartbeat: bump my in-flight rows' updatedAt so a live-but-stuck task doesn't read as offline.
+  // SERVER-MANAGED rows are skipped: batch-duplicate rows (adopted from the store, never born in
+  // this tab) are progressed by the /api/hs/duplicate pump — a heartbeat here would race it and
+  // could briefly overwrite a pump-written link/error with this tab's stale copy. Their liveness
+  // signal is the pump's own writes.
   useEffect(() => {
     const iv = window.setInterval(() => {
       if (document.hidden) return;
       for (const t of tasksRef.current) {
         const mine = t.local || (!!me && t.owner === me);
-        if (mine && (t.status === "queued" || t.status === "running" || t.status === "submitted")) {
+        const serverManaged = !t.local && t.kind === "duplicate";
+        if (mine && !serverManaged && (t.status === "queued" || t.status === "running" || t.status === "submitted")) {
           saveRemote(t.id, dynOf(t));
         }
       }
