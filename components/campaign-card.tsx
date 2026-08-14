@@ -330,7 +330,7 @@ export function CampaignCard({
   // catalog. Either way this string is exactly what launches (and what Copy copies).
   const derivedLink = hsMode
     ? isHttpUrl(c.link)
-      ? hsFinalLink(c.link, c.pixel, hs?.acr ?? "")
+      ? hsFinalLink(c.link, c.pixel, hs?.acr ?? "", c)
       : ""
     : fullLandingUrl(partner, c.landing, c.gcm, conversions, c.pixel);
 
@@ -678,7 +678,8 @@ export function CampaignCard({
                     options={OBJECTIVES}
                   />
                 </Field>
-                {/* Optimization (fire=click) is an MO funnel concept — LION owns HS tracking. */}
+                {/* The optimization toggle is an MO funnel concept — HS tails get fire=click
+                    unconditionally on HIGH ADX (redirect type decides, see hsLinkSegments). */}
                 {!hsMode ? (
                   <Field
                     label="Optimization"
@@ -908,7 +909,7 @@ export function CampaignCard({
                         {hsMode && isHttpUrl(c.link) ? (
                           <div className="mt-2 overflow-hidden rounded-lg border border-line bg-surface2/50">
                             <div className="max-h-24 select-all overflow-y-auto break-all px-3 py-2 font-mono text-[11px] leading-relaxed">
-                              {hsLinkSegments(c.link, c.pixel || "…", hs?.acr ?? "").map((seg, i) => (
+                              {hsLinkSegments(c.link, c.pixel || "…", hs?.acr ?? "", c).map((seg, i) => (
                                 <span key={i} className={LINK_ROLE_CLASS[seg.role]}>
                                   {seg.text}
                                 </span>

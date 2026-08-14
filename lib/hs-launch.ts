@@ -3,6 +3,7 @@
 
 import { type Campaign, bidKind, parseMoney } from "./types";
 import type { LinkSegment } from "./partners";
+import { CONVERSION_EVENTS } from "./catalog";
 
 /** LION validates the `(REDIR_LABEL)` name segment against redirect_type with this exact map. */
 export const HS_REDIRECT_LABELS: Record<string, string> = {
@@ -12,29 +13,86 @@ export const HS_REDIRECT_LABELS: Record<string, string> = {
 };
 
 /**
- * Destination-link builder for HS creates (mirrors MO's segments→join one-truth pattern): the
- * pasted landing gets the team's tracking tail appended — `utm_source=facebook`, the
- * `{{campaign.id}}` Meta URL macro (Facebook substitutes it at click time, braces must stay
- * RAW), `mb=<acr>` and `pixel=<the picked pixel>`. LION passes the link to Meta verbatim (its
- * docs' "url_tags auto-build" lives only in the weapon UI — verified live 08-13). A base that
- * already carries `utm_source=` is treated as fully built and goes out untouched, so pasting an
- * old campaign's complete link can't double-append the tail.
+ * `cl=` value for HIGH ADX tails. Consumed server-side by the funnel's pixel service
+ * (pixel.highleverage.dev gets the full landing URL) — semantics unknown; live weapon links carry
+ * a near-uniform 2..20 spread with no correlation to landing/account/event/locales (probed 41
+ * campaigns, 08-14). 15 = what the weapon UI issued for our buyer on 08-14; every value 2..20 is
+ * live on GLO-01 money campaigns, so any is prod-safe. Bump if the partner names the real rule.
  */
-export function hsLinkSegments(baseRaw: string, pixelId: string, acr: string): LinkSegment[] {
+export const HS_HIGH_CL = 15;
+
+/** The conversion event the launch actually optimizes for — min-ROAS always optimizes purchase
+ *  value, so it pins PURCHASE regardless of the card's dropdown. One truth for the payload's
+ *  `conversion_event` and the link tail's `event=`. */
+export function hsConversionEventValue(c: Pick<Campaign, "conversionEvent" | "bidStrategy">): string {
+  return bidKind(c.bidStrategy) === "roas" ? "PURCHASE" : c.conversionEvent;
+}
+
+/** Meta PIXEL event name (CamelCase) for the link tail — the catalog labels ARE the pixel event
+ *  names (PURCHASE→Purchase, CONTENT_VIEW→ViewContent …), matching live weapon links. */
+function hsEventLabel(c: Pick<Campaign, "conversionEvent" | "bidStrategy">): string {
+  const value = hsConversionEventValue(c);
+  return CONVERSION_EVENTS.find((e) => e.value === value)?.label ?? "Purchase";
+}
+
+type HsLinkCampaign = Pick<Campaign, "redirectType" | "conversionEvent" | "bidStrategy">;
+
+/**
+ * Destination-link builder for HS creates (mirrors MO's segments→join one-truth pattern): the
+ * pasted landing gets the team's tracking tail appended. LION passes the link to Meta verbatim
+ * (its docs' "url_tags auto-build" lives only in the weapon UI — verified live 08-13), and Meta
+ * substitutes the `{{…}}` URL macros at click time (braces must stay RAW).
+ *
+ * The tail is REDIRECT-TYPE-DEPENDENT (probed live 08-14 across GLO-01 campaigns via details/):
+ *   META ADX  → `?utm_source=facebook&utm_campaign={{campaign.id}}&mb=<acr>&pixel=<id>`
+ *               (10/10 live links — exactly this, nothing more)
+ *   HIGH ADX  → `?utm_source=facebook&utm_campaign={{campaign.id}}&utm_content={{ad.id}}
+ *               &utm_term={{placement}}&utm_id={{site_source_name}}&mb=<acr>&cl=NN&pixel=<id>
+ *               &event=<PixelEvent>&pixel_mode=single&fire=click`
+ *               (every live link with a visible link_url — the funnel forwards the whole query to
+ *               HS's server-side pixel service, so event/pixel_mode/fire drive the actual pixel
+ *               fire; omitting them starves the adset of its optimization signal)
+ *   #ADX      → a different scheme entirely (`tg5=…`, utm_medium, no mb/pixel) that the weapon
+ *               builds from its own links table — NOT reproduced here; plain-#ADX cards get the
+ *               META tail so buyer attribution (`mb=`) at least survives.
+ *
+ * A base that already carries `utm_source=` is treated as fully built and goes out untouched, so
+ * pasting an old campaign's complete link can't double-append the tail.
+ */
+export function hsLinkSegments(
+  baseRaw: string,
+  pixelId: string,
+  acr: string,
+  c: HsLinkCampaign,
+): LinkSegment[] {
   const base = baseRaw.trim();
   if (!base) return [];
   if (/[?&]utm_source=/.test(base)) return [{ text: base, role: "slug" }];
   const sep = base.includes("?") ? "&" : "?";
+  const mb = (acr || "GLO-01").toLowerCase();
+  if (c.redirectType === "HIGH ADX") {
+    return [
+      { text: base, role: "slug" },
+      {
+        text:
+          `${sep}utm_source=facebook&utm_campaign={{campaign.id}}&utm_content={{ad.id}}` +
+          `&utm_term={{placement}}&utm_id={{site_source_name}}&mb=${mb}&cl=${HS_HIGH_CL}`,
+        role: "params",
+      },
+      { text: `&pixel=${pixelId}`, role: "pixel" },
+      { text: `&event=${hsEventLabel(c)}&pixel_mode=single&fire=click`, role: "fire" },
+    ];
+  }
   return [
     { text: base, role: "slug" },
-    { text: `${sep}utm_source=facebook&utm_campaign={{campaign.id}}&mb=${(acr || "GLO-01").toLowerCase()}`, role: "params" },
+    { text: `${sep}utm_source=facebook&utm_campaign={{campaign.id}}&mb=${mb}`, role: "params" },
     { text: `&pixel=${pixelId}`, role: "pixel" },
   ];
 }
 
 /** Full ad link = the segments joined — what the launch payload sends and Copy copies. */
-export function hsFinalLink(base: string, pixelId: string, acr: string): string {
-  return hsLinkSegments(base, pixelId, acr)
+export function hsFinalLink(base: string, pixelId: string, acr: string, c: HsLinkCampaign): string {
+  return hsLinkSegments(base, pixelId, acr, c)
     .map((s) => s.text)
     .join("");
 }
@@ -137,7 +195,6 @@ export function hsCreatePayload(
   acr: string,
   ddmm: string,
 ): Record<string, unknown> {
-  const kind = bidKind(c.bidStrategy);
   const wireBid = hsWireBid(parseMoney(c.bidCap), c.bidStrategy);
   const localeById = new Map(profileLocales.map((l) => [String(l.id), l.name]));
   // c.locales stores FB locale ids as strings; unknown ids (profile switched) are dropped.
@@ -153,12 +210,12 @@ export function hsCreatePayload(
     cta: c.cta,
     // The wire link is BUILT here, never pasted raw: base landing + tracking tail + the card's
     // pixel (same segments the card previews — one source of truth).
-    link: hsFinalLink(c.link, c.pixel, acr),
+    link: hsFinalLink(c.link, c.pixel, acr, c),
     daily_budget: Math.round(parseMoney(c.budget) * 100),
     ...(wireBid != null ? { bid: wireBid } : {}),
     bid_strategy: c.bidStrategy,
     objective: c.objective,
-    conversion_event: kind === "roas" ? "PURCHASE" : c.conversionEvent,
+    conversion_event: hsConversionEventValue(c),
     age_min: String(c.ageMin),
     position: c.placement,
     country_codes: hsCountryCodes(c.countries),

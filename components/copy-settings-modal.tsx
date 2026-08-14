@@ -52,7 +52,8 @@ const FIELDS: Field[] = [
   { key: "pixel", label: "Pixel", group: "Setup", when: (p) => !p.lockedPixel, preview: (c) => c.pixel || "—" },
 
   { key: "objective", label: "Objective", group: "Delivery", preview: (c) => optLabel(OBJECTIVES, c.objective) },
-  // fire=click optimization is MO-funnel-only; LION owns HS tracking.
+  // The optimization toggle is MO-funnel-only; HS tails carry fire=click unconditionally on
+  // HIGH ADX (driven by redirect type in hsLinkSegments, not by this field).
   {
     key: "optimization",
     label: "Optimization",
