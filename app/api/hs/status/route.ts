@@ -5,7 +5,10 @@ import { lionCampaignAds, lionConfigured, lionCreationStatus } from "@/lib/lion"
 export const runtime = "nodejs";
 
 const MAX_IDS = 100;
-const MAX_VERIFY_IDS = 25;
+// Must cover a full duplicate wave (45 shots): the client's verify list is stable-ordered, so a
+// smaller cap would permanently starve the tail — clones beyond the cut would never get their
+// reality check while the head stays pending.
+const MAX_VERIFY_IDS = 50;
 
 /** Batched creation-status proxy — the HS task manager polls all its pending LION tasks in ONE
  *  call. camelCase-mapped; `error` flattened to the message string.

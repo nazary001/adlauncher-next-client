@@ -1,5 +1,4 @@
-import { NextResponse } from "next/server";
-import { after } from "next/server";
+import { NextResponse, after } from "next/server";
 import { bidKind, parseMoney } from "@/lib/types";
 import { hsWireBid } from "@/lib/hs-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
@@ -33,6 +32,10 @@ const MAX_SHOTS = 45;
 const PUMP_BUDGET_MS = 770_000;
 
 const bad = (error: string, status = 400) => NextResponse.json({ ok: false, error }, { status });
+
+// Same-instance backstop for the wave claim: survives between requests on a warm function, so a
+// double-POST landing on the same instance short-circuits even before the app-cache read.
+const claimedWaves = new Set<string>();
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const jitter = () => 1000 + Math.random() * 2000;
@@ -196,8 +199,12 @@ export async function POST(req: Request): Promise<NextResponse> {
       });
 
     const waveKey = `hs-wave:${waveId}`;
+    if (claimedWaves.has(waveId)) return alreadyAccepted();
     const existing = await readAppCache<{ at: number }>(waveKey);
-    if (existing?.value?.at) return alreadyAccepted();
+    if (existing?.value?.at) {
+      claimedWaves.add(waveId);
+      return alreadyAccepted();
+    }
 
     // Rows land in the shared store BEFORE the claim and the response: the team (and this
     // buyer's next tab) sees the wave as queued even if the browser closes on the very next
@@ -225,9 +232,17 @@ export async function POST(req: Request): Promise<NextResponse> {
     if (claimed === null) {
       // Lost the unique-ckey race → someone else claimed this wave between read and write.
       const winner = await readAppCache<{ at: number }>(waveKey);
-      if (winner?.value?.at) return alreadyAccepted();
-      // Store unavailable — proceed without idempotency rather than blocking the wave.
+      if (winner?.value?.at) {
+        claimedWaves.add(waveId);
+        return alreadyAccepted();
+      }
+      // Store unavailable → FAIL CLOSED (review 08-14): without a persisted claim, a retry of
+      // this wave could pump twice and double every campaign. Money invariant beats
+      // availability — the buyer just re-fires when the store is back. (The stamped rows, if
+      // any landed, are harmless upserts of the same ids.)
+      return bad("task_store_unavailable_wave_not_fired", 503);
     }
+    claimedWaves.add(waveId);
 
     const user = session.username;
     const deadline = startedAt + PUMP_BUDGET_MS;
@@ -362,6 +377,22 @@ async function pumpBatch(
 
     // ---- phase 1: jittered submits ----
     for (let i = 0; i < shots.length; i++) {
+      // Window exhausted mid-wave (LION crawling — each call may burn up to its 60s timeout):
+      // mark every not-yet-fired shot explicitly instead of leaving silent "running" rows the
+      // platform kill would strand (review 08-14), then stop. Re-firing is the buyer's call.
+      if (Date.now() > deadline - 30_000) {
+        for (let j = i; j < shots.length; j++) {
+          const rest = shots[j];
+          if (rest.settled || rest.lionTaskId) continue;
+          rest.settled = true;
+          await rowWrite(user, rest.taskId, {
+            status: "error",
+            error: "Not submitted — the wave's server window closed before this shot (LION was slow). Re-fire it in the duplicator.",
+            finished_at: Date.now(),
+          });
+        }
+        break;
+      }
       const s = shots[i];
       if (familyFailed.has(s.campaignId)) {
         s.settled = true;

@@ -603,15 +603,20 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     // (live 08-12: a request hung overnight kept the latch closed, so a wedged task ticked for
     // 400+ minutes with the cap never firing).
     for (const t of tasksRef.current) {
-      // submittedAt for rows the server pump submitted; queuedAt covers rows whose pump died
-      // BEFORE the shot went out (link never set → no submittedAt) — without the fallback such
-      // a row would tick "running" forever, capped by nothing.
+      // Two stranded classes age out here: submitted rows LION never finished, AND batch rows
+      // whose server pump died BEFORE the shot went out (link empty → they restore as "running"
+      // with no lionTaskId, so neither polling nor the submitted-gate ever touches them — a
+      // review 08-14 caught them ticking forever).
+      const neverSubmitted = t.kind === "duplicate" && !t.local && t.status === "running" && !t.lionTaskId;
       const capFrom = t.submittedAt ?? t.queuedAt;
-      if (mine(t) && t.status === "submitted" && capFrom && now - capFrom > PENDING_CAP_MS) {
+      if (mine(t) && (t.status === "submitted" || neverSubmitted) && capFrom && now - capFrom > PENDING_CAP_MS) {
         const finishedAt = capFrom + PENDING_CAP_MS;
-        const error = "Still not finished on LION after 3 h — check the LION dashboard";
-        patch(t.id, { status: "unknown", finishedAt, error });
-        saveRemote(t.id, dynOf({ ...t, status: "unknown", finishedAt, error }));
+        const error = neverSubmitted
+          ? "Never reached LION — the wave's server window closed before this shot; re-fire it in the duplicator"
+          : "Still not finished on LION after 3 h — check the LION dashboard";
+        const status = neverSubmitted ? ("error" as const) : ("unknown" as const);
+        patch(t.id, { status, finishedAt, error });
+        saveRemote(t.id, dynOf({ ...t, status, finishedAt, error }));
       }
     }
     if (pollBusyRef.current) return;
@@ -1021,7 +1026,11 @@ type Filter = "all" | "active" | "done" | "failed";
 
 function fmtElapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  // Hours show as h:mm:ss — with the 3h pending cap a wedged row would otherwise read "180:00".
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+  return `${m}:${String(s % 60).padStart(2, "0")}`;
 }
 
 function HsTaskManagerPanel() {
