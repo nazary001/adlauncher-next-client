@@ -1038,7 +1038,7 @@ function TasksButtonCore({ tm, label }: { tm: TaskManagerValue; label: string })
           <span className="animate-pulse-soft absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-launch2" />
         ) : null}
       </span>
-      <span className="hidden sm:inline">{label}</span>
+      <span className="hidden whitespace-nowrap sm:inline">{label}</span>
       {badge > 0 ? (
         <span
           key={badge}
