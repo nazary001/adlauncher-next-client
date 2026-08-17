@@ -181,13 +181,15 @@ export async function stampHsTaskRow(
  * awaits the tail — call it before closing the stream so Vercel can't freeze the function with a
  * write still in flight. Failures are swallowed (the client-side saver is the fallback writer).
  */
-export function taskWriter(user: string, taskId: string | null) {
+export function taskWriter(user: string, taskId: string | null, statics: TaskRowData = {}) {
   let chain: Promise<unknown> = Promise.resolve();
   const active = Boolean(taskId) && storeConfigured();
   return {
     write(fields: TaskRowData): void {
       if (!active) return;
-      chain = chain.then(() => upsertTaskRow(user, taskId as string, fields)).catch(() => {});
+      // `statics` ride on EVERY write (e.g. partner="us" for the AIF rail) so even a row this
+      // writer CREATES (client died before its first save) lands in the right drawer's scope.
+      chain = chain.then(() => upsertTaskRow(user, taskId as string, { ...statics, ...fields })).catch(() => {});
     },
     flush(): Promise<unknown> {
       return chain.catch(() => {});

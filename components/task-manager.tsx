@@ -121,7 +121,8 @@ type TaskInput = LaunchInput | CloneInput;
 // Per-account key: several people share machines/browsers, and the fallback snapshot must not
 // leak one account's queue into another. The bare legacy key predates scoping and gets dropped.
 const LS_BASE = "adlauncher.tasks";
-const lsKeyFor = (user?: SessionUser) => (user?.username ? `${LS_BASE}.${user.username}` : LS_BASE);
+const lsKeyFor = (user: SessionUser | undefined, base: string) =>
+  user?.username ? `${base}.${user.username}` : base;
 
 export type EnqueueArgs = {
   partnerId: PartnerId;
@@ -165,6 +166,42 @@ export function useTaskManager(): TaskManagerValue {
   return v;
 }
 
+// AIF runs an IDENTICAL queue/drawer as a fully SEPARATE instance (own context, own Strapi scope
+// partner="us", own localStorage) — owner call 08-17: every partner gets its own task manager;
+// the team "Tasks" drawer stays MO-only, "HS Tasks" stays LION's.
+const AifCtx = createContext<TaskManagerValue | null>(null);
+
+export function useAifTaskManager(): TaskManagerValue {
+  const v = useContext(AifCtx);
+  if (!v) throw new Error("useAifTaskManager must be used within AifTaskManagerProvider");
+  return v;
+}
+
+/** Everything scope-specific about one task-manager instance. `api` also serves POST and the
+ *  pagehide beacon — the query param only matters on GET (the server scopes the list by it). */
+type TmScope = {
+  api: string;
+  lsBase: string;
+  /** Header button caption. */
+  label: string;
+  title: string;
+  subtitle: string;
+};
+const MO_SCOPE: TmScope = {
+  api: "/api/launch-tasks",
+  lsBase: LS_BASE,
+  label: "Tasks",
+  title: "Task Manager",
+  subtitle: "Team launch & clone queue",
+};
+const AIF_SCOPE: TmScope = {
+  api: "/api/launch-tasks?scope=aif",
+  lsBase: "adlauncher.aiftasks",
+  label: "AIF Tasks",
+  title: "AIF Task Manager",
+  subtitle: "AIF launch queue · team view",
+};
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 // ---------- provider (single-concurrency worker) ----------
@@ -172,7 +209,34 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // navigating between the launcher and the clone board.
 
 export function TaskManagerProvider({ children, user }: { children: React.ReactNode; user?: SessionUser }) {
-  const lsKey = lsKeyFor(user);
+  return (
+    <TaskManagerCore user={user} scope={MO_SCOPE} ctx={Ctx}>
+      {children}
+    </TaskManagerCore>
+  );
+}
+
+/** The AIF twin — mounted alongside in the (app) layout; boards pick the instance by partner. */
+export function AifTaskManagerProvider({ children, user }: { children: React.ReactNode; user?: SessionUser }) {
+  return (
+    <TaskManagerCore user={user} scope={AIF_SCOPE} ctx={AifCtx}>
+      {children}
+    </TaskManagerCore>
+  );
+}
+
+function TaskManagerCore({
+  children,
+  user,
+  scope,
+  ctx,
+}: {
+  children: React.ReactNode;
+  user?: SessionUser;
+  scope: TmScope;
+  ctx: React.Context<TaskManagerValue | null>;
+}) {
+  const lsKey = lsKeyFor(user, scope.lsBase);
   const me = user?.username ?? null;
   const [tasks, setTasks] = useState<LaunchTask[]>([]);
   const [open, setOpen] = useState(false);
@@ -222,7 +286,7 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
     if (dyn.status === "done" || dyn.status === "error") terminalSaved.current.add(id);
     const payload = { task_id: id, ...(meta.current.get(id) ?? {}), ...dyn };
     const post = () =>
-      fetch("/api/launch-tasks", {
+      fetch(scope.api, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -241,7 +305,7 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
         await post().catch(() => {});
       });
     saveChains.current.set(id, next);
-  }, []);
+  }, [scope.api]);
 
   // deleteRemote is gone with UI deletion (owner call 08-11): tasks leave Strapi only via
   // admin cleanup, never from a buyer's drawer. The tombstone map stays — it still suppresses
@@ -250,7 +314,7 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
   /** Pull the whole team's tasks and merge them in. My in-session tasks stay authoritative; every
    *  other row mirrors the fetch (so a teammate's dismiss disappears here too). */
   const loadRemote = useCallback(() => {
-    fetch("/api/launch-tasks")
+    fetch(scope.api)
       .then(async (r) => {
         if (r.status === 401) {
           // Session died — stop hammering; the next focus/visibility re-arms polling.
@@ -273,7 +337,7 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
         setTasks((cur) => mergeShared(cur, fetched, tomb));
       })
       .catch(() => {});
-  }, [noteSkew]);
+  }, [noteSkew, scope.api]);
 
   // Restore once on mount: the team's Strapi list wins; localStorage is the offline fallback.
   useEffect(() => {
@@ -283,12 +347,12 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
       // A snapshot task can never be `local` again — its input (video blob) died with the session.
       if (raw) localSnap = (JSON.parse(raw) as LaunchTask[]).map((t) => ({ ...t, local: false }));
       // Pre-scoping snapshot was account-agnostic — drop it so it can't surface for the wrong user.
-      if (lsKey !== LS_BASE) localStorage.removeItem(LS_BASE);
+      if (lsKey !== scope.lsBase) localStorage.removeItem(scope.lsBase);
     } catch {
       /* ignore */
     }
     let alive = true;
-    fetch("/api/launch-tasks")
+    fetch(scope.api)
       .then((r) => r.json())
       .then((d) => {
         if (!alive) return;
@@ -311,7 +375,7 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
     return () => {
       alive = false;
     };
-  }, [lsKey, noteSkew]);
+  }, [lsKey, noteSkew, scope.api, scope.lsBase]);
 
   // Live shared view: poll continuously (faster with the drawer open), pause while the tab is
   // hidden, refresh immediately on focus/visible — the badge is truthful at any moment.
@@ -388,7 +452,7 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
       for (let i = 0; i < rows.length; i += 25) {
         try {
           navigator.sendBeacon?.(
-            "/api/launch-tasks",
+            scope.api,
             new Blob([JSON.stringify({ tasks: rows.slice(i, i + 25) })], { type: "application/json" }),
           );
         } catch {
@@ -398,7 +462,7 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
     };
     window.addEventListener("pagehide", onPageHide);
     return () => window.removeEventListener("pagehide", onPageHide);
-  }, []);
+  }, [scope.api]);
 
   // Convergence: persist the interrupt for MY OWN stale rows (a crashed session can't beacon).
   // Owner-scoped writes mean only my sessions can settle my rows; others' dead rows stay derived-
@@ -929,17 +993,25 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
   };
 
   return (
-    <Ctx.Provider value={value}>
+    <ctx.Provider value={value}>
       {children}
-      <TaskManagerPanel />
-    </Ctx.Provider>
+      <TaskManagerPanel tm={value} scope={scope} />
+    </ctx.Provider>
   );
 }
 
 // ---------- header button ----------
 
 export function TaskManagerButton() {
-  const { counts, setOpen } = useTaskManager();
+  return <TasksButtonCore tm={useTaskManager()} label={MO_SCOPE.label} />;
+}
+
+export function AifTaskManagerButton() {
+  return <TasksButtonCore tm={useAifTaskManager()} label={AIF_SCOPE.label} />;
+}
+
+function TasksButtonCore({ tm, label }: { tm: TaskManagerValue; label: string }) {
+  const { counts, setOpen } = tm;
   const badge = counts.active > 0 ? counts.active : counts.error > 0 ? counts.error : 0;
   const tone =
     counts.active > 0
@@ -952,7 +1024,7 @@ export function TaskManagerButton() {
     <button
       type="button"
       onClick={() => setOpen(true)}
-      aria-label="Open Task Manager"
+      aria-label={`Open ${label}`}
       className={
         "relative flex h-9 items-center gap-2 rounded-full border px-3 text-[13px] font-medium " +
         "transition-all duration-200 active:scale-[0.96] focus-visible:outline-none " +
@@ -966,7 +1038,7 @@ export function TaskManagerButton() {
           <span className="animate-pulse-soft absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-launch2" />
         ) : null}
       </span>
-      <span className="hidden sm:inline">Tasks</span>
+      <span className="hidden sm:inline">{label}</span>
       {badge > 0 ? (
         <span
           key={badge}
@@ -1001,8 +1073,8 @@ const inBucket = (eff: EffStatus, f: Filter): boolean =>
         ? eff === "error" || eff === "stale"
         : eff === f;
 
-function TaskManagerPanel() {
-  const { tasks, counts, me, open, setOpen, retry, retryAll } = useTaskManager();
+function TaskManagerPanel({ tm, scope }: { tm: TaskManagerValue; scope: TmScope }) {
+  const { tasks, counts, me, open, setOpen, retry, retryAll } = tm;
   const [filter, setFilter] = useState<Filter>("all");
   const [kindFilter, setKindFilter] = useState<KindFilter>("all");
   const [mineOnly, setMineOnly] = useState(false);
@@ -1067,8 +1139,8 @@ function TaskManagerPanel() {
               <TasksIcon className="h-4 w-4" />
             </span>
             <div className="leading-none">
-              <h2 className="text-[14px] font-semibold text-ink">Task Manager</h2>
-              <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-faint">Team launch &amp; clone queue</p>
+              <h2 className="text-[14px] font-semibold text-ink">{scope.title}</h2>
+              <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-faint">{scope.subtitle}</p>
             </div>
           </div>
           <button

@@ -67,14 +67,21 @@ export async function GET(req: Request) {
   const user = callerOf(req);
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   if (!storeConfigured()) return NextResponse.json({ ok: false, tasks: [] });
+  // Every partner runs its OWN task manager over this one collection (owner call 08-17):
+  // ?scope=aif → only AIF rows (partner="us"); default → the MO drawer, which excludes both
+  // HS ("br", see /api/hs-tasks) and AIF rows. Explicit $and — repeating filters[partner][$ne]
+  // as two bare query keys would collapse into one in parsing.
+  const scope = new URL(req.url).searchParams.get("scope");
+  const partnerFilter =
+    scope === "aif"
+      ? `&filters[partner][$eq]=us`
+      : `&filters[$and][0][partner][$ne]=br&filters[$and][1][partner][$ne]=us`;
   try {
     const cutoff = Date.now() - WINDOW_MS;
     const rows: Row[] = [];
     for (let page = 1; page <= MAX_PAGES; page++) {
       const res = await fetch(
-        // HS tasks share this collection tagged partner="br" (see /api/hs-tasks) — exclude them
-        // so the MO drawer only ever shows MO launches/clones.
-        `${STRAPI}/api/launch-tasks?filters[owner][$notNull]=true&filters[partner][$ne]=br&filters[queued_at][$gte]=${cutoff}` +
+        `${STRAPI}/api/launch-tasks?filters[owner][$notNull]=true${partnerFilter}&filters[queued_at][$gte]=${cutoff}` +
           `&sort[0]=queued_at:desc&pagination[page]=${page}&pagination[pageSize]=${PAGE_SIZE}`,
         { headers: H(), cache: "no-store" },
       );

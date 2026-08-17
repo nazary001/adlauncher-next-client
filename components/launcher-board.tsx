@@ -24,7 +24,7 @@ import { useHs } from "./use-hs";
 import { LaunchRail } from "./launch-rail";
 import { CopySettingsModal } from "./copy-settings-modal";
 import { ChevronsIcon, CopyIcon, PlusIcon } from "./icons";
-import { useTaskManager } from "./task-manager";
+import { useAifTaskManager, useTaskManager } from "./task-manager";
 import { type HsLaunchChannel, useHsTaskManager } from "./hs-task-manager";
 import type { SessionUser } from "./user-menu";
 
@@ -98,7 +98,8 @@ export function LauncherBoard({ user, initialPartner = "in" }: { user?: SessionU
 }
 
 function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPartner: PartnerId }) {
-  const { enqueue, tasks } = useTaskManager();
+  const teamTm = useTaskManager();
+  const aifTm = useAifTaskManager();
   const [partnerId, setPartnerId] = useState<PartnerId>(initialPartner);
   // Codes already taken in the current partner's Strapi registry (MO gcm / AIF brand), keyed by
   // the registry endpoint they came from: switching partners makes the other pool's snapshot
@@ -117,6 +118,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   const [copyOpen, setCopyOpen] = useState(false);
   const nextId = useRef(2);
   const partner = partnerConfig(partnerId);
+  // The board talks to the ACTIVE partner's own task manager: AIF launches queue/track in the
+  // separate AIF instance (own drawer, own Strapi scope), everything else in the team one.
+  const { enqueue, tasks } = partner.aifLaunch ? aifTm : teamTm;
   const anyExpanded = campaigns.some((c) => !c.collapsed);
   // The partner's marker pool (MO gcm 01..200 / AIF brand test01..test700; null = no markers).
   const pool = markerPool(partner);

@@ -2,7 +2,7 @@
 
 import { FacebookMark, GoogleMark, RocketIcon, TikTokMark } from "./icons";
 import { PartnerSwitcher } from "./partner-switcher";
-import { TaskManagerButton } from "./task-manager";
+import { AifTaskManagerButton, TaskManagerButton } from "./task-manager";
 import { HsTaskManagerButton } from "./hs-task-manager";
 import { UserMenu, type SessionUser } from "./user-menu";
 import { partnerConfig, type PartnerId } from "@/lib/partners";
@@ -91,7 +91,13 @@ export function Header({
           {/* Only the active partner's queue button shows: HS (LION submits) has its own
               independent manager, everyone else shares the team Tasks queue. Both providers stay
               mounted in the app layout, so the hidden queue keeps working across the switch. */}
-          {partnerConfig(partner).lionLaunch ? <HsTaskManagerButton /> : <TaskManagerButton />}
+          {partnerConfig(partner).lionLaunch ? (
+            <HsTaskManagerButton />
+          ) : partnerConfig(partner).aifLaunch ? (
+            <AifTaskManagerButton />
+          ) : (
+            <TaskManagerButton />
+          )}
           <PlatformTabs />
           {user ? <UserMenu user={user} /> : null}
         </div>

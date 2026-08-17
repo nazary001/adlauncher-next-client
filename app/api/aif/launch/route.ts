@@ -269,8 +269,9 @@ export async function POST(req: Request) {
     async start(controller) {
       const send = (o: Json) => controller.enqueue(encoder.encode(JSON.stringify(o) + "\n"));
       // Mirror progress into the shared launch-task row — the team keeps seeing the truth even
-      // if this browser dies mid-run.
-      const tw = taskWriter(session.username, taskId);
+      // if this browser dies mid-run. partner="us" on every write: the row must land in the AIF
+      // drawer's scope even when this writer is the one that creates it.
+      const tw = taskWriter(session.username, taskId, { partner: "us" });
       let lastStage = "gcm";
       let settled = false; // set before the terminal write — the beat must never chain after it
       const progress = (stage: string) => {
