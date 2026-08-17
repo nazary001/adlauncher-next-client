@@ -319,7 +319,9 @@ export async function POST(req: Request) {
       const send = (o: Json) => controller.enqueue(encoder.encode(JSON.stringify(o) + "\n"));
       // Mirror progress into the launch-task row (chained, non-blocking, owner-guarded) so the
       // shared Task Manager stays live for every account — including after this client is gone.
-      const tw = taskWriter(session.username, taskId);
+      // partner="in" on every write: if THIS writer creates the row (client's queued-save failed,
+      // browser died), a null partner would match neither drawer scope — invisible team-wide.
+      const tw = taskWriter(session.username, taskId, { partner: "in" });
       let lastStage = "gcm";
       let settled = false; // set before the terminal write — the beat must never chain after it
       const progress = (stage: string) => {

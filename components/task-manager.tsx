@@ -443,6 +443,9 @@ function TaskManagerCore({
       if (mine.length === 0) return;
       const rows = mine.map((t) => ({
         task_id: t.id,
+        // If this beacon CREATES the row (the queued-save never landed), a missing partner would
+        // drop it out of every drawer scope — local tasks always know theirs.
+        ...(t.partner ? { partner: t.partner } : {}),
         status: "error",
         stage: t.stage,
         error: "Interrupted — page closed mid-run",

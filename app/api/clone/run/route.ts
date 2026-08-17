@@ -197,7 +197,9 @@ export async function POST(req: Request) {
       for (let idx = 0; idx < edits.length; idx++) {
         const edit = edits[idx];
         // Server-side mirror of this clone's Task Manager row (no-op when no task id was sent).
-        const tw = taskWriter(session.username, taskIds[idx] ?? null);
+        // partner="in" on every write: a row this writer CREATES (client save lost) must still
+        // land in the MO drawer's scope — null matches no scope at all.
+        const tw = taskWriter(session.username, taskIds[idx] ?? null, { partner: "in" });
         let lastStage = "source";
         let settled = false; // set before the terminal write — the beat must never chain after it
         const progress = (stage: string) => {

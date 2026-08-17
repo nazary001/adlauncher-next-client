@@ -72,10 +72,14 @@ export async function GET(req: Request) {
   // HS ("br", see /api/hs-tasks) and AIF rows. Explicit $and — repeating filters[partner][$ne]
   // as two bare query keys would collapse into one in parsing.
   const scope = new URL(req.url).searchParams.get("scope");
+  // The MO scope also claims partner-NULL rows: Strapi's $ne doesn't match NULL, so without the
+  // $or a row created without a partner stamp (historic server-writer/beacon creates) would be
+  // invisible in EVERY drawer. Null = MO by definition (lib/task-view.ts).
   const partnerFilter =
     scope === "aif"
       ? `&filters[partner][$eq]=us`
-      : `&filters[$and][0][partner][$ne]=br&filters[$and][1][partner][$ne]=us`;
+      : `&filters[$or][0][partner][$null]=true` +
+        `&filters[$or][1][$and][0][partner][$ne]=br&filters[$or][1][$and][1][partner][$ne]=us`;
   try {
     const cutoff = Date.now() - WINDOW_MS;
     const rows: Row[] = [];

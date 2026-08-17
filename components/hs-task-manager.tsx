@@ -303,7 +303,7 @@ export type HsSubmittedRow = {
 
 type HsTaskManagerValue = {
   tasks: HsTask[];
-  counts: { active: number; done: number; failed: number; running: number; total: number; inFlight: number };
+  counts: { active: number; done: number; failed: number; running: number; total: number; inFlight: number; onLion: number };
   /** Current user — labels task owners in the shared view and gates own-only actions. */
   me: string | null;
   /** Est. server clock (Date.now()+skew) at the last fetch — for owner-liveness (stale) judging. */
@@ -1118,6 +1118,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
           stage: "queue",
           lionTaskId: r.lionTaskId,
           queuedAt: now,
+          startedAt: now,
           submittedAt: now,
           local: true,
         };
@@ -1183,10 +1184,19 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       done = 0,
       failed = 0,
       running = 0,
-      inFlight = 0;
+      inFlight = 0,
+      onLion = 0;
     for (const t of tasks) {
+      // A dead session's non-terminal row is INTERRUPTED, not live — the row already renders it
+      // "session offline"; counting it by raw status kept the badge pulsing and Active/On-LION
+      // inflated forever (header contradicting the list, review find 08-17).
+      if (isStaleHsRow(t, me, estServerNow)) {
+        failed++;
+        continue;
+      }
       if (t.status === "queued" || t.status === "running" || t.status === "submitted") active++;
       if (t.status === "running" || t.status === "submitted") running++;
+      if (t.status === "submitted") onLion++;
       if (t.status === "done") done++;
       if (t.status === "error" || t.status === "unknown") failed++;
       // Launches still CLIENT-side (queued behind the pump, or running their upload/stream) die
@@ -1194,8 +1204,8 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       // tasks only: teammates' rows and restored snapshots don't hold this page hostage.
       if (t.local && (t.status === "queued" || t.status === "running")) inFlight++;
     }
-    return { active, done, failed, running, total: tasks.length, inFlight };
-  }, [tasks]);
+    return { active, done, failed, running, total: tasks.length, inFlight, onLion };
+  }, [tasks, me, estServerNow]);
 
   // Closing the page while launches are still client-side kills them (queued rows never fire;
   // an upload dies mid-flight) — the native leave-confirm is the hard stop behind the floating
@@ -1328,6 +1338,15 @@ function fmtElapsed(ms: number): string {
   return `${m}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/** A teammate's non-terminal row whose session stopped writing (> STALE_MS) — the "session
+ *  offline" state the row renders. ONE predicate for the row, the counts, the tabs and the
+ *  summary strip, so the header can never contradict the list again. */
+function isStaleHsRow(t: HsTask, me: string | null, estServerNow: number): boolean {
+  const mine = t.local || (!!me && t.owner === me);
+  const terminal = t.status === "done" || t.status === "error" || t.status === "unknown";
+  return !mine && !terminal && (!t.updatedMs || estServerNow - t.updatedMs > STALE_MS);
+}
+
 function HsTaskManagerPanel() {
   const { tasks, counts, me, estServerNow, open, setOpen, retry, retryAll, dismiss } = useHsTaskManager();
   const [filter, setFilter] = useState<Filter>("all");
@@ -1351,14 +1370,15 @@ function HsTaskManagerPanel() {
 
   if (!open) return null;
 
+  const staleOf = (t: HsTask) => isStaleHsRow(t, me, estServerNow);
   const inBucket = (t: HsTask): boolean =>
     filter === "all"
       ? true
       : filter === "active"
-        ? t.status === "queued" || t.status === "running" || t.status === "submitted"
+        ? (t.status === "queued" || t.status === "running" || t.status === "submitted") && !staleOf(t)
         : filter === "done"
           ? t.status === "done"
-          : t.status === "error" || t.status === "unknown";
+          : t.status === "error" || t.status === "unknown" || staleOf(t);
 
   const isMine = (t: HsTask) => t.local || (!!me && t.owner === me);
   const scoped = mineOnly ? tasks.filter(isMine) : tasks;
@@ -1400,7 +1420,7 @@ function HsTaskManagerPanel() {
         {/* summary strip */}
         <div className="flex items-center gap-1.5 border-b border-line px-4 py-2.5">
           <Stat label="Active" n={counts.active} tone="text-[#9db8ff]" />
-          <Stat label="On LION" n={tasks.filter((t) => t.status === "submitted").length} tone="text-launch2" />
+          <Stat label="On LION" n={counts.onLion} tone="text-launch2" />
           <Stat label="Done" n={counts.done} tone="text-launch2" />
           <Stat label="Failed" n={counts.failed} tone="text-danger" />
         </div>
@@ -1531,13 +1551,9 @@ function HsTaskRow({
   const done = t.status === "done";
   const error = t.status === "error";
   const unknown = t.status === "unknown";
-  // A teammate's non-terminal task whose session stopped writing (> STALE_MS) reads as "stale".
-  const stale =
-    !mine &&
-    !done &&
-    !error &&
-    !unknown &&
-    (!t.updatedMs || estServerNow - t.updatedMs > STALE_MS);
+  // A teammate's non-terminal task whose session stopped writing (> STALE_MS) reads as "stale" —
+  // same predicate the counts/tabs use (isStaleHsRow), so header and list always agree.
+  const stale = isStaleHsRow(t, me, estServerNow);
   const running = (t.status === "running" || t.status === "submitted") && !stale;
   const idx = stageIndex(t.stage);
   const end = t.finishedAt ?? now;

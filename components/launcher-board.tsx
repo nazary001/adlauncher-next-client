@@ -348,6 +348,11 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     setPartnerId(id);
     setCampaigns((cs) => normalize(cs, partnerConfig(id), reserved));
     setPreviewed(false);
+    // Every drawer closes on a partner switch: the swapped-in tasks button could otherwise open a
+    // second z-[80] panel on top of a still-open one (reachable keyboard-only — review find 08-17).
+    teamTm.setOpen(false);
+    aifTm.setOpen(false);
+    hsTasks.setOpen(false);
     // The pick rides in the URL so a refresh reopens on the same partner (no navigation).
     const url = new URL(window.location.href);
     url.searchParams.set("partner", id);
