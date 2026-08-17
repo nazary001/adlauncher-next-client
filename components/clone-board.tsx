@@ -303,8 +303,9 @@ function CloneInner({
     const url = new URL(window.location.href);
     url.searchParams.set("partner", id);
     // Switching onto a LION partner swaps the whole board (HS duplicator is a different server
-    // component tree) — full navigation; within Graph partners it's just state + URL.
-    if (partnerConfig(id).lionLaunch) {
+    // component tree) — full navigation; same for AIF (its clone board is a stub for now).
+    // Within Graph partners it's just state + URL.
+    if (partnerConfig(id).lionLaunch || partnerConfig(id).aifLaunch) {
       window.location.assign(url.toString());
       return;
     }

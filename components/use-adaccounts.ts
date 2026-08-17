@@ -22,10 +22,16 @@ export type AdAccountOption = RichOption & { pixels: PixelInfo[] };
  * mismatch (or enabled=false) IS the loading/reset state, so the effect never needs a
  * synchronous setState reset (which the react-compiler lint flags as cascade-prone).
  */
-export function useAdAccounts(enabled: boolean, preferredPixel?: Bound): AdAccountOption[] | null {
+export function useAdAccounts(
+  enabled: boolean,
+  preferredPixel?: Bound,
+  endpoint: string = "/api/adaccounts",
+): AdAccountOption[] | null {
   const preferredId = preferredPixel?.id;
   const preferredName = preferredPixel?.name;
-  const key = `${preferredId ?? ""}|${preferredName ?? ""}`;
+  // The endpoint is part of the key: switching partners (MO ↔ AIF) must reset to loading and
+  // refetch from the right token's catalog, never show the other partner's accounts.
+  const key = `${endpoint}|${preferredId ?? ""}|${preferredName ?? ""}`;
   const [state, setState] = useState<{ key: string; list: AdAccountOption[] | null }>({
     key,
     list: null,
@@ -38,7 +44,7 @@ export function useAdAccounts(enabled: boolean, preferredPixel?: Bound): AdAccou
 
     async function load(attempt: number): Promise<void> {
       try {
-        const r = await fetch("/api/adaccounts");
+        const r = await fetch(endpoint);
         const d = (await r.json().catch(() => ({}))) as {
           ok?: boolean;
           accounts?: Array<{ id: string; name: string; pixels?: PixelInfo[] }>;
@@ -83,7 +89,7 @@ export function useAdAccounts(enabled: boolean, preferredPixel?: Bound): AdAccou
       alive = false;
       if (timer) clearTimeout(timer);
     };
-  }, [enabled, key, preferredId, preferredName]);
+  }, [enabled, key, preferredId, preferredName, endpoint]);
 
   return enabled && state.key === key ? state.list : null;
 }

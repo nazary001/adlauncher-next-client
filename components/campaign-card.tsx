@@ -26,7 +26,7 @@ import {
   pixelsFor,
 } from "@/lib/catalog";
 import { hsFinalLink, hsLinkSegments, hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
-import { type LinkRole, type PartnerConfig, ROAS_PIXEL, fullLandingUrl, landingUrlSegments, launchReadyOpts } from "@/lib/partners";
+import { AIF_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifSlugSanitize, fullLandingUrl, landingUrlSegments, launchReadyOpts } from "@/lib/partners";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
 import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-adaccounts";
@@ -71,8 +71,8 @@ function missingRequirements(
   if (opts.account && !c.account) m.push("account");
   if (opts.pixel && !c.pixel) m.push("pixel");
   if (opts.page && !c.page) m.push(partner.pageLabel.toLowerCase());
-  if (opts.landing && !c.landing) m.push("landing");
-  if (opts.gcm && !c.gcm) m.push("gcm code");
+  if (opts.landing && !c.landing) m.push(partner.aifLaunch ? "destination" : "landing");
+  if (opts.gcm && !c.gcm) m.push(partner.aifLaunch ? "brand" : "gcm code");
   if (opts.profile && !c.profile) m.push("profile");
   if (opts.link && !isHttpUrl(c.link)) m.push("link");
   if (opts.adText && !c.title.trim()) m.push("title");
@@ -264,6 +264,9 @@ export function CampaignCard({
   const missing = missingRequirements(c, partner, opts);
   const bidCapEnabled = c.bidStrategy !== "LOWEST_COST_WITHOUT_CAP";
 
+  // ---- AIF mode: MO-style pickers on the AIF token; destination = free-typed slug; the pixel
+  // is derived (conversions → the AIF postback pixel, clicks → none) and never picked. ----
+  const aifMode = Boolean(partner.aifLaunch);
   // ---- HS (LION) mode: the bind cascade + locales come from LION's catalog ----
   const hsMode = Boolean(partner.lionLaunch && hs);
   const hsData = hsMode && hs ? hs.dataFor(c.profile) : undefined;
@@ -279,7 +282,8 @@ export function CampaignCard({
   // Self-heal restored/copied min-ROAS drafts: the value-pixel pin is STATE, not just display —
   // a draft restored with another pixel converges to the only ROAS-allowed one. Idempotent
   // (patches only on mismatch), so the unstable `patch` identity is safe to leave out of deps.
-  const roasPixelDrift = !hsMode && partner.accountsFromToken && kind === "roas" && c.pixel !== ROAS_PIXEL.id;
+  const roasPixelDrift =
+    !hsMode && !aifMode && partner.accountsFromToken && kind === "roas" && c.pixel !== ROAS_PIXEL.id;
   useEffect(() => {
     if (roasPixelDrift) onPatch(c.id, { pixel: ROAS_PIXEL.id });
   }, [roasPixelDrift, onPatch, c.id]);
@@ -338,7 +342,8 @@ export function CampaignCard({
   // the button never yields a "?gcm=" link with an empty code (which is also why the preview shows a
   // "…" placeholder until the code lands: preview and Copy now agree — nothing to copy until ready).
   // HS: same contract — no copy until the pixel is picked (the tail ends in pixel=<id>).
-  const linkCopyable = Boolean(derivedLink) && (hsMode ? Boolean(c.pixel) : !partner.usesGcm || Boolean(c.gcm));
+  const linkCopyable =
+    Boolean(derivedLink) && (hsMode ? Boolean(c.pixel) : partner.usesGcm || aifMode ? Boolean(c.gcm) : true);
   function copyLink() {
     if (!linkCopyable) return;
     navigator.clipboard?.writeText(derivedLink);
@@ -389,9 +394,9 @@ export function CampaignCard({
                 {c.profile.replace("globecoders-", "")}
               </span>
             ) : null}
-            {partner.usesGcm && c.gcm ? (
+            {(partner.usesGcm || aifMode) && c.gcm ? (
               <span className="rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 font-mono text-[#9db8ff]">
-                gcm {c.gcm}
+                {partner.usesGcm ? `gcm ${c.gcm}` : c.gcm}
               </span>
             ) : null}
             <span className="font-mono">${moneyLabel(c.budget)}</span>
@@ -527,9 +532,13 @@ export function CampaignCard({
                         patch({
                           account: v,
                           // A roas card keeps its pinned value pixel across account switches —
-                          // defaultPixelFor would swap it back to the FARM-1 preference.
-                          pixel:
-                            kind === "roas" ? ROAS_PIXEL.id : defaultPixelFor(adAccounts ?? null, v, partner.preferredPixel),
+                          // defaultPixelFor would swap it back to the FARM-1 preference. AIF pixels
+                          // are derived from the optimization (normalize re-pins) — never refilled.
+                          pixel: aifMode
+                            ? c.pixel
+                            : kind === "roas"
+                              ? ROAS_PIXEL.id
+                              : defaultPixelFor(adAccounts ?? null, v, partner.preferredPixel),
                         })
                       }
                       options={adAccounts ?? []}
@@ -596,7 +605,15 @@ export function CampaignCard({
                 <Field
                   label="Pixel"
                   className={setupCol}
-                  hint={!hsMode && partner.accountsFromToken && kind === "roas" ? "pinned by min ROAS" : undefined}
+                  hint={
+                    aifMode
+                      ? conversions
+                        ? "postback CAPI pixel"
+                        : "clicks need no pixel"
+                      : !hsMode && partner.accountsFromToken && kind === "roas"
+                        ? "pinned by min ROAS"
+                        : undefined
+                  }
                   error={
                     hsMode
                       ? // Quiet until the fanka is picked — that's where the pixel step starts
@@ -604,14 +621,23 @@ export function CampaignCard({
                         c.account && c.page && Array.isArray(hsPixels) && hsPixels.length > 0 && !c.pixel
                         ? "Pick a pixel"
                         : undefined
-                      : partner.accountsFromToken && kind === "roas" && c.pixel !== ROAS_PIXEL.id
+                      : !aifMode && partner.accountsFromToken && kind === "roas" && c.pixel !== ROAS_PIXEL.id
                         ? `min ROAS runs only on ${ROAS_PIXEL.name}`
-                        : partner.accountsFromToken && c.account && !c.pixel
+                        : !aifMode && partner.accountsFromToken && c.account && !c.pixel
                           ? "Pick a pixel"
                           : undefined
                   }
                 >
-                  {hsMode ? (
+                  {aifMode ? (
+                    // The pixel is never picked on this rail: conversions run ONLY on the AIF
+                    // postback pixel (where the CAPI forwarder lands Purchases), clicks carry
+                    // no pixel at all — both server-enforced, shown here as locked truth.
+                    conversions ? (
+                      <LockedField value={`${AIF_PIXEL.name} · ${AIF_PIXEL.id}`} hint="auto" mono />
+                    ) : (
+                      <LockedField value="No pixel — click optimization" hint="auto" />
+                    )
+                  ) : hsMode ? (
                     <SearchSelect
                       // While the pixel list is still loading there is no name to show — the raw
                       // id would render as bare digits, so the field shows its placeholder instead.
@@ -662,33 +688,37 @@ export function CampaignCard({
             <section className="flex flex-col gap-3">
               <SectionLabel icon={<TargetIcon className="h-3.5 w-3.5" />}>Delivery</SectionLabel>
               <div className="grid grid-cols-12 gap-3">
-                <Field label="Objective" className={hsMode ? "col-span-6 md:col-span-4" : "col-span-6 md:col-span-3"}>
-                  <Select
-                    value={c.objective}
-                    onChange={(e) => {
-                      const objective = e.target.value;
-                      // Events are objective-specific — keep the current one if still valid, else
-                      // fall back to the first event allowed for the new objective.
-                      const allowed = conversionEventsFor(objective);
-                      const conversionEvent = allowed.some((o) => o.value === c.conversionEvent)
-                        ? c.conversionEvent
-                        : allowed[0]?.value ?? c.conversionEvent;
-                      patch({ objective, conversionEvent });
-                    }}
-                    options={OBJECTIVES}
-                  />
-                </Field>
+                {!aifMode ? (
+                  <Field label="Objective" className={hsMode ? "col-span-6 md:col-span-4" : "col-span-6 md:col-span-3"}>
+                    <Select
+                      value={c.objective}
+                      onChange={(e) => {
+                        const objective = e.target.value;
+                        // Events are objective-specific — keep the current one if still valid, else
+                        // fall back to the first event allowed for the new objective.
+                        const allowed = conversionEventsFor(objective);
+                        const conversionEvent = allowed.some((o) => o.value === c.conversionEvent)
+                          ? c.conversionEvent
+                          : allowed[0]?.value ?? c.conversionEvent;
+                        patch({ objective, conversionEvent });
+                      }}
+                      options={OBJECTIVES}
+                    />
+                  </Field>
+                ) : null}
                 {/* The optimization toggle is an MO funnel concept — HS tails get fire=click
                     unconditionally on HIGH ADX (redirect type decides, see hsLinkSegments). */}
                 {!hsMode ? (
                   <Field
                     label="Optimization"
-                    className="col-span-6 md:col-span-3"
+                    className={aifMode ? "col-span-6" : "col-span-6 md:col-span-3"}
                     hint={
                       kind === "roas"
                         ? "pinned by min ROAS"
                         : conversions
-                          ? "link gets &fire=click"
+                          ? aifMode
+                            ? "Purchase on the AIF pixel"
+                            : "link gets &fire=click"
                           : undefined
                     }
                   >
@@ -702,7 +732,10 @@ export function CampaignCard({
                     />
                   </Field>
                 ) : null}
-                <Field label="Bid strategy" className={hsMode ? "col-span-6 md:col-span-4" : "col-span-6 md:col-span-3"}>
+                <Field
+                  label="Bid strategy"
+                  className={hsMode ? "col-span-6 md:col-span-4" : aifMode ? "col-span-6" : "col-span-6 md:col-span-3"}
+                >
                   <Select
                     value={c.bidStrategy}
                     onChange={(e) => {
@@ -728,21 +761,24 @@ export function CampaignCard({
                         });
                       }
                     }}
-                    options={BID_STRATEGIES}
+                    // AIF bans min-ROAS (its CAPI Purchases carry value 0 — nothing to optimize).
+                    options={aifMode ? BID_STRATEGIES.filter((o) => bidKind(o.value) !== "roas") : BID_STRATEGIES}
                   />
                 </Field>
-                <Field
-                  label="Conversion event"
-                  className={hsMode ? "col-span-6 md:col-span-4" : "col-span-6 md:col-span-3"}
-                  hint={kind === "roas" ? "pinned by min ROAS" : undefined}
-                >
-                  <Select
-                    value={kind === "roas" ? "PURCHASE" : c.conversionEvent}
-                    onChange={(e) => patch({ conversionEvent: e.target.value })}
-                    options={conversionEventsFor(c.objective)}
-                    disabled={kind === "roas"}
-                  />
-                </Field>
+                {!aifMode ? (
+                  <Field
+                    label="Conversion event"
+                    className={hsMode ? "col-span-6 md:col-span-4" : "col-span-6 md:col-span-3"}
+                    hint={kind === "roas" ? "pinned by min ROAS" : undefined}
+                  >
+                    <Select
+                      value={kind === "roas" ? "PURCHASE" : c.conversionEvent}
+                      onChange={(e) => patch({ conversionEvent: e.target.value })}
+                      options={conversionEventsFor(c.objective)}
+                      disabled={kind === "roas"}
+                    />
+                  </Field>
+                ) : null}
                 <Field
                   label="Daily budget"
                   className="col-span-6"
@@ -812,15 +848,17 @@ export function CampaignCard({
                         options={CTAS}
                       />
                     </Field>
-                    <Field label="Redirect type">
-                      <Select
-                        value={c.redirectType}
-                        onChange={(e) => patch({ redirectType: e.target.value })}
-                        options={REDIRECT_TYPES}
-                      />
-                    </Field>
+                    {!aifMode ? (
+                      <Field label="Redirect type">
+                        <Select
+                          value={c.redirectType}
+                          onChange={(e) => patch({ redirectType: e.target.value })}
+                          options={REDIRECT_TYPES}
+                        />
+                      </Field>
+                    ) : null}
                   </div>
-                  {c.redirectType === "#ADX" && !hsMode ? (
+                  {c.redirectType === "#ADX" && !hsMode && !aifMode ? (
                     <div className="animate-pop-in">
                       <Field label="Param mode">
                         <Select
@@ -831,7 +869,7 @@ export function CampaignCard({
                       </Field>
                     </div>
                   ) : null}
-                  {c.redirectType === "HIGH ADX" && !hsMode ? (
+                  {c.redirectType === "HIGH ADX" && !hsMode && !aifMode ? (
                     <button
                       type="button"
                       className={
@@ -890,6 +928,45 @@ export function CampaignCard({
                         </div>
                       </Field>
                     </>
+                  ) : aifMode ? (
+                    <Field
+                      label="Destination article"
+                      hint="bare article slug on the partner's RW page — e.g. best-family-pets"
+                    >
+                      <div>
+                        <TextInput
+                          value={c.landing}
+                          onChange={(e) => patch({ landing: aifSlugSanitize(e.target.value) })}
+                          maxLength={200}
+                          placeholder="best-family-pets"
+                          className="font-mono text-[12px]"
+                        />
+                        {/* RW-link preview — the EXACT link the launch will send (same segments
+                            the server joins); brand slot fills once the registry hands a code. */}
+                        {c.landing ? (
+                          <div className="mt-2 overflow-hidden rounded-lg border border-line bg-surface2/50">
+                            <div className="max-h-24 select-all overflow-y-auto break-all px-3 py-2 font-mono text-[11px] leading-relaxed">
+                              {landingUrlSegments(partner, c.landing, c.gcm || "…", conversions).map((seg, i) => (
+                                <span key={i} className={LINK_ROLE_CLASS[seg.role]}>
+                                  {seg.text}
+                                </span>
+                              ))}
+                            </div>
+                            <div className="flex items-center justify-between gap-2 border-t border-line bg-surface/50 px-2 py-1.5">
+                              <span className="select-none font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
+                                RW link
+                              </span>
+                              <CopyLinkButton
+                                copied={copied}
+                                disabled={!linkCopyable}
+                                title="Waiting for a brand…"
+                                onClick={copyLink}
+                              />
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    </Field>
                   ) : (
                     <Field
                       label="Destination link"

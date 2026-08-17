@@ -72,8 +72,10 @@ const FIELDS: Field[] = [
       c.bidCap ? (bidKind(c.bidStrategy) === "roas" ? `ROAS ${c.bidCap}` : `$${moneyLabel(c.bidCap)}`) : "—",
   },
 
+  // AIF reuses the landing slot for its destination slug — same copy semantics, different label.
   { key: "landing", label: "Landing", group: "Creative", when: (p) => p.usesGcm, preview: (c) => c.landing || "—" },
-  { key: "link", label: "Destination link", group: "Creative", when: (p) => !p.usesGcm, preview: (c) => c.link || "—" },
+  { key: "landing", label: "Destination article", group: "Creative", when: (p) => Boolean(p.aifLaunch), preview: (c) => c.landing || "—" },
+  { key: "link", label: "Destination link", group: "Creative", when: (p) => !p.usesGcm && !p.aifLaunch, preview: (c) => c.link || "—" },
   { key: "title", label: "Title", group: "Creative", preview: (c) => c.title || "—" },
   { key: "copy", label: "Primary text", group: "Creative", preview: (c) => c.copy || "—" },
   { key: "cta", label: "CTA", group: "Creative", preview: (c) => optLabel(CTAS, c.cta) },

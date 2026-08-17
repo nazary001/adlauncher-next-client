@@ -9,7 +9,8 @@ import {
   type PartnerConfig,
   type PartnerId,
   applyPartnerLocks,
-  assignGcmCodes,
+  assignPoolCodes,
+  markerPool,
   launchReadyOpts,
   namePrefixFor,
   partnerConfig,
@@ -43,7 +44,8 @@ const HS_CHANNEL_LS = "adlauncher.hs.channel";
 
 /** gcm auto-claim (skipping registry-reserved codes) + single account/pixel/fanpage pinning. */
 function normalize(rows: Campaign[], partner: PartnerConfig, reserved: Set<string> | null): Campaign[] {
-  const withGcm = partner.usesGcm ? assignGcmCodes(rows, reserved) : rows;
+  const pool = markerPool(partner);
+  const withGcm = pool ? assignPoolCodes(rows, reserved, pool) : rows;
   return applyPartnerLocks(withGcm, partner);
 }
 
@@ -76,8 +78,9 @@ function fillAccountDefaults(
     const pixels = adAccounts.find((a) => a.value === account)?.pixels ?? [];
     // Min-ROAS cards are pinned to the value pixel — never re-fill them, even if this account's
     // list misses it (the launch route's pixel_not_on_account then names the real problem
-    // instead of a silent swap ping-ponging with the card's pin effect).
-    if (bidKind(c.bidStrategy) !== "roas" && (!pixel || !pixels.some((p) => p.id === pixel))) {
+    // instead of a silent swap ping-ponging with the card's pin effect). AIF pixels are derived
+    // from the optimization (applyPartnerLocks), never filled from the account's list.
+    if (!partner.aifLaunch && bidKind(c.bidStrategy) !== "roas" && (!pixel || !pixels.some((p) => p.id === pixel))) {
       pixel = defaultPixelFor(adAccounts, account, partner.preferredPixel);
     }
     if (account === c.account && pixel === c.pixel) return c;
@@ -97,8 +100,10 @@ export function LauncherBoard({ user, initialPartner = "in" }: { user?: SessionU
 function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPartner: PartnerId }) {
   const { enqueue, tasks } = useTaskManager();
   const [partnerId, setPartnerId] = useState<PartnerId>(initialPartner);
-  // Codes already taken in the Strapi gcm registry. null = not loaded yet → assign nothing.
-  const [reserved, setReserved] = useState<Set<string> | null>(null);
+  // Codes already taken in the current partner's Strapi registry (MO gcm / AIF brand), keyed by
+  // the registry endpoint they came from: switching partners makes the other pool's snapshot
+  // instantly invalid (derived `reserved` reads null → assign nothing until the refetch lands).
+  const [reservedState, setReservedState] = useState<{ api: string; set: Set<string> } | null>(null);
   // Count just sent to the Task Manager, shown as a brief confirmation (campaigns stay on the board).
   const [justQueued, setJustQueued] = useState(0);
   const queuedTimer = useRef<number | null>(null);
@@ -113,15 +118,29 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   const nextId = useRef(2);
   const partner = partnerConfig(partnerId);
   const anyExpanded = campaigns.some((c) => !c.collapsed);
-  // Free codes left in the 01–200 registry pool (null until the registry loads). `reserved` is the
+  // The partner's marker pool (MO gcm 01..200 / AIF brand test01..test700; null = no markers).
+  const pool = markerPool(partner);
+  const poolApi = pool?.api ?? "";
+  // The current partner's used-set — null while another pool's snapshot (or nothing) is loaded.
+  const reserved = reservedState && reservedState.api === poolApi ? reservedState.set : null;
+  // Free codes left in the registry pool (null until the registry loads). `reserved` is the
   // live used-set — refreshed on focus and grown by completed launches — so this count updates
   // without extra requests. Drives the exhaustion banner and the Launch hard-block below.
-  const poolFree = reserved ? Math.max(0, GCM_POOL_MAX - reserved.size) : null;
-  const gcmExhausted = Boolean(partner.usesGcm) && poolFree === 0;
-  // Token fanpages for the per-card fanka picker (Indians), each with its live N/limit fill tag.
-  const fanpages = useFanpages(Boolean(partner.fanpagesFromToken), partner.pageAdLimit ?? 250);
+  const poolFree = pool && reserved ? Math.max(0, pool.max - reserved.size) : null;
+  const poolExhausted = Boolean(pool) && poolFree === 0;
+  // Token fanpages for the per-card fanka picker, each with its live N/limit fill tag (MO); AIF
+  // reads its own token's pages and ships v1 without the volume badges.
+  const fanpages = useFanpages(
+    Boolean(partner.fanpagesFromToken),
+    partner.pageAdLimit ?? 250,
+    partner.aifLaunch ? { list: "/api/aif/fanpages", volume: null } : undefined,
+  );
   // Token ad accounts (with their pixels) for the account/pixel pickers.
-  const adAccounts = useAdAccounts(Boolean(partner.accountsFromToken), partner.preferredPixel);
+  const adAccounts = useAdAccounts(
+    Boolean(partner.accountsFromToken),
+    partner.preferredPixel,
+    partner.aifLaunch ? "/api/aif/adaccounts" : undefined,
+  );
   // LION catalog (HS): profiles + ACR, per-profile accounts/pages/locales, per-account pixels.
   const hs = useHs(Boolean(partner.lionLaunch));
   const hsTasks = useHsTaskManager();
@@ -173,23 +192,30 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // mount and again when the window regains focus (≥15s apart): with several accounts working
   // at once another user may claim a previewed code — the claim itself is atomic server-side,
   // this just keeps the optimistic previews close to reality.
-  const lastGcmFetch = useRef(0);
+  const lastGcmFetch = useRef<{ api: string; at: number }>({ api: "", at: 0 });
   const refreshGcm = useCallback(() => {
-    if (Date.now() - lastGcmFetch.current < 15_000) return;
-    lastGcmFetch.current = Date.now();
-    fetch("/api/gcm")
+    if (!poolApi) return;
+    const last = lastGcmFetch.current;
+    if (last.api === poolApi && Date.now() - last.at < 15_000) return;
+    lastGcmFetch.current = { api: poolApi, at: Date.now() };
+    fetch(poolApi)
       .then((r) => r.json())
       .then((d) => {
         if (!Array.isArray(d.used)) return;
         const set = new Set<string>(d.used);
-        setReserved(set);
-        setCampaigns((cs) => normalize(cs, partnerRef.current, set));
+        setReservedState({ api: poolApi, set });
+        // The partner may have switched while this was in flight — assigning the new partner's
+        // codes from the OLD pool's snapshot could preview an already-taken code. Only normalize
+        // while this snapshot still belongs to the current partner's registry.
+        if (markerPool(partnerRef.current)?.api === poolApi) {
+          setCampaigns((cs) => normalize(cs, partnerRef.current, set));
+        }
       })
       .catch(() => {
         /* registry unreachable — keep the previous reserved set (null on first load =
            no possibly-taken code is handed out) */
       });
-  }, []);
+  }, [poolApi]);
 
   useEffect(() => {
     refreshGcm();
@@ -210,29 +236,31 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     // Safe setState-in-effect: the functional updater returns the SAME reference when nothing new is
     // added, so it never re-renders (let alone cascades); it only grows `reserved` when a launch
     // actually completes with a new claimed code.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setReserved((prev) => {
-      if (!prev) return prev;
+    setReservedState((prev) => {
+      if (!prev || prev.api !== poolApi) return prev;
       let set: Set<string> | null = null;
       for (const t of tasks) {
-        const fresh = t.status === "done" && (t.finishedAt ?? 0) > lastGcmFetch.current;
+        // Only the CURRENT partner's completions belong to this pool — an MO wave finishing
+        // while the board sits on AIF must not fold gcm codes into the brand set (and vice versa).
+        const fresh =
+          t.status === "done" && t.partner === partnerId && (t.finishedAt ?? 0) > lastGcmFetch.current.at;
         const g = fresh ? t.result?.gcm : undefined;
-        if (g && !prev.has(g)) {
-          set = set ?? new Set(prev);
+        if (g && !prev.set.has(g)) {
+          set = set ?? new Set(prev.set);
           set.add(g);
         }
       }
-      return set ?? prev;
+      return set ? { api: prev.api, set } : prev;
     });
-  }, [tasks]);
+  }, [tasks, poolApi, partnerId]);
 
   /** Non-blocking launch: every launchable campaign is captured + dropped into the Task Manager
    *  instantly, then flies off the board so you can keep building. The queue creates them one by
    *  one (ACTIVE since 08-11) in the background. */
   function launch() {
     // Pool exhausted → nothing may launch: stale card previews would only burn failed claims
-    // (the rail button is disabled too; claimGcm server-side is the last-resort guard).
-    if (gcmExhausted) return;
+    // (the rail button is disabled too; the server-side claim is the last-resort guard).
+    if (poolExhausted) return;
     const opts = launchReadyOpts(partner);
     const launchable = campaigns.filter((c) => isLaunchable(c, opts));
     if (launchable.length === 0) return;
@@ -275,6 +303,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     // so any card built next never re-previews a code that's already on its way into the registry.
     const nextReserved = reserved ? new Set(reserved) : null;
     const launched = new Set<string>();
+    const launchApi = poolApi; // snapshot — the async wave keeps writing to ITS pool's key
     for (const c of launchable) {
       const media = firstMedia(c);
       if (!media) continue;
@@ -292,7 +321,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       });
       launched.add(c.id);
     }
-    if (nextReserved) setReserved(nextReserved);
+    if (nextReserved) setReservedState({ api: launchApi, set: nextReserved });
     setPreviewed(false);
 
     // Keep the campaigns on the board so you can tweak them and relaunch — only clear the gcm of the
@@ -386,8 +415,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     });
   };
 
-  // Capped at the gcm pool size (codes 01–200) so a full wave can't leave a card without a code.
-  const MAX_CARDS = GCM_POOL_MAX;
+  // Capped at the marker pool size (and 200 overall — a bigger board is unusable anyway) so a
+  // full wave can't leave a card without a code.
+  const MAX_CARDS = Math.min(pool?.max ?? GCM_POOL_MAX, GCM_POOL_MAX);
 
   /** Wave builder: APPEND `n` new cards (owner switched from ×multiply 08-11), cycling through
    *  the existing cards as templates — one template card → n identical copies, several cards →
@@ -419,7 +449,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
         {/* Free-pool alert, first thing on the board: designers must see BEFORE building cards
             that launches are (about to be) blocked. Red = pool exhausted (Launch disabled),
             amber = running low. gcm partners only; hidden until the registry loads. */}
-        {partner.usesGcm && poolFree !== null && poolFree <= GCM_LOW_WATER ? (
+        {pool && poolFree !== null && poolFree <= GCM_LOW_WATER ? (
           <div className="mx-auto w-full max-w-[1440px] px-4 pt-4 sm:px-6">
             <div
               role="alert"
@@ -437,8 +467,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
                 }
               />
               {poolFree === 0
-                ? `No free gcm codes left — all ${GCM_POOL_MAX} are in use. Launching is blocked until codes are freed in the registry.`
-                : `Only ${poolFree} free gcm code${poolFree === 1 ? "" : "s"} left of ${GCM_POOL_MAX} — a bigger wave won't fit.`}
+                ? `No free ${pool!.label} codes left — all ${pool!.max} are in use. Launching is blocked until codes are freed in the registry.`
+                : `Only ${poolFree} free ${pool!.label} code${poolFree === 1 ? "" : "s"} left of ${pool!.max} — a bigger wave won't fit.`}
             </div>
           </div>
         ) : null}

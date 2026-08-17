@@ -30,8 +30,17 @@ const VOLUME_MAX_POLLS = 10;
  * mismatch (or enabled=false) IS the loading/reset state, so the effect never needs a
  * synchronous setState reset (which the react-compiler lint flags as cascade-prone).
  */
-export function useFanpages(enabled: boolean, limit = 250): FanpageOption[] | null {
-  const key = String(limit);
+export function useFanpages(
+  enabled: boolean,
+  limit = 250,
+  /** Partner-specific endpoints. `volume: null` = no fill badges for this partner (AIF v1). */
+  endpoints?: { list: string; volume: string | null },
+): FanpageOption[] | null {
+  const listApi = endpoints ? endpoints.list : "/api/fanpages";
+  const volumeApi = endpoints ? endpoints.volume : "/api/fanpages/volume";
+  // The endpoint is part of the key: switching partners (MO ↔ AIF) must reset to loading and
+  // refetch from the right token's catalog, never show the other partner's pages.
+  const key = `${listApi}|${limit}`;
   const [state, setState] = useState<{ key: string; list: FanpageOption[] | null }>({
     key,
     list: null,
@@ -43,9 +52,10 @@ export function useFanpages(enabled: boolean, limit = 250): FanpageOption[] | nu
     let timer: ReturnType<typeof setTimeout> | null = null;
 
     async function loadVolume(ids: string[], attempt: number): Promise<void> {
+      if (!volumeApi) return; // partner ships without fill badges — the list alone is the picker
       let missing = ids.length;
       try {
-        const v = (await fetch("/api/fanpages/volume").then((r) => r.json())) as {
+        const v = (await fetch(volumeApi).then((r) => r.json())) as {
           ok?: boolean;
           counts?: Record<string, number | null>;
         };
@@ -83,7 +93,7 @@ export function useFanpages(enabled: boolean, limit = 250): FanpageOption[] | nu
       // Phase 1: the list itself — the picker is usable as soon as this lands.
       let ids: string[] = [];
       try {
-        const r = await fetch("/api/fanpages");
+        const r = await fetch(listApi);
         const d = (await r.json().catch(() => ({}))) as {
           ok?: boolean;
           pages?: Array<{ id: string; name: string }>;
@@ -118,7 +128,7 @@ export function useFanpages(enabled: boolean, limit = 250): FanpageOption[] | nu
       alive = false;
       if (timer) clearTimeout(timer);
     };
-  }, [enabled, key, limit]);
+  }, [enabled, key, limit, listApi, volumeApi]);
 
   return enabled && state.key === key ? state.list : null;
 }

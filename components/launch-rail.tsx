@@ -4,7 +4,7 @@ import type { Campaign } from "@/lib/types";
 import { fullName, isLaunchable, moneyLabel, parseMoney } from "@/lib/types";
 import { CONVERSION_EVENTS, geoSummary } from "@/lib/catalog";
 import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
-import { type PartnerConfig, launchReadyOpts } from "@/lib/partners";
+import { type PartnerConfig, launchReadyOpts, markerPool } from "@/lib/partners";
 import type { HsLaunchChannel } from "./hs-task-manager";
 import { CheckIcon, EyeIcon, RocketIcon } from "./icons";
 
@@ -46,8 +46,9 @@ export function LaunchRail({
   const readyCount = campaigns.filter((c) => isLaunchable(c, opts)).length;
   const allReady = campaigns.length > 0 && readyCount === campaigns.length;
   // Registry pool exhausted → the button locks even for cards holding stale code previews: with
-  // every code row taken, their claims can only fail server-side (claimGcm walks 400s then throws).
-  const gcmBlocked = Boolean(partner.usesGcm) && poolFree === 0;
+  // every code row taken, their claims can only fail server-side (the claim walks 400s then throws).
+  const pool = markerPool(partner);
+  const gcmBlocked = Boolean(pool) && poolFree === 0;
   const ddmm = partner.lionLaunch ? todaySaoPauloDDMM() : "";
   const nameOf = (c: Campaign) =>
     partner.lionLaunch ? (c.name.trim() ? hsFullName(c, hsAcr ?? "", ddmm) : "") : fullName(c);
@@ -108,10 +109,12 @@ export function LaunchRail({
                       {nameOf(c) || "Untitled campaign"}
                     </span>
                     <span className="block truncate text-[10.5px] text-faint">
-                      {(partner.usesGcm
+                      {(pool
                         ? c.gcm
-                          ? `gcm ${c.gcm}`
-                          : "no gcm"
+                          ? partner.usesGcm
+                            ? `gcm ${c.gcm}`
+                            : c.gcm
+                          : `no ${pool.label}`
                         : c.profile
                           ? c.profile.replace("globecoders-", "")
                           : "no profile") +
@@ -245,7 +248,7 @@ export function LaunchRail({
 
           {gcmBlocked ? (
             <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">
-              No free gcm codes left — launching is blocked until codes are freed in the registry.
+              No free {pool?.label ?? "gcm"} codes left — launching is blocked until codes are freed in the registry.
             </p>
           ) : justQueued > 0 ? (
             <p className="animate-pop-in text-center text-[11px] font-medium leading-relaxed text-launch2">

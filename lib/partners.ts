@@ -1,6 +1,7 @@
 import type { ComponentType, SVGProps } from "react";
 import { BrazilFlag, IndiaFlag, UsaFlag } from "@/components/icons";
 import type { Campaign } from "./types";
+import { bidKind } from "./types";
 
 export type Bound = { id: string; name: string };
 
@@ -56,6 +57,12 @@ export type PartnerConfig = {
    *  from LION, the name follows LION's validated format, creatives are public URLs (one ad per
    *  URL) and an independent HS task manager tracks the LION-side creation. */
   lionLaunch?: boolean;
+  /** Airfind Rewarded Web (AIF): MO-style direct Graph launch on the AIF token, but the ad link
+   *  is the partner's RW page (destination = a free-typed article slug) carrying a brand marker
+   *  from the test01..test700 pool (the revenue key — one brand per campaign, own registry).
+   *  Conversions arrive via the postback→CAPI forwarder into the AIF pixel, so conversion
+   *  launches pin that pixel + Purchase; min-ROAS is banned (CAPI value is 0). */
+  aifLaunch?: boolean;
   /** Not built out yet → the switcher renders this partner disabled ("in development"). */
   inDevelopment?: boolean;
   /** Meta's per-Page ad-limit tier for the bound fanpage. The Graph API returns the live
@@ -102,6 +109,25 @@ const MO_DEFAULT_PIXEL: Bound = { id: "3075610185982313", name: "GC for MO Pixel
  *  even where technically eligible. Enforced in the card (pin + readiness), /api/launch and
  *  /api/clone/run. */
 export const ROAS_PIXEL: Bound = { id: "4367956310124642", name: "VD-C1-HS-1" };
+
+// ---- AIF (Airfind "Google Rewarded Web") ----------------------------------------------------
+// Link contract from the partner's implementation guide (GC-coding/AIF, 2026-08): traffic goes to
+// the RW page with our clientId, a brand marker for revenue segmentation and the article slug in
+// `destination`. `ppid={{campaign.id}}` is ours: the RW page echoes every query param into the
+// postback (→ our CAPI forwarder), so the macro auto-ties each conversion to its campaign and
+// feeds the partner's click-spam report. FB appends fbclid itself.
+export const AIF_RW_BASE = "https://content.honeyandhues.com/rewarded";
+export const AIF_CLIENT_ID = "52105";
+/** The AIF pixel — where the postback→CAPI forwarder (HS server) lands Purchase events. The ONLY
+ *  pixel AIF conversion launches may optimize on; click launches carry no pixel at all. */
+export const AIF_PIXEL: Bound = { id: "2130695154991928", name: "AIF Rewarded" };
+/** Brand pool test01..test700 (partner-assigned): 1–9 keep the doc's 2-digit zero-padded shape
+ *  ("test01"), 10+ are plain. One brand = one buy campaign — the registry enforces it. */
+export const AIF_POOL_MAX = 700;
+export const aifBrandCode = (n: number): string => `test${String(n).padStart(2, "0")}`;
+/** Destination slugs are free-typed (the partner's articles are arbitrary) — keep only what a
+ *  slug can be made of, so the RW link can never carry spaces, slashes or query junk. */
+export const aifSlugSanitize = (raw: string): string => raw.trim().replace(/[^\w-]/g, "");
 
 export const PARTNERS: PartnerConfig[] = [
   {
@@ -151,14 +177,23 @@ export const PARTNERS: PartnerConfig[] = [
     label: "AIF",
     Flag: UsaFlag,
     usesGcm: false,
-    usesProfile: true,
-    landingBase: "",
+    aifLaunch: true,
+    usesProfile: false,
+    nameTier: "aif",
+    landingBase: AIF_RW_BASE,
     landings: [],
-    pageLabel: "Page",
-    pagePlaceholder: "Search page",
+    pageLabel: "Fanpage",
+    pagePlaceholder: "Search fanpage",
     fanpages: [],
-    launchNote: "Submits through LION",
-    inDevelopment: true,
+    fanpagesFromToken: true,
+    accountsFromToken: true,
+    launchNote: "Submits via the AIF token",
+    pageAdLimit: 250,
+    maxCreatives: 1,
+    // AIF ships DORMANT on prod, same pattern as HS: the switcher unlocks only where
+    // NEXT_PUBLIC_AIF_ENABLED=1 is baked into the build (.env.local locally; not set on Vercel
+    // until the FB_AIF_LAUNCH_TOKEN env and a battle smoke land).
+    inDevelopment: process.env.NEXT_PUBLIC_AIF_ENABLED !== "1",
   },
 ];
 
@@ -190,20 +225,24 @@ export function launchReadyOpts(p: PartnerConfig): {
   roasPixel: string;
 } {
   return {
-    landing: p.usesGcm,
+    // AIF reuses the landing slot for its free-typed destination slug — required all the same.
+    landing: p.usesGcm || Boolean(p.aifLaunch),
     profile: p.usesProfile,
     page: Boolean(p.fanpagesFromToken) || Boolean(p.lionLaunch),
     account: Boolean(p.accountsFromToken) || Boolean(p.lionLaunch),
-    pixel: Boolean(p.accountsFromToken) || Boolean(p.lionLaunch),
-    // gcm-monetized partners need a claimed code before the card counts as ready — a landing card
-    // whose code hasn't loaded (registry unreachable / pre-load window) must not look launchable,
-    // and Copy must not offer a "?gcm=" link with an empty code.
-    gcm: p.usesGcm,
+    // AIF's pixel is DERIVED (conversions → pinned AIF pixel, clicks → none), never picked —
+    // requiring it would dead-lock click cards whose pixel is legitimately empty.
+    pixel: (Boolean(p.accountsFromToken) && !p.aifLaunch) || Boolean(p.lionLaunch),
+    // Marker-pool partners (MO gcm / AIF brand) need a claimed code before the card counts as
+    // ready — a card whose code hasn't loaded (registry unreachable / pre-load window) must not
+    // look launchable, and Copy must not offer a link with an empty marker.
+    gcm: p.usesGcm || Boolean(p.aifLaunch),
     // LION builds ads from the typed destination link + title/copy — all hard-required by create/.
     link: Boolean(p.lionLaunch),
     adText: Boolean(p.lionLaunch),
-    // MO min-ROAS is pinned to the partner's value pixel; LION partners validate pixels their own way.
-    roasPixel: p.accountsFromToken ? ROAS_PIXEL.id : "",
+    // MO min-ROAS is pinned to the partner's value pixel; LION partners validate pixels their own
+    // way; AIF bans min-ROAS outright (its CAPI Purchases carry value 0 — nothing to optimize).
+    roasPixel: p.accountsFromToken && !p.aifLaunch ? ROAS_PIXEL.id : "",
   };
 }
 
@@ -240,6 +279,20 @@ export function landingUrlSegments(
   pixel?: string,
 ): LinkSegment[] {
   if (!slug) return [];
+  // AIF: the partner's RW page with the doc's exact params — destination slug, our clientId, the
+  // brand marker (revenue key, rides the shared `gcm` slot) and the campaign.id macro the page
+  // echoes into the postback. No fire/pixel params: the conversion side lives in the postback→
+  // CAPI forwarder, not on the landing.
+  if (p.aifLaunch) {
+    return [
+      { text: `${p.landingBase}?destination=`, role: "base" },
+      { text: slug, role: "slug" },
+      { text: `&clientId=${AIF_CLIENT_ID}`, role: "params" },
+      { text: "&brand=", role: "gcmKey" },
+      { text: gcm, role: "gcm" },
+      { text: "&ppid={{campaign.id}}", role: "params" },
+    ];
+  }
   const medium = p.nameTier ? `&utm_medium=${p.nameTier}` : "";
   const segs: LinkSegment[] = [
     { text: `${p.landingBase}/`, role: "base" },
@@ -265,18 +318,29 @@ export function fullLandingUrl(
   return segs.length ? segs.map((s) => s.text).join("") : "";
 }
 
-/** Pin account/pixel/fanpage to the partner's single bound values (Indians). No-op otherwise. */
+/** Pin account/pixel/fanpage to the partner's single bound values (Indians), and keep AIF cards
+ *  on their derived invariants: the pixel follows the optimization (conversions → the AIF pixel,
+ *  clicks → none), the objective/event are pinned to SALES/Purchase (the only event the CAPI
+ *  forwarder ever sends), and min-ROAS snaps back to lowest cost (banned — CAPI value is 0).
+ *  Pure and idempotent; covers fresh, duplicated, copy-to-all'ed and restored cards alike. */
 export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[] {
   const acct = p.lockedAccount?.name;
   const px = p.lockedPixel?.id; // pixel is identified by its numeric id, not its text name
   const fan = p.fanpages.length === 1 ? p.fanpages[0] : undefined;
-  if (!acct && !px && !fan) return rows;
+  if (!acct && !px && !fan && !p.aifLaunch) return rows;
   let changed = false;
   const next = rows.map((r) => {
     const patch: Partial<Campaign> = {};
     if (acct && r.account !== acct) patch.account = acct;
     if (px && r.pixel !== px) patch.pixel = px;
     if (fan && r.page !== fan) patch.page = fan;
+    if (p.aifLaunch) {
+      if (bidKind(r.bidStrategy) === "roas") patch.bidStrategy = "LOWEST_COST_WITHOUT_CAP";
+      const pixel = r.optimization === "conversions" ? AIF_PIXEL.id : "";
+      if (r.pixel !== pixel) patch.pixel = pixel;
+      if (r.objective !== "OUTCOME_SALES") patch.objective = "OUTCOME_SALES";
+      if (r.conversionEvent !== "PURCHASE") patch.conversionEvent = "PURCHASE";
+    }
     if (Object.keys(patch).length === 0) return r;
     changed = true;
     return { ...r, ...patch };
@@ -291,15 +355,36 @@ export const GCM_POOL_MAX = 200;
  *  registry row uses that shape), 100–200 are plain 3-digit. */
 export const gcmCode = (n: number): string => String(n).padStart(2, "0");
 
+/** A partner's revenue-marker pool: the codes that segment partner revenue per campaign, claimed
+ *  atomically from a Strapi registry. MO = gcm 01..200, AIF = brand test01..test700. The two code
+ *  shapes can never collide, but each partner previews/claims strictly from its own registry. */
+export type MarkerPool = {
+  /** What the code is called in UI copy ("gcm" / "brand"). */
+  label: string;
+  max: number;
+  code: (n: number) => string;
+  /** Board preview endpoint answering { used, next, poolMax }. */
+  api: string;
+};
+export const GCM_POOL: MarkerPool = { label: "gcm", max: GCM_POOL_MAX, code: gcmCode, api: "/api/gcm" };
+export const AIF_POOL: MarkerPool = { label: "brand", max: AIF_POOL_MAX, code: aifBrandCode, api: "/api/aif/brand" };
+
+/** The marker pool a partner assigns from (null = partner has no marker concept, e.g. HS). */
+export function markerPool(p: PartnerConfig): MarkerPool | null {
+  return p.usesGcm ? GCM_POOL : p.aifLaunch ? AIF_POOL : null;
+}
+
 /**
- * Fill the lowest free code (01..200) for landing-having campaigns missing a gcm.
- * `reserved` = codes already taken in the Strapi registry. While it's null (not loaded yet)
- * NOTHING is assigned — never hand out a code that might already be live. The batch also
- * avoids reusing a code across two campaigns in the same session.
+ * Fill the lowest free pool code for landing-having campaigns missing one (the shared `gcm` slot
+ * carries the marker for both MO codes and AIF brands). `reserved` = codes already taken in that
+ * partner's Strapi registry. While it's null (not loaded yet) NOTHING is assigned — never hand
+ * out a code that might already be live. The batch also avoids reusing a code across two
+ * campaigns in the same session.
  */
-export function assignGcmCodes<T extends { landing: string; gcm: string }>(
+export function assignPoolCodes<T extends { landing: string; gcm: string }>(
   rows: T[],
   reserved: Set<string> | null,
+  pool: MarkerPool = GCM_POOL,
 ): T[] {
   if (!reserved) return rows;
   const used = new Set<string>(reserved);
@@ -308,8 +393,8 @@ export function assignGcmCodes<T extends { landing: string; gcm: string }>(
   const next = rows.map((r) => {
     if (!r.landing || r.gcm) return r;
     let code = "";
-    for (let n = 1; n <= GCM_POOL_MAX; n++) {
-      const c = gcmCode(n);
+    for (let n = 1; n <= pool.max; n++) {
+      const c = pool.code(n);
       if (!used.has(c)) {
         code = c;
         break;

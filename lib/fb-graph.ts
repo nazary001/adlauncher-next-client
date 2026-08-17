@@ -155,6 +155,12 @@ export async function fbGet(path: string, token: string = TOKEN): Promise<Json> 
 
 export type FanPage = { id: string; name: string };
 
+/** Which token a catalog read runs on. Every function below defaults to the MO launch token —
+ *  byte-identical behaviour for existing callers; the AIF rail (lib/aif-launch) passes its own
+ *  token with its own cache identity so the two partners' catalogs never bleed into each other. */
+export type TokenCatalog = { token: string; cacheKey: string };
+const MO_CATALOG: TokenCatalog = { token: TOKEN, cacheKey: "mo" };
+
 // The system-user token advertises through pages ASSIGNED to it (me/accounts), not through a
 // page bound to the ad account — Meta checks the "Ads" task on the page at creative-create time.
 // Cached briefly: the list feeds both the UI picker and the per-launch server-side validation.
@@ -162,7 +168,7 @@ const PAGES_TTL_MS = 5 * 60_000;
 // An EMPTY result (transient de-permission / edge blip) is trusted only briefly — caching it for the
 // full TTL would reject every launch with fanpage_not_allowed for 5 minutes with no self-correction.
 const PAGES_EMPTY_TTL_MS = 20_000;
-let pagesCache: { at: number; ttl: number; pages: FanPage[] } | null = null;
+const pagesCaches = new Map<string, { at: number; ttl: number; pages: FanPage[] }>();
 
 /** Read a paging cursor: prefer cursors.after, else pull `after` out of the next URL (relay-style
  *  paging / >100 entries return a next URL without cursors.after — dropping it truncated the list). */
@@ -179,14 +185,18 @@ function nextAfter(paging: { cursors?: { after?: string }; next?: string } | und
 }
 
 /** Every page the launch token can advertise with (ADVERTISE task), paginated + cached. */
-export async function advertisablePages(): Promise<FanPage[]> {
-  if (pagesCache && Date.now() - pagesCache.at < pagesCache.ttl) return pagesCache.pages;
+export async function advertisablePages(cat: TokenCatalog = MO_CATALOG): Promise<FanPage[]> {
+  const cached = pagesCaches.get(cat.cacheKey);
+  if (cached && Date.now() - cached.at < cached.ttl) return cached.pages;
 
   const pages: FanPage[] = [];
   let after = "";
   // 20 × 100 = a 2000-page ceiling — far above the ~60 the token carries today.
   for (let i = 0; i < 20; i++) {
-    const body = await fbGet(`me/accounts?fields=id,name,tasks&limit=100${after ? `&after=${encodeURIComponent(after)}` : ""}`);
+    const body = await fbGet(
+      `me/accounts?fields=id,name,tasks&limit=100${after ? `&after=${encodeURIComponent(after)}` : ""}`,
+      cat.token,
+    );
     const data = (body.data as Array<{ id?: string; name?: string; tasks?: string[] }> | undefined) ?? [];
     for (const p of data) {
       if (!p?.id || !p.name) continue;
@@ -200,21 +210,21 @@ export async function advertisablePages(): Promise<FanPage[]> {
 
   // Stable order for the picker; duplicate display names exist → id is the tiebreaker.
   pages.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-  pagesCache = { at: Date.now(), ttl: pages.length > 0 ? PAGES_TTL_MS : PAGES_EMPTY_TTL_MS, pages };
+  pagesCaches.set(cat.cacheKey, { at: Date.now(), ttl: pages.length > 0 ? PAGES_TTL_MS : PAGES_EMPTY_TTL_MS, pages });
   return pages;
 }
 
 /** Server-side guard: only ids from the token's own page list are accepted for a launch/clone. */
-export async function isAdvertisablePage(pageId: string): Promise<boolean> {
+export async function isAdvertisablePage(pageId: string, cat: TokenCatalog = MO_CATALOG): Promise<boolean> {
   if (!/^\d{5,}$/.test(pageId)) return false;
-  const pages = await advertisablePages();
+  const pages = await advertisablePages(cat);
   return pages.some((p) => p.id === pageId);
 }
 
 /** Display name of one of the token's own pages ("" when unknown) — free, the list is cached.
  *  Feeds the ad set's DSA beneficiary/payor declaration (what Ads Manager pre-fills there). */
-export async function advertisablePageName(pageId: string): Promise<string> {
-  const pages = await advertisablePages();
+export async function advertisablePageName(pageId: string, cat: TokenCatalog = MO_CATALOG): Promise<string> {
+  const pages = await advertisablePages(cat);
   return pages.find((p) => p.id === pageId)?.name ?? "";
 }
 
@@ -222,10 +232,9 @@ export async function advertisablePageName(pageId: string): Promise<string> {
 
 export type TokenAdAccount = { id: string; name: string; pixels: { id: string; name: string }[] };
 
-/** Shared row shape (app-cache key `token-adaccounts`). */
+/** Shared row shape (app-cache key `token-adaccounts` / `<catalog>-adaccounts`). */
 type AccountsState = { accounts: TokenAdAccount[]; expiresAt: number };
 
-const ACCOUNTS_KEY = "token-adaccounts";
 const ACCOUNTS_OK_TTL_MS = 15 * 60_000;
 const ACCOUNTS_FAIL_TTL_MS = 5 * 60_000;
 // The account LIST loaded but the pixel sweep was throttled (some accounts have empty pixels) —
@@ -233,8 +242,14 @@ const ACCOUNTS_FAIL_TTL_MS = 5 * 60_000;
 const ACCOUNTS_INCOMPLETE_TTL_MS = 60_000;
 const ACCOUNTS_CLAIM_TTL_MS = 2 * 60_000;
 
-let accountsL1: { readAt: number; hasL2: boolean; state: AccountsState } | null = null;
-let accountsInflight: Promise<TokenAdAccount[]> | null = null;
+/** The MO catalog keeps its historical shared-row key (live app-cache rows + prod instances
+ *  depend on it); other catalogs get their own namespaced row. */
+const accountsKvKey = (cat: TokenCatalog): string =>
+  cat.cacheKey === "mo" ? "token-adaccounts" : `${cat.cacheKey}-adaccounts`;
+
+type AccountsL1 = { readAt: number; hasL2: boolean; state: AccountsState };
+const accountsL1s = new Map<string, AccountsL1>();
+const accountsInflights = new Map<string, Promise<TokenAdAccount[]>>();
 
 /**
  * Every ACTIVE ad account the launch token can use, each with its pixel list (pixels gate the
@@ -242,37 +257,42 @@ let accountsInflight: Promise<TokenAdAccount[]> | null = null;
  * fanpage volume sweep: one Strapi row for all instances, claim before refreshing, stale beats
  * empty, and the per-account pixel sweep aborts on the first rate-limit error.
  */
-export async function tokenAdAccounts(): Promise<TokenAdAccount[]> {
+export async function tokenAdAccounts(cat: TokenCatalog = MO_CATALOG): Promise<TokenAdAccount[]> {
   const now = Date.now();
+  const key = accountsKvKey(cat);
+  const l1 = accountsL1s.get(key);
   if (
-    accountsL1 &&
-    now < accountsL1.state.expiresAt &&
-    accountsL1.state.accounts.length > 0 &&
-    (accountsL1.hasL2 ? now < accountsL1.readAt + VOLUME_L1_MS : true)
+    l1 &&
+    now < l1.state.expiresAt &&
+    l1.state.accounts.length > 0 &&
+    (l1.hasL2 ? now < l1.readAt + VOLUME_L1_MS : true)
   ) {
-    return accountsL1.state.accounts;
+    return l1.state.accounts;
   }
-  if (accountsInflight) return accountsInflight;
-  accountsInflight = resolveAccounts().finally(() => {
-    accountsInflight = null;
+  const inflight = accountsInflights.get(key);
+  if (inflight) return inflight;
+  const next = resolveAccounts(cat).finally(() => {
+    accountsInflights.delete(key);
   });
-  return accountsInflight;
+  accountsInflights.set(key, next);
+  return next;
 }
 
-async function resolveAccounts(): Promise<TokenAdAccount[]> {
+async function resolveAccounts(cat: TokenCatalog): Promise<TokenAdAccount[]> {
   const now = Date.now();
-  const row = await readAppCache<AccountsState>(ACCOUNTS_KEY);
+  const key = accountsKvKey(cat);
+  const row = await readAppCache<AccountsState>(key);
   const shared = row?.value && Array.isArray(row.value.accounts) ? row.value : null;
   const hasL2 = row !== null;
 
   if (shared && now < shared.expiresAt && shared.accounts.length > 0) {
-    accountsL1 = { readAt: now, hasL2, state: shared };
+    accountsL1s.set(key, { readAt: now, hasL2, state: shared });
     return shared.accounts;
   }
 
   // Claim the refresh so parallel instances serve the stale list instead of refetching too.
   const claim: AccountsState = { accounts: shared?.accounts ?? [], expiresAt: now + ACCOUNTS_CLAIM_TTL_MS };
-  const claimedId = (await writeAppCache(ACCOUNTS_KEY, claim, row?.documentId ?? null)) ?? row?.documentId ?? null;
+  const claimedId = (await writeAppCache(key, claim, row?.documentId ?? null)) ?? row?.documentId ?? null;
 
   try {
     // Account list — one or two paginated calls (fbGet retries are fine at this size).
@@ -281,6 +301,7 @@ async function resolveAccounts(): Promise<TokenAdAccount[]> {
     for (let i = 0; i < 10; i++) {
       const body = await fbGet(
         `me/adaccounts?fields=account_id,name,account_status&limit=100${after ? `&after=${encodeURIComponent(after)}` : ""}`,
+        cat.token,
       );
       const data = (body.data as Array<{ account_id?: string; name?: string; account_status?: number }> | undefined) ?? [];
       for (const a of data) {
@@ -305,7 +326,7 @@ async function resolveAccounts(): Promise<TokenAdAccount[]> {
         const acct = accounts[i];
         try {
           const res = await fetch(`${FB}/act_${acct.id}/adspixels?fields=id,name&limit=50`, {
-            headers: { Authorization: `Bearer ${TOKEN}` },
+            headers: { Authorization: `Bearer ${cat.token}` },
             cache: "no-store",
           });
           const body = (await res.json().catch(() => ({}))) as Json;
@@ -343,15 +364,15 @@ async function resolveAccounts(): Promise<TokenAdAccount[]> {
           ? ACCOUNTS_INCOMPLETE_TTL_MS
           : ACCOUNTS_OK_TTL_MS;
     const state: AccountsState = { accounts, expiresAt: Date.now() + ttl };
-    await writeAppCache(ACCOUNTS_KEY, state, claimedId);
-    accountsL1 = { readAt: Date.now(), hasL2, state };
+    await writeAppCache(key, state, claimedId);
+    accountsL1s.set(key, { readAt: Date.now(), hasL2, state });
     return accounts;
   } catch (e) {
     // Total failure (rate limit / transport): keep serving the stale list when there is one.
     if (shared && shared.accounts.length > 0) {
       const state: AccountsState = { accounts: shared.accounts, expiresAt: Date.now() + ACCOUNTS_FAIL_TTL_MS };
-      await writeAppCache(ACCOUNTS_KEY, state, claimedId);
-      accountsL1 = { readAt: Date.now(), hasL2, state };
+      await writeAppCache(key, state, claimedId);
+      accountsL1s.set(key, { readAt: Date.now(), hasL2, state });
       return shared.accounts;
     }
     throw e;
@@ -359,18 +380,18 @@ async function resolveAccounts(): Promise<TokenAdAccount[]> {
 }
 
 /** Server-side guard: only accounts from the token's own list are accepted for a launch/clone. */
-export async function isTokenAccount(accountId: string): Promise<boolean> {
+export async function isTokenAccount(accountId: string, cat: TokenCatalog = MO_CATALOG): Promise<boolean> {
   if (!/^\d{5,}$/.test(accountId)) return false;
-  const accounts = await tokenAdAccounts();
+  const accounts = await tokenAdAccounts(cat);
   return accounts.some((a) => a.id === accountId);
 }
 
 /** Pixels of one token account; falls back to a direct read when the cached sweep missed it. */
-export async function accountPixels(accountId: string): Promise<{ id: string; name: string }[]> {
-  const accounts = await tokenAdAccounts();
+export async function accountPixels(accountId: string, cat: TokenCatalog = MO_CATALOG): Promise<{ id: string; name: string }[]> {
+  const accounts = await tokenAdAccounts(cat);
   const acct = accounts.find((a) => a.id === accountId);
   if (acct && acct.pixels.length > 0) return acct.pixels;
-  const body = await fbGet(`act_${accountId}/adspixels?fields=id,name&limit=50`);
+  const body = await fbGet(`act_${accountId}/adspixels?fields=id,name&limit=50`, cat.token);
   const data = (body.data as Array<{ id?: string; name?: string }> | undefined) ?? [];
   const pixels = data.filter((p) => p?.id).map((p) => ({ id: String(p.id), name: String(p.name ?? p.id) }));
   if (acct) acct.pixels = pixels; // enrich the L1 view for subsequent calls

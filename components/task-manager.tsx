@@ -11,7 +11,7 @@ import {
 } from "react";
 import { upload } from "@vercel/blob/client";
 import { type Campaign, moneyLabel } from "@/lib/types";
-import type { PartnerId } from "@/lib/partners";
+import { type PartnerId, partnerConfig } from "@/lib/partners";
 import type { CloneEdit } from "@/lib/clone";
 import {
   type EffStatus,
@@ -485,8 +485,10 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
         let resStatus = 0;
         try {
           // taskId lets the server mirror progress + the terminal state into the shared row —
-          // the team keeps seeing the truth even if this browser dies mid-run.
-          const res = await fetch("/api/launch", {
+          // the team keeps seeing the truth even if this browser dies mid-run. AIF rides its own
+          // route (own token, brand registry, RW link) with the same stages/NDJSON contract.
+          const launchApi = partnerConfig(input.partnerId).aifLaunch ? "/api/aif/launch" : "/api/launch";
+          const res = await fetch(launchApi, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -787,6 +789,7 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
           kind: "launch" as const,
           owner: me,
           name: args.name,
+          partner: args.partnerId,
           gcm: args.gcm,
           geo: args.geo,
           budget: args.budget,
@@ -826,6 +829,7 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
           kind: "clone" as const,
           owner: me,
           name: args.name,
+          partner: args.partnerId,
           gcm: "",
           geo: args.geo,
           budget: args.budget,
@@ -1258,7 +1262,7 @@ function TaskRow({
             {task.name || "Untitled campaign"}
           </p>
           <p className="mt-0.5 truncate font-mono text-[10.5px] text-faint">
-            gcm {task.gcm || "—"} · {task.geo} · ${moneyLabel(task.budget)} ·{" "}
+            {task.partner === "us" ? "brand" : "gcm"} {task.gcm || "—"} · {task.geo} · ${moneyLabel(task.budget)} ·{" "}
             <OwnerChip owner={task.owner} mine={mine} />
           </p>
         </div>

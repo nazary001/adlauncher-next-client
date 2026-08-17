@@ -14,6 +14,9 @@ export type LaunchTask = {
   /** Username that launched/cloned this. Shared view shows everyone's; mutations stay owner-scoped. */
   owner?: string | null;
   name: string;
+  /** Partner id ("in" MO / "us" AIF / "br" HS) — labels the marker column ("gcm" vs "brand") and
+   *  scopes pool bookkeeping on the board. Older rows may miss it (treated as MO). */
+  partner?: string;
   gcm: string;
   geo: string;
   budget: string;
@@ -62,6 +65,7 @@ export function fromRemote(r: Record<string, unknown>): LaunchTask {
     kind: /\(clone\)/i.test(name) ? "clone" : "launch",
     owner: s(r.owner) ?? null,
     name,
+    partner: s(r.partner),
     gcm: s(r.gcm) ?? "",
     geo: s(r.geo) ?? "",
     budget: s(r.budget) ?? "",

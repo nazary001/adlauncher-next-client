@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { SESSION_COOKIE, verifySession } from "@/lib/session";
+import { AifCloneStub } from "@/components/aif-clone-stub";
 import { CloneBoard } from "@/components/clone-board";
 import { HsCloneBoard } from "@/components/hs-clone-board";
 import { type PartnerId, partnerConfig, sanitizePartnerId } from "@/lib/partners";
@@ -56,6 +57,10 @@ export default async function ClonePage({
           partner={partner}
           initialIds={ids}
         />
+      ) : partnerConfig(partner).aifLaunch ? (
+        // AIF has no duplicator yet — never open the MO clone board on this partner (wrong
+        // token, wrong registry).
+        <AifCloneStub user={{ username: session.username, role: session.role ?? null }} />
       ) : (
         <CloneBoard
           user={{ username: session.username, role: session.role ?? null }}
