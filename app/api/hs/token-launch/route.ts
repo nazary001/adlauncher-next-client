@@ -66,8 +66,10 @@ export async function POST(req: Request): Promise<Response> {
   if (!hsTokenConfigured()) {
     return bad("hs_fb_token_missing — set FB_HS_LAUNCH_TOKEN (or FB_HS_VOLUME_TOKEN) in the environment", 500);
   }
-  // Binds are still validated against LION's catalog — a token launch into an account no weapon
-  // profile sees would be invisible to the partner's ingestion (their rule #2), so LION must be up.
+  // Binds are validated against LION's catalog BY DESIGN (owner decision 08-17: keep the tie —
+  // token launches may only go where LION profiles are bound): an account no weapon profile sees
+  // would be invisible to the partner's ingestion (their rule #2). Consequence, accepted: with
+  // LION down the token rail refuses to launch rather than fire an unverifiable bind.
   if (!lionConfigured()) return bad("lion_not_configured", 500);
 
   let body: { campaign?: Campaign; creatives?: unknown; taskId?: unknown };
