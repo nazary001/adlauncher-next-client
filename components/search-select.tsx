@@ -162,12 +162,18 @@ export function SearchSelect({
   );
   // Closed input shows the picked option's LABEL (+ its status tag) — value and label differ for
   // id-keyed options (fanpages); plain string catalogs are unaffected (value === label).
+  // An unresolved pick (catalog still loading, or a stale stored id) falls back to the raw
+  // value — EXCEPT bare id blobs (6+ digits): "1297336295903991" in the Account box reads as
+  // noise, so id-keyed picks show the placeholder until their catalog arrives with a name.
+  // String catalogs keep showing the pick instantly while their list loads (value IS the label).
   const selected = opts.find((o) => o.value === value);
   const displayValue = selected
     ? metaWhenClosed && selected.meta
       ? `${selected.label} · ${selected.meta}`
       : selected.label
-    : value;
+    : /^\d{6,}$/.test(value)
+      ? ""
+      : value;
   const q = query.trim().toLowerCase();
   // Searchable by label, meta, value (fanpages: the page id), group (landing niche) and the
   // exact tag ("es" → Spanish landings without also matching every label containing "es").
