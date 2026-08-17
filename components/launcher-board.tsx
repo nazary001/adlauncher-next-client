@@ -262,6 +262,10 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       }
       setPreviewed(false);
       setJustQueued(sent);
+      // The drawer opens itself on a launch (owner ask 08-17): the queue's progress is the thing
+      // the buyer needs to watch next, and the floating still-launching guard takes over if they
+      // close it early.
+      if (sent > 0) hsTasks.setOpen(true);
       if (queuedTimer.current) window.clearTimeout(queuedTimer.current);
       queuedTimer.current = window.setTimeout(() => setJustQueued(0), 3500);
       return;

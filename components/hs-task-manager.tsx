@@ -303,7 +303,7 @@ export type HsSubmittedRow = {
 
 type HsTaskManagerValue = {
   tasks: HsTask[];
-  counts: { active: number; done: number; failed: number; running: number; total: number };
+  counts: { active: number; done: number; failed: number; running: number; total: number; inFlight: number };
   /** Current user — labels task owners in the shared view and gates own-only actions. */
   me: string | null;
   /** Est. server clock (Date.now()+skew) at the last fetch — for owner-liveness (stale) judging. */
@@ -1182,15 +1182,34 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     let active = 0,
       done = 0,
       failed = 0,
-      running = 0;
+      running = 0,
+      inFlight = 0;
     for (const t of tasks) {
       if (t.status === "queued" || t.status === "running" || t.status === "submitted") active++;
       if (t.status === "running" || t.status === "submitted") running++;
       if (t.status === "done") done++;
       if (t.status === "error" || t.status === "unknown") failed++;
+      // Launches still CLIENT-side (queued behind the pump, or running their upload/stream) die
+      // with this page — unlike "submitted" (LION owns it) or terminal rows. THIS tab's own
+      // tasks only: teammates' rows and restored snapshots don't hold this page hostage.
+      if (t.local && (t.status === "queued" || t.status === "running")) inFlight++;
     }
-    return { active, done, failed, running, total: tasks.length };
+    return { active, done, failed, running, total: tasks.length, inFlight };
   }, [tasks]);
+
+  // Closing the page while launches are still client-side kills them (queued rows never fire;
+  // an upload dies mid-flight) — the native leave-confirm is the hard stop behind the floating
+  // banner. Registered only while something is actually in flight, so normal navigation stays
+  // silent the rest of the time.
+  useEffect(() => {
+    if (counts.inFlight === 0) return;
+    const guard = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = ""; // legacy field — without it some Chromium builds skip the dialog
+    };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [counts.inFlight]);
 
   const value: HsTaskManagerValue = {
     tasks,
@@ -1209,8 +1228,44 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
   return (
     <Ctx.Provider value={value}>
       {children}
+      {!open && counts.inFlight > 0 ? (
+        <HsLaunchingBanner n={counts.inFlight} onOpen={() => setOpen(true)} />
+      ) : null}
       <HsTaskManagerPanel />
     </Ctx.Provider>
+  );
+}
+
+/** Floating guard for launches still CLIENT-side while the drawer is hidden: the page must stay
+ *  open or queued/uploading campaigns die with it (the beforeunload confirm above is the hard
+ *  stop; this is the visible one). Clicking re-opens the Task Manager. Disappears by itself the
+ *  moment every launch is handed off (submitted/done/error). */
+function HsLaunchingBanner({ n, onOpen }: { n: number; onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-live="polite"
+      className={
+        "animate-pop-in fixed bottom-5 left-1/2 z-[70] flex -translate-x-1/2 items-center gap-2.5 " +
+        "rounded-full border border-warn/45 bg-surface/95 py-2 pl-3 pr-2 " +
+        "shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-md transition-all duration-150 " +
+        "hover:border-warn/70 hover:bg-surface2 active:scale-[0.98] " +
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warn/40"
+      }
+    >
+      <span className="relative flex h-3 w-3 shrink-0 items-center justify-center">
+        <span className="z-10 h-2 w-2 rounded-full bg-warn" />
+        <span className="absolute inset-0 animate-ping rounded-full bg-warn/50" />
+      </span>
+      <span className="whitespace-nowrap text-[12.5px] font-semibold text-warn">
+        {n === 1 ? "1 campaign is still launching" : `${n} campaigns are still launching`}
+        <span className="font-medium text-dim"> · keep this page open</span>
+      </span>
+      <span className="ml-1 shrink-0 rounded-full border border-line bg-surface2 px-2 py-0.5 text-[10.5px] font-medium text-dim">
+        View
+      </span>
+    </button>
   );
 }
 
