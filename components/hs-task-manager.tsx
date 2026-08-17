@@ -258,11 +258,16 @@ function mergeShared(cur: HsTask[], fetched: HsTask[], tombstones: ReadonlySet<s
     // would double-create.
     const lostAnswer =
       !!prev?.local && (prev.status === "error" || prev.status === "unknown") && !prev.lionTaskId && !!f.lionTaskId;
-    // Token twin of lostAnswer: the stream got cut client-side (local error/unknown) but the
-    // server kept building and wrote "done" — its terminal truth wins; adopting retires the
-    // local Retry, which would build a second tree next to the finished one.
+    // Token twin of lostAnswer: the stream got cut client-side but the server kept building and
+    // wrote its own verdict — that truth wins. An ambiguous local "unknown" adopts EITHER
+    // terminal (done upgrades it, the server's error names the real failure + created ids); a
+    // local clean error adopts only "done" (adopting a server error would retire a legitimate
+    // pre-campaign Retry for no gain).
     const tokenSettled =
-      !!prev?.local && prev.kind === "token" && (prev.status === "error" || prev.status === "unknown") && f.status === "done";
+      !!prev?.local &&
+      prev.kind === "token" &&
+      ((prev.status === "unknown" && (f.status === "done" || f.status === "error")) ||
+        (prev.status === "error" && f.status === "done"));
     byId.set(
       f.id,
       prev && prev.local && !lostAnswer && !tokenSettled ? prev : prev && prev.updatedMs === f.updatedMs ? prev : f,
@@ -461,7 +466,13 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
                 ...t,
                 local: false,
                 status: "error",
-                error: "Interrupted — page closed before the submit reached LION",
+                // Token runs continue SERVER-side after the page dies — the shared row (which the
+                // fetch below merges over this snapshot) is the truth; this text only survives for
+                // runs that died before reaching the server.
+                error:
+                  t.kind === "token"
+                    ? "Interrupted — page closed mid-launch; check this row / Ads Manager before re-firing"
+                    : "Interrupted — page closed before the submit reached LION",
                 finishedAt: t.finishedAt ?? Date.now(),
               }
             : { ...t, local: false },
@@ -524,16 +535,17 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
   }, [tasks, lsKey, me]);
 
   // Heartbeat: bump my in-flight rows' updatedAt so a live-but-stuck task doesn't read as offline.
-  // SERVER-MANAGED rows are skipped: batch-duplicate rows (adopted from the store, never born in
-  // this tab) are progressed by the /api/hs/duplicate pump — a heartbeat here would race it and
-  // could briefly overwrite a pump-written link/error with this tab's stale copy. Their liveness
-  // signal is the pump's own writes.
+  // SERVER-MANAGED rows are skipped: batch-duplicate rows are progressed by the /api/hs/duplicate
+  // pump, and ADOPTED token rows by their launch route's own beat — a heartbeat here would race
+  // those writers with this tab's stale copy, and worse, keep a DEAD server run looking alive
+  // (rowFresh) so the age-out cap never fires. Their liveness signal is the server's own writes;
+  // only rows BORN in this tab (local) heartbeat for the token kind.
   useEffect(() => {
     const iv = window.setInterval(() => {
       if (document.hidden) return;
       for (const t of tasksRef.current) {
         const mine = t.local || (!!me && t.owner === me);
-        const serverManaged = !t.local && t.kind === "duplicate";
+        const serverManaged = !t.local && (t.kind === "duplicate" || t.kind === "token");
         if (mine && !serverManaged && (t.status === "queued" || t.status === "running" || t.status === "submitted")) {
           saveRemote(t.id, dynOf(t));
         }
@@ -556,6 +568,11 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         //    downloads them itself.
         const media = input.files.filter((f) => f.kind === "video" || f.kind === "image");
         if (media.length === 0) throw new Error("no creatives on the card");
+        // FB Token rail builds the whole tree inside one serverless window — cap creatives BEFORE
+        // uploading anything (the server enforces the same limit; failing here saves the uploads).
+        if (input.channel === "token" && media.length > 10) {
+          throw new Error("the FB Token rail builds at most 10 ads per campaign — trim the creatives or use the LION rail");
+        }
         const urls: string[] = [];
         for (let i = 0; i < media.length; i++) {
           const f = media[i];
@@ -601,6 +618,11 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
           let final: Record<string, unknown> | null = null;
           let resStatus = 0;
           let lastStage = "submit";
+          // Transport-class failure (network cut / timeout mid-stream): AMBIGUOUS — the server
+          // keeps building and writes the shared row itself, so this must NOT become a retryable
+          // error (a re-fire could build a second tree). Captured separately from a clean
+          // `ok:false` final, which IS a real per-launch verdict.
+          let transportError: string | null = null;
           try {
             const res = await fetch("/api/hs/token-launch", {
               method: "POST",
@@ -644,6 +666,10 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
             } else {
               final = await res.json().catch(() => null);
             }
+          } catch (e) {
+            transportError = streamAbort.signal.aborted
+              ? `stream timed out after ${STREAM_TIMEOUT_MS / 60_000} min`
+              : ((e as Error).message ?? String(e));
           } finally {
             window.clearTimeout(streamTimer);
           }
@@ -666,6 +692,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
             saveRemote(id, {
               status: "done",
               stage: "ads",
+              started_at: startedAt,
               finished_at: finishedAt,
               campaign_id: f.campaign_id ?? null,
               adset_id: f.adset_id ?? null,
@@ -673,12 +700,12 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
               error: null,
             });
             inputs.current.delete(id); // the tree exists — never re-run
-          } else {
+          } else if (f) {
+            // Clean per-launch rejection from the server — a real verdict, retryable only while
+            // nothing landed on Facebook.
             const finishedAt = Date.now();
-            const msg = f
-              ? (f.error as string) || `HTTP ${resStatus}`
-              : `stream ended unexpectedly (HTTP ${resStatus}) — the server may still be building; check HS Tasks / Ads Manager before re-firing`;
-            const created = ((f?.created ?? {}) as Record<string, unknown>) || {};
+            const msg = (f.error as string) || `HTTP ${resStatus}`;
+            const created = ((f.created ?? {}) as Record<string, unknown>) || {};
             const createdCampaign = created.campaign_id ? String(created.campaign_id) : undefined;
             patch(id, {
               status: "error",
@@ -691,6 +718,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
             saveRemote(id, {
               status: "error",
               stage: lastStage,
+              started_at: startedAt,
               finished_at: finishedAt,
               error: msg,
               ...(createdCampaign ? { campaign_id: createdCampaign } : {}),
@@ -699,6 +727,16 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
             // A created campaign makes a blind retry a DUPLICATE tree — drop the inputs so the
             // Retry affordance disappears (same rule as the MO manager).
             if (createdCampaign) inputs.current.delete(id);
+          } else {
+            // No final event: the connection was cut or the stream ended without a verdict
+            // (server timeout). The build may have finished server-side — the shared row is the
+            // truth (the server writes it to the end, and mergeShared adopts its done/error over
+            // this), so this settles as terminal-unknown with NO retry affordance. No remote
+            // write either: the row (whatever the server managed to write) is already more
+            // truthful than "unknown".
+            const msg = `Connection lost mid-build${transportError ? ` (${transportError})` : ` (HTTP ${resStatus})`} — check this row / Ads Manager before re-firing`;
+            patch(id, { status: "unknown", stage: lastStage, finishedAt: Date.now(), error: msg });
+            inputs.current.delete(id); // never offer a one-click re-fire of an ambiguous outcome
           }
           return;
         }

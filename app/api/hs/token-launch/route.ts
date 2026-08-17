@@ -164,9 +164,11 @@ export async function POST(req: Request): Promise<Response> {
         const send = (o: Json) => controller.enqueue(encoder.encode(JSON.stringify(o) + "\n"));
         // Mirror progress into the shared HS task row. Statics (name/geo/budget + partner/kind)
         // ride in EVERY write so a save racing an admin row-deletion never resurrects a nameless
-        // stub (same rule as the client saver). gcm column = kind → "token".
+        // stub (same rule as the client saver). gcm column = kind → "token". started_at rides
+        // too: without it a launch whose browser died mid-run lands "done" with no elapsed time
+        // (the client's own saves also carry its upload-start stamp — either value is truthful).
         const tw = taskWriter(session.username, taskId);
-        const statics: Json = { partner: "br", gcm: "token", name, geo, budget: c.budget };
+        const statics: Json = { partner: "br", gcm: "token", name, geo, budget: c.budget, started_at: Date.now() };
         let lastStage = "submit";
         let settled = false;
         const progress = (stage: string) => {
