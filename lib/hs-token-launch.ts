@@ -1,0 +1,97 @@
+// Server-only config + helpers for the HS "FB Token" launch rail: the same launch the LION
+// create weapon performs, built directly on the Graph API with OUR partner-side user token
+// instead of a LION anti-detect profile. The partner's rules for outside-the-weapon launches
+// (their message, 08-17) are encoded here:
+//   1. campaign names follow the exact LION-validated pattern (lib/hs-launch hsFullName);
+//   2. campaigns land only in ad accounts a weapon-connected profile can see (the launch route
+//      validates binds against LION's own profile catalog, same as the LION rail);
+//   3. delivery starts ≥30 min after creation — their ingestion routines need the minutes to add
+//      the campaign id to the reportable keys, so the ad set carries a future start_time.
+
+import { createAdsetSelfHealing, fbGet, fbPost } from "./fb-graph";
+import { uploadImage, uploadVideo, videoThumb, waitForVideo } from "./fb-media";
+
+// The write token: FB_HS_LAUNCH_TOKEN when provisioned, else the FB_HS_VOLUME_TOKEN fallback —
+// that is "Gcforhs2", the partner-side user with the ~30 VD-C1 pool accounts (the badge sweep
+// proves it READS them; whether Meta lets it WRITE surfaces as a clear per-launch error, not a
+// config failure). Server-only: neither token ever reaches the browser.
+const HS_FB_TOKEN = process.env.FB_HS_LAUNCH_TOKEN || process.env.FB_HS_VOLUME_TOKEN || "";
+
+export const hsTokenConfigured = (): boolean => HS_FB_TOKEN.length > 0;
+
+type Json = Record<string, unknown>;
+
+/** Graph calls on the HS partner-side token — same client (backoff, budget, error mapping) as
+ *  the MO rail, only the bearer differs. The media/adset helpers below bind the same token so
+ *  the route never handles it directly. */
+export const hsFbGet = (path: string): Promise<Json> => fbGet(path, HS_FB_TOKEN);
+export const hsFbPost = (path: string, params: Json): Promise<Json> => fbPost(path, params, HS_FB_TOKEN);
+export const hsUploadVideo = (accountId: string, fileUrl: string, name: string): Promise<string> =>
+  uploadVideo(accountId, fileUrl, name, HS_FB_TOKEN);
+export const hsUploadImage = (accountId: string, buf: Buffer): Promise<string> =>
+  uploadImage(accountId, buf, HS_FB_TOKEN);
+export const hsWaitForVideo = (videoId: string): Promise<void> => waitForVideo(videoId, undefined, HS_FB_TOKEN);
+export const hsVideoThumb = (videoId: string): Promise<string> => videoThumb(videoId, HS_FB_TOKEN);
+export const hsCreateAdset = (path: string, payload: Json): Promise<Json> =>
+  createAdsetSelfHealing(path, payload, HS_FB_TOKEN);
+
+/** Partner rule: token-rail campaigns must not start delivering for ~30 minutes after creation
+ *  ("we always launch the campaigns with a 30 min gap … it takes some minutes for our routines
+ *  to add the campaign id to the reportable keys"). The LION rail needs no gap here — the weapon
+ *  applies its own. */
+export const HS_TOKEN_START_GAP_MIN = 30;
+
+/** Ad-set start_time honoring the partner's 30-min ingestion gap (ISO, Graph-native). */
+export function hsTokenStartTime(now: Date = new Date()): string {
+  return new Date(now.getTime() + HS_TOKEN_START_GAP_MIN * 60_000).toISOString();
+}
+
+/** One creative for a token-rail launch. The kind decides the Graph path (advideos vs adimages),
+ *  so the client sends it explicitly — a bare URL doesn't reveal it. */
+export type HsTokenCreative = { url: string; kind: "video" | "image"; name?: string };
+
+const isHttpsUrl = (v: string): boolean => /^https:\/\/\S+$/i.test(v);
+
+/** Our own Blob-broker uploads only — the same SSRF fence as the MO launch route: this server
+ *  fetches IMAGE bytes itself, so it must never be pointed at an arbitrary host. */
+export function isOwnBlobUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw);
+    return u.protocol === "https:" && u.hostname.endsWith(".blob.vercel-storage.com") && u.pathname.startsWith("/creatives/");
+  } catch {
+    return false;
+  }
+}
+
+// The LION create weapon takes up to 50 creative URLs and chews on them for as long as it needs;
+// this rail builds the whole tree inside one serverless window (maxDuration 300s, FB budget 240s),
+// and each VIDEO needs its Meta-side processing waited out. 10 is what provably fits with the
+// 3-wide processing pool; bigger decks go through the LION rail.
+export const HS_TOKEN_MAX_CREATIVES = 10;
+
+/**
+ * Parse + validate the wire creatives array. Returns the clean list or a machine-friendly error
+ * string (mirrors the launch guards' style). Videos may live on any https host — Meta fetches
+ * those bytes itself, exactly as it does for LION's URLs. Images must be OUR Blob uploads: the
+ * route downloads them server-side, and an arbitrary URL there would be an SSRF hole.
+ */
+export function parseTokenCreatives(raw: unknown): { creatives: HsTokenCreative[] } | { error: string } {
+  if (!Array.isArray(raw) || raw.length === 0) return { error: "creatives_required" };
+  if (raw.length > HS_TOKEN_MAX_CREATIVES) {
+    return { error: `too_many_creatives — the FB Token rail builds at most ${HS_TOKEN_MAX_CREATIVES} ads per campaign; use the LION rail for bigger decks` };
+  }
+  const creatives: HsTokenCreative[] = [];
+  for (const item of raw as unknown[]) {
+    const o = (item ?? {}) as Record<string, unknown>;
+    const url = typeof o.url === "string" ? o.url.trim() : "";
+    const kind = o.kind === "image" ? "image" : o.kind === "video" ? "video" : null;
+    if (!kind) return { error: "creative_kind_invalid" };
+    if (!isHttpsUrl(url)) return { error: "creative_url_invalid" };
+    if (kind === "image" && !isOwnBlobUrl(url)) {
+      return { error: "image_url_not_allowed — paste-URL images can't ride the FB Token rail (drop the file instead, or use the LION rail)" };
+    }
+    const name = typeof o.name === "string" ? o.name.slice(0, 120) : "";
+    creatives.push({ url, kind, ...(name ? { name } : {}) });
+  }
+  return { creatives };
+}

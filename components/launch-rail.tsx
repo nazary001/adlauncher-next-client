@@ -5,12 +5,16 @@ import { fullName, isLaunchable, moneyLabel, parseMoney } from "@/lib/types";
 import { CONVERSION_EVENTS, geoSummary } from "@/lib/catalog";
 import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { type PartnerConfig, launchReadyOpts } from "@/lib/partners";
+import type { HsLaunchChannel } from "./hs-task-manager";
 import { CheckIcon, EyeIcon, RocketIcon } from "./icons";
 
 export function LaunchRail({
   campaigns,
   partner,
   hsAcr,
+  hsChannel = "lion",
+  hsTokenReady = false,
+  onHsChannel,
   previewed,
   justQueued,
   poolFree,
@@ -22,6 +26,11 @@ export function LaunchRail({
   partner: PartnerConfig;
   /** LION media-buyer acronym — the HS name preview needs it (empty while loading). */
   hsAcr?: string;
+  /** HS launch rail pick (LION create weapon vs FB Token direct build). */
+  hsChannel?: HsLaunchChannel;
+  /** FB Token rail provisioned server-side — until then the Token option renders disabled. */
+  hsTokenReady?: boolean;
+  onHsChannel?: (ch: HsLaunchChannel) => void;
   previewed: boolean;
   /** Count just sent to the Task Manager — shows a brief confirmation; campaigns stay on the board. */
   justQueued: number;
@@ -157,6 +166,48 @@ export function LaunchRail({
         </div>
 
         <div className="flex shrink-0 flex-col gap-2">
+          {/* HS launch rail: LION's create weapon vs our FB token building the same tree
+              directly on the Graph (partner-approved bypass — same name pattern, same binds,
+              +30 min delivery gap). One pick for the whole wave. */}
+          {partner.lionLaunch ? (
+            <div className="flex flex-col gap-1">
+              <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
+                {(
+                  [
+                    { key: "lion" as const, label: "LION API", ready: true },
+                    { key: "token" as const, label: "FB Token", ready: hsTokenReady },
+                  ]
+                ).map((opt) => {
+                  const active = hsChannel === opt.key;
+                  return (
+                    <button
+                      key={opt.key}
+                      type="button"
+                      disabled={!opt.ready}
+                      aria-pressed={active}
+                      title={opt.ready ? undefined : "FB token not configured on the server (FB_HS_LAUNCH_TOKEN)"}
+                      onClick={() => onHsChannel?.(opt.key)}
+                      className={
+                        "h-8 rounded-[10px] text-[12px] font-semibold transition-all duration-150 " +
+                        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
+                        (active
+                          ? "bg-accent/20 text-[#9db8ff] shadow-[inset_0_0_0_1px_rgba(122,150,255,0.35)]"
+                          : "text-dim hover:text-ink") +
+                        (opt.ready ? "" : " cursor-not-allowed opacity-40")
+                      }
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-center text-[10px] leading-relaxed text-faint">
+                {hsChannel === "token"
+                  ? "Our FB token builds the tree · delivery starts +30 min"
+                  : "LION profiles build the tree on the weapon side"}
+              </p>
+            </div>
+          ) : null}
           <button
             type="button"
             onClick={onPreview}
@@ -204,7 +255,9 @@ export function LaunchRail({
             <p className="text-center text-[10.5px] leading-relaxed text-faint">
               {readyCount > 0
                 ? partner.lionLaunch
-                  ? "Queued to HS Task Manager · LION builds the ads"
+                  ? hsChannel === "token"
+                    ? "Queued to HS Task Manager · FB token builds the ads · starts in 30 min"
+                    : "Queued to HS Task Manager · LION builds the ads"
                   : "Queued to Task Manager · goes live on create"
                 : `${partner.launchNote} · needs a creative`}
             </p>

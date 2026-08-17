@@ -24,7 +24,7 @@ import { LaunchRail } from "./launch-rail";
 import { CopySettingsModal } from "./copy-settings-modal";
 import { ChevronsIcon, CopyIcon, PlusIcon } from "./icons";
 import { useTaskManager } from "./task-manager";
-import { useHsTaskManager } from "./hs-task-manager";
+import { type HsLaunchChannel, useHsTaskManager } from "./hs-task-manager";
 import type { SessionUser } from "./user-menu";
 
 /** Today as DD.MM for the campaign-name prefix. Runs client-side (and on the local dev server). */
@@ -36,6 +36,10 @@ function todayDDMM(): string {
 /** Free-pool warning threshold: at or below this many free gcm codes the board shows the early
  *  amber banner, so designers know BEFORE building a wave that it may not fit. 0 = hard block. */
 const GCM_LOW_WATER = 15;
+
+/** The HS launch-rail pick (LION API vs FB Token) survives refreshes — buyers run whole waves on
+ *  one rail, re-picking it every session would invite accidental LION shots mid-token-wave. */
+const HS_CHANNEL_LS = "adlauncher.hs.channel";
 
 /** gcm auto-claim (skipping registry-reserved codes) + single account/pixel/fanpage pinning. */
 function normalize(rows: Campaign[], partner: PartnerConfig, reserved: Set<string> | null): Campaign[] {
@@ -121,6 +125,29 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // LION catalog (HS): profiles + ACR, per-profile accounts/pages/locales, per-account pixels.
   const hs = useHs(Boolean(partner.lionLaunch));
   const hsTasks = useHsTaskManager();
+  // HS launch rail: LION create weapon (default) or the FB Token direct-Graph build. Restored
+  // from localStorage after mount (SSR-safe); the token option is offered only once the server
+  // says the rail is provisioned (hs.tokenLaunch).
+  const [hsChannel, setHsChannel] = useState<HsLaunchChannel>("lion");
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(HS_CHANNEL_LS);
+      // Safe setState-in-effect: runs once on mount (localStorage is unreadable during SSR),
+      // and only flips the default when a pick was actually saved.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      if (v === "token" || v === "lion") setHsChannel(v);
+    } catch {
+      /* storage disabled — session-local pick only */
+    }
+  }, []);
+  const changeHsChannel = useCallback((ch: HsLaunchChannel) => {
+    setHsChannel(ch);
+    try {
+      localStorage.setItem(HS_CHANNEL_LS, ch);
+    } catch {
+      /* storage disabled */
+    }
+  }, []);
 
   // Latest partner for callbacks that must not re-subscribe on partner switch.
   const partnerRef = useRef(partner);
@@ -210,9 +237,13 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     const launchable = campaigns.filter((c) => isLaunchable(c, opts));
     if (launchable.length === 0) return;
 
-    // HS: every launchable card becomes ONE submit to LION's create weapon (all its creatives —
-    // LION makes one ad per URL). Cards stay on the board for tweak-and-relaunch, same as MO.
+    // HS: every launchable card becomes ONE submit on the picked rail — LION's create weapon
+    // (one ad per creative URL, built on LION's side) or the FB Token rail (the same tree built
+    // directly on the Graph by /api/hs/token-launch). Cards stay on the board for
+    // tweak-and-relaunch, same as MO. The token pick is honored only while the server says the
+    // rail is provisioned — otherwise the wave falls back to LION rather than dying en masse.
     if (partner.lionLaunch) {
+      const channel: HsLaunchChannel = hsChannel === "token" && hs.tokenLaunch ? "token" : "lion";
       const ddmm = todaySaoPauloDDMM();
       let sent = 0;
       for (const c of launchable) {
@@ -225,6 +256,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
           profile: c.profile,
           geo: geoSummary(c.countries),
           budget: c.budget,
+          channel,
         });
         sent++;
       }
@@ -521,6 +553,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
             campaigns={campaigns}
             partner={partner}
             hsAcr={hs.acr}
+            hsChannel={hsChannel}
+            hsTokenReady={hs.tokenLaunch}
+            onHsChannel={changeHsChannel}
             previewed={previewed}
             justQueued={justQueued}
             poolFree={poolFree}

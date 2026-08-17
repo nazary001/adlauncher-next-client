@@ -6,11 +6,14 @@
 // ("Sent to LION"), nobody polls the weapon's answer — results are checked in LION itself, and
 // the tab can close the moment the row turns green. DUPLICATES keep the full submitted → poll →
 // auto-activate lifecycle (their wave pump runs it server-side; the poll here finishes what the
-// pump's budget didn't). TEAM-SHARED (2026-08-12): every row is persisted to Strapi (the shared
+// pump's budget didn't). TOKEN launches (kind="token", the FB Token channel, 08-17) skip LION
+// entirely: /api/hs/token-launch streams NDJSON while OUR partner-side token builds the same
+// tree directly on the Graph — the row finishes with the real campaign/adset/ad ids in-request,
+// nothing to poll. TEAM-SHARED (2026-08-12): every row is persisted to Strapi (the shared
 // launch-task collection tagged partner="br", via /api/hs-tasks + server-side stamps in
-// /api/hs/{launch,duplicate}) so the whole team sees every HS launch and clone. Only the owner's
-// session polls LION + auto-activates + can retry; teammates mirror the store. localStorage
-// stays as an offline fallback for my own rows.
+// /api/hs/{launch,duplicate} and the token-launch stream) so the whole team sees every HS launch
+// and clone. Only the owner's session polls LION + auto-activates + can retry; teammates mirror
+// the store. localStorage stays as an offline fallback for my own rows.
 
 import {
   createContext,
@@ -30,6 +33,9 @@ import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, XIcon
 
 export type HsTaskStatus = "queued" | "running" | "submitted" | "done" | "error" | "unknown";
 
+/** Which rail a launch rides: LION's create weapon, or our own FB token straight on the Graph. */
+export type HsLaunchChannel = "lion" | "token";
+
 export type HsTask = {
   id: string;
   name: string;
@@ -41,9 +47,10 @@ export type HsTask = {
   owner?: string | null;
   /** Server-side updatedAt (ms) of the Strapi row — the liveness signal behind `stale`. */
   updatedMs?: number;
-  /** "launch" (create weapon, default for restored rows) or "duplicate" (clone weapon —
-   *  enters at "submitted" and auto-activates after COMPLETED, clones are born PAUSED). */
-  kind?: "launch" | "duplicate";
+  /** "launch" (create weapon, default for restored rows), "duplicate" (clone weapon — enters at
+   *  "submitted" and auto-activates after COMPLETED, clones are born PAUSED) or "token" (FB
+   *  Token channel — the tree is built in-request by /api/hs/token-launch, no LION lifecycle). */
+  kind?: "launch" | "duplicate" | "token";
   status: HsTaskStatus;
   /** Furthest stage key reached (drives the segmented bar). */
   stage: string;
@@ -74,6 +81,16 @@ const STAGES: readonly { key: string; label: string }[] = [
   { key: "adset", label: "Creating ad set" },
   { key: "ads", label: "Creating ads" },
 ];
+
+// Token launches ride the same stage keys (one segmented bar for every kind) but never queue on
+// LION — their "submit" phase is the server registering media with Meta.
+const TOKEN_STAGE_LABELS: Record<string, string> = {
+  upload: "Uploading creatives",
+  submit: "Uploading to Facebook",
+  campaign: "Creating campaign",
+  adset: "Creating ad set",
+  ads: "Creating ads",
+};
 
 const stageIndex = (stage: string): number => {
   const i = STAGES.findIndex((s) => s.key === stage);
@@ -115,6 +132,9 @@ const LION_STAGE: Record<string, { key: string; label: string }> = {
 
 // Blob uploads have no server deadline — bound them like the MO manager does.
 const UPLOAD_TIMEOUT_MS = 5 * 60_000;
+// Token-launch NDJSON stream cap — a hair over the route's maxDuration (300s) so the server
+// always finishes (or cleanly errors) first; mirrors the MO manager's STREAM_TIMEOUT_MS.
+const STREAM_TIMEOUT_MS = 330_000;
 // Gap between consecutive LION submits — RANDOM 1–3s per gap (owner call 2026-08-12): a jittered
 // cadence looks less bot-like and, more importantly, spacing the shots is the front-line defence
 // against Facebook temporarily blocking the executor PROFILE when a whole wave fires at once.
@@ -204,7 +224,7 @@ function fromRemote(r: HsRemoteRow): HsTask {
     profile: "",
     geo: r.geo || "",
     budget: r.budget || "",
-    kind: r.kind === "duplicate" ? "duplicate" : "launch",
+    kind: r.kind === "duplicate" ? "duplicate" : r.kind === "token" ? "token" : "launch",
     status,
     stage: r.stage || (status === "submitted" ? "queue" : "upload"),
     lionTaskId: r.lionTaskId || undefined,
@@ -238,7 +258,15 @@ function mergeShared(cur: HsTask[], fetched: HsTask[], tombstones: ReadonlySet<s
     // would double-create.
     const lostAnswer =
       !!prev?.local && (prev.status === "error" || prev.status === "unknown") && !prev.lionTaskId && !!f.lionTaskId;
-    byId.set(f.id, prev && prev.local && !lostAnswer ? prev : prev && prev.updatedMs === f.updatedMs ? prev : f);
+    // Token twin of lostAnswer: the stream got cut client-side (local error/unknown) but the
+    // server kept building and wrote "done" — its terminal truth wins; adopting retires the
+    // local Retry, which would build a second tree next to the finished one.
+    const tokenSettled =
+      !!prev?.local && prev.kind === "token" && (prev.status === "error" || prev.status === "unknown") && f.status === "done";
+    byId.set(
+      f.id,
+      prev && prev.local && !lostAnswer && !tokenSettled ? prev : prev && prev.updatedMs === f.updatedMs ? prev : f,
+    );
   }
   // Local tasks absent from the fetch stay; ids already decided above keep that decision.
   for (const c of cur) if (c.local && !byId.has(c.id)) byId.set(c.id, c);
@@ -253,6 +281,8 @@ export type HsEnqueueArgs = {
   profile: string;
   geo: string;
   budget: string;
+  /** Launch rail: "lion" (create weapon, default) or "token" (direct Graph build). */
+  channel?: HsLaunchChannel;
 };
 
 /** A duplicate already submitted to LION (the duplicate POST is instant) — one row per LION task.
@@ -292,7 +322,7 @@ export function useHsTaskManager(): HsTaskManagerValue {
   return v;
 }
 
-type TaskInput = { campaign: Campaign; files: FileItem[] };
+type TaskInput = { campaign: Campaign; files: FileItem[]; channel: HsLaunchChannel };
 
 // ---------- provider ----------
 
@@ -388,7 +418,10 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       gcm: t.kind ?? "launch",
       campaign_id: t.campaignId ?? null,
       adset_id: t.adsetId ?? null,
-      ad_id: t.adCount ?? null,
+      // ad_id is a STRING column — a numeric adCount 400s the whole Strapi write and the row
+      // wedges at its previous status (live 08-17: 4/4 token launches stuck "running"; the same
+      // silent 400 hit duplicate done-writes since 08-12).
+      ad_id: t.adCount != null ? String(t.adCount) : null,
       error: t.error ?? t.lionNote ?? null,
       queued_at: t.queuedAt,
       started_at: t.submittedAt ?? t.startedAt ?? null,
@@ -553,7 +586,124 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
           }
         }
 
-        // 2) One submit — LION answers fast (it just enqueues a weapon task). taskId lets the
+        // 2a) FB Token rail: /api/hs/token-launch builds the whole tree in-request and streams
+        // NDJSON stage events — consume them like the MO manager does, then settle on the final
+        // ok/error event. No LION lifecycle: done here means the campaign EXISTS on Facebook.
+        if (input.channel === "token") {
+          patch(id, { stage: "submit" });
+          const creatives = media.map((f, i) => ({
+            url: urls[i],
+            kind: f.kind === "image" ? "image" : "video",
+            name: f.name || "",
+          }));
+          const streamAbort = new AbortController();
+          const streamTimer = window.setTimeout(() => streamAbort.abort(), STREAM_TIMEOUT_MS);
+          let final: Record<string, unknown> | null = null;
+          let resStatus = 0;
+          let lastStage = "submit";
+          try {
+            const res = await fetch("/api/hs/token-launch", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ campaign: input.campaign, creatives, taskId: id }),
+              signal: streamAbort.signal,
+            });
+            resStatus = res.status;
+            const handle = (line: string) => {
+              let ev: Record<string, unknown>;
+              try {
+                ev = JSON.parse(line);
+              } catch {
+                return;
+              }
+              if (ev.ok === true || ev.ok === false) {
+                final = ev;
+                return;
+              }
+              if (typeof ev.stage === "string") {
+                lastStage = ev.stage;
+                patch(id, { stage: ev.stage, ...(typeof ev.done === "number" ? { adCount: ev.done } : {}) });
+              }
+            };
+            if (res.body) {
+              const reader = res.body.getReader();
+              const dec = new TextDecoder();
+              let buf = "";
+              for (;;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buf += dec.decode(value, { stream: true });
+                let nl: number;
+                while ((nl = buf.indexOf("\n")) >= 0) {
+                  const line = buf.slice(0, nl).trim();
+                  buf = buf.slice(nl + 1);
+                  if (line) handle(line);
+                }
+              }
+              if (buf.trim()) handle(buf.trim());
+            } else {
+              final = await res.json().catch(() => null);
+            }
+          } finally {
+            window.clearTimeout(streamTimer);
+          }
+
+          const f = final as Record<string, unknown> | null;
+          if (f && f.ok === true) {
+            const finishedAt = Date.now();
+            const adCount = Array.isArray(f.ad_ids) ? f.ad_ids.length : media.length;
+            const nm = typeof f.name === "string" ? f.name : undefined;
+            patch(id, {
+              status: "done",
+              stage: "ads",
+              finishedAt,
+              campaignId: f.campaign_id ? String(f.campaign_id) : undefined,
+              adsetId: f.adset_id ? String(f.adset_id) : undefined,
+              adCount,
+              ...(nm ? { name: nm } : {}),
+            });
+            if (nm) meta.current.set(id, { ...(meta.current.get(id) ?? {}), name: nm });
+            saveRemote(id, {
+              status: "done",
+              stage: "ads",
+              finished_at: finishedAt,
+              campaign_id: f.campaign_id ?? null,
+              adset_id: f.adset_id ?? null,
+              ad_id: String(adCount), // string column — see dynOf
+              error: null,
+            });
+            inputs.current.delete(id); // the tree exists — never re-run
+          } else {
+            const finishedAt = Date.now();
+            const msg = f
+              ? (f.error as string) || `HTTP ${resStatus}`
+              : `stream ended unexpectedly (HTTP ${resStatus}) — the server may still be building; check HS Tasks / Ads Manager before re-firing`;
+            const created = ((f?.created ?? {}) as Record<string, unknown>) || {};
+            const createdCampaign = created.campaign_id ? String(created.campaign_id) : undefined;
+            patch(id, {
+              status: "error",
+              stage: lastStage,
+              finishedAt,
+              error: msg,
+              ...(createdCampaign ? { campaignId: createdCampaign } : {}),
+              ...(created.adset_id ? { adsetId: String(created.adset_id) } : {}),
+            });
+            saveRemote(id, {
+              status: "error",
+              stage: lastStage,
+              finished_at: finishedAt,
+              error: msg,
+              ...(createdCampaign ? { campaign_id: createdCampaign } : {}),
+              ...(created.adset_id ? { adset_id: created.adset_id } : {}),
+            });
+            // A created campaign makes a blind retry a DUPLICATE tree — drop the inputs so the
+            // Retry affordance disappears (same rule as the MO manager).
+            if (createdCampaign) inputs.current.delete(id);
+          }
+          return;
+        }
+
+        // 2b) One submit — LION answers fast (it just enqueues a weapon task). taskId lets the
         // server stamp the shared row the instant LION accepts it (durability).
         patch(id, { stage: "submit" });
         let res: Response;
@@ -658,7 +808,9 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         const error = neverSubmitted
           ? t.kind === "duplicate"
             ? "Never reached LION — the wave's server window closed before this shot; re-fire it in the duplicator"
-            : "Interrupted — the submitting session closed before this launch reached LION; fire the card again"
+            : t.kind === "token"
+              ? "Interrupted — the launching session went offline mid-build; check Ads Manager before re-firing"
+              : "Interrupted — the submitting session closed before this launch reached LION; fire the card again"
           : "Still not finished on LION after 3 h — check the LION dashboard";
         const status = neverSubmitted ? ("error" as const) : ("unknown" as const);
         patch(t.id, { status, finishedAt, error });
@@ -876,8 +1028,10 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       const id =
         (globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)) + Date.now().toString(36);
       const now = Date.now();
-      inputs.current.set(id, { campaign: args.campaign, files: args.files });
-      meta.current.set(id, { name: args.name, geo: args.geo, budget: args.budget, gcm: "launch" });
+      const channel: HsLaunchChannel = args.channel === "token" ? "token" : "lion";
+      const kind = channel === "token" ? ("token" as const) : ("launch" as const);
+      inputs.current.set(id, { campaign: args.campaign, files: args.files, channel });
+      meta.current.set(id, { name: args.name, geo: args.geo, budget: args.budget, gcm: kind });
       setTasks((ts) => [
         {
           id,
@@ -886,7 +1040,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
           geo: args.geo,
           budget: args.budget,
           owner: me,
-          kind: "launch" as const,
+          kind,
           status: "queued" as const,
           stage: "upload",
           queuedAt: now,
@@ -894,8 +1048,9 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         },
         ...ts,
       ]);
-      // Show the queued row to the team immediately; the runner's submit fills in the LION id.
-      saveRemote(id, { status: "queued", stage: "upload", gcm: "launch", queued_at: now });
+      // Show the queued row to the team immediately; the runner's submit (LION) or the token
+      // stream fills in the rest.
+      saveRemote(id, { status: "queued", stage: "upload", gcm: kind, queued_at: now });
       queue.current.push(id);
       void pump();
     },
@@ -950,8 +1105,9 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       const t = tasksRef.current.find((x) => x.id === id);
       if (!t || t.status !== "error") return;
       // Only pre-submit failures are retryable: after a successful submit LION owns the task, and a
-      // re-submit would create a SECOND campaign task on their side.
-      if (t.lionTaskId || !inputs.current.has(id)) return;
+      // re-submit would create a SECOND campaign task on their side. Same on the token rail once a
+      // campaign id exists — the tree (or part of it) is live on Facebook.
+      if (t.lionTaskId || t.campaignId || !inputs.current.has(id)) return;
       if (queue.current.includes(id)) return;
       patch(id, { status: "queued", stage: "upload", error: undefined, startedAt: undefined, finishedAt: undefined });
       saveRemote(id, { status: "queued", stage: "upload", error: null, finished_at: null });
@@ -963,7 +1119,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
 
   const retryAll = useCallback(() => {
     for (const t of tasksRef.current) {
-      if (t.status === "error" && !t.lionTaskId && t.local && inputs.current.has(t.id)) retry(t.id);
+      if (t.status === "error" && !t.lionTaskId && !t.campaignId && t.local && inputs.current.has(t.id)) retry(t.id);
     }
   }, [retry]);
 
@@ -1114,7 +1270,7 @@ function HsTaskManagerPanel() {
   const isMine = (t: HsTask) => t.local || (!!me && t.owner === me);
   const scoped = mineOnly ? tasks.filter(isMine) : tasks;
   const shown = scoped.filter(inBucket);
-  const retryable = tasks.filter((t) => t.status === "error" && !t.lionTaskId && t.local).length;
+  const retryable = tasks.filter((t) => t.status === "error" && !t.lionTaskId && !t.campaignId && t.local).length;
 
   const tabs: { key: Filter; label: string; n: number }[] = [
     { key: "all", label: "All", n: tasks.length },
@@ -1135,7 +1291,7 @@ function HsTaskManagerPanel() {
             </span>
             <div className="leading-none">
               <h2 className="text-[14px] font-semibold text-ink">HS Task Manager</h2>
-              <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-faint">LION launch queue</p>
+              <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-faint">LION · FB token launch queue</p>
             </div>
           </div>
           <button
@@ -1194,8 +1350,9 @@ function HsTaskManagerPanel() {
               </span>
               <p className="text-[13px] font-medium text-dim">Nothing here yet</p>
               <p className="max-w-[250px] text-[11.5px] leading-relaxed text-faint">
-                HS launches land here: creatives upload and the campaign is handed to LION — a
-                green row means LION accepted it; the build itself finishes on LION&apos;s side.
+                HS launches land here. LION rail: a green row means LION accepted it — the build
+                finishes on LION&apos;s side. FB token rail: a green row means the campaign is
+                already live on Facebook (delivery starts 30 min after create).
               </p>
             </div>
           ) : (
@@ -1294,11 +1451,15 @@ function HsTaskRow({
   const elapsed = t.startedAt ? Math.max(0, end - t.startedAt) : 0;
 
   // A done row that never learned its campaign (launches finalize at LION acceptance, 08-14)
-  // reads "Sent to LION"; rows the pollers/pump finished keep the richer label.
+  // reads "Sent to LION"; rows the pollers/pump finished keep the richer label. Token rows are
+  // done only when the tree is REAL on Facebook, so they always name it.
+  const adsSuffix = t.adCount ? ` · ${t.adCount} ad${t.adCount === 1 ? "" : "s"}` : "";
   const statusLabel = done
-    ? t.campaignId || t.adCount
-      ? `Created on LION${t.adCount ? ` · ${t.adCount} ad${t.adCount === 1 ? "" : "s"}` : ""}`
-      : "Sent to LION"
+    ? t.kind === "token"
+      ? `Created via FB token${adsSuffix} · delivery +30 min from create`
+      : t.campaignId || t.adCount
+        ? `Created on LION${adsSuffix}`
+        : "Sent to LION"
     : error
       ? t.error || "Failed"
       : unknown
@@ -1306,7 +1467,7 @@ function HsTaskRow({
         : t.status === "queued"
           ? "Queued"
           : t.status === "running"
-            ? STAGES[idx]?.label ?? "Working…"
+            ? (t.kind === "token" ? TOKEN_STAGE_LABELS[t.stage] : STAGES[idx]?.label) ?? "Working…"
             : (t.lionStatus && LION_STAGE[t.lionStatus]?.label) || `On LION: ${t.lionStatus ?? "…"}`;
 
   return (
@@ -1336,8 +1497,9 @@ function HsTaskRow({
             </span>
           ) : null}
           <span className="font-mono text-[10.5px] tabular-nums text-faint">{fmtElapsed(elapsed)}</span>
-          {/* Retry is own-only (needs the local creative inputs). */}
-          {error && t.local && !t.lionTaskId ? (
+          {/* Retry is own-only (needs the local creative inputs) and only while nothing landed
+              on the other side — no LION task, no token-rail campaign. */}
+          {error && t.local && !t.lionTaskId && !t.campaignId ? (
             <button
               type="button"
               onClick={onRetry}

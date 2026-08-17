@@ -20,6 +20,9 @@ export type HsProfileData = {
 export type HsCatalog = {
   /** Media-buyer acronym bound to the LION token (name prefix). Empty while loading. */
   acr: string;
+  /** FB Token rail provisioned server-side (FB_HS_LAUNCH_TOKEN / fallback) — gates the channel
+   *  switch. false while loading, so the switch can't offer an unconfigured rail. */
+  tokenLaunch: boolean;
   /** Profile slugs. null = loading (or failed → retried). */
   profiles: RichOption[] | null;
   /** Profile bind space: undefined = never requested / failed, null = loading. */
@@ -32,6 +35,7 @@ export type HsCatalog = {
 
 const EMPTY: HsCatalog = {
   acr: "",
+  tokenLaunch: false,
   profiles: null,
   dataFor: () => undefined,
   pixelsFor: () => undefined,
@@ -53,6 +57,7 @@ const VOLUME_MAX_TRIES = 4;
  */
 export function useHs(enabled: boolean): HsCatalog {
   const [acr, setAcr] = useState("");
+  const [tokenLaunch, setTokenLaunch] = useState(false);
   const [profiles, setProfiles] = useState<RichOption[] | null>(null);
   const [data, setData] = useState<Map<string, HsProfileData | null>>(new Map());
   const [pixels, setPixels] = useState<Map<string, PixelInfo[] | null>>(new Map());
@@ -78,10 +83,16 @@ export function useHs(enabled: boolean): HsCatalog {
     async function load(attempt: number): Promise<void> {
       try {
         const r = await fetch("/api/hs/profiles");
-        const d = (await r.json().catch(() => ({}))) as { ok?: boolean; acr?: string; profiles?: string[] };
+        const d = (await r.json().catch(() => ({}))) as {
+          ok?: boolean;
+          acr?: string;
+          profiles?: string[];
+          tokenLaunch?: boolean;
+        };
         if (!alive) return;
         if (r.ok && d?.ok && Array.isArray(d.profiles)) {
           setAcr(typeof d.acr === "string" ? d.acr : "");
+          setTokenLaunch(d.tokenLaunch === true);
           setProfiles(d.profiles.map((slug) => ({ value: slug, label: slug })));
           return;
         }
@@ -275,5 +286,5 @@ export function useHs(enabled: boolean): HsCatalog {
   );
 
   if (!enabled) return EMPTY;
-  return { acr, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels };
+  return { acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels };
 }

@@ -122,12 +122,15 @@ function retryWaitMs(res: Response, attempt: number): number | null {
  * GET a Graph path (no leading slash beyond an optional `?...` root query), with rate-limit
  * backoff. Returns the parsed JSON body; throws FbError (with a Graph-facing message + a mapped
  * HTTP status: 429 when rate-limited, 502 otherwise) on failure.
+ * `token` defaults to the MO launch token; the HS token-launch rail passes the partner-side
+ * user token instead (lib/hs-token-launch) — everything else (backoff, budget, error mapping)
+ * is identical for both rails.
  */
-export async function fbGet(path: string): Promise<Json> {
-  if (!TOKEN) throw new FbError("no_fb_token", null, 500);
+export async function fbGet(path: string, token: string = TOKEN): Promise<Json> {
+  if (!token) throw new FbError("no_fb_token", null, 500);
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(`${FB}/${path}`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${token}` },
       cache: "no-store",
     });
     const body = (await res.json().catch(() => ({}))) as Json;
@@ -667,11 +670,44 @@ export async function withParentRetry<T>(parentId: string, fn: () => Promise<T>)
 }
 
 /**
+ * Create an ad set, self-healing the regional "universal ads" declarations Meta requires for
+ * regulated locations (Taiwan, Singapore, …) when the audience includes them — e.g. worldwide
+ * targeting. Meta surfaces one region per error ("...use the following value ...: TAIWAN_UNIVERSAL"),
+ * so each demanded value is added to regional_regulated_categories and the create retried.
+ * Pre-seeded from the payload (worldwide sends the known pair up front); this catches anything
+ * further Meta adds. Shared by the MO launch route and the HS token-launch rail.
+ */
+export async function createAdsetSelfHealing(path: string, payload: Json, token?: string): Promise<Json> {
+  const seed = payload.regional_regulated_categories;
+  const cats = new Set<string>(Array.isArray(seed) ? (seed as string[]) : []);
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const body: Json = cats.size ? { ...payload, regional_regulated_categories: [...cats] } : payload;
+    try {
+      return await fbPost(path, body, token);
+    } catch (e) {
+      const detail = (e as FbError).detail as
+        | { error?: { error_user_title?: string; error_user_msg?: string } }
+        | undefined;
+      const text = `${detail?.error?.error_user_title ?? ""} ${detail?.error?.error_user_msg ?? ""}`;
+      const m = /([A-Z][A-Z_]*_UNIVERSAL)/.exec(text);
+      if (m && !cats.has(m[1])) {
+        cats.add(m[1]);
+        continue; // Meta named a new required declaration → add it and retry
+      }
+      throw e; // unrelated failure — surface it
+    }
+  }
+  // Exhausted retries — one last attempt so a genuine failure propagates with its detail.
+  return fbPost(path, { ...payload, regional_regulated_categories: [...cats] }, token);
+}
+
+/**
  * POST a Graph path with form-encoding (nested objects/arrays are JSON-stringified, per the
  * Marketing API convention), with the same rate-limit backoff as fbGet. Throws FbError on failure.
+ * `token` defaults to the MO launch token (see fbGet).
  */
-export async function fbPost(path: string, params: Json): Promise<Json> {
-  if (!TOKEN) throw new FbError("no_fb_token", null, 500);
+export async function fbPost(path: string, params: Json, token: string = TOKEN): Promise<Json> {
+  if (!token) throw new FbError("no_fb_token", null, 500);
   const form = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v === undefined || v === null) continue;
@@ -680,7 +716,7 @@ export async function fbPost(path: string, params: Json): Promise<Json> {
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(`${FB}/${path}`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/x-www-form-urlencoded" },
       body: form,
     });
     const body = (await res.json().catch(() => ({}))) as Json;
