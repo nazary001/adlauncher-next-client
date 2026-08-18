@@ -108,6 +108,9 @@ type LaunchInput = {
   mediaUrl: string;
   mediaName: string;
   mediaKind: "video" | "image";
+  /** Custom cover for a VIDEO creative (session-local object URL) — uploaded next to the
+   *  creative and pinned as the ad's thumbnail by the launch route. */
+  cover?: { url: string; name: string };
 };
 
 type CloneInput = {
@@ -130,6 +133,8 @@ export type EnqueueArgs = {
   mediaUrl: string;
   mediaName: string;
   mediaKind: "video" | "image";
+  /** Custom cover image for a video creative (see LaunchInput.cover). */
+  cover?: { url: string; name: string };
   name: string;
   gcm: string;
   geo: string;
@@ -560,6 +565,31 @@ function TaskManagerCore({
           window.clearTimeout(uploadTimer);
         }
 
+        // Custom video cover: ships to Blob next to the creative; the route pins it as the ad's
+        // thumbnail (image_hash). Video creatives only — images ARE their own cover.
+        let coverUrl: string | undefined;
+        if (input.cover && input.mediaKind === "video") {
+          const cblob = await fetch(input.cover.url).then((r) => r.blob());
+          const cfile = new File([cblob], input.cover.name || "cover.jpg", { type: cblob.type || "image/jpeg" });
+          const cSafe = (cfile.name || "cover.jpg").replace(/[^\w.-]+/g, "_");
+          const cAbort = new AbortController();
+          const cTimer = window.setTimeout(() => cAbort.abort(), UPLOAD_TIMEOUT_MS);
+          try {
+            ({ url: coverUrl } = await upload(`creatives/${id}-cover-${cSafe}`, cfile, {
+              access: "public",
+              contentType: cfile.type || "image/jpeg",
+              handleUploadUrl: "/api/blob-upload",
+              abortSignal: cAbort.signal,
+            }));
+          } catch (e) {
+            throw cAbort.signal.aborted
+              ? new Error(`cover upload timed out after ${UPLOAD_TIMEOUT_MS / 60_000} min — check the connection and retry`)
+              : e;
+          } finally {
+            window.clearTimeout(cTimer);
+          }
+        }
+
         const streamAbort = new AbortController();
         const streamTimer = window.setTimeout(() => streamAbort.abort(), STREAM_TIMEOUT_MS);
         let final: Record<string, unknown> | null = null;
@@ -577,6 +607,7 @@ function TaskManagerCore({
               campaign: input.campaign,
               mediaUrl,
               mediaKind: input.mediaKind,
+              ...(coverUrl ? { coverUrl } : {}),
               taskId: id,
             }),
             signal: streamAbort.signal,
@@ -854,6 +885,7 @@ function TaskManagerCore({
         mediaUrl: args.mediaUrl,
         mediaName: args.mediaName,
         mediaKind: args.mediaKind,
+        ...(args.cover ? { cover: args.cover } : {}),
       });
       // static fields reused on every remote upsert for this task
       meta.current.set(id, {

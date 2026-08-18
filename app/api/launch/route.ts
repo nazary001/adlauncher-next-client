@@ -95,6 +95,7 @@ export async function POST(req: Request) {
   let partnerId: PartnerId;
   let mediaUrl = "";
   let mediaKind: "video" | "image" = "video";
+  let coverUrl = "";
   let taskId: string | null = null;
   try {
     const j = (await req.json()) as {
@@ -102,6 +103,8 @@ export async function POST(req: Request) {
       partnerId?: string;
       mediaUrl?: string;
       mediaKind?: string;
+      /** Custom cover image for a video creative (own-Blob URL) — pinned as the thumbnail. */
+      coverUrl?: string;
       /** Legacy client field (pre-image builds still in open tabs) — video by definition. */
       videoUrl?: string;
       taskId?: string;
@@ -110,6 +113,7 @@ export async function POST(req: Request) {
     partnerId = String(j.partnerId ?? "in") as PartnerId;
     mediaUrl = typeof j.mediaUrl === "string" && j.mediaUrl ? j.mediaUrl : typeof j.videoUrl === "string" ? j.videoUrl : "";
     mediaKind = j.mediaKind === "image" ? "image" : "video";
+    coverUrl = mediaKind === "video" && typeof j.coverUrl === "string" ? j.coverUrl.trim() : "";
     // The Task Manager row this run belongs to. When present, progress + the terminal state are
     // ALSO written to Strapi server-side, so every account keeps seeing the truth live even if the
     // launching browser dies mid-run (the run itself continues here regardless).
@@ -231,19 +235,20 @@ export async function POST(req: Request) {
   // on the *.blob.vercel-storage.com host over https, so we require both the host suffix AND that
   // path prefix — narrowing the surface to blobs this app actually creates (rev-api #2).
   {
-    let host = "";
-    let path = "";
-    try {
-      const u = new URL(mediaUrl);
-      if (u.protocol === "https:") {
-        host = u.hostname;
-        path = u.pathname;
+    const ownBlob = (raw: string): boolean => {
+      try {
+        const u = new URL(raw);
+        return u.protocol === "https:" && u.hostname.endsWith(".blob.vercel-storage.com") && u.pathname.startsWith("/creatives/");
+      } catch {
+        return false;
       }
-    } catch {
-      host = "";
-    }
-    if (!host.endsWith(".blob.vercel-storage.com") || !path.startsWith("/creatives/")) {
+    };
+    if (!ownBlob(mediaUrl)) {
       return NextResponse.json({ ok: false, stage: "media", error: "media_url_invalid" }, { status: 400 });
+    }
+    // The cover is fetched server-side into adimages — same own-Blob fence as the creative.
+    if (coverUrl && !ownBlob(coverUrl)) {
+      return NextResponse.json({ ok: false, stage: "media", error: "cover_url_invalid" }, { status: 400 });
     }
   }
   if (bidAmountMissing(campaign)) {
@@ -288,19 +293,19 @@ export async function POST(req: Request) {
     );
   }
 
-  // Image launches: fetch + validate the creative BEFORE the stream — an oversized image must
-  // die here as a clean 400 (nothing claimed, no campaign shell), not 20s into the wave at
-  // adimages. The validated bytes ride into the stream so the Blob isn't fetched twice.
+  // Image launches + custom video covers: fetch + validate BEFORE the stream — an oversized
+  // image must die here as a clean 400 (nothing claimed, no campaign shell), not 20s into the
+  // wave at adimages. The validated bytes ride into the stream so the Blob isn't fetched twice.
   let imageBuf: Buffer | null = null;
-  if (mediaKind === "image") {
-    try {
-      imageBuf = await fetchValidatedImage(mediaUrl);
-    } catch (e) {
-      return NextResponse.json(
-        { ok: false, stage: "media", error: (e as FbError).message ?? String(e) },
-        { status: 400 },
-      );
-    }
+  let coverBuf: Buffer | null = null;
+  try {
+    if (mediaKind === "image") imageBuf = await fetchValidatedImage(mediaUrl);
+    if (coverUrl) coverBuf = await fetchValidatedImage(coverUrl);
+  } catch (e) {
+    return NextResponse.json(
+      { ok: false, stage: "media", error: (e as FbError).message ?? String(e) },
+      { status: 400 },
+    );
   }
 
   const name = `${campaign.namePrefix}${campaign.name}`.trim();
@@ -372,6 +377,7 @@ export async function POST(req: Request) {
         let videoId = "";
         let thumbUrl = "";
         let imageHash = "";
+        let coverHash = "";
         if (mediaKind === "image") {
           imageHash = await uploadImage(binds.accountId, imageBuf as Buffer); // validated pre-flight
           created.image_hash = imageHash;
@@ -380,7 +386,9 @@ export async function POST(req: Request) {
           created.video_id = videoId;
           progress("processing");
           await waitForVideo(videoId);
-          thumbUrl = await videoThumb(videoId);
+          // A custom cover replaces the auto-thumbnail entirely (no thumbnail poll needed).
+          if (coverBuf) coverHash = await uploadImage(binds.accountId, coverBuf);
+          else thumbUrl = await videoThumb(videoId);
         }
         const localeIds = await resolveLocales(campaign.locales);
 
@@ -400,7 +408,7 @@ export async function POST(req: Request) {
           `act_${binds.accountId}/adcreatives`,
           mediaKind === "image"
             ? imageCreativePayload(campaign, name, binds, { imageHash, link })
-            : creativePayload(campaign, name, binds, { videoId, thumbUrl, link }),
+            : creativePayload(campaign, name, binds, { videoId, thumbUrl, link, ...(coverHash ? { coverHash } : {}) }),
         );
         created.creative_id = String(creative.id);
 
@@ -477,6 +485,7 @@ export async function POST(req: Request) {
         // Awaited (not fire-and-forget) so it completes before the stream closes and Vercel can
         // freeze the function. The "done"/"error" event was already sent, so this adds no visible wait.
         await del(mediaUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
+        if (coverUrl) await del(coverUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
         // Flush the task-row writer too — its last transition must land before Vercel freezes us.
         await tw.flush();
         controller.close();

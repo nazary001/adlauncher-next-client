@@ -226,6 +226,7 @@ export function CampaignCard({
   adAccounts,
   hs,
   highlight,
+  coversEnabled,
   onPatch,
   onToggleCollapse,
   onDuplicate,
@@ -244,6 +245,10 @@ export function CampaignCard({
   hs?: HsCatalog;
   /** Focus-pulse this card after a jump from the Launch bay. */
   highlight?: boolean;
+  /** Offer the per-video custom-cover picker. True wherever the launch rides OUR FB token
+   *  (MO / AIF always; HS only while the FB Token rail is picked — LION's create contract
+   *  takes bare URLs and picks its own frame, owner rule 2026-08-18). */
+  coversEnabled?: boolean;
   onPatch: (id: string, patch: Partial<Campaign>) => void;
   onToggleCollapse: (id: string) => void;
   onDuplicate: (id: string) => void;
@@ -1041,7 +1046,7 @@ export function CampaignCard({
                       files={c.files}
                       onChange={(files) => patch({ files })}
                       maxFiles={partner.maxCreatives}
-                      covers={hsMode}
+                      covers={coversEnabled}
                     />
                     {hsMode ? <AddByUrl onAdd={(item) => patch({ files: [...c.files, item] })} /> : null}
                     {onApplyFilesToAll && c.files.length > 0 ? (

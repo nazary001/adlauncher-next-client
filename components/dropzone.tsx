@@ -186,7 +186,7 @@ function CreativeCard({
             <button
               type="button"
               onClick={() => coverInput.current?.click()}
-              title="Pick a custom cover image for this video (FB Token rail)"
+              title="Pick a custom cover image for this video"
               className={
                 "absolute bottom-2 right-2 z-10 flex items-center gap-1 rounded-md bg-black/55 px-1.5 py-1 " +
                 "font-mono text-[8.5px] font-semibold uppercase tracking-wider text-white/75 backdrop-blur-sm " +

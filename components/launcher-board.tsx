@@ -378,6 +378,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
         mediaUrl: media.url,
         mediaName: media.name,
         mediaKind: media.kind === "image" ? "image" : "video",
+        // Custom video cover picked in the dropzone (images are their own cover).
+        ...(media.kind === "video" && media.cover ? { cover: media.cover } : {}),
         name: fullName(c),
         gcm: c.gcm,
         geo: geoSummary(c.countries),
@@ -633,6 +635,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
                 adAccounts={adAccounts}
                 hs={partner.lionLaunch ? hs : undefined}
                 highlight={highlightId === c.id}
+                // Covers ride only on OUR FB token (owner rule): MO/AIF rails always do; HS only
+                // while the FB Token channel is picked — the LION weapon picks its own frame.
+                coversEnabled={partner.lionLaunch ? hsChannel === "token" && hs.tokenLaunch : true}
                 onPatch={patch}
                 onToggleCollapse={toggleCollapse}
                 onDuplicate={duplicate}

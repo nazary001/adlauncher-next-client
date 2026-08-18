@@ -104,6 +104,7 @@ export async function POST(req: Request) {
   let campaign: Campaign;
   let mediaUrl = "";
   let mediaKind: "video" | "image" = "video";
+  let coverUrl = "";
   let taskId: string | null = null;
   try {
     const j = (await req.json()) as {
@@ -111,11 +112,14 @@ export async function POST(req: Request) {
       partnerId?: string;
       mediaUrl?: string;
       mediaKind?: string;
+      /** Custom cover image for a video creative (own-Blob URL) — pinned as the thumbnail. */
+      coverUrl?: string;
       taskId?: string;
     };
     campaign = (j.campaign ?? {}) as Campaign;
     mediaUrl = typeof j.mediaUrl === "string" ? j.mediaUrl : "";
     mediaKind = j.mediaKind === "image" ? "image" : "video";
+    coverUrl = mediaKind === "video" && typeof j.coverUrl === "string" ? j.coverUrl.trim() : "";
     taskId = typeof j.taskId === "string" && /^[\w-]{6,64}$/.test(j.taskId) ? j.taskId : null;
   } catch (e) {
     return NextResponse.json({ ok: false, stage: "parse", error: String(e) }, { status: 400 });
@@ -201,19 +205,19 @@ export async function POST(req: Request) {
   }
   // The creative must be a Vercel Blob URL our OWN broker produced — same SSRF fence as /api/launch.
   {
-    let host = "";
-    let path = "";
-    try {
-      const u = new URL(mediaUrl);
-      if (u.protocol === "https:") {
-        host = u.hostname;
-        path = u.pathname;
+    const ownBlob = (raw: string): boolean => {
+      try {
+        const u = new URL(raw);
+        return u.protocol === "https:" && u.hostname.endsWith(".blob.vercel-storage.com") && u.pathname.startsWith("/creatives/");
+      } catch {
+        return false;
       }
-    } catch {
-      host = "";
-    }
-    if (!host.endsWith(".blob.vercel-storage.com") || !path.startsWith("/creatives/")) {
+    };
+    if (!ownBlob(mediaUrl)) {
       return NextResponse.json({ ok: false, stage: "media", error: "media_url_invalid" }, { status: 400 });
+    }
+    if (coverUrl && !ownBlob(coverUrl)) {
+      return NextResponse.json({ ok: false, stage: "media", error: "cover_url_invalid" }, { status: 400 });
     }
   }
   if (!AIF_BID_STRATEGIES.has(campaign.bidStrategy)) {
@@ -248,17 +252,18 @@ export async function POST(req: Request) {
     );
   }
 
-  // Image launches: fetch + validate the creative BEFORE the stream (clean 400, nothing claimed).
+  // Image launches + custom video covers: fetch + validate BEFORE the stream (clean 400,
+  // nothing claimed).
   let imageBuf: Buffer | null = null;
-  if (mediaKind === "image") {
-    try {
-      imageBuf = await fetchValidatedImage(mediaUrl);
-    } catch (e) {
-      return NextResponse.json(
-        { ok: false, stage: "media", error: (e as FbError).message ?? String(e) },
-        { status: 400 },
-      );
-    }
+  let coverBuf: Buffer | null = null;
+  try {
+    if (mediaKind === "image") imageBuf = await fetchValidatedImage(mediaUrl);
+    if (coverUrl) coverBuf = await fetchValidatedImage(coverUrl);
+  } catch (e) {
+    return NextResponse.json(
+      { ok: false, stage: "media", error: (e as FbError).message ?? String(e) },
+      { status: 400 },
+    );
   }
 
   // Server-pinned invariants (the UI pins them too, but a stale/edited draft is the client's
@@ -318,6 +323,7 @@ export async function POST(req: Request) {
         let videoId = "";
         let thumbUrl = "";
         let imageHash = "";
+        let coverHash = "";
         if (mediaKind === "image") {
           imageHash = await aifUploadImage(binds.accountId, imageBuf as Buffer); // validated pre-flight
           created.image_hash = imageHash;
@@ -326,7 +332,9 @@ export async function POST(req: Request) {
           created.video_id = videoId;
           progress("processing");
           await aifWaitForVideo(videoId);
-          thumbUrl = await aifVideoThumb(videoId);
+          // A custom cover replaces the auto-thumbnail entirely (no thumbnail poll needed).
+          if (coverBuf) coverHash = await aifUploadImage(binds.accountId, coverBuf);
+          else thumbUrl = await aifVideoThumb(videoId);
         }
         const localeIds = await resolveLocales(serverCampaign.locales);
 
@@ -346,7 +354,7 @@ export async function POST(req: Request) {
           `act_${binds.accountId}/adcreatives`,
           mediaKind === "image"
             ? imageCreativePayload(serverCampaign, name, binds, { imageHash, link })
-            : creativePayload(serverCampaign, name, binds, { videoId, thumbUrl, link }),
+            : creativePayload(serverCampaign, name, binds, { videoId, thumbUrl, link, ...(coverHash ? { coverHash } : {}) }),
         );
         created.creative_id = String(creative.id);
 
@@ -410,6 +418,7 @@ export async function POST(req: Request) {
         clearInterval(beat);
         // Drop the temporary Blob whether the launch succeeded or failed — never orphan the upload.
         await del(mediaUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
+        if (coverUrl) await del(coverUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
         await tw.flush();
         controller.close();
       }
