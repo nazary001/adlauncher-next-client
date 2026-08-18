@@ -147,7 +147,16 @@ export type CloneEnqueueArgs = {
 type TaskManagerValue = {
   /** The shared team list, each task with its display status (`eff`) resolved. Newest first. */
   tasks: ViewTask[];
-  counts: { queued: number; running: number; done: number; error: number; active: number; total: number };
+  counts: {
+    queued: number;
+    running: number;
+    done: number;
+    error: number;
+    active: number;
+    total: number;
+    /** THIS tab's own launches still client-side (queued / running) — they die with the page. */
+    inFlight: number;
+  };
   /** The current user — used to label task owners and gate own-only actions in the shared view. */
   me: string | null;
   open: boolean;
@@ -186,6 +195,9 @@ type TmScope = {
   label: string;
   title: string;
   subtitle: string;
+  /** Bottom offset of the still-launching pill — the two instances must never overlap when both
+   *  queues are mid-wave (MO wave running while an AIF wave fires, or vice versa). */
+  bannerBottom: string;
 };
 const MO_SCOPE: TmScope = {
   api: "/api/launch-tasks",
@@ -193,6 +205,7 @@ const MO_SCOPE: TmScope = {
   label: "Tasks",
   title: "Task Manager",
   subtitle: "Team launch & clone queue",
+  bannerBottom: "bottom-5",
 };
 const AIF_SCOPE: TmScope = {
   api: "/api/launch-tasks?scope=aif",
@@ -200,6 +213,7 @@ const AIF_SCOPE: TmScope = {
   label: "AIF Tasks",
   title: "AIF Task Manager",
   subtitle: "AIF launch queue · team view",
+  bannerBottom: "bottom-[4.75rem]",
 };
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -978,15 +992,36 @@ function TaskManagerCore({
     let queued = 0,
       running = 0,
       done = 0,
-      error = 0;
+      error = 0,
+      inFlight = 0;
     for (const t of view) {
       if (t.eff === "queued") queued++;
       else if (t.eff === "running") running++;
       else if (t.eff === "done") done++;
       else error++; // real errors + stale/interrupted
+      // Launches still CLIENT-side (queued behind this tab's worker, or running their
+      // upload/stream) die with the page — the leave guard below holds it open. THIS tab's own
+      // tasks only (raw status: our own live rows are never stale); teammates' rows and
+      // restored snapshots don't hold the page hostage.
+      if (t.local && (t.status === "queued" || t.status === "running")) inFlight++;
     }
-    return { queued, running, done, error, active: queued + running, total: view.length };
+    return { queued, running, done, error, active: queued + running, total: view.length, inFlight };
   }, [view]);
+
+  // Closing the page while launches are still client-side kills them (queued rows never fire;
+  // an upload dies mid-flight) — the native leave-confirm is the hard stop behind the floating
+  // pill. Registered only while something is actually in flight, so normal navigation stays
+  // silent the rest of the time. (Same guard the HS Task Manager ships — owner ask 08-18:
+  // every partner's queue holds the page.)
+  useEffect(() => {
+    if (counts.inFlight === 0) return;
+    const guard = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = ""; // legacy field — without it some Chromium builds skip the dialog
+    };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [counts.inFlight]);
 
   const value: TaskManagerValue = {
     tasks: view,
@@ -1003,8 +1038,44 @@ function TaskManagerCore({
   return (
     <ctx.Provider value={value}>
       {children}
+      {!open && counts.inFlight > 0 ? (
+        <LaunchingBanner n={counts.inFlight} bottom={scope.bannerBottom} onOpen={() => setOpen(true)} />
+      ) : null}
       <TaskManagerPanel tm={value} scope={scope} />
     </ctx.Provider>
+  );
+}
+
+/** Floating guard for launches still CLIENT-side while the drawer is hidden: the page must stay
+ *  open or queued/uploading campaigns die with it (the beforeunload confirm above is the hard
+ *  stop; this is the visible one). Clicking re-opens the drawer. Disappears by itself the moment
+ *  every launch reaches the server or a terminal state. Mirrors the HS pill. */
+function LaunchingBanner({ n, bottom, onOpen }: { n: number; bottom: string; onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-live="polite"
+      className={
+        `animate-pop-in fixed ${bottom} left-1/2 z-[70] flex -translate-x-1/2 items-center gap-2.5 ` +
+        "rounded-full border border-warn/45 bg-surface/95 py-2 pl-3 pr-2 " +
+        "shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-md transition-all duration-150 " +
+        "hover:border-warn/70 hover:bg-surface2 active:scale-[0.98] " +
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warn/40"
+      }
+    >
+      <span className="relative flex h-3 w-3 shrink-0 items-center justify-center">
+        <span className="z-10 h-2 w-2 rounded-full bg-warn" />
+        <span className="absolute inset-0 animate-ping rounded-full bg-warn/50" />
+      </span>
+      <span className="whitespace-nowrap text-[12.5px] font-semibold text-warn">
+        {n === 1 ? "1 campaign is still launching" : `${n} campaigns are still launching`}
+        <span className="font-medium text-dim"> · keep this page open</span>
+      </span>
+      <span className="ml-1 shrink-0 rounded-full border border-line bg-surface2 px-2 py-0.5 text-[10.5px] font-medium text-dim">
+        View
+      </span>
+    </button>
   );
 }
 
