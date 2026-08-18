@@ -142,13 +142,16 @@ export async function POST(req: Request): Promise<Response> {
     ),
   ];
 
-  // Image creatives: fetch + validate BEFORE the stream — an oversized image must die here as a
-  // clean 400, not mid-run at adimages. Video URLs are never fetched by us (Meta pulls them).
+  // Image creatives + custom video COVERS: fetch + validate BEFORE the stream — an oversized
+  // image must die here as a clean 400, not mid-run at adimages. Video URLs themselves are never
+  // fetched by us (Meta pulls them); a cover is an image and gets the image treatment.
   const imageBufs = new Map<number, Buffer>();
+  const coverBufs = new Map<number, Buffer>();
   for (let i = 0; i < creatives.length; i++) {
-    if (creatives[i].kind !== "image") continue;
     try {
-      imageBufs.set(i, await fetchValidatedImage(creatives[i].url));
+      if (creatives[i].kind === "image") imageBufs.set(i, await fetchValidatedImage(creatives[i].url));
+      const cover = creatives[i].cover;
+      if (cover) coverBufs.set(i, await fetchValidatedImage(cover));
     } catch (e) {
       return bad(`creative ${i + 1}: ${(e as FbError).message ?? String(e)}`);
     }
@@ -202,7 +205,7 @@ export async function POST(req: Request): Promise<Response> {
           // 1) register every creative first (a media failure must not orphan a campaign shell).
           // "submit" is the client's wire stage for this phase — its bar maps it to "on Facebook".
           type Media =
-            | { kind: "video"; videoId: string; thumbUrl: string }
+            | { kind: "video"; videoId: string; thumbUrl: string; coverHash?: string }
             | { kind: "image"; imageHash: string };
           const media: Media[] = new Array(creatives.length);
           {
@@ -217,7 +220,17 @@ export async function POST(req: Request): Promise<Response> {
                 } else {
                   const videoId = await hsUploadVideo(binds.accountId, cr.url, `${name} · video ${i + 1}`);
                   await hsWaitForVideo(videoId);
-                  media[i] = { kind: "video", videoId, thumbUrl: await hsVideoThumb(videoId) };
+                  // A custom cover replaces the auto-thumbnail entirely: upload it into the
+                  // account's image library and pin its hash (no thumbnail poll needed).
+                  const coverBuf = coverBufs.get(i);
+                  media[i] = coverBuf
+                    ? {
+                        kind: "video",
+                        videoId,
+                        thumbUrl: "",
+                        coverHash: await hsUploadImage(binds.accountId, coverBuf),
+                      }
+                    : { kind: "video", videoId, thumbUrl: await hsVideoThumb(videoId) };
                 }
               }
             };
@@ -246,7 +259,12 @@ export async function POST(req: Request): Promise<Response> {
               `act_${binds.accountId}/adcreatives`,
               m.kind === "image"
                 ? imageCreativePayload(c, adName, binds, { imageHash: m.imageHash, link })
-                : creativePayload(c, adName, binds, { videoId: m.videoId, thumbUrl: m.thumbUrl, link }),
+                : creativePayload(c, adName, binds, {
+                    videoId: m.videoId,
+                    thumbUrl: m.thumbUrl,
+                    link,
+                    coverHash: m.coverHash,
+                  }),
             );
             const ad = await withParentRetry(String(adset.id), () =>
               hsFbPost(`act_${binds.accountId}/ads`, adPayload(adName, String(adset.id), String(creative.id))),

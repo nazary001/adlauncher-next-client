@@ -605,6 +605,37 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
           }
         }
 
+        // 1b) Custom covers (video creatives, FB Token rail only — LION's create contract takes
+        // bare URLs and picks its own frame): each cover rides to Blob like a creative and the
+        // server pins it as the ad's thumbnail.
+        const coverUrls = new Map<number, string>();
+        if (input.channel === "token") {
+          for (let i = 0; i < media.length; i++) {
+            const cov = media[i].cover;
+            if (!cov || media[i].kind !== "video") continue;
+            const blob = await fetch(cov.url).then((r) => r.blob());
+            const file = new File([blob], cov.name || `cover-${i}.jpg`, { type: blob.type || "image/jpeg" });
+            const safeName = (file.name || `cover-${i}.jpg`).replace(/[^\w.-]+/g, "_");
+            const abort = new AbortController();
+            const timer = window.setTimeout(() => abort.abort(), UPLOAD_TIMEOUT_MS);
+            try {
+              const { url } = await upload(`creatives/hs-${id}-${i}-cover-${safeName}`, file, {
+                access: "public",
+                contentType: file.type || "image/jpeg",
+                handleUploadUrl: "/api/blob-upload",
+                abortSignal: abort.signal,
+              });
+              coverUrls.set(i, url);
+            } catch (e) {
+              throw abort.signal.aborted
+                ? new Error(`cover upload timed out after ${UPLOAD_TIMEOUT_MS / 60_000} min — retry`)
+                : e;
+            } finally {
+              window.clearTimeout(timer);
+            }
+          }
+        }
+
         // 2a) FB Token rail: /api/hs/token-launch builds the whole tree in-request and streams
         // NDJSON stage events — consume them like the MO manager does, then settle on the final
         // ok/error event. No LION lifecycle: done here means the campaign EXISTS on Facebook.
@@ -614,6 +645,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
             url: urls[i],
             kind: f.kind === "image" ? "image" : "video",
             name: f.name || "",
+            ...(coverUrls.has(i) ? { cover: coverUrls.get(i) } : {}),
           }));
           const streamAbort = new AbortController();
           const streamTimer = window.setTimeout(() => streamAbort.abort(), STREAM_TIMEOUT_MS);

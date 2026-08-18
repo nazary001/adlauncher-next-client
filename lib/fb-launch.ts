@@ -188,11 +188,12 @@ export function creativePayload(
   c: Campaign,
   name: string,
   binds: LaunchBinds,
-  media: { videoId: string; thumbUrl: string; link: string },
+  media: { videoId: string; thumbUrl: string; link: string; coverHash?: string },
 ): Record<string, unknown> {
   const videoData: Record<string, unknown> = {
     video_id: media.videoId,
-    image_url: media.thumbUrl,
+    // A custom cover (account-library image_hash, HS Token rail) beats the auto-thumbnail URL.
+    ...(media.coverHash ? { image_hash: media.coverHash } : { image_url: media.thumbUrl }),
     message: c.copy || undefined, // primary text
     title: c.headline || c.title || undefined, // headline
   };

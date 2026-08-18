@@ -48,7 +48,13 @@ export function hsTokenStartTime(now: Date = new Date()): string {
 
 /** One creative for a token-rail launch. The kind decides the Graph path (advideos vs adimages),
  *  so the client sends it explicitly — a bare URL doesn't reveal it. */
-export type HsTokenCreative = { url: string; kind: "video" | "image"; name?: string };
+export type HsTokenCreative = {
+  url: string;
+  kind: "video" | "image";
+  name?: string;
+  /** Custom cover image for a VIDEO creative (own-Blob URL) — pinned as the ad's thumbnail. */
+  cover?: string;
+};
 
 const isHttpsUrl = (v: string): boolean => /^https:\/\/\S+$/i.test(v);
 
@@ -91,7 +97,16 @@ export function parseTokenCreatives(raw: unknown): { creatives: HsTokenCreative[
       return { error: "image_url_not_allowed — paste-URL images can't ride the FB Token rail (drop the file instead, or use the LION rail)" };
     }
     const name = typeof o.name === "string" ? o.name.slice(0, 120) : "";
-    creatives.push({ url, kind, ...(name ? { name } : {}) });
+    // Optional custom cover: fetched server-side into adimages, so it gets the SAME fence as
+    // image creatives — only a Blob our broker produced. Meaningful for videos only.
+    const cover = typeof o.cover === "string" ? o.cover.trim() : "";
+    if (cover) {
+      if (kind !== "video") return { error: "cover_on_image — covers apply to video creatives only" };
+      if (!isHttpsUrl(cover) || !isOwnBlobUrl(cover)) {
+        return { error: "cover_url_not_allowed — the cover must be uploaded through the launcher" };
+      }
+    }
+    creatives.push({ url, kind, ...(name ? { name } : {}), ...(cover ? { cover } : {}) });
   }
   return { creatives };
 }

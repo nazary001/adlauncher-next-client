@@ -1037,7 +1037,12 @@ export function CampaignCard({
                   hint={hsMode ? "one ad per creative (LION)" : undefined}
                 >
                   <div className="flex flex-col gap-2">
-                    <Dropzone files={c.files} onChange={(files) => patch({ files })} maxFiles={partner.maxCreatives} />
+                    <Dropzone
+                      files={c.files}
+                      onChange={(files) => patch({ files })}
+                      maxFiles={partner.maxCreatives}
+                      covers={hsMode}
+                    />
                     {hsMode ? <AddByUrl onAdd={(item) => patch({ files: [...c.files, item] })} /> : null}
                     {onApplyFilesToAll && c.files.length > 0 ? (
                       <button

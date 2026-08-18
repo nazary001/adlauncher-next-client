@@ -23,16 +23,30 @@ function CreativeCard({
   file,
   large,
   onRemove,
+  onCover,
 }: {
   file: FileItem;
   large: boolean;
   onRemove: () => void;
+  /** Present = the cover picker is enabled (video creatives only): pass the chosen image, or
+   *  null to clear. The image is recoded like a dropped creative — it lands on adimages too. */
+  onCover?: (cover: { url: string; name: string } | null) => void;
 }) {
   const vid = useRef<HTMLVideoElement>(null);
+  const coverInput = useRef<HTMLInputElement>(null);
   const [meta, setMeta] = useState<VidMeta>({});
   const [playing, setPlaying] = useState(false);
   const isImage = file.kind === "image";
   const isVideo = file.kind === "video";
+
+  async function pickCover(list: FileList | null) {
+    const raw = list?.[0];
+    if (!raw || !onCover) return;
+    const recoded = await recodeImage(raw);
+    const f = recoded ?? raw;
+    if (!recoded && raw.size > IMAGE_MAX_BYTES) return; // undecodable + over the server cap
+    onCover({ url: URL.createObjectURL(f), name: f.name });
+  }
 
   const dims = meta.w && meta.h ? `${meta.w}×${meta.h}` : "";
   const bits = [fmtSize(file.size), fmtDur(meta.duration ?? 0), dims].filter(Boolean).join(" · ");
@@ -130,6 +144,63 @@ function CreativeCard({
         <XIcon className="h-3.5 w-3.5" />
       </button>
 
+      {/* custom cover (video creatives only, when the partner supports it): a small chip that
+          holds the chosen thumbnail — the launch uploads it and pins it as the ad's cover. */}
+      {isVideo && onCover ? (
+        <>
+          <input
+            ref={coverInput}
+            type="file"
+            accept="image/*"
+            className="sr-only"
+            onChange={(e) => {
+              void pickCover(e.target.files);
+              e.target.value = "";
+            }}
+          />
+          {file.cover ? (
+            <span
+              className={
+                "absolute bottom-2 right-2 z-10 flex items-center gap-1.5 rounded-md bg-black/60 py-1 pl-1 pr-1.5 " +
+                "backdrop-blur-sm ring-1 ring-white/15"
+              }
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element -- local blob preview */}
+              <img src={file.cover.url} alt="Cover" className="h-6 w-9 rounded-[4px] object-cover" />
+              <span className="font-mono text-[8.5px] font-semibold uppercase tracking-wider text-white/80">
+                Cover
+              </span>
+              <button
+                type="button"
+                aria-label="Remove cover"
+                onClick={() => onCover(null)}
+                className={
+                  "flex h-4.5 w-4.5 items-center justify-center rounded text-white/70 transition-colors " +
+                  "hover:bg-danger/80 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                }
+              >
+                <XIcon className="h-3 w-3" />
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={() => coverInput.current?.click()}
+              title="Pick a custom cover image for this video (FB Token rail)"
+              className={
+                "absolute bottom-2 right-2 z-10 flex items-center gap-1 rounded-md bg-black/55 px-1.5 py-1 " +
+                "font-mono text-[8.5px] font-semibold uppercase tracking-wider text-white/75 backdrop-blur-sm " +
+                "ring-1 ring-white/15 transition-colors hover:bg-black/75 hover:text-white " +
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              }
+            >
+              <PlusIcon className="h-3 w-3" />
+              Cover
+            </button>
+          )}
+        </>
+      ) : null}
+
       {/* info footer */}
       <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/45 to-transparent px-2.5 pb-2 pt-8">
         <p className={"truncate font-medium text-white " + (large ? "text-[12px]" : "text-[10px]")}>{file.name}</p>
@@ -206,12 +277,15 @@ export function Dropzone({
   files,
   onChange,
   maxFiles,
+  covers,
 }: {
   id?: string;
   files: FileItem[];
   onChange: (files: FileItem[]) => void;
   /** Cap on creatives (Indians = 1). Undefined = unlimited. */
   maxFiles?: number;
+  /** Offer a per-video custom cover picker (HS — the FB Token rail pins it as the thumbnail). */
+  covers?: boolean;
 }) {
   const [dragging, setDragging] = useState(false);
   const [rejected, setRejected] = useState<string[]>([]);
@@ -360,7 +434,17 @@ export function Dropzone({
       >
         {files.map((f) => (
           <div key={f.id} className={single ? "h-full" : "h-28"}>
-            <CreativeCard file={f} large={single} onRemove={() => remove(f.id)} />
+            <CreativeCard
+              file={f}
+              large={single}
+              onRemove={() => remove(f.id)}
+              onCover={
+                covers && f.kind === "video"
+                  ? (cover) =>
+                      onChange(files.map((x) => (x.id === f.id ? { ...x, cover: cover ?? undefined } : x)))
+                  : undefined
+              }
+            />
           </div>
         ))}
         {!single && !atMax ? (

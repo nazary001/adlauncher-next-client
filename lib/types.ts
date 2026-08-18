@@ -4,6 +4,10 @@ export type FileItem = {
   size: number;
   kind: "image" | "video" | "other";
   url: string;
+  /** Optional custom COVER image for a video creative (session-local object URL, like `url`).
+   *  Rides to the launch as the creative's thumbnail — HS FB-Token rail only (LION's create
+   *  contract takes bare creative URLs and picks its own frame). */
+  cover?: { url: string; name: string };
 };
 
 export type Campaign = {
