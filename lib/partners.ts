@@ -281,9 +281,13 @@ export function launchReadyOpts(p: PartnerConfig): {
   };
 }
 
-/** Fixed naming prefix for a new campaign, e.g. "[04.08] - (t1) - ". Empty when the partner has no tier. */
+/** Fixed naming prefix for a new campaign — non-editable in the card; the buyer types only the
+ *  suffix (defaulting to their username). Owner format 2026-08-18: `[DD/MM] (MO) - ` /
+ *  `[DD/MM] (AIF) - ` — LION-style slash date + the partner LABEL. nameTier stays a link
+ *  concern only (MO's `utm_medium=t1`). Empty when the partner has no tier (HS builds its own
+ *  LION-grammar prefix). */
 export function namePrefixFor(p: PartnerConfig, ddmm: string): string {
-  return p.nameTier ? `[${ddmm}] - (${p.nameTier}) - ` : "";
+  return p.nameTier ? `[${ddmm.replace(".", "/")}] (${p.label}) - ` : "";
 }
 
 /** FB macros must stay literal (unencoded), so the URL is built by hand, not URLSearchParams. */
