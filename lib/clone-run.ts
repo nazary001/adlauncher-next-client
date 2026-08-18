@@ -142,9 +142,10 @@ function mediaFromAd(ad: Json): SourceMedia | null {
   return null;
 }
 
-/** Pull the source campaign's objective + first ad set's delivery + first reusable ad media. */
-export async function fetchSourceDetail(campaignId: string): Promise<SourceDetail> {
-  const obj = await fbGet(`${campaignId}?fields=${encodeURIComponent(SRC_FIELDS)}`);
+/** Pull the source campaign's objective + first ad set's delivery + first reusable ad media.
+ *  `token` selects the Graph bearer (MO launch token by default; the AIF rail passes its own). */
+export async function fetchSourceDetail(campaignId: string, token?: string): Promise<SourceDetail> {
+  const obj = await fbGet(`${campaignId}?fields=${encodeURIComponent(SRC_FIELDS)}`, token);
   const adset = (((obj.adsets as { data?: Json[] } | undefined)?.data?.[0] ?? {}) as Json);
   const ads = ((obj.ads as { data?: Json[] } | undefined)?.data ?? []) as Json[];
   // Scan the campaign's ads for the first with reusable media — a video (inline video_data or
@@ -204,10 +205,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Wait until an uploaded video finishes processing (mirrors /api/launch's waitForVideo).
  *  6s cadence — status polls dominate a wave's call count on the dev-tier quota. */
-async function waitVideoReady(videoId: string, timeoutMs = 180_000): Promise<void> {
+async function waitVideoReady(videoId: string, token?: string, timeoutMs = 180_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const body = await fbGet(`${videoId}?fields=status`);
+    const body = await fbGet(`${videoId}?fields=status`, token);
     const status = ((body?.status ?? {}) as Json).video_status;
     if (status === "ready") return;
     if (status === "error") throw new FbError("migrated video processing failed", body);
@@ -217,9 +218,9 @@ async function waitVideoReady(videoId: string, timeoutMs = 180_000): Promise<voi
 }
 
 /** The thumbnail FB auto-generates for a processed video — required as the creative's image. */
-async function videoThumbUrl(videoId: string): Promise<string> {
+async function videoThumbUrl(videoId: string, token?: string): Promise<string> {
   for (let i = 0; i < 8; i++) {
-    const body = await fbGet(`${videoId}/thumbnails?fields=uri,is_preferred`);
+    const body = await fbGet(`${videoId}/thumbnails?fields=uri,is_preferred`, token);
     const thumbs = (body?.data as Array<Json> | undefined) ?? [];
     const pick = thumbs.find((t) => t.is_preferred) ?? thumbs[0];
     if (pick?.uri) return String(pick.uri);
@@ -241,19 +242,20 @@ export async function migrateMediaToAccount(
   sourceAccountId: string,
   targetAccountId: string,
   name: string,
+  token?: string,
 ): Promise<SourceMedia> {
   if (media.kind === "video") {
     const videoId = String(media.data.video_id ?? "");
-    const info = await fbGet(`${videoId}?fields=source`);
+    const info = await fbGet(`${videoId}?fields=source`, token);
     const sourceUrl = typeof info.source === "string" ? info.source : "";
     if (!sourceUrl) {
       throw new FbError("source video file unavailable — cannot clone it into another account", { videoId });
     }
-    const up = await fbPost(`act_${targetAccountId}/advideos`, { name, file_url: sourceUrl });
+    const up = await fbPost(`act_${targetAccountId}/advideos`, { name, file_url: sourceUrl }, token);
     if (!up?.id) throw new FbError("video migration upload failed", up);
     const newId = String(up.id);
-    await waitVideoReady(newId);
-    const thumb = await videoThumbUrl(newId);
+    await waitVideoReady(newId, token);
+    const thumb = await videoThumbUrl(newId, token);
     const data: Json = { ...media.data, video_id: newId, image_url: thumb };
     delete data.image_hash; // the old account's asset — invalid in the target
     return { kind: "video", data };
@@ -261,9 +263,11 @@ export async function migrateMediaToAccount(
 
   const hash = typeof media.data.image_hash === "string" ? media.data.image_hash : "";
   if (!hash) return media; // picture-URL image — nothing account-local to migrate
-  const body = await fbPost(`act_${targetAccountId}/adimages`, {
-    copy_from: { source_account_id: sourceAccountId, hash },
-  });
+  const body = await fbPost(
+    `act_${targetAccountId}/adimages`,
+    { copy_from: { source_account_id: sourceAccountId, hash } },
+    token,
+  );
   const images = (body?.images ?? {}) as Record<string, { hash?: string }>;
   const newHash = Object.values(images)[0]?.hash;
   if (!newHash) throw new FbError("image migration failed — no hash returned", body);
@@ -277,6 +281,14 @@ export function swapGcm(link: string, gcm: string): string {
   if (!link) return link;
   if (/[?&]gcm=[^&#]*/.test(link)) return link.replace(/([?&]gcm=)[^&#]*/, `$1${gcm}`);
   return link + (link.includes("?") ? "&" : "?") + `gcm=${gcm}`;
+}
+
+/** Swap the AIF `brand=` marker in an RW link (or append it) — the AIF twin of swapGcm: the brand
+ *  is that rail's revenue key, one per campaign. destination/clientId/ppid stay verbatim. */
+export function swapBrand(link: string, brand: string): string {
+  if (!link) return link;
+  if (/[?&]brand=[^&#]*/.test(link)) return link.replace(/([?&]brand=)[^&#]*/, `$1${brand}`);
+  return link + (link.includes("?") ? "&" : "?") + `brand=${brand}`;
 }
 
 /**
@@ -313,8 +325,10 @@ function rewriteLink(link: string, gcm: string, pixelId: string): string {
   return swapPixel(swapGcm(link, gcm), pixelId);
 }
 
-/** video_data rebuild: same video/copy/title/CTA, the gcm + pixel in the CTA link swapped. */
-function videoCreativeData(videoData: Json, gcm: string, pixelId: string): Json {
+type LinkRewriter = (link: string) => string;
+
+/** video_data rebuild: same video/copy/title/CTA, the tracking link rewritten by `swap`. */
+function videoCreativeData(videoData: Json, swap: LinkRewriter): Json {
   const vd: Json = {};
   if (videoData.video_id) vd.video_id = videoData.video_id;
   if (videoData.message) vd.message = videoData.message;
@@ -327,7 +341,7 @@ function videoCreativeData(videoData: Json, gcm: string, pixelId: string): Json 
   const cta = videoData.call_to_action as Json | undefined;
   if (cta) {
     const val = (cta.value ?? {}) as Json;
-    const link = typeof val.link === "string" ? rewriteLink(val.link, gcm, pixelId) : val.link;
+    const link = typeof val.link === "string" ? swap(val.link) : val.link;
     vd.call_to_action = { type: cta.type, value: { ...val, link } };
   }
   return vd;
@@ -337,9 +351,9 @@ function videoCreativeData(videoData: Json, gcm: string, pixelId: string): Json 
  *  the destination link (and in the CTA link when the source carries one). The image is reused by
  *  image_hash — an account-library asset, valid because the clone is built in the account that
  *  hash lives in (the source's own, or the target after migrateMediaToAccount rehomed it). */
-function imageCreativeData(linkData: Json, gcm: string, pixelId: string): Json {
+function imageCreativeData(linkData: Json, swap: LinkRewriter): Json {
   const ld: Json = {};
-  if (typeof linkData.link === "string") ld.link = rewriteLink(linkData.link, gcm, pixelId);
+  if (typeof linkData.link === "string") ld.link = swap(linkData.link);
   if (linkData.message) ld.message = linkData.message;
   if (linkData.name) ld.name = linkData.name;
   if (linkData.description) ld.description = linkData.description;
@@ -351,7 +365,7 @@ function imageCreativeData(linkData: Json, gcm: string, pixelId: string): Json {
   const cta = linkData.call_to_action as Json | undefined;
   if (cta && typeof cta.type === "string") {
     const val = (cta.value ?? {}) as Json;
-    const link = typeof val.link === "string" ? rewriteLink(val.link, gcm, pixelId) : undefined;
+    const link = typeof val.link === "string" ? swap(val.link) : undefined;
     ld.call_to_action = link ? { type: cta.type, value: { ...val, link } } : { type: cta.type };
   }
   return ld;
@@ -359,8 +373,9 @@ function imageCreativeData(linkData: Json, gcm: string, pixelId: string): Json {
 
 /**
  * Rebuild the creative from the source's media — video_data for video ads, link_data for static
- * image ads — swapping the gcm + the clone's account pixel in the tracking link. Only known-
- * writable fields are forwarded (the read fetch returns extras).
+ * image ads — rewriting the tracking link for the clone. Default rewrite = the MO rail's fresh
+ * gcm + account pixel; the AIF rail passes its own (`swapBrand` — brand marker only, no pixel
+ * param on that link). Only known-writable fields are forwarded (the read fetch returns extras).
  */
 export function cloneCreativePayload(
   name: string,
@@ -368,22 +383,27 @@ export function cloneCreativePayload(
   media: SourceMedia,
   gcm: string,
   pixelId: string,
+  rewrite?: LinkRewriter,
 ): Json {
+  const swap: LinkRewriter = rewrite ?? ((link) => rewriteLink(link, gcm, pixelId));
   const spec =
     media.kind === "video"
-      ? { video_data: videoCreativeData(media.data, gcm, pixelId) }
-      : { link_data: imageCreativeData(media.data, gcm, pixelId) };
+      ? { video_data: videoCreativeData(media.data, swap) }
+      : { link_data: imageCreativeData(media.data, swap) };
   return { name, object_story_spec: { page_id: pageId, ...spec } };
 }
 
 /** Resolve locale display names → Meta locale ids (exact match only). Empty in, empty out (no call). */
-export async function resolveLocales(names: string[]): Promise<number[]> {
+export async function resolveLocales(names: string[], token?: string): Promise<number[]> {
   const ids: number[] = [];
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z]/g, "");
   for (const raw of names) {
     if (/\(all\)/i.test(raw)) continue; // "all" = no restriction
     try {
-      const body = await fbGet(`search?type=adlocale&limit=25&q=${encodeURIComponent(raw.replace(/[()]/g, " ").trim())}`);
+      const body = await fbGet(
+        `search?type=adlocale&limit=25&q=${encodeURIComponent(raw.replace(/[()]/g, " ").trim())}`,
+        token,
+      );
       const data = (body.data as Array<{ key?: number; name?: string }> | undefined) ?? [];
       const hit = data.find((d) => d.name && norm(d.name) === norm(raw));
       if (typeof hit?.key === "number") ids.push(hit.key);

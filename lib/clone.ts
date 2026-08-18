@@ -122,7 +122,9 @@ export function splitCloneName(sourceName: string, ddmm: string): { prefix: stri
   const tierM = s.match(/^\(([^)]*)\)\s*-?\s*/); // capture + drop a leading (tier) like (t1)
   const tier = tierM ? tierM[1] : "";
   if (tierM) s = s.slice(tierM[0].length);
-  const prefix = tier ? `[${ddmm}] (CLONE) - (${tier}) - ` : `[${ddmm}] (CLONE) - `;
+  // Slash date — same shape the launch prefixes moved to 2026-08-18 ("[18/08] (MO) - ").
+  const d = ddmm.replace(".", "/");
+  const prefix = tier ? `[${d}] (CLONE) - (${tier}) - ` : `[${d}] (CLONE) - `;
   return { prefix, name: s.trim() };
 }
 

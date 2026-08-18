@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { FbError, fbGet, hasFbToken } from "@/lib/fb-graph";
+import { aifRawToken, aifTokenConfigured } from "@/lib/aif-launch";
+import { partnerConfig, sanitizePartnerId } from "@/lib/partners";
 import { moneyLabel } from "@/lib/types";
 import { sessionFromCookieHeader } from "@/lib/session";
 import type { CloneCreative, CloneSource } from "@/lib/clone";
@@ -124,13 +126,19 @@ export async function GET(req: Request) {
   if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  if (!hasFbToken()) {
+  const url = new URL(req.url);
+  // The partner picks the Graph bearer: AIF sources live in the AIF cabinets (its own token);
+  // everything else reads on the MO launch token (the historical default).
+  const partner = partnerConfig(sanitizePartnerId(url.searchParams.get("partner")));
+  const aif = Boolean(partner.aifLaunch);
+  const token = aif ? aifRawToken() : undefined;
+  if (aif ? !aifTokenConfigured() : !hasFbToken()) {
     return NextResponse.json({ ok: false, error: "no_fb_token" }, { status: 500 });
   }
 
   const ids = [
     ...new Set(
-      (new URL(req.url).searchParams.get("ids") ?? "")
+      (url.searchParams.get("ids") ?? "")
         .split(",")
         .map((s) => s.trim())
         .filter((s) => /^\d{5,}$/.test(s)),
@@ -151,7 +159,7 @@ export async function GET(req: Request) {
     const failed: string[] = [];
     for (const id of ids) {
       try {
-        const obj = await fbGet(`${id}?fields=${encodeURIComponent(FIELDS)}`);
+        const obj = await fbGet(`${id}?fields=${encodeURIComponent(FIELDS)}`, token);
         sources.push(mapCampaign(id, obj));
       } catch (e) {
         const err = e as FbError;

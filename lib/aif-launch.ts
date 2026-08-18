@@ -27,6 +27,8 @@ type Json = Record<string, unknown>;
 const AIF_FB_TOKEN = process.env.FB_AIF_LAUNCH_TOKEN ?? "";
 
 export const aifTokenConfigured = (): boolean => AIF_FB_TOKEN.length > 0;
+/** Raw bearer for lib/clone-run's parameterized Graph calls (server-only, never to the browser). */
+export const aifRawToken = (): string => AIF_FB_TOKEN;
 
 /** This rail's catalog identity: own in-process caches + own app-cache row (`aif-adaccounts`). */
 const CAT: TokenCatalog = { token: AIF_FB_TOKEN, cacheKey: "aif" };

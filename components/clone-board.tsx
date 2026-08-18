@@ -31,7 +31,7 @@ import {
   TrashIcon,
 } from "./icons";
 import { Header } from "./header";
-import { useTaskManager } from "./task-manager";
+import { useAifTaskManager, useTaskManager } from "./task-manager";
 import { CloneTargetingModal } from "./clone-targeting-modal";
 import { CloneHighOfferModal } from "./clone-high-offer-modal";
 import { SearchSelect } from "./search-select";
@@ -180,8 +180,14 @@ function CloneInner({
   initialIds: string[];
   partner: PartnerId;
 }) {
-  const { enqueueClone, setOpen } = useTaskManager();
-  const [partnerId, setPartnerId] = useState<PartnerId>(initialPartner);
+  // Fixed for the board's lifetime — a partner switch is a full navigation (see changePartner).
+  const partnerId: PartnerId = initialPartner;
+  // The board talks to the ACTIVE partner's own task manager: AIF clones queue/track in the
+  // separate AIF instance (own drawer, own Strapi scope), MO in the team one — same rule as the
+  // launcher board.
+  const teamTm = useTaskManager();
+  const aifTm = useAifTaskManager();
+  const { enqueueClone, setOpen } = partnerConfig(partnerId).aifLaunch ? aifTm : teamTm;
   const [settings, setSettings] = useState<CloneSettings>(() => defaultSettings(initialPartner));
   const [rows, setRows] = useState<CloneRow[]>([]);
   const [loading, setLoading] = useState<boolean>(initialIds.length > 0);
@@ -202,20 +208,32 @@ function CloneInner({
   const queuedTimer = useRef<number | null>(null);
 
   const partner = partnerConfig(partnerId);
-  // Token fanpages for the batch fanka picker (with live N/limit fill tags). null while loading.
-  const fanpages = useFanpages(Boolean(partner.fanpagesFromToken), partner.pageAdLimit ?? 250);
+  const aifMode = Boolean(partner.aifLaunch);
+  // Token fanpages for the batch fanka picker (with live N/limit fill tags; AIF reads its own
+  // token's pages, no volume badges — same as the launcher board).
+  const fanpages = useFanpages(
+    Boolean(partner.fanpagesFromToken),
+    partner.pageAdLimit ?? 250,
+    aifMode ? { list: "/api/aif/fanpages", volume: null } : undefined,
+  );
   const fanpageMissing = Boolean(partner.fanpagesFromToken) && !settings.pageId;
   // Token ad accounts for the destination pick. The destination is an EXPLICIT choice:
   // "" = nothing chosen yet (Duplicate stays locked), SOURCE_ACCOUNT = consciously keep each
   // clone in its source campaign's own account, digits = a concrete target account (media gets
   // migrated there). No silent default — the buyer must say where the batch goes.
-  const adAccounts = useAdAccounts(Boolean(partner.accountsFromToken), partner.preferredPixel);
+  const adAccounts = useAdAccounts(
+    Boolean(partner.accountsFromToken),
+    partner.preferredPixel,
+    aifMode ? "/api/aif/adaccounts" : undefined,
+  );
   const accountMissing = Boolean(partner.accountsFromToken) && !settings.accountId;
   const isTargetAccount = Boolean(settings.accountId) && settings.accountId !== SOURCE_ACCOUNT;
   const targetPixels = isTargetAccount ? pixelOptionsOf(adAccounts, settings.accountId) : [];
   // A concrete target account needs a pixel of that account: conversion sources can't carry
   // their own pixel across (it lives on the source's account) — the server enforces this too.
-  const pixelMissing = isTargetAccount && !settings.pixelId;
+  // AIF derives its pixel server-side (conversions → the postback pixel, clicks → none), so the
+  // board never asks for one there.
+  const pixelMissing = !aifMode && isTargetAccount && !settings.pixelId;
   const destinationMissing = fanpageMissing || accountMissing || pixelMissing;
   // Account launch limit (5 campaigns / 30 min): a concrete TARGET account must fit the whole
   // batch (rows × copies). From-each-source batches aren't metered here — the sources' accounts
@@ -314,18 +332,11 @@ function CloneInner({
   const changePartner = (id: PartnerId) => {
     const url = new URL(window.location.href);
     url.searchParams.set("partner", id);
-    // Switching onto a LION partner swaps the whole board (HS duplicator is a different server
-    // component tree) — full navigation; same for AIF (its clone board is a stub for now).
-    // Within Graph partners it's just state + URL.
-    if (partnerConfig(id).lionLaunch || partnerConfig(id).aifLaunch) {
-      window.location.assign(url.toString());
-      return;
-    }
-    setPartnerId(id);
-    setSettings(defaultSettings(id));
-    setPreviewed(false);
-    // The pick rides in the URL so a refresh reopens on the same partner (ids etc. preserved).
-    window.history.replaceState(null, "", url);
+    // Always a full navigation: LION partners swap the whole board (HS duplicator is a different
+    // server tree), and MO ↔ AIF swap the Graph token + marker registry — rows loaded under one
+    // partner's cabinets are meaningless (and unclonable) under the other's, so the board must
+    // reload clean rather than carry them across.
+    window.location.assign(url.toString());
   };
 
   const preview = flattenPreview(rows, settings.copies);
@@ -353,8 +364,11 @@ function CloneInner({
           userOs: settings.userOs,
           pageId: settings.pageId,
           // Target account+pixel only for a concrete account; SOURCE_ACCOUNT (an explicit pick
-          // too) omits them = each clone builds in its source's own account.
-          ...(isTargetAccount ? { accountId: settings.accountId, pixelId: settings.pixelId } : {}),
+          // too) omits them = each clone builds in its source's own account. AIF never sends a
+          // pixel — the server derives it (postback pixel for conversions, none for clicks).
+          ...(isTargetAccount
+            ? { accountId: settings.accountId, ...(aifMode ? {} : { pixelId: settings.pixelId }) }
+            : {}),
         };
         enqueueClone({ partnerId, edit, name, geo: geoSummary(r.countries), budget: r.budget });
         queued++;
@@ -417,8 +431,11 @@ function CloneInner({
                             accountId: v,
                             // Auto-pick the target's pixel (FARM-1 when it carries it) the same way
                             // a fresh launch card does; no pixel in source mode / when cleared.
+                            // AIF never picks one — the server derives it per source.
                             pixelId:
-                              v && v !== SOURCE_ACCOUNT ? defaultPixelFor(adAccounts, v, partner.preferredPixel) : "",
+                              !aifMode && v && v !== SOURCE_ACCOUNT
+                                ? defaultPixelFor(adAccounts, v, partner.preferredPixel)
+                                : "",
                           })
                         }
                         options={[
@@ -430,7 +447,11 @@ function CloneInner({
                         warn={accountMissing}
                       />
                     </div>
-                    {isTargetAccount ? (
+                    {isTargetAccount && aifMode ? (
+                      // AIF pixel is server-derived: conversion sources pin the postback pixel,
+                      // click sources go pixel-less — nothing to pick.
+                      <LockedRow label="Pixel" value="Auto · AIF Rewarded (conversions)" />
+                    ) : isTargetAccount ? (
                       <div className="flex flex-col gap-1 px-1.5 py-1">
                         <span
                           className={`text-[10px] font-medium uppercase tracking-[0.14em] ${pixelMissing ? "text-warn" : "text-faint"}`}

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { ROAS_PIXEL, partnerConfig, type PartnerId } from "@/lib/partners";
+import { AIF_PIXEL, ROAS_PIXEL, partnerConfig, type PartnerId } from "@/lib/partners";
 import { bidAmountMissing, bidKind, parseMoney } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
 import {
@@ -14,7 +14,18 @@ import {
   withFbBudget,
   withParentRetry,
 } from "@/lib/fb-graph";
+import {
+  aifAccountName,
+  aifAccountPixels,
+  aifAdvertisablePageName,
+  aifFbPost,
+  aifIsAdvertisablePage,
+  aifIsTokenAccount,
+  aifRawToken,
+  aifTokenConfigured,
+} from "@/lib/aif-launch";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
+import { backfillBrand, claimBrand, deleteBrand } from "@/lib/aif-claim";
 import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 import { taskWriter } from "@/lib/task-store";
 import type { CloneEdit } from "@/lib/clone";
@@ -31,6 +42,7 @@ import {
   migrateMediaToAccount,
   resolveCloneBinds,
   resolveLocales,
+  swapBrand,
 } from "@/lib/clone-run";
 
 export const runtime = "nodejs";
@@ -48,13 +60,13 @@ const FB_BUDGET_RETRIES = 8;
  * Create the ad set, self-healing the regional "universal ads" declarations Meta demands for
  * regulated locations in the audience (same behaviour as the launch route's createAdset).
  */
-async function createAdset(path: string, payload: Json): Promise<Json> {
+async function createAdset(path: string, payload: Json, post: typeof fbPost = fbPost): Promise<Json> {
   const seed = payload.regional_regulated_categories;
   const cats = new Set<string>(Array.isArray(seed) ? (seed as string[]) : []);
   for (let attempt = 0; attempt < 8; attempt++) {
     const body: Json = cats.size ? { ...payload, regional_regulated_categories: [...cats] } : payload;
     try {
-      return await fbPost(path, body);
+      return await post(path, body);
     } catch (e) {
       const detail = (e as FbError).detail as
         | { error?: { error_user_title?: string; error_user_msg?: string } }
@@ -68,7 +80,7 @@ async function createAdset(path: string, payload: Json): Promise<Json> {
       throw e;
     }
   }
-  return fbPost(path, { ...payload, regional_regulated_categories: [...cats] });
+  return post(path, { ...payload, regional_regulated_categories: [...cats] });
 }
 
 /**
@@ -112,6 +124,20 @@ export async function POST(req: Request) {
   if (!partner.fanpagesFromToken) {
     return NextResponse.json({ ok: false, error: "partner_not_launchable" }, { status: 400 });
   }
+  // The partner picks the RAIL: AIF clones ride the AIF token, the aif-maps brand registry and a
+  // brand-only link rewrite; everything else stays byte-identical to the MO flow (token default,
+  // gcm registry, gcm+pixel link rewrite). One route, two claim/backfill/release bundles.
+  const aif = Boolean(partner.aifLaunch);
+  if (aif && !aifTokenConfigured()) {
+    return NextResponse.json({ ok: false, error: "no_aif_token" }, { status: 500 });
+  }
+  const railToken = aif ? aifRawToken() : undefined;
+  const pageOk = (p: string) => (aif ? aifIsAdvertisablePage(p) : isAdvertisablePage(p));
+  const pageNameOf = (p: string) => (aif ? aifAdvertisablePageName(p) : advertisablePageName(p));
+  const acctOk = (a: string) => (aif ? aifIsTokenAccount(a) : isTokenAccount(a));
+  const pixelsOf = (a: string) => (aif ? aifAccountPixels(a) : accountPixels(a));
+  const acctNameOf = (a: string) => (aif ? aifAccountName(a) : tokenAccountName(a));
+  const post: typeof fbPost = (path, params) => (aif ? aifFbPost(path, params as Json) : fbPost(path, params));
   // Default: a clone is built in its SOURCE's own account (media is account-local) with the
   // source's pixel. The buyer MAY pick a target account+pixel instead (cross-account, media
   // migrated). The fanka is always the buyer's pick. Every picked id is validated here against
@@ -128,13 +154,13 @@ export async function POST(req: Request) {
   const pageNames = new Map<string, string>();
   try {
     for (const p of pageIds) {
-      if (!(await isAdvertisablePage(p))) {
+      if (!(await pageOk(p))) {
         return NextResponse.json(
           { ok: false, error: "fanpage_not_allowed — the launch token cannot advertise with this page" },
           { status: 400 },
         );
       }
-      pageNames.set(p, await advertisablePageName(p));
+      pageNames.set(p, await pageNameOf(p));
     }
     // Optional TARGET account+pixel (cross-account clones): validated up front against the token's
     // own data — a bad pick fails the whole batch here, before any media migration or FB write.
@@ -154,14 +180,14 @@ export async function POST(req: Request) {
       if (px) targets.get(acct)!.add(px);
     }
     for (const [acct, pixelIds] of targets) {
-      if (!(await isTokenAccount(acct))) {
+      if (!(await acctOk(acct))) {
         return NextResponse.json(
           { ok: false, error: "account_not_allowed — the launch token cannot use this ad account" },
           { status: 400 },
         );
       }
       if (pixelIds.size > 0) {
-        const pixels = await accountPixels(acct);
+        const pixels = await pixelsOf(acct);
         for (const px of pixelIds) {
           if (!pixels.some((p) => p.id === px)) {
             return NextResponse.json(
@@ -199,9 +225,9 @@ export async function POST(req: Request) {
       for (let idx = 0; idx < edits.length; idx++) {
         const edit = edits[idx];
         // Server-side mirror of this clone's Task Manager row (no-op when no task id was sent).
-        // partner="in" on every write: a row this writer CREATES (client save lost) must still
-        // land in the MO drawer's scope — null matches no scope at all.
-        const tw = taskWriter(session.username, taskIds[idx] ?? null, { partner: "in" });
+        // The partner rides on every write: a row this writer CREATES (client save lost) must
+        // still land in the right drawer's scope — null matches no scope at all.
+        const tw = taskWriter(session.username, taskIds[idx] ?? null, { partner: aif ? "us" : "in" });
         let lastStage = "source";
         let settled = false; // set before the terminal write — the beat must never chain after it
         const progress = (stage: string) => {
@@ -224,7 +250,7 @@ export async function POST(req: Request) {
           let src = detailCache.get(edit.campaignId);
           if (!src) {
             progress("source");
-            src = await fetchSourceDetail(edit.campaignId);
+            src = await fetchSourceDetail(edit.campaignId, railToken);
             detailCache.set(edit.campaignId, src);
           }
           const media = src.media;
@@ -233,10 +259,25 @@ export async function POST(req: Request) {
           // TARGET account (cross-account — media gets migrated there below). The source account is
           // re-checked even for cross-account clones: its media is about to be read.
           if (!/^\d{5,}$/.test(src.accountId)) throw new FbError("source account unknown — cannot clone", { campaignId: edit.campaignId });
-          if (!(await isTokenAccount(src.accountId))) {
+          if (!(await acctOk(src.accountId))) {
             throw new FbError(`source account act_${src.accountId} is not available to the launch token`, { campaignId: edit.campaignId });
           }
           const binds = resolveCloneBinds(edit, src);
+          // AIF pixel policy is DERIVED, never picked (parity with /api/aif/launch): a conversion
+          // source pins the postback pixel — shared to every AIF cabinet — and click sources stay
+          // pixel-less. The RW link carries no &pixel= param, so only the adset needs it.
+          if (aif) {
+            binds.pixelId = /^\d{10,20}$/.test(src.pixelId) ? AIF_PIXEL.id : "";
+            if (binds.cross && binds.pixelId) {
+              const pixels = await pixelsOf(binds.accountId);
+              if (!pixels.some((p) => p.id === binds.pixelId)) {
+                throw new FbError(
+                  `pixel_not_on_account — share the AIF pixel ${AIF_PIXEL.id} to act_${binds.accountId} in Business Manager first`,
+                  { campaignId: edit.campaignId },
+                );
+              }
+            }
+          }
           // A conversion-optimized source cloned into ANOTHER account must carry a pixel of that
           // account (the source's pixel isn't valid there) — the adset's promoted_object and the
           // funnel's &pixel= both need it. Click sources (no source pixel) pass pixel-less.
@@ -263,6 +304,14 @@ export async function POST(req: Request) {
           if (!SUPPORTED_BID_STRATEGIES.has(campaign.bidStrategy)) {
             throw new FbError(`source bid strategy ${campaign.bidStrategy} can't be cloned — recreate it manually`, { campaignId: edit.campaignId });
           }
+          // AIF bans min-ROAS outright (its CAPI Purchases carry value 0 — nothing to optimize;
+          // same rule as /api/aif/launch) — a roas source can't be cloned on this rail.
+          if (aif && bidKind(campaign.bidStrategy) === "roas") {
+            throw new FbError(
+              "roas_not_supported — AIF conversions carry value 0 (postback CAPI); this source can't be cloned on the AIF rail",
+              { campaignId: edit.campaignId },
+            );
+          }
           if (bidAmountMissing(campaign)) {
             throw new FbError("source uses a bid cap but no ROAS goal was set on the clone row", { campaignId: edit.campaignId });
           }
@@ -270,9 +319,9 @@ export async function POST(req: Request) {
           if (bidKind(campaign.bidStrategy) === "roas" && parseMoney(campaign.bidCap) > 100) {
             throw new FbError("ROAS goal must be 0–100 on the clone row", { campaignId: edit.campaignId });
           }
-          // Owner rule (2026-08-11): min-ROAS clones may only optimize on the partner's value
+          // Owner rule (2026-08-11): MO min-ROAS clones may only optimize on the partner's value
           // pixel — same gate as /api/launch, before any claim/write.
-          if (bidKind(campaign.bidStrategy) === "roas" && editBinds.pixelId !== ROAS_PIXEL.id) {
+          if (!aif && bidKind(campaign.bidStrategy) === "roas" && editBinds.pixelId !== ROAS_PIXEL.id) {
             throw new FbError(
               `min-ROAS clones run only on ${ROAS_PIXEL.name} (${ROAS_PIXEL.id}) — pick it as the pixel`,
               { campaignId: edit.campaignId },
@@ -293,10 +342,10 @@ export async function POST(req: Request) {
           // released in the catch on any pre-campaign failure.
           acctSlot = await claimAcctSlot(binds.accountId, {
             user: session.username,
-            partner: "in",
-            channel: "clone",
+            partner: aif ? "us" : "in",
+            channel: aif ? "aif-clone" : "clone",
             name: edit.name,
-            accountName: await tokenAccountName(binds.accountId).catch(() => ""),
+            accountName: await acctNameOf(binds.accountId).catch(() => ""),
           });
 
           // Cross-account: re-home the media in the target account BEFORE claiming a gcm — a failed
@@ -308,20 +357,27 @@ export async function POST(req: Request) {
             const mKey = `${edit.campaignId}→${binds.accountId}`;
             let migrated = migratedCache.get(mKey);
             if (!migrated) {
-              migrated = await migrateMediaToAccount(media, src.accountId, binds.accountId, edit.name);
+              migrated = await migrateMediaToAccount(media, src.accountId, binds.accountId, edit.name, railToken);
               migratedCache.set(mKey, migrated);
             }
             cloneMedia = migrated;
           }
 
+          // Reserve this rail's revenue marker: MO = a gcm code, AIF = a brand (both registries
+          // enforce uniqueness atomically; the marker rides the shared `gcm` field downstream).
           progress("gcm");
-          claim = await claimGcm("", { campaign_name: edit.name, notes: "claimed via adlauncher clone" });
+          if (aif) {
+            const c = await claimBrand("", { campaign_name: edit.name, notes: "claimed via adlauncher clone" });
+            claim = { gcm: c.brand, documentId: c.documentId };
+          } else {
+            claim = await claimGcm("", { campaign_name: edit.name, notes: "claimed via adlauncher clone" });
+          }
           const gcm = claim.gcm;
 
-          const localeIds = await resolveLocales(edit.locales);
+          const localeIds = await resolveLocales(edit.locales, railToken);
 
           progress("campaign");
-          const camp = await fbPost(`act_${editBinds.accountId}/campaigns`, campaignPayload(campaign, edit.name));
+          const camp = await post(`act_${editBinds.accountId}/campaigns`, campaignPayload(campaign, edit.name));
           created.campaign_id = String(camp.id);
 
           progress("adset");
@@ -329,34 +385,51 @@ export async function POST(req: Request) {
             createAdset(
               `act_${editBinds.accountId}/adsets`,
               adsetPayload(campaign, edit.name, String(camp.id), editBinds, localeIds),
+              post,
             ),
           );
           created.adset_id = String(adset.id);
 
           progress("creative");
-          const creative = await fbPost(
+          const creative = await post(
             `act_${editBinds.accountId}/adcreatives`,
-            cloneCreativePayload(edit.name, editBinds.pageId, cloneMedia, gcm, editBinds.pixelId),
+            cloneCreativePayload(
+              edit.name,
+              editBinds.pageId,
+              cloneMedia,
+              gcm,
+              editBinds.pixelId,
+              // AIF RW links carry the brand marker only — no pixel param exists on that rail.
+              aif ? (l: string) => swapBrand(l, gcm) : undefined,
+            ),
           );
           created.creative_id = String(creative.id);
 
           progress("ad");
           const ad = await withParentRetry(String(adset.id), () =>
-            fbPost(`act_${editBinds.accountId}/ads`, adPayload(edit.name, String(adset.id), String(creative.id))),
+            post(`act_${editBinds.accountId}/ads`, adPayload(edit.name, String(adset.id), String(creative.id))),
           );
           // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
           if (!ad.id) throw new FbError("ad create returned no id", ad);
           created.ad_id = String(ad.id);
 
-          await backfillGcm(
-            claim.documentId,
-            {
+          if (aif) {
+            await backfillBrand(claim.documentId, {
               campaign_id: created.campaign_id,
               adset_id: created.adset_id,
               ad_id: created.ad_id,
-            },
-            claim.gcm,
-          );
+            });
+          } else {
+            await backfillGcm(
+              claim.documentId,
+              {
+                campaign_id: created.campaign_id,
+                adset_id: created.adset_id,
+                ad_id: created.ad_id,
+              },
+              claim.gcm,
+            );
+          }
 
           ok++;
           settled = true;
@@ -377,24 +450,24 @@ export async function POST(req: Request) {
           // Free the account's launch slot when NO campaign was created (limit meters only
           // campaigns that exist); once one exists the slot stays consumed.
           if (acctSlot && !created.campaign_id) await releaseAcctSlot(acctSlot.documentId);
-          // Free the gcm code when nothing was created; keep the row (marked failed) once a campaign
-          // exists so the orphaned PAUSED campaign stays traceable — same policy as the launch route.
+          // Free the marker when nothing was created; keep the row (marked retired) once a campaign
+          // exists so the orphaned campaign stays traceable — same policy as the launch routes.
           if (claim?.documentId) {
-            if (created.campaign_id)
-              // "retired" — the registry's status enum is active|retired; "failed" is rejected by
-              // Strapi (the whole PUT 400s and backfillGcm swallows it, losing the note AND the ids).
-              await backfillGcm(
-                claim.documentId,
-                {
-                  status: "retired",
-                  notes: `clone failed: ${err.message}`,
-                  // Record what DID get created so the orphaned PAUSED campaign is traceable by code.
-                  campaign_id: created.campaign_id,
-                  ...(created.adset_id ? { adset_id: created.adset_id } : {}),
-                },
-                claim.gcm,
-              );
-            else await deleteGcm(claim.documentId, claim.gcm);
+            if (created.campaign_id) {
+              const failPatch = {
+                status: "retired",
+                notes: `clone failed: ${err.message}`,
+                // Record what DID get created so the orphaned campaign is traceable by marker.
+                campaign_id: created.campaign_id,
+                ...(created.adset_id ? { adset_id: created.adset_id } : {}),
+              };
+              if (aif) await backfillBrand(claim.documentId, failPatch);
+              else await backfillGcm(claim.documentId, failPatch, claim.gcm);
+            } else if (aif) {
+              await deleteBrand(claim.documentId);
+            } else {
+              await deleteGcm(claim.documentId, claim.gcm);
+            }
           }
           settled = true;
           tw.write({
