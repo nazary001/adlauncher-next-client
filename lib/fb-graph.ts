@@ -386,6 +386,13 @@ export async function isTokenAccount(accountId: string, cat: TokenCatalog = MO_C
   return accounts.some((a) => a.id === accountId);
 }
 
+/** Display name of one of the token's own ad accounts ("" when unknown) — free, cached list.
+ *  Display-only material (the acct-limit panel labels accounts with it). */
+export async function tokenAccountName(accountId: string, cat: TokenCatalog = MO_CATALOG): Promise<string> {
+  const accounts = await tokenAdAccounts(cat);
+  return accounts.find((a) => a.id === accountId)?.name ?? "";
+}
+
 /** Pixels of one token account; falls back to a direct read when the cached sweep missed it. */
 export async function accountPixels(accountId: string, cat: TokenCatalog = MO_CATALOG): Promise<{ id: string; name: string }[]> {
   const accounts = await tokenAdAccounts(cat);

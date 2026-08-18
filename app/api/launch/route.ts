@@ -21,9 +21,11 @@ import {
   fbPost,
   isAdvertisablePage,
   isTokenAccount,
+  tokenAccountName,
   withFbBudget,
   withParentRetry,
 } from "@/lib/fb-graph";
+import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 import { fetchValidatedImage, uploadImage, uploadVideo, videoThumb, waitForVideo } from "@/lib/fb-media";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import { taskWriter } from "@/lib/task-store";
@@ -337,9 +339,21 @@ export async function POST(req: Request) {
       }, 30_000);
       const created: Json = {};
       let claim: { gcm: string; documentId: string | null } | null = null;
+      let acctSlot: { documentId: string } | null = null;
       try {
-        // 1) reserve the gcm BEFORE building the link (guarantees no duplicate marker)
+        // 0) claim the ACCOUNT's launch slot — at most 5 campaigns per ad account per 30-min
+        // window, across every user and channel (owner rule 2026-08-18). Throws the human
+        // countdown message when the window is full; released below on any pre-campaign failure.
         progress("gcm");
+        acctSlot = await claimAcctSlot(binds.accountId, {
+          user: session.username,
+          partner: "in",
+          channel: "launch",
+          name,
+          accountName: await tokenAccountName(binds.accountId).catch(() => ""),
+        });
+
+        // 1) reserve the gcm BEFORE building the link (guarantees no duplicate marker)
         claim = await claimGcm(campaign.gcm, {
           campaign_name: name,
           landing: campaign.landing || null,
@@ -424,6 +438,9 @@ export async function POST(req: Request) {
         send({ ok: true, stage: "done", gcm, link, page_id: binds.pageId, ...created });
       } catch (e) {
         const err = e as FbError;
+        // Free the account's launch slot when NO campaign was created — the window only meters
+        // campaigns that actually exist on FB. Once one exists the slot stays consumed.
+        if (acctSlot && !created.campaign_id) await releaseAcctSlot(acctSlot.documentId);
         // Free the gcm code when nothing was created on FB (early failures like a rate limit or a
         // video error) so the 01–200 pool never leaks; keep the row (marked failed) once a campaign
         // exists so the orphaned PAUSED campaign stays traceable.

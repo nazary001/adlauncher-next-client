@@ -14,6 +14,7 @@ import { sessionFromCookieHeader } from "@/lib/session";
 import { FbError, withFbBudget, withParentRetry } from "@/lib/fb-graph";
 import { fetchValidatedImage } from "@/lib/fb-media";
 import {
+  aifAccountName,
   aifAccountPixels,
   aifAdvertisablePageName,
   aifCreateAdset,
@@ -28,6 +29,7 @@ import {
   aifWaitForVideo,
 } from "@/lib/aif-launch";
 import { backfillBrand, claimBrand, deleteBrand } from "@/lib/aif-claim";
+import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 import { taskWriter } from "@/lib/task-store";
 import { del } from "@vercel/blob";
 
@@ -284,9 +286,21 @@ export async function POST(req: Request) {
       }, 30_000);
       const created: Json = {};
       let claim: { brand: string; documentId: string | null } | null = null;
+      let acctSlot: { documentId: string } | null = null;
       try {
-        // 1) reserve the brand BEFORE building the link (guarantees no duplicate revenue key)
+        // 0) claim the ACCOUNT's launch slot — at most 5 campaigns per ad account per 30-min
+        // window, across every user and channel (owner rule 2026-08-18). Released below on any
+        // pre-campaign failure.
         progress("gcm");
+        acctSlot = await claimAcctSlot(binds.accountId, {
+          user: session.username,
+          partner: "us",
+          channel: "aif",
+          name,
+          accountName: await aifAccountName(binds.accountId).catch(() => ""),
+        });
+
+        // 1) reserve the brand BEFORE building the link (guarantees no duplicate revenue key)
         claim = await claimBrand(serverCampaign.gcm, {
           campaign_name: name,
           destination: slug,
@@ -364,6 +378,9 @@ export async function POST(req: Request) {
         send({ ok: true, stage: "done", gcm: brand, link, page_id: binds.pageId, ...created });
       } catch (e) {
         const err = e as FbError;
+        // Free the account's launch slot when NO campaign was created — the window only meters
+        // campaigns that actually exist on FB. Once one exists the slot stays consumed.
+        if (acctSlot && !created.campaign_id) await releaseAcctSlot(acctSlot.documentId);
         // Free the brand when nothing was created on FB (early failures) so the test01..test700
         // pool never leaks; keep the row (retired + noted) once a campaign exists so the orphaned
         // campaign stays traceable by brand.

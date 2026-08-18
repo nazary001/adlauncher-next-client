@@ -16,6 +16,7 @@ import {
   fbPost,
   isAdvertisablePage,
   isTokenAccount,
+  tokenAccountName,
   tokenAdAccounts,
 } from "./fb-graph";
 import { uploadImage, uploadVideo, videoThumb, waitForVideo } from "./fb-media";
@@ -47,6 +48,7 @@ export const aifVideoThumb = (videoId: string): Promise<string> => videoThumb(vi
 // per-launch server-side validation, exactly like the MO rail.
 export const aifTokenAdAccounts = (): Promise<TokenAdAccount[]> => tokenAdAccounts(CAT);
 export const aifIsTokenAccount = (accountId: string): Promise<boolean> => isTokenAccount(accountId, CAT);
+export const aifAccountName = (accountId: string): Promise<string> => tokenAccountName(accountId, CAT);
 export const aifAccountPixels = (accountId: string): Promise<{ id: string; name: string }[]> =>
   accountPixels(accountId, CAT);
 export const aifAdvertisablePages = (): Promise<FanPage[]> => advertisablePages(CAT);

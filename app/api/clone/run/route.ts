@@ -10,10 +10,12 @@ import {
   fbPost,
   isAdvertisablePage,
   isTokenAccount,
+  tokenAccountName,
   withFbBudget,
   withParentRetry,
 } from "@/lib/fb-graph";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
+import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 import { taskWriter } from "@/lib/task-store";
 import type { CloneEdit } from "@/lib/clone";
 import {
@@ -213,6 +215,7 @@ export async function POST(req: Request) {
           if (!settled) tw.write({ status: "running", stage: lastStage });
         }, 30_000);
         let claim: { gcm: string; documentId: string | null } | null = null;
+        let acctSlot: { documentId: string } | null = null;
         const created: Json = {};
         try {
           send({ idx, stage: "start", name: edit.name });
@@ -284,6 +287,17 @@ export async function POST(req: Request) {
           if (money(campaign.budget) < 100) {
             throw new FbError("clone daily budget must be at least $1", { campaignId: edit.campaignId });
           }
+
+          // Account launch slot (5 campaigns / 30 min per ad account, all channels — owner rule
+          // 2026-08-18), claimed BEFORE the costly media migration so a full account fails fast;
+          // released in the catch on any pre-campaign failure.
+          acctSlot = await claimAcctSlot(binds.accountId, {
+            user: session.username,
+            partner: "in",
+            channel: "clone",
+            name: edit.name,
+            accountName: await tokenAccountName(binds.accountId).catch(() => ""),
+          });
 
           // Cross-account: re-home the media in the target account BEFORE claiming a gcm — a failed
           // migration (video unfetchable, processing error) must not burn a code or orphan anything.
@@ -360,6 +374,9 @@ export async function POST(req: Request) {
         } catch (e) {
           failed++;
           const err = e as FbError;
+          // Free the account's launch slot when NO campaign was created (limit meters only
+          // campaigns that exist); once one exists the slot stays consumed.
+          if (acctSlot && !created.campaign_id) await releaseAcctSlot(acctSlot.documentId);
           // Free the gcm code when nothing was created; keep the row (marked failed) once a campaign
           // exists so the orphaned PAUSED campaign stays traceable — same policy as the launch route.
           if (claim?.documentId) {
