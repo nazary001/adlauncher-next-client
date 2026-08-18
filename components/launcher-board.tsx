@@ -278,24 +278,35 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   /** Non-blocking launch: every launchable campaign is captured + dropped into the Task Manager
    *  instantly, then flies off the board so you can keep building. The queue creates them one by
    *  one (ACTIVE since 08-11) in the background. */
-  function launch() {
+  async function launch() {
     // Pool exhausted → nothing may launch: stale card previews would only burn failed claims
     // (the rail button is disabled too; the server-side claim is the last-resort guard).
     if (poolExhausted) return;
+    // A tab older than the deployed build has outdated gates — launching is locked until reload
+    // (the banner explains; the rail button is disabled too).
+    if (limits.staleBuild) return;
     const opts = launchReadyOpts(partner);
     const launchable = campaigns.filter((c) => isLaunchable(c, opts));
     if (launchable.length === 0) return;
 
     // Account launch limit (5 campaigns / 30 min, all users & channels): send only what fits each
-    // account's remaining capacity — limits.countFor covers the server registry PLUS the user's
-    // own queued tasks, and sentNow covers this very wave (enqueued tasks only reach the pending
-    // fold on the next render). The overflow stays on the board with the amber rail note; the
-    // server-side claim remains the authority for whatever races past this check.
+    // account's remaining capacity, measured against a picture fetched AT THIS CLICK — never the
+    // ≤30s poll cache (another buyer may have filled the account seconds ago). Capacity =
+    // fresh server count + own queued tasks + what this very wave has just taken (sentNow —
+    // enqueued tasks only reach the pending fold on the next render). The overflow stays on the
+    // board with the amber rail note; the server-side claim stays the final authority for
+    // whatever still races past.
+    const fresh = await limits.fetchFresh(); // null on a blip → the cached view gates instead
+    const serverCountOf = (k: string): number => {
+      if (!fresh) return Math.max(0, limits.countFor(k) - limits.pendingFor(k));
+      const a = fresh.accounts[k];
+      return a && a.resetAt > Date.now() + fresh.skew ? a.count : 0;
+    };
     const sentNow = new Map<string, number>();
     const fitsAcct = (acct: string): boolean => {
       const k = acctIdKey(acct);
       if (!k) return true; // no account bound (non-token partners) — nothing to meter here
-      return limits.countFor(k) + (sentNow.get(k) ?? 0) < limits.limit;
+      return serverCountOf(k) + limits.pendingFor(k) + (sentNow.get(k) ?? 0) < limits.limit;
     };
     const noteSent = (acct: string) => {
       const k = acctIdKey(acct);

@@ -30,9 +30,17 @@ export type AcctLimits = {
   skew: number;
   /** Launches already recorded this window (0 when idle/expired — expiry unblocks instantly). */
   countFor: (accountId: string) => number;
+  /** The user's OWN queued-but-not-started demand alone (subset of countFor). */
+  pendingFor: (accountId: string) => number;
   resetAtFor: (accountId: string) => number | null;
   /** Immediate re-poll (throttled) — call after a task reaches a terminal state. */
   refresh: () => void;
+  /** Un-throttled re-poll that RESOLVES with the fresh server picture (null on failure) — the
+   *  launch click awaits this so the wave partition never runs on a ≤30s-old cache. */
+  fetchFresh: () => Promise<{ accounts: Record<string, AcctLimitInfo>; skew: number } | null>;
+  /** This tab runs a bundle OLDER than the deployed server — its launch gates are outdated, so
+   *  every launch surface hard-blocks until the tab reloads. */
+  staleBuild: boolean;
 };
 
 /** Canonical account key, client copy (the server lib is server-only): strip act_, trim. */
@@ -46,8 +54,11 @@ const EMPTY: AcctLimits = {
   accounts: {},
   skew: 0,
   countFor: () => 0,
+  pendingFor: () => 0,
   resetAtFor: () => null,
   refresh: () => {},
+  fetchFresh: async () => null,
+  staleBuild: false,
 };
 
 const Ctx = createContext<AcctLimits>(EMPTY);
@@ -100,34 +111,46 @@ const FOCUS_THROTTLE_MS = 5_000;
 
 export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<State>({ limit: 5, windowMs: 30 * 60_000, accounts: {}, skew: 0 });
+  const [staleBuild, setStaleBuild] = useState(false);
   const lastFetch = useRef(0);
   const stopped401 = useRef(false); // logged-out tab — quiet until a focus retries
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<{
+    accounts: Record<string, AcctLimitInfo>;
+    skew: number;
+  } | null> => {
     lastFetch.current = Date.now();
     try {
       const r = await fetch("/api/acct-limit");
       if (r.status === 401) {
         stopped401.current = true;
-        return;
+        return null;
       }
       const d = (await r.json().catch(() => null)) as {
         ok?: boolean;
         now?: number;
         limit?: number;
         windowMs?: number;
+        build?: string;
         accounts?: Record<string, AcctLimitInfo>;
       } | null;
-      if (!d?.ok || typeof d.accounts !== "object") return; // 502/registry blip — next tick retries
+      if (!d?.ok || typeof d.accounts !== "object") return null; // 502/registry blip — next tick retries
       stopped401.current = false;
-      setState({
+      // Build-stamp check: this bundle vs the server answering. A mismatch means the tab
+      // predates a deploy — its gates are outdated, so launching locks until a reload.
+      const own = process.env.NEXT_PUBLIC_BUILD_STAMP ?? "";
+      if (own && typeof d.build === "string" && d.build && d.build !== own) setStaleBuild(true);
+      const next = {
         limit: Number(d.limit) || 5,
         windowMs: Number(d.windowMs) || 30 * 60_000,
         accounts: d.accounts ?? {},
         skew: (Number(d.now) || Date.now()) - Date.now(),
-      });
+      };
+      setState(next);
+      return { accounts: next.accounts, skew: next.skew };
     } catch {
       /* transient — the interval retries */
+      return null;
     }
   }, []);
 
@@ -218,10 +241,50 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
       skew: state.skew,
       // Server truth + the user's own queued demand: what a NEW launch would actually face.
       countFor: (id) => (live(id)?.count ?? 0) + (pending.get(acctIdKey(id)) ?? 0),
+      pendingFor: (id) => pending.get(acctIdKey(id)) ?? 0,
       resetAtFor: (id) => live(id)?.resetAt ?? null,
       refresh,
+      fetchFresh: load,
+      staleBuild,
     };
-  }, [state, pending, refresh]);
+  }, [state, pending, refresh, load, staleBuild]);
 
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+  return (
+    <Ctx.Provider value={value}>
+      {staleBuild ? <StaleBuildBanner /> : null}
+      {children}
+    </Ctx.Provider>
+  );
+}
+
+/** Full-width red banner pinned under the header once the deployed build outruns this tab.
+ *  Launching is hard-blocked everywhere while it shows — reload is the only way forward. */
+function StaleBuildBanner() {
+  return (
+    <div className="fixed inset-x-0 top-16 z-[90] flex justify-center px-4">
+      <div
+        role="alert"
+        className={
+          "pointer-events-auto flex w-full max-w-[1440px] items-center gap-3 rounded-xl border " +
+          "border-danger/50 bg-[#2a0f14] px-4 py-3 text-[13px] font-semibold text-danger " +
+          "shadow-[0_12px_40px_rgba(0,0,0,0.55)]"
+        }
+      >
+        <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-danger" />
+        A newer version of Ad Launcher is live — this tab&apos;s launch limits are outdated, so
+        launching is paused here.
+        <button
+          type="button"
+          onClick={() => window.location.reload()}
+          className={
+            "ml-auto shrink-0 rounded-lg border border-danger/50 bg-danger/15 px-3 py-1.5 " +
+            "text-[12px] font-bold text-danger transition-colors hover:bg-danger/25 " +
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50"
+          }
+        >
+          Reload now
+        </button>
+      </div>
+    </div>
+  );
 }

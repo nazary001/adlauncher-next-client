@@ -240,7 +240,7 @@ export function LaunchRail({
             <button
               type="button"
               onClick={onLaunch}
-              disabled={readyCount === 0 || gcmBlocked}
+              disabled={readyCount === 0 || gcmBlocked || limits.staleBuild}
               className={
                 "animate-pop-in group flex h-11 w-full items-center justify-center gap-2 rounded-xl " +
                 "bg-gradient-to-b from-launch2 to-launch text-[13.5px] font-bold text-[#032e20] " +
@@ -261,7 +261,11 @@ export function LaunchRail({
               after the reset or move them to another account.
             </p>
           ) : null}
-          {gcmBlocked ? (
+          {limits.staleBuild ? (
+            <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">
+              A newer version is live — reload this tab to launch (its limit gates are outdated).
+            </p>
+          ) : gcmBlocked ? (
             <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">
               No free {pool?.label ?? "gcm"} codes left — launching is blocked until codes are freed in the registry.
             </p>

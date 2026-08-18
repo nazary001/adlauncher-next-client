@@ -16,7 +16,9 @@ export async function GET(req: Request): Promise<NextResponse> {
   try {
     const snap = await acctLimitSnapshot();
     return NextResponse.json(
-      { ok: true, ...snap },
+      // `build` = this deployment's build stamp: a client whose inlined stamp differs is a
+      // stale tab and must reload before launching (its pre-flight gates are outdated).
+      { ok: true, build: process.env.NEXT_PUBLIC_BUILD_STAMP ?? "", ...snap },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (e) {

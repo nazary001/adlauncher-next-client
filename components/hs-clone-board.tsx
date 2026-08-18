@@ -266,7 +266,7 @@ export function HsCloneBoard({
   const MAX_SHOTS_PER_FIRE = 45;
 
   async function duplicateAll() {
-    if (!bindsReady || validRows.length === 0 || firing || acctOver) return;
+    if (!bindsReady || validRows.length === 0 || firing || acctOver || limits.staleBuild) return;
     if (totalClones > MAX_SHOTS_PER_FIRE) {
       alert(
         `That's ${totalClones} clones — the server fires at most ${MAX_SHOTS_PER_FIRE} per wave. ` +
@@ -426,7 +426,7 @@ export function HsCloneBoard({
                 <button
                   type="button"
                   onClick={() => void duplicateAll()}
-                  disabled={!bindsReady || validRows.length === 0 || firing || acctOver}
+                  disabled={!bindsReady || validRows.length === 0 || firing || acctOver || limits.staleBuild}
                   className={
                     "animate-pop-in flex h-11 w-full items-center justify-center gap-2 rounded-xl " +
                     "bg-gradient-to-b from-launch2 to-launch text-[13.5px] font-bold text-[#032e20] " +

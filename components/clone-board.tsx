@@ -333,7 +333,7 @@ function CloneInner({
   /** Queue each clone (rows × copies) into the Task Manager, which builds them one at a time
    *  (ACTIVE since 08-11) with live stages / errors / retry — the same queue and pipeline as launches. */
   const duplicate = () => {
-    if (destinationMissing || acctBlocked) return; // the button is disabled too — belt and suspenders
+    if (destinationMissing || acctBlocked || limits.staleBuild) return; // the button is disabled too — belt and suspenders
     const total = Math.max(1, Math.floor(settings.copies) || 1);
     let queued = 0;
     for (const r of rows) {
@@ -534,7 +534,7 @@ function CloneInner({
                 <button
                   type="button"
                   onClick={duplicate}
-                  disabled={destinationMissing || acctBlocked}
+                  disabled={destinationMissing || acctBlocked || limits.staleBuild}
                   className={
                     "animate-pop-in flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-launch/50 " +
                     "bg-launch/15 text-[14px] font-semibold text-launch2 transition-all duration-150 hover:border-launch/70 " +
