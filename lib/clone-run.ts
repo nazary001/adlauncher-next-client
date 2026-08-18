@@ -142,6 +142,12 @@ function mediaFromAd(ad: Json): SourceMedia | null {
   return null;
 }
 
+/** Public per-ad media extraction for rails that read whole source trees themselves (the HS
+ *  token-duplicate pump rebuilds EVERY reusable ad, not just the first). */
+export function extractAdMedia(ad: Json): SourceMedia | null {
+  return mediaFromAd(ad);
+}
+
 /** Pull the source campaign's objective + first ad set's delivery + first reusable ad media.
  *  `token` selects the Graph bearer (MO launch token by default; the AIF rail passes its own). */
 export async function fetchSourceDetail(campaignId: string, token?: string): Promise<SourceDetail> {

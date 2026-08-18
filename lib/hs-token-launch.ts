@@ -18,6 +18,8 @@ import { uploadImage, uploadVideo, videoThumb, waitForVideo } from "./fb-media";
 const HS_FB_TOKEN = process.env.FB_HS_LAUNCH_TOKEN || process.env.FB_HS_VOLUME_TOKEN || "";
 
 export const hsTokenConfigured = (): boolean => HS_FB_TOKEN.length > 0;
+/** Raw bearer for lib/clone-run's parameterized Graph calls (server-only, never to the browser). */
+export const hsRawToken = (): string => HS_FB_TOKEN;
 
 type Json = Record<string, unknown>;
 

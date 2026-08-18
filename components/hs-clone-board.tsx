@@ -124,6 +124,29 @@ export function HsCloneBoard({
   const [copies, setCopies] = useState("1");
   const [previewed, setPreviewed] = useState(false);
   const [firing, setFiring] = useState(false);
+  // Duplicate rail: LION's clone weapon (default) vs OUR FB token building each tree directly on
+  // the Graph (owner ask 08-18 — same channel pair as the launcher). Survives refreshes; the
+  // token option unlocks only once the server says the rail is provisioned.
+  const [dupChannel, setDupChannel] = useState<"lion" | "token">("lion");
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem("adlauncher.hs.dupchannel");
+      // Safe setState-in-effect: runs once on mount (localStorage is unreadable during SSR).
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      if (v === "token" || v === "lion") setDupChannel(v);
+    } catch {
+      /* storage disabled — session-local pick only */
+    }
+  }, []);
+  const changeDupChannel = (ch: "lion" | "token") => {
+    setDupChannel(ch);
+    setPreviewed(false);
+    try {
+      localStorage.setItem("adlauncher.hs.dupchannel", ch);
+    } catch {
+      /* storage disabled */
+    }
+  };
   const [draftId, setDraftId] = useState("");
   const counter = useRef(1);
   // One waveId per PREPARED wave (same binds + same shots): a retry-click after a lost answer
@@ -263,14 +286,19 @@ export function HsCloneBoard({
 
   // The server pump takes the whole wave in ONE call and paces/polls/activates it after the
   // response (fire-and-forget, owner ask 08-14) — its shot cap must fit the pump's time budget.
+  // The token rail builds one full Graph tree per shot (much heavier than a LION submit), so its
+  // wave cap is tighter (mirrors the server's MAX_TOKEN_SHOTS).
   const MAX_SHOTS_PER_FIRE = 45;
+  const MAX_TOKEN_SHOTS_PER_FIRE = 10;
+  const effDupChannel: "lion" | "token" = dupChannel === "token" && hs.tokenLaunch ? "token" : "lion";
 
   async function duplicateAll() {
     if (!bindsReady || validRows.length === 0 || firing || acctOver || limits.staleBuild) return;
-    if (totalClones > MAX_SHOTS_PER_FIRE) {
+    const cap = effDupChannel === "token" ? MAX_TOKEN_SHOTS_PER_FIRE : MAX_SHOTS_PER_FIRE;
+    if (totalClones > cap) {
       alert(
-        `That's ${totalClones} clones — the server fires at most ${MAX_SHOTS_PER_FIRE} per wave. ` +
-          "Lower the copies or remove some rows and fire in two waves.",
+        `That's ${totalClones} clones — the ${effDupChannel === "token" ? "FB Token rail builds" : "server fires"} at most ${cap} per wave. ` +
+          "Lower the copies or remove some rows and fire in waves.",
       );
       return;
     }
@@ -303,12 +331,14 @@ export function HsCloneBoard({
       }));
     });
     validRows.forEach((r) => patchRow(r.id, { state: "sending", msg: "queuing on server…" }));
-    const sig = JSON.stringify({ profile, account, page, pixel: effectivePixel, shots });
+    // The channel is part of the wave's identity — a LION wave retried on the token rail (or
+    // vice versa) is a DIFFERENT wave and must not be swallowed by the idempotency claim.
+    const sig = JSON.stringify({ channel: effDupChannel, profile, account, page, pixel: effectivePixel, shots });
     if (!waveRef.current || waveRef.current.sig !== sig) {
       waveRef.current = { sig, id: crypto.randomUUID() };
     }
     try {
-      const res = await fetch("/api/hs/duplicate", {
+      const res = await fetch(effDupChannel === "token" ? "/api/hs/token-duplicate" : "/api/hs/duplicate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ profile, account, page, pixel: effectivePixel, shots, waveId: waveRef.current.id }),
@@ -406,6 +436,46 @@ export function HsCloneBoard({
                   className="h-9 w-full rounded-lg border border-line bg-surface2 px-3 text-[13px] font-mono tabular-nums text-ink outline-none transition-colors hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
                 />
               </Field>
+
+              {/* duplicate rail: LION's clone weapon vs our FB token building each tree on the
+                  Graph — same channel pair (and the same provisioning gate) as the launcher. */}
+              <div className="mt-1 flex flex-col gap-1">
+                <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
+                  {(
+                    [
+                      { key: "lion" as const, label: "LION API", ready: true },
+                      { key: "token" as const, label: "FB Token", ready: hs.tokenLaunch },
+                    ]
+                  ).map((opt) => {
+                    const active = dupChannel === opt.key;
+                    return (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        disabled={!opt.ready}
+                        aria-pressed={active}
+                        title={opt.ready ? undefined : "FB token not configured on the server (FB_HS_LAUNCH_TOKEN)"}
+                        onClick={() => changeDupChannel(opt.key)}
+                        className={
+                          "h-8 rounded-[10px] text-[12px] font-semibold transition-all duration-150 " +
+                          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
+                          (active
+                            ? "bg-accent/20 text-[#9db8ff] shadow-[inset_0_0_0_1px_rgba(122,150,255,0.35)]"
+                            : "text-dim hover:text-ink") +
+                          (opt.ready ? "" : " cursor-not-allowed opacity-40")
+                        }
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-center text-[10px] leading-relaxed text-faint">
+                  {effDupChannel === "token"
+                    ? `Our FB token rebuilds each tree · starts +30 min · max ${MAX_TOKEN_SHOTS_PER_FIRE}/wave`
+                    : "LION's clone weapon builds on the weapon side"}
+                </p>
+              </div>
 
               <button
                 type="button"
