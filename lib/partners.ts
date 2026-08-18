@@ -125,9 +125,44 @@ export const AIF_PIXEL: Bound = { id: "2130695154991928", name: "AIF Rewarded" }
  *  ("test01"), 10+ are plain. One brand = one buy campaign — the registry enforces it. */
 export const AIF_POOL_MAX = 700;
 export const aifBrandCode = (n: number): string => `test${String(n).padStart(2, "0")}`;
-/** Destination slugs are free-typed (the partner's articles are arbitrary) — keep only what a
- *  slug can be made of, so the RW link can never carry spaces, slashes or query junk. */
-export const aifSlugSanitize = (raw: string): string => raw.trim().replace(/[^\w-]/g, "");
+/** Normalize a pasted article reference to the bare slug the RW `destination` param takes
+ *  (doc example: `destination=best-family-pets`): a full path/URL like
+ *  "https://content.honeyandhues.com/article/foo" or "/article/foo" reduces to "foo", then
+ *  everything a slug can't carry (spaces, slashes, query junk) is stripped. */
+export const aifSlugSanitize = (raw: string): string =>
+  raw
+    .trim()
+    .replace(/^https?:\/\/[^/]+/i, "")
+    .replace(/^\/?article\//i, "")
+    .replace(/^\/+/, "")
+    .replace(/[^\w-]/g, "");
+
+// The partner's standard article catalog (owner list 2026-08-18, pasted as /article/<slug>
+// paths — `destination` takes the BARE slug per the implementation guide). Ordered by niche:
+// the picker emits a section header whenever `niche` changes, so groups must stay contiguous.
+const AIF_LANDINGS: Landing[] = [
+  { slug: "daily-mobile-game-reward-tips", title: "Daily Mobile Game Reward Tips", lang: "EN", niche: "Mobile Games" },
+  { slug: "mobile-games-how-to-earn-more-gems-for-free", title: "How to Earn More Gems for Free", lang: "EN", niche: "Mobile Games" },
+  { slug: "how-to-get-more-free-rewards-on-mobile-games", title: "Get More Free Rewards on Mobile Games", lang: "EN", niche: "Mobile Games" },
+  { slug: "free-daily-mobile-games-reward-tips", title: "Free Daily Mobile Games Reward Tips", lang: "EN", niche: "Mobile Games" },
+  { slug: "watch-ads-to-earn-free-rewards-on-mobile-games", title: "Watch Ads to Earn Free Rewards", lang: "EN", niche: "Mobile Games" },
+  { slug: "daily-mobile-games-free-reward-tips", title: "Daily Mobile Games Free Reward Tips", lang: "EN", niche: "Mobile Games" },
+  { slug: "watch-free-videos-to-make-money-online", title: "Watch Free Videos to Make Money Online", lang: "EN", niche: "Make Money" },
+  { slug: "best-apps-that-pay-you-for-your-opinion", title: "Best Apps That Pay for Your Opinion", lang: "EN", niche: "Make Money" },
+  { slug: "make-money-online", title: "Make Money Online", lang: "EN", niche: "Make Money" },
+  { slug: "credit-card-point-transfer-partner-sweet-spots", title: "Credit Card Point Transfer Sweet Spots", lang: "EN", niche: "Finance" },
+  { slug: "pre-approval-tool-stacking-and-instant-virtual-card-access", title: "Pre-Approval Stacking & Instant Virtual Cards", lang: "EN", niche: "Finance" },
+  { slug: "the-anti-budget-method-and-cash-flow-automation", title: "The Anti-Budget Method & Cash Flow Automation", lang: "EN", niche: "Finance" },
+  { slug: "automated-lifestyle-creep-protection-and-low-cost-index-funds", title: "Lifestyle Creep Protection & Index Funds", lang: "EN", niche: "Finance" },
+  // "habbits" [sic] — the slug is the partner's live URL, typo included.
+  { slug: "wealth-building-habbits", title: "Wealth Building Habits", lang: "EN", niche: "Finance" },
+  { slug: "no-code-web-integration-and-client-site-building", title: "No-Code Web Integration & Client Sites", lang: "EN", niche: "AI & Tech" },
+  { slug: "ai-workflow-automation-for-small-businesses", title: "AI Workflow Automation for Small Businesses", lang: "EN", niche: "AI & Tech" },
+  { slug: "the-multi-agent-economy-and-running-local-llms", title: "The Multi-Agent Economy & Local LLMs", lang: "EN", niche: "AI & Tech" },
+  { slug: "skill-verification-and-micro-credentials-vs-traditional-degrees", title: "Micro-Credentials vs Traditional Degrees", lang: "EN", niche: "Education" },
+  { slug: "assisted-living-for-seniors", title: "Assisted Living for Seniors", lang: "EN", niche: "Lifestyle" },
+  { slug: "these-2026-bathroom-design-features-are-getting-attention", title: "2026 Bathroom Design Features", lang: "EN", niche: "Lifestyle" },
+];
 
 export const PARTNERS: PartnerConfig[] = [
   {
@@ -181,7 +216,7 @@ export const PARTNERS: PartnerConfig[] = [
     usesProfile: false,
     nameTier: "aif",
     landingBase: AIF_RW_BASE,
-    landings: [],
+    landings: AIF_LANDINGS,
     pageLabel: "Fanpage",
     pagePlaceholder: "Search fanpage",
     fanpages: [],

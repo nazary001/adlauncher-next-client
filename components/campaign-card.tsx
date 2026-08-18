@@ -26,7 +26,7 @@ import {
   pixelsFor,
 } from "@/lib/catalog";
 import { hsFinalLink, hsLinkSegments, hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
-import { AIF_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifSlugSanitize, fullLandingUrl, landingUrlSegments, launchReadyOpts } from "@/lib/partners";
+import { AIF_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, fullLandingUrl, landingUrlSegments, launchReadyOpts } from "@/lib/partners";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
 import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-adaccounts";
@@ -941,15 +941,16 @@ export function CampaignCard({
                   ) : aifMode ? (
                     <Field
                       label="Destination article"
-                      hint="bare article slug on the partner's RW page — e.g. best-family-pets"
+                      hint="the partner's standard articles — the RW link carries the bare slug"
                     >
                       <div>
-                        <TextInput
+                        <SearchSelect
                           value={c.landing}
-                          onChange={(e) => patch({ landing: aifSlugSanitize(e.target.value) })}
-                          maxLength={200}
-                          placeholder="best-family-pets"
-                          className="font-mono text-[12px]"
+                          onChange={(v) => patch({ landing: v })}
+                          options={landingOptions}
+                          placeholder="Search article"
+                          emptyHint="No articles match"
+                          facets
                         />
                         {/* RW-link preview — the EXACT link the launch will send (same segments
                             the server joins); brand slot fills once the registry hands a code. */}

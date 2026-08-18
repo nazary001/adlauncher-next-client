@@ -185,12 +185,14 @@ export async function POST(req: Request) {
     );
   }
 
-  // The destination is a free-typed article slug — the card sanitizes as you type, but the server
-  // re-validates so a hostile/stale client can't smuggle a path or query into the RW link.
+  // The destination must be one of the partner's STANDARD articles (owner list in
+  // lib/partners AIF_LANDINGS) — same contract as MO's landing catalog: a stale/renamed slug
+  // from a restored draft would build a live ad pointing at a dead article. The shape check
+  // stays as a belt (the RW link must never carry a path or query junk).
   const slug = String(campaign.landing ?? "").trim();
-  if (!SLUG_RE.test(slug)) {
+  if (!SLUG_RE.test(slug) || !partner.landings.some((l) => l.slug === slug)) {
     return NextResponse.json(
-      { ok: false, stage: "config", error: "destination_invalid — type the bare article slug (letters, digits, dashes)" },
+      { ok: false, stage: "config", error: "destination_invalid — pick a standard article on the campaign card" },
       { status: 400 },
     );
   }
