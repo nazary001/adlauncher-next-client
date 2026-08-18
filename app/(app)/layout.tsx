@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { SESSION_COOKIE, verifySession } from "@/lib/session";
 import { AifTaskManagerProvider, TaskManagerProvider } from "@/components/task-manager";
 import { HsTaskManagerProvider } from "@/components/hs-task-manager";
+import { AcctLimitProvider } from "@/components/use-acct-limit";
 
 /**
  * Shared shell for the authenticated app (launcher + clone board). The Task Manager provider is
@@ -19,7 +20,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     <TaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
       <AifTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
         <HsTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
-          {children}
+          <AcctLimitProvider>{children}</AcctLimitProvider>
         </HsTaskManagerProvider>
       </AifTaskManagerProvider>
     </TaskManagerProvider>
