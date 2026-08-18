@@ -38,6 +38,16 @@ export function PlusIcon(props: P) {
   );
 }
 
+export function TimerIcon(props: P) {
+  return (
+    <S {...props}>
+      <path d="M10 2h4" />
+      <path d="M12 14v-4" />
+      <circle cx="12" cy="14" r="8" />
+    </S>
+  );
+}
+
 export function CopyIcon(props: P) {
   return (
     <S {...props}>
