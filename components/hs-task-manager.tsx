@@ -65,6 +65,8 @@ export type HsTask = {
   adsetId?: string;
   adCount?: number;
   error?: string;
+  /** Target ad account id (client-only, set at enqueue — not persisted): launch-limit demand. */
+  account?: string;
   queuedAt: number;
   startedAt?: number;
   submittedAt?: number;
@@ -1081,6 +1083,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
           kind,
           status: "queued" as const,
           stage: "upload",
+          account: args.campaign.account || undefined,
           queuedAt: now,
           local: true,
         },

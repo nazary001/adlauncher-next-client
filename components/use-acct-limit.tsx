@@ -10,6 +10,8 @@ import {
   useState,
 } from "react";
 import type { RichOption } from "@/lib/catalog";
+import { useAifTaskManager, useTaskManager } from "./task-manager";
+import { useHsTaskManager } from "./hs-task-manager";
 
 // Client mirror of the per-account launch limit (5 campaigns / 30 min, window anchored at the
 // first launch — owner rule 2026-08-18). One provider (app layout) polls /api/acct-limit and
@@ -77,7 +79,7 @@ export function decorateAccountOptions<T extends RichOption>(options: T[], limit
     const full = count >= limits.limit;
     return {
       ...o,
-      tag: `${count}/${limits.limit}`,
+      tag: `${Math.min(count, limits.limit)}/${limits.limit}`,
       tagTone: (full ? "danger" : count >= limits.limit - 1 ? "warn" : "dim") as RichOption["tagTone"],
       disabled: o.disabled || full,
     };
@@ -133,7 +135,58 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
     if (Date.now() - lastFetch.current > REFRESH_THROTTLE_MS) void load();
   }, [load]);
 
+  // Own queued-but-not-started launches per account (the client-only `account` on local task
+  // rows): folded into countFor below, so the pickers/cards/rails see capacity NET of the
+  // user's own queue. Running tasks are excluded — their server-side claim lands within seconds
+  // of starting, and the transition effect below re-polls the registry right then.
+  const team = useTaskManager();
+  const aif = useAifTaskManager();
+  const hsTm = useHsTaskManager();
+  const pending = useMemo(() => {
+    const m = new Map<string, number>();
+    const fold = (ts: ReadonlyArray<{ local?: boolean; status: string; account?: string }>) => {
+      for (const t of ts) {
+        if (!t.local || t.status !== "queued") continue;
+        const k = acctIdKey(t.account ?? "");
+        if (k) m.set(k, (m.get(k) ?? 0) + 1);
+      }
+    };
+    fold(team.tasks);
+    fold(aif.tasks);
+    fold(hsTm.tasks);
+    return m;
+  }, [team.tasks, aif.tasks, hsTm.tasks]);
+
+  // A local task starting or finishing means the server registry changed within seconds —
+  // re-poll (throttled) instead of letting counts sit up to 30 s stale mid-wave.
+  const transitionSig = useMemo(() => {
+    const sig = (ts: ReadonlyArray<{ local?: boolean; status: string }>) => {
+      let q = 0;
+      let run = 0;
+      let done = 0;
+      for (const t of ts) {
+        if (!t.local) continue;
+        if (t.status === "queued") q++;
+        else if (t.status === "running" || t.status === "submitted") run++;
+        else done++;
+      }
+      return `${q}:${run}:${done}`;
+    };
+    return `${sig(team.tasks)}|${sig(aif.tasks)}|${sig(hsTm.tasks)}`;
+  }, [team.tasks, aif.tasks, hsTm.tasks]);
+  const skipFirstSig = useRef(true);
   useEffect(() => {
+    if (skipFirstSig.current) {
+      skipFirstSig.current = false;
+      return;
+    }
+    refresh();
+  }, [transitionSig, refresh]);
+
+  useEffect(() => {
+    // Safe setState-in-effect: load() awaits the network before any setState — nothing here
+    // writes state synchronously (the lint can't see past the async boundary).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
     const onFocus = () => {
       stopped401.current = false;
@@ -163,11 +216,12 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
       windowMs: state.windowMs,
       accounts: state.accounts,
       skew: state.skew,
-      countFor: (id) => live(id)?.count ?? 0,
+      // Server truth + the user's own queued demand: what a NEW launch would actually face.
+      countFor: (id) => (live(id)?.count ?? 0) + (pending.get(acctIdKey(id)) ?? 0),
       resetAtFor: (id) => live(id)?.resetAt ?? null,
       refresh,
     };
-  }, [state, refresh]);
+  }, [state, pending, refresh]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

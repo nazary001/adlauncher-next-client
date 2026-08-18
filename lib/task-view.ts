@@ -31,6 +31,10 @@ export type LaunchTask = {
   updatedMs?: number;
   /** Created this session (has its input → can be retried). Restored rows are false. */
   local?: boolean;
+  /** Target ad account id (client-only, set at enqueue — NOT persisted to Strapi): feeds the
+   *  launch-limit's optimistic demand, so a board can't over-queue its own wave into one
+   *  account. Restored/foreign rows have none — their claims live in the server registry. */
+  account?: string;
 };
 
 /** A task with its display status resolved against owner liveness. */

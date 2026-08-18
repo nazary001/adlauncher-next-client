@@ -20,6 +20,7 @@ import { Header } from "./header";
 import { CampaignCard } from "./campaign-card";
 import { useFanpages } from "./use-fanpages";
 import { type AdAccountOption, defaultPixelFor, useAdAccounts } from "./use-adaccounts";
+import { type AcctLimits, acctIdKey, useAcctLimits } from "./use-acct-limit";
 import { useHs } from "./use-hs";
 import { LaunchRail } from "./launch-rail";
 import { CopySettingsModal } from "./copy-settings-modal";
@@ -58,21 +59,28 @@ function freshCard(id: string, partner: PartnerConfig, owner: string): Campaign 
 }
 
 /** Token-account partners: fill an empty/invalid account with the partner default (else the first
- *  token account) and keep the pixel on something the chosen account actually carries. Pure —
- *  returns the SAME array when nothing changes. */
+ *  token account) and keep the pixel on something the chosen account actually carries. When the
+ *  natural default sits at its 5/30min launch limit, the fill prefers the first account with
+ *  room (falls back to the full one when every account is full). Only ever touches EMPTY/invalid
+ *  accounts — a buyer's pick is never moved. Pure — returns the SAME array when nothing changes. */
 function fillAccountDefaults(
   rows: Campaign[],
   partner: PartnerConfig,
   adAccounts: AdAccountOption[] | null,
+  limits?: Pick<AcctLimits, "countFor" | "limit">,
 ): Campaign[] {
   if (!partner.accountsFromToken || !adAccounts || adAccounts.length === 0) return rows;
+  const hasRoom = (id: string) => !limits || limits.countFor(id) < limits.limit;
   let changed = false;
   const next = rows.map((c) => {
     let account = c.account;
     if (!account || !adAccounts.some((a) => a.value === account)) {
-      account = adAccounts.some((a) => a.value === partner.defaultAccount?.id)
+      const preferred = adAccounts.some((a) => a.value === partner.defaultAccount?.id)
         ? partner.defaultAccount!.id
         : adAccounts[0].value;
+      account = hasRoom(preferred)
+        ? preferred
+        : (adAccounts.find((a) => hasRoom(a.value))?.value ?? preferred);
     }
     let pixel = c.pixel;
     const pixels = adAccounts.find((a) => a.value === account)?.pixels ?? [];
@@ -108,6 +116,15 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // Count just sent to the Task Manager, shown as a brief confirmation (campaigns stay on the board).
   const [justQueued, setJustQueued] = useState(0);
   const queuedTimer = useRef<number | null>(null);
+  // Cards the last Launch click held back because their account hit the 5/30min launch limit.
+  const [heldBack, setHeldBack] = useState(0);
+  const heldTimer = useRef<number | null>(null);
+  // Per-account launch-limit picture (server counts + own queued demand) — gates the wave below.
+  const limits = useAcctLimits();
+  const limitsRef = useRef(limits);
+  useEffect(() => {
+    limitsRef.current = limits;
+  }, [limits]);
   // Card that a Launch-bay row jumped to (focus-pulses briefly).
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const hlTimer = useRef<number | null>(null);
@@ -189,7 +206,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // changes, so this never cascades.
   useEffect(() => {
     if (!adAccounts || adAccounts.length === 0) return;
-    setCampaigns((cs) => fillAccountDefaults(cs, partnerRef.current, adAccounts));
+    setCampaigns((cs) => fillAccountDefaults(cs, partnerRef.current, adAccounts, limitsRef.current));
   }, [adAccounts]);
 
   // Pull the live registry and (re)assign gcm codes above whatever is already used. Runs on
@@ -269,6 +286,28 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     const launchable = campaigns.filter((c) => isLaunchable(c, opts));
     if (launchable.length === 0) return;
 
+    // Account launch limit (5 campaigns / 30 min, all users & channels): send only what fits each
+    // account's remaining capacity — limits.countFor covers the server registry PLUS the user's
+    // own queued tasks, and sentNow covers this very wave (enqueued tasks only reach the pending
+    // fold on the next render). The overflow stays on the board with the amber rail note; the
+    // server-side claim remains the authority for whatever races past this check.
+    const sentNow = new Map<string, number>();
+    const fitsAcct = (acct: string): boolean => {
+      const k = acctIdKey(acct);
+      if (!k) return true; // no account bound (non-token partners) — nothing to meter here
+      return limits.countFor(k) + (sentNow.get(k) ?? 0) < limits.limit;
+    };
+    const noteSent = (acct: string) => {
+      const k = acctIdKey(acct);
+      if (k) sentNow.set(k, (sentNow.get(k) ?? 0) + 1);
+    };
+    let held = 0;
+    const showHeld = (n: number) => {
+      setHeldBack(n);
+      if (heldTimer.current) window.clearTimeout(heldTimer.current);
+      if (n > 0) heldTimer.current = window.setTimeout(() => setHeldBack(0), 8000);
+    };
+
     // HS: every launchable card becomes ONE submit on the picked rail — LION's create weapon
     // (one ad per creative URL, built on LION's side) or the FB Token rail (the same tree built
     // directly on the Graph by /api/hs/token-launch). Cards stay on the board for
@@ -281,6 +320,10 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       for (const c of launchable) {
         const media = c.files.filter((f) => f.kind === "video" || f.kind === "image");
         if (media.length === 0) continue;
+        if (!fitsAcct(c.account)) {
+          held++;
+          continue;
+        }
         hsTasks.enqueue({
           campaign: c,
           files: media,
@@ -290,10 +333,12 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
           budget: c.budget,
           channel,
         });
+        noteSent(c.account);
         sent++;
       }
       setPreviewed(false);
       setJustQueued(sent);
+      showHeld(held);
       // The drawer opens itself on a launch (owner ask 08-17): the queue's progress is the thing
       // the buyer needs to watch next, and the floating still-launching guard takes over if they
       // close it early.
@@ -311,6 +356,10 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     for (const c of launchable) {
       const media = firstMedia(c);
       if (!media) continue;
+      if (!fitsAcct(c.account)) {
+        held++;
+        continue;
+      }
       if (nextReserved && c.gcm) nextReserved.add(c.gcm);
       enqueue({
         partnerId,
@@ -323,6 +372,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
         geo: geoSummary(c.countries),
         budget: c.budget,
       });
+      noteSent(c.account);
       launched.add(c.id);
     }
     if (nextReserved) setReservedState({ api: launchApi, set: nextReserved });
@@ -335,12 +385,15 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     );
 
     setJustQueued(launched.size);
+    showHeld(held);
     if (queuedTimer.current) window.clearTimeout(queuedTimer.current);
     queuedTimer.current = window.setTimeout(() => setJustQueued(0), 3500);
   }
 
   function mutate(fn: (cs: Campaign[]) => Campaign[]) {
-    setCampaigns((cs) => fillAccountDefaults(normalize(fn(cs), partner, reserved), partner, adAccountsRef.current));
+    setCampaigns((cs) =>
+      fillAccountDefaults(normalize(fn(cs), partner, reserved), partner, adAccountsRef.current, limitsRef.current),
+    );
     setPreviewed(false);
   }
 
@@ -601,6 +654,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
             onHsChannel={changeHsChannel}
             previewed={previewed}
             justQueued={justQueued}
+            heldBack={heldBack}
             poolFree={poolFree}
             onJump={jumpTo}
             onPreview={() => setPreviewed(true)}

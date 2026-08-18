@@ -7,6 +7,7 @@ import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { type PartnerConfig, launchReadyOpts, markerPool } from "@/lib/partners";
 import type { HsLaunchChannel } from "./hs-task-manager";
 import { CheckIcon, EyeIcon, RocketIcon } from "./icons";
+import { useAcctLimits } from "./use-acct-limit";
 
 export function LaunchRail({
   campaigns,
@@ -17,6 +18,7 @@ export function LaunchRail({
   onHsChannel,
   previewed,
   justQueued,
+  heldBack = 0,
   poolFree,
   onJump,
   onPreview,
@@ -34,6 +36,8 @@ export function LaunchRail({
   previewed: boolean;
   /** Count just sent to the Task Manager — shows a brief confirmation; campaigns stay on the board. */
   justQueued: number;
+  /** Cards held on the board by the account launch limit during the last Launch click. */
+  heldBack?: number;
   /** Free gcm codes left in the registry pool (null while loading). 0 → launching hard-blocked. */
   poolFree?: number | null;
   /** Jump the page to a campaign card and focus-pulse it. */
@@ -43,7 +47,12 @@ export function LaunchRail({
 }) {
   const total = campaigns.reduce((s, c) => s + parseMoney(c.budget), 0);
   const opts = launchReadyOpts(partner);
-  const readyCount = campaigns.filter((c) => isLaunchable(c, opts)).length;
+  // Account launch limit (5/30min): a card bound to a full account is not launchable — the SAME
+  // predicate the card dot uses, so the bay count, the dots and the launch filter always agree.
+  const limits = useAcctLimits();
+  const launchableOf = (c: Campaign) =>
+    isLaunchable(c, opts) && !(c.account && limits.countFor(c.account) >= limits.limit);
+  const readyCount = campaigns.filter(launchableOf).length;
   const allReady = campaigns.length > 0 && readyCount === campaigns.length;
   // Registry pool exhausted → the button locks even for cards holding stale code previews: with
   // every code row taken, their claims can only fail server-side (the claim walks 400s then throws).
@@ -84,7 +93,7 @@ export function LaunchRail({
         ) : (
           <div className="-mx-2 flex min-h-0 flex-col overflow-y-auto overscroll-contain">
             {campaigns.map((c, i) => {
-              const ready = isLaunchable(c, opts);
+              const ready = launchableOf(c);
               const eventLabel =
                 CONVERSION_EVENTS.find((e) => e.value === c.conversionEvent)?.label ?? "";
               return (
@@ -246,6 +255,12 @@ export function LaunchRail({
             </button>
           ) : null}
 
+          {heldBack > 0 ? (
+            <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
+              {heldBack} held by the account limit (5 / 30 min) — they stay on the board; relaunch
+              after the reset or move them to another account.
+            </p>
+          ) : null}
           {gcmBlocked ? (
             <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">
               No free {pool?.label ?? "gcm"} codes left — launching is blocked until codes are freed in the registry.

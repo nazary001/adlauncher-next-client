@@ -30,6 +30,7 @@ import { AIF_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifSlugSaniti
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
 import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-adaccounts";
+import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
 import { Field, MoneyInput, Select, TextArea, TextInput, IconButton } from "./ui";
 import { SearchSelect } from "./search-select";
 import { MultiSelect } from "./multi-select";
@@ -64,8 +65,10 @@ function missingRequirements(
   c: Campaign,
   partner: PartnerConfig,
   opts: ReturnType<typeof launchReadyOpts>,
+  acctFull = false,
 ): string[] {
   const m: string[] = [];
+  if (acctFull) m.push("account at its 5/30min launch limit — pick another or wait for the reset");
   if (!c.name.trim()) m.push("name");
   if (c.countries.length === 0) m.push("geo");
   if (opts.account && !c.account) m.push("account");
@@ -260,8 +263,13 @@ export function CampaignCard({
   // Match the Launch bay + launch filter EXACTLY (isLaunchable = isReady + a video creative), so the
   // card dot can't show green "ready" while the rail refuses to launch it for want of a video.
   const opts = launchReadyOpts(partner);
-  const ready = isLaunchable(c, opts);
-  const missing = missingRequirements(c, partner, opts);
+  // Account launch limit (5 campaigns / 30 min, all users & channels): a full account blocks the
+  // card exactly like a missing field — dot, tooltip, rail and the launch filter all agree.
+  const limits = useAcctLimits();
+  const acctFull = Boolean(c.account) && limits.countFor(c.account) >= limits.limit;
+  const acctResetAt = acctFull ? limits.resetAtFor(c.account) : null;
+  const ready = isLaunchable(c, opts) && !acctFull;
+  const missing = missingRequirements(c, partner, opts, acctFull);
   const bidCapEnabled = c.bidStrategy !== "LOWEST_COST_WITHOUT_CAP";
 
   // ---- AIF mode: MO-style pickers on the AIF token; destination = free-typed slug; the pixel
@@ -501,20 +509,22 @@ export function CampaignCard({
                   label="Account"
                   className={setupCol}
                   error={
-                    hsMode
-                      ? c.profile && hsData && !c.account
-                        ? "Pick an account"
-                        : undefined
-                      : partner.accountsFromToken && (adAccounts?.length ?? 0) > 0 && !c.account
-                        ? "Pick an account"
-                        : undefined
+                    acctFull && acctResetAt
+                      ? `Account 5/5 — resets in ${fmtCountdown(acctResetAt, limits.skew)}`
+                      : hsMode
+                        ? c.profile && hsData && !c.account
+                          ? "Pick an account"
+                          : undefined
+                        : partner.accountsFromToken && (adAccounts?.length ?? 0) > 0 && !c.account
+                          ? "Pick an account"
+                          : undefined
                   }
                 >
                   {hsMode ? (
                     <SearchSelect
                       value={c.account}
                       onChange={(v) => patch({ account: v, pixel: "" })}
-                      options={hsData?.accounts ?? []}
+                      options={decorateAccountOptions(hsData?.accounts ?? [], limits)}
                       placeholder="Search account"
                       emptyHint={
                         !c.profile
@@ -541,7 +551,7 @@ export function CampaignCard({
                               : defaultPixelFor(adAccounts ?? null, v, partner.preferredPixel),
                         })
                       }
-                      options={adAccounts ?? []}
+                      options={decorateAccountOptions(adAccounts ?? [], limits)}
                       placeholder="Search account"
                       emptyHint={adAccounts ? "No accounts on the token" : "Loading accounts…"}
                     />

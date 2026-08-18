@@ -862,6 +862,8 @@ function TaskManagerCore({
           budget: args.budget,
           status: "queued" as const,
           stage: null,
+          // Client-only: the launch-limit's optimistic demand (never persisted).
+          account: args.campaign.account || undefined,
           queuedAt,
           local: true,
         },
@@ -902,6 +904,9 @@ function TaskManagerCore({
           budget: args.budget,
           status: "queued" as const,
           stage: null,
+          // Client-only demand key: the TARGET account when picked; from-each-source clones have
+          // none (their accounts differ per source — the server claim meters those).
+          account: args.edit.accountId?.trim() ? args.edit.accountId : undefined,
           queuedAt,
           local: true,
         },
