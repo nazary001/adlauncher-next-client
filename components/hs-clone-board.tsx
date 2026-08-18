@@ -6,6 +6,7 @@ import { Field } from "./ui";
 import { SearchSelect } from "./search-select";
 import { useHs } from "./use-hs";
 import { useHsTaskManager } from "./hs-task-manager";
+import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
 import { limitMoney, moneyLabel, parseMoney } from "@/lib/types";
 import { geoSummary } from "@/lib/catalog";
 import { todaySaoPauloDDMM } from "@/lib/hs-launch";
@@ -253,13 +254,19 @@ export function HsCloneBoard({
   const validRows = rows.filter((r) => /^\d{5,}$/.test(r.campaignId.trim()) && parseMoney(r.budget) >= 1);
   const unreadable = rows.filter((r) => r.info?.status === "UNREADABLE").length;
   const totalClones = validRows.length * copiesN;
+  // Account launch limit (5 campaigns / 30 min): the wave binds ONE account, so an over-capacity
+  // fire is blocked here with the countdown (the server precheck would 429 it anyway).
+  const limits = useAcctLimits();
+  const acctRemaining = account ? Math.max(0, limits.limit - limits.countFor(account)) : null;
+  const acctOver = acctRemaining !== null && totalClones > acctRemaining;
+  const acctResetAt = account ? limits.resetAtFor(account) : null;
 
   // The server pump takes the whole wave in ONE call and paces/polls/activates it after the
   // response (fire-and-forget, owner ask 08-14) — its shot cap must fit the pump's time budget.
   const MAX_SHOTS_PER_FIRE = 45;
 
   async function duplicateAll() {
-    if (!bindsReady || validRows.length === 0 || firing) return;
+    if (!bindsReady || validRows.length === 0 || firing || acctOver) return;
     if (totalClones > MAX_SHOTS_PER_FIRE) {
       alert(
         `That's ${totalClones} clones — the server fires at most ${MAX_SHOTS_PER_FIRE} per wave. ` +
@@ -358,7 +365,7 @@ export function HsCloneBoard({
                 <SearchSelect
                   value={account}
                   onChange={pickAccount}
-                  options={data?.accounts ?? []}
+                  options={decorateAccountOptions(data?.accounts ?? [], limits)}
                   placeholder="Search account"
                   emptyHint={!profile ? "Pick a profile first" : data ? "No enabled accounts" : "Loading…"}
                 />
@@ -419,7 +426,7 @@ export function HsCloneBoard({
                 <button
                   type="button"
                   onClick={() => void duplicateAll()}
-                  disabled={!bindsReady || validRows.length === 0 || firing}
+                  disabled={!bindsReady || validRows.length === 0 || firing || acctOver}
                   className={
                     "animate-pop-in flex h-11 w-full items-center justify-center gap-2 rounded-xl " +
                     "bg-gradient-to-b from-launch2 to-launch text-[13.5px] font-bold text-[#032e20] " +
@@ -432,6 +439,14 @@ export function HsCloneBoard({
                   <CopyIcon className="h-4 w-4" />
                   {firing ? "Submitting…" : `Duplicate ${totalClones} clone${totalClones === 1 ? "" : "s"}`}
                 </button>
+              ) : null}
+              {bindsReady && acctOver ? (
+                <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
+                  Account limit — only {acctRemaining} of {totalClones} clones fit this
+                  account&apos;s 30-min window
+                  {acctResetAt ? ` · resets in ${fmtCountdown(acctResetAt, limits.skew)}` : ""}.
+                  Trim copies/rows or pick another account.
+                </p>
               ) : null}
               <p className="text-center text-[10.5px] leading-relaxed text-faint">
                 {bindsReady
