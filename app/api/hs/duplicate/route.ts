@@ -3,6 +3,15 @@ import { bidKind, parseMoney } from "@/lib/types";
 import { hsWireBid } from "@/lib/hs-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { readAppCache, writeAppCache } from "@/lib/app-cache";
+import {
+  ACCT_LIMIT,
+  AcctLimitedError,
+  acctKey,
+  acctLimitMessage,
+  acctLimitSnapshot,
+  claimAcctSlot,
+  releaseAcctSlot,
+} from "@/lib/acct-limit";
 import { stampHsTaskRow, upsertTaskRow } from "@/lib/task-store";
 import {
   LionError,
@@ -54,7 +63,7 @@ async function validateBinds(
   account: string,
   page: string,
   pixel: string,
-): Promise<{ error: NextResponse } | { currency: string }> {
+): Promise<{ error: NextResponse } | { currency: string; accountName: string }> {
   let data;
   try {
     data = await lionProfileData(profile);
@@ -73,7 +82,7 @@ async function validateBinds(
     return { error: bad(`lion_unreachable: ${(e as Error).message}`, 502) };
   }
   if (!pixels.some((p) => p.id === pixel)) return { error: bad("pixel_not_on_account") };
-  return { currency: acct.currency || "USD" };
+  return { currency: acct.currency || "USD", accountName: acct.name || "" };
 }
 
 type BatchShot = {
@@ -212,6 +221,30 @@ export async function POST(req: Request): Promise<NextResponse> {
       return alreadyAccepted();
     }
 
+    // ---- account launch-limit precheck (5 campaigns / 30 min per ad account, owner rule
+    // 2026-08-18): the whole wave lands in ONE account, so an over-capacity wave is refused up
+    // front with the countdown instead of stamping rows destined to fail. Runs AFTER the wave-
+    // idempotency checks (a re-POST of an already-pumped wave must answer alreadyAccepted, not
+    // 429 off its own consumed slots). The per-shot claim in the pump stays the authority.
+    {
+      let snap;
+      try {
+        snap = await acctLimitSnapshot();
+      } catch {
+        return bad("acct_limit_unavailable — wave blocked (launch registry unreachable)", 503);
+      }
+      const info = snap.accounts[acctKey(account)];
+      const remaining = ACCT_LIMIT - (info?.count ?? 0);
+      if (info && remaining <= 0) return bad(acctLimitMessage(info.resetAt), 429);
+      if (shots.length > remaining) {
+        const tail = info ? ` — ${acctLimitMessage(info.resetAt)}` : "";
+        return bad(
+          `account_limit — only ${Math.max(0, remaining)} of ${shots.length} clones fit this account's 30-min window${tail}`,
+          429,
+        );
+      }
+    }
+
     // Rows land in the shared store BEFORE the claim and the response: the team (and this
     // buyer's next tab) sees the wave as queued even if the browser closes on the very next
     // tick, and a crash between stamping and claiming stays retryable (the re-POST re-stamps
@@ -252,7 +285,7 @@ export async function POST(req: Request): Promise<NextResponse> {
 
     const user = session.username;
     const deadline = startedAt + PUMP_BUDGET_MS;
-    after(() => pumpBatch(user, { profile, account, page, pixel }, shots, deadline));
+    after(() => pumpBatch(user, { profile, account, page, pixel, accountName: binds.accountName }, shots, deadline));
 
     return NextResponse.json({
       ok: true,
@@ -304,6 +337,27 @@ export async function POST(req: Request): Promise<NextResponse> {
     startingBid = wire;
   }
 
+  // Account launch slots (5 campaigns / 30 min per ad account): the legacy shape creates
+  // `copies` clones in ONE LION call, so it needs `copies` slots up front. Limited/store-down
+  // mid-claim → everything just claimed goes back and the request is refused with the countdown.
+  const acctSlots: string[] = [];
+  try {
+    for (let i = 0; i < copies; i++) {
+      const s = await claimAcctSlot(acctKey(account), {
+        user: session.username,
+        partner: "br",
+        channel: "hs-dup",
+        name: name || `Clone of ${campaignId}`,
+        accountName: binds.accountName || "",
+      });
+      acctSlots.push(s.documentId);
+    }
+  } catch (e) {
+    await Promise.all(acctSlots.map((d) => releaseAcctSlot(d)));
+    if (e instanceof AcctLimitedError) return bad(e.message, 429);
+    return bad((e as Error).message ?? String(e), 503);
+  }
+
   // ---- submit ----
   try {
     const result = await lionDuplicate({
@@ -339,15 +393,24 @@ export async function POST(req: Request): Promise<NextResponse> {
           }),
         ),
       );
+      // LION accepted fewer copies than asked → the surplus slots go back to the pool.
+      if (acctSlots.length > taskIds.length) {
+        await Promise.all(acctSlots.slice(taskIds.length).map((d) => releaseAcctSlot(d)));
+      }
       return NextResponse.json({ ok: true, rows, taskIds, currency: binds.currency });
     }
     // Preflight rejection — LION's reason is the actionable text ("No valid creative URL found
     // in campaign ads" = object-story source → not duplicable; dead/unreadable source; …).
+    // Nothing was created → every claimed slot goes back.
+    await Promise.all(acctSlots.map((d) => releaseAcctSlot(d)));
     return bad(result.reason || `LION rejected the duplicate (${result.result ?? "no result"})`);
   } catch (e) {
     // 404 plain-text bodies ("Page not found in account data", "Pixel not found for account")
-    // surface verbatim — they are the actionable reason, not a transport failure.
+    // surface verbatim — they are the actionable reason, not a transport failure. A 4xx is a
+    // clean LION-side refusal (no clones created → slots released); 5xx/transport is ambiguous —
+    // the clones may exist, so the slots stay consumed.
     const status = e instanceof LionError && e.status && e.status < 500 ? 400 : 502;
+    if (status === 400) await Promise.all(acctSlots.map((d) => releaseAcctSlot(d)));
     return bad(`lion_duplicate_failed: ${(e as Error).message}`, status);
   }
 }
@@ -373,7 +436,7 @@ const rowWrite = (user: string, taskId: string, fields: Record<string, unknown>)
  */
 async function pumpBatch(
   user: string,
-  binds: { profile: string; account: string; page: string; pixel: string },
+  binds: { profile: string; account: string; page: string; pixel: string; accountName?: string },
   shots: BatchShot[],
   deadline: number,
 ): Promise<void> {
@@ -409,6 +472,7 @@ async function pumpBatch(
         });
         continue;
       }
+      let slotDoc: string | null = null;
       try {
         let startingBid: number | undefined;
         if (s.bid != null) {
@@ -430,6 +494,18 @@ async function pumpBatch(
           }
           startingBid = wire;
         }
+        // Account launch slot (5 campaigns / 30 min per ad account) — claimed right before the
+        // submit; released on a clean preflight rejection below, KEPT on ambiguous outcomes
+        // (the clone may exist on LION). A full window stops the whole wave in the catch.
+        slotDoc = (
+          await claimAcctSlot(acctKey(binds.account), {
+            user,
+            partner: "br",
+            channel: "hs-dup",
+            name: s.name || s.label || `Clone of ${s.campaignId}`,
+            accountName: binds.accountName || "",
+          })
+        ).documentId;
         const result = await lionDuplicate({
           profile_slug: binds.profile,
           account_id: binds.account,
@@ -450,16 +526,35 @@ async function pumpBatch(
           await rowWrite(user, s.taskId, { link: lionTaskId, started_at: Date.now() });
         } else {
           // Preflight rejection kills the whole family (object-story creatives, dead source…).
+          // No clone was created → the account slot goes back to the pool.
+          await releaseAcctSlot(slotDoc);
           const reason = result.reason || `LION rejected the duplicate (${result.result ?? "no result"})`;
           familyFailed.set(s.campaignId, reason);
           s.settled = true;
           await rowWrite(user, s.taskId, { status: "error", error: reason, finished_at: Date.now() });
         }
       } catch (e) {
+        // Account window full / limit registry down: every later shot targets the SAME account,
+        // so settle them all with the countdown message and stop submitting (deterministic —
+        // the pump's whole budget fits inside one 30-min window).
+        if (e instanceof AcctLimitedError || /acct_limit_unavailable/.test(String((e as Error).message ?? ""))) {
+          const msg = (e as Error).message ?? String(e);
+          for (let j = i; j < shots.length; j++) {
+            const rest = shots[j];
+            if (rest.settled || rest.lionTaskId) continue;
+            rest.settled = true;
+            await rowWrite(user, rest.taskId, { status: "error", error: msg, finished_at: Date.now() });
+          }
+          break;
+        }
         const msg = `lion_duplicate_failed: ${(e as Error).message ?? e}`;
         // 4xx = LION-side semantic answer (page/pixel not in account data…) — deterministic for
-        // the family; 5xx/transport may be transient, so only this shot is marked.
-        if (e instanceof LionError && e.status && e.status < 500) familyFailed.set(s.campaignId, msg);
+        // the family (and no clone was created → the slot goes back); 5xx/transport may be
+        // transient AND ambiguous, so only this shot is marked and the slot stays consumed.
+        if (e instanceof LionError && e.status && e.status < 500) {
+          familyFailed.set(s.campaignId, msg);
+          await releaseAcctSlot(slotDoc);
+        }
         s.settled = true;
         await rowWrite(user, s.taskId, { status: "error", error: msg, finished_at: Date.now() });
       }

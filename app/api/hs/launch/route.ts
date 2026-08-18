@@ -3,6 +3,7 @@ import type { Campaign } from "@/lib/types";
 import { hsCampaignError, hsCountryCodes, hsCreatePayload, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { stampHsTaskRow } from "@/lib/task-store";
+import { AcctLimitedError, acctKey, claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 import {
   LION_ACR,
   LionError,
@@ -78,6 +79,25 @@ export async function POST(req: Request): Promise<NextResponse> {
 
   // ---- build + submit ----
   const payload = hsCreatePayload(c, creatives, data.locales, LION_ACR, todaySaoPauloDDMM());
+
+  // Account launch slot (5 campaigns / 30 min per ad account, every channel — owner rule
+  // 2026-08-18), claimed right before the LION submit. Kept once LION accepts (a campaign will
+  // exist); released on a clean LION rejection; KEPT on an ambiguous submit error — the create
+  // may have landed (same exactly-once philosophy as the duplicate pump).
+  let acctSlot: { documentId: string } | null = null;
+  try {
+    acctSlot = await claimAcctSlot(acctKey(c.account), {
+      user: session.username,
+      partner: "br",
+      channel: "hs-lion",
+      name: String(payload.campaign_name ?? ""),
+      accountName: account.name || "",
+    });
+  } catch (e) {
+    if (e instanceof AcctLimitedError) return bad(e.message, 429);
+    return bad((e as Error).message ?? String(e), 503);
+  }
+
   try {
     const result = await lionCreateCampaign({
       profile_slug: c.profile,
@@ -104,8 +124,11 @@ export async function POST(req: Request): Promise<NextResponse> {
       return NextResponse.json({ ok: true, lionTaskId, name, currency: account.currency || "USD" });
     }
     // Per-campaign rejection — LION's reason is the actionable text (name mismatch, missing field…).
+    // No campaign was created → the account slot goes back to the pool.
+    await releaseAcctSlot(acctSlot.documentId);
     return bad(result.reason || `LION rejected the campaign (${result.result})`);
   } catch (e) {
+    // Ambiguous outcome (network/5xx) — the create may have landed on LION, so the slot is KEPT.
     return bad(`lion_create_failed: ${(e as Error).message}`, 502);
   }
 }

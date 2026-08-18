@@ -33,6 +33,7 @@ import {
 import { LION_ACR, LionError, lionAccountPixels, lionConfigured, lionProfileData } from "@/lib/lion";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { taskWriter } from "@/lib/task-store";
+import { acctKey, claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -184,10 +185,22 @@ export async function POST(req: Request): Promise<Response> {
         }, 30_000);
         const created: Json = {};
         const adIds: string[] = [];
+        let acctSlot: { documentId: string } | null = null;
         try {
+          // 0) account launch slot (5 campaigns / 30 min per ad account, every channel — owner
+          // rule 2026-08-18) — claimed before any FB work; released below on any pre-campaign
+          // failure (media registration included: no campaign exists yet).
+          progress("submit");
+          acctSlot = await claimAcctSlot(acctKey(binds.accountId), {
+            user: session.username,
+            partner: "br",
+            channel: "hs-token",
+            name,
+            accountName: account.name || "",
+          });
+
           // 1) register every creative first (a media failure must not orphan a campaign shell).
           // "submit" is the client's wire stage for this phase — its bar maps it to "on Facebook".
-          progress("submit");
           type Media =
             | { kind: "video"; videoId: string; thumbUrl: string }
             | { kind: "image"; imageHash: string };
@@ -270,6 +283,9 @@ export async function POST(req: Request): Promise<Response> {
           });
         } catch (e) {
           const err = e as FbError;
+          // Free the account's launch slot when NO campaign was created — the window meters only
+          // campaigns that exist. Once one exists the slot stays consumed.
+          if (acctSlot && !created.campaign_id) await releaseAcctSlot(acctSlot.documentId);
           // Partial trees stay traceable: the ids that DID land ride in the row and the error
           // event, and the client blocks a retry once a campaign exists (a re-fire would build a
           // second one — the buyer settles the partial in Ads Manager instead).
