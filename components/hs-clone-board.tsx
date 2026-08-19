@@ -292,6 +292,24 @@ export function HsCloneBoard({
   const MAX_TOKEN_SHOTS_PER_FIRE = 10;
   const effDupChannel: "lion" | "token" = dupChannel === "token" && hs.tokenLaunch ? "token" : "lion";
 
+  // FB Token rail: offer only accounts OUR token can act on — LION binds cover segments the token
+  // was never granted (aleph, 08-19), and a clone there dies on the first Graph POST. null sweep →
+  // no filtering (fail open; the server guard still answers with the actionable error).
+  const tokenVisible = effDupChannel === "token" ? (data?.tokenAccounts ?? null) : null;
+  const accountOptions =
+    tokenVisible !== null ? (data?.accounts ?? []).filter((a) => tokenVisible.has(a.value)) : (data?.accounts ?? []);
+  // A picked account that the rail switch just hid would submit a bind the picker can't display —
+  // clear it (and its dependent pixel), same self-heal idiom as the card's unlisted-pixel guard.
+  const accountHidden = Boolean(account) && tokenVisible !== null && !tokenVisible.has(account);
+  useEffect(() => {
+    if (!accountHidden) return;
+    // Safe setState-in-effect: converges in one pass (account clears → accountHidden false).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setAccount("");
+    setPixel("");
+    setPreviewed(false);
+  }, [accountHidden]);
+
   async function duplicateAll() {
     if (!bindsReady || validRows.length === 0 || firing || acctOver || limits.staleBuild) return;
     const cap = effDupChannel === "token" ? MAX_TOKEN_SHOTS_PER_FIRE : MAX_SHOTS_PER_FIRE;
@@ -395,9 +413,17 @@ export function HsCloneBoard({
                 <SearchSelect
                   value={account}
                   onChange={pickAccount}
-                  options={decorateAccountOptions(data?.accounts ?? [], limits)}
+                  options={decorateAccountOptions(accountOptions, limits)}
                   placeholder="Search account"
-                  emptyHint={!profile ? "Pick a profile first" : data ? "No enabled accounts" : "Loading…"}
+                  emptyHint={
+                    !profile
+                      ? "Pick a profile first"
+                      : !data
+                        ? "Loading…"
+                        : tokenVisible !== null && (data.accounts?.length ?? 0) > 0 && accountOptions.length === 0
+                          ? "No accounts here are visible to our FB token — use the LION API rail (or another profile)"
+                          : "No enabled accounts"
+                  }
                 />
               </Field>
               <Field label="Page">

@@ -15,6 +15,9 @@ export type HsProfileData = {
   locales: { id: string; name: string }[];
   /** account_id → its currency (budget/bid hint). */
   currencies: Record<string, string>;
+  /** Account ids (same "act_…" format as accounts[].value) OUR FB token can act on — the FB
+   *  Token rail offers only these. null = server couldn't sweep → don't filter (fail open). */
+  tokenAccounts: ReadonlySet<string> | null;
 };
 
 export type HsCatalog = {
@@ -164,6 +167,7 @@ export function useHs(enabled: boolean): HsCatalog {
             accounts?: { id: string; name: string; currency: string; status: number }[];
             pages?: { id: string; name: string }[];
             locales?: { id: number; name: string }[];
+            tokenAccounts?: string[] | null;
           };
           if (!r.ok || !d?.ok) throw new Error(`HTTP ${r.status}`);
           // Disabled accounts are DROPPED entirely (owner call 2026-08-11) — the picker offers
@@ -195,6 +199,7 @@ export function useHs(enabled: boolean): HsCatalog {
             })),
             locales: (d.locales ?? []).map((l) => ({ id: String(l.id), name: l.name })),
             currencies,
+            tokenAccounts: Array.isArray(d.tokenAccounts) ? new Set(d.tokenAccounts.map(String)) : null,
           };
           failedAt.current.delete(key);
           doneRef.current.add(key);

@@ -37,6 +37,47 @@ export const hsVideoThumb = (videoId: string): Promise<string> => videoThumb(vid
 export const hsCreateAdset = (path: string, payload: Json): Promise<Json> =>
   createAdsetSelfHealing(path, payload, HS_FB_TOKEN);
 
+// ---- Token-visible ad accounts ----------------------------------------------------------------
+// The partner's park is bigger than what they share to our token user: LION profiles bind whole
+// segments (e.g. the FARM profiles carry the HR_GC-HS-aleph-* accounts, 08-19) that Gcforhs2 has
+// never been granted — a launch there passes the LION bind check and then dies on the first Graph
+// POST with "Unsupported post request". This sweep is the ground truth the pickers and the token
+// routes filter against. Cached like LION's profile data; null = sweep unavailable (callers fail
+// OPEN — the Graph error itself is then the backstop, exactly the pre-filter behaviour).
+
+const ACCT_CACHE_MS = 10 * 60_000;
+let acctCache: { at: number; ids: Set<string> } | null = null;
+let acctInflight: Promise<Set<string> | null> | null = null;
+
+/** Digit ids of every ad account the HS token can act on (act_ stripped), or null when the
+ *  sweep fails. One Graph pagination per 10 min across all callers. */
+export function hsTokenAccountIds(): Promise<Set<string> | null> {
+  if (acctCache && Date.now() - acctCache.at < ACCT_CACHE_MS) return Promise.resolve(acctCache.ids);
+  if (acctInflight) return acctInflight;
+  acctInflight = (async () => {
+    try {
+      const ids = new Set<string>();
+      let after = "";
+      for (let i = 0; i < 20; i++) {
+        const body = await hsFbGet(`me/adaccounts?fields=account_id&limit=500${after ? `&after=${encodeURIComponent(after)}` : ""}`);
+        for (const row of (body.data as { account_id?: unknown }[] | undefined) ?? []) {
+          if (row?.account_id) ids.add(String(row.account_id));
+        }
+        const paging = body.paging as { next?: string; cursors?: { after?: string } } | undefined;
+        after = paging?.next && paging.cursors?.after ? String(paging.cursors.after) : "";
+        if (!after) break;
+      }
+      acctCache = { at: Date.now(), ids };
+      return ids;
+    } catch {
+      return null; // transient Graph failure — no negative cache, next caller retries
+    } finally {
+      acctInflight = null;
+    }
+  })();
+  return acctInflight;
+}
+
 /** Partner rule: token-rail campaigns must not start delivering for ~30 minutes after creation
  *  ("we always launch the campaigns with a 30 min gap … it takes some minutes for our routines
  *  to add the campaign id to the reportable keys"). The LION rail needs no gap here — the weapon

@@ -22,6 +22,7 @@ import {
   type HsTokenCreative,
   hsCreateAdset,
   hsFbPost,
+  hsTokenAccountIds,
   hsTokenConfigured,
   hsTokenStartTime,
   hsUploadImage,
@@ -119,6 +120,18 @@ export async function POST(req: Request): Promise<Response> {
     return bad(`lion_unreachable: ${(e as Error).message}`, 502);
   }
   if (!pixels.some((p) => p.id === c.pixel)) return bad("pixel_not_on_account");
+
+  // LION binds cover segments our token was never granted (aleph, 08-19) — there the first Graph
+  // POST dies with an unexplained "Unsupported post request". Refuse those up front; a failed
+  // sweep (null) falls OPEN so a Graph blip can't block launches into provably-fine accounts.
+  {
+    const visible = await hsTokenAccountIds();
+    if (visible && !visible.has(c.account.replace(/^act_/, ""))) {
+      return bad(
+        "account_not_visible_to_fb_token — our FB token was never granted this ad account; launch it on the LION API rail (or pick a token-visible account)",
+      );
+    }
+  }
 
   const binds: LaunchBinds = {
     accountId: c.account.replace(/^act_/, ""),

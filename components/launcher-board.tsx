@@ -638,6 +638,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
                 // Covers ride only on OUR FB token (owner rule): MO/AIF rails always do; HS only
                 // while the FB Token channel is picked — the LION weapon picks its own frame.
                 coversEnabled={partner.lionLaunch ? hsChannel === "token" && hs.tokenLaunch : true}
+                // FB Token rail picked → the card's account picker filters to token-visible ones.
+                hsTokenRail={partner.lionLaunch ? hsChannel === "token" && hs.tokenLaunch : false}
                 onPatch={patch}
                 onToggleCollapse={toggleCollapse}
                 onDuplicate={duplicate}

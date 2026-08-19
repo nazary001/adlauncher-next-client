@@ -10,6 +10,7 @@ import {
   hsFbGet,
   hsFbPost,
   hsRawToken,
+  hsTokenAccountIds,
   hsTokenConfigured,
   hsTokenStartTime,
 } from "@/lib/hs-token-launch";
@@ -172,6 +173,19 @@ export async function POST(req: Request): Promise<NextResponse> {
 
   const binds = await validateBinds(profile, account, page, pixel);
   if ("error" in binds) return binds.error;
+
+  // LION binds cover segments our token was never granted (aleph, 08-19) — there the wave burns
+  // on the first Graph call. Refuse the TARGET up front; a failed sweep (null) falls OPEN so a
+  // Graph blip can't block clones into provably-fine accounts. (An unreadable SOURCE still fails
+  // per shot inside the pump — its account is only known after the source read.)
+  {
+    const visible = await hsTokenAccountIds();
+    if (visible && !visible.has(acctKey(account))) {
+      return bad(
+        "account_not_visible_to_fb_token — our FB token was never granted this ad account; duplicate on the LION API rail (or pick a token-visible account)",
+      );
+    }
+  }
 
   // Account launch-limit precheck — the wave lands in ONE account (same rule as the LION rail).
   {

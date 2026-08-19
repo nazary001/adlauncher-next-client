@@ -227,6 +227,7 @@ export function CampaignCard({
   hs,
   highlight,
   coversEnabled,
+  hsTokenRail,
   onPatch,
   onToggleCollapse,
   onDuplicate,
@@ -249,6 +250,10 @@ export function CampaignCard({
    *  (MO / AIF always; HS only while the FB Token rail is picked — LION's create contract
    *  takes bare URLs and picks its own frame, owner rule 2026-08-18). */
   coversEnabled?: boolean;
+  /** HS: the FB Token rail is picked — the account picker offers only token-visible accounts
+   *  (LION binds cover segments the token was never granted; a launch there burns on the first
+   *  Graph POST — aleph, 2026-08-19). */
+  hsTokenRail?: boolean;
   onPatch: (id: string, patch: Partial<Campaign>) => void;
   onToggleCollapse: (id: string) => void;
   onDuplicate: (id: string) => void;
@@ -320,6 +325,20 @@ export function CampaignCard({
   useEffect(() => {
     if (hsPixelUnlisted) onPatch(c.id, { pixel: "" });
   }, [hsPixelUnlisted, onPatch, c.id]);
+  // FB Token rail: offer only accounts OUR token can act on — LION binds cover segments the
+  // token was never granted (aleph, 08-19), and a launch there dies on the first Graph POST.
+  // null sweep → no filtering (fail open; the token route's guard still refuses cleanly).
+  const hsTokenVisible = hsMode && hsTokenRail ? (hsData?.tokenAccounts ?? null) : null;
+  const hsAccountOptions =
+    hsTokenVisible !== null
+      ? (hsData?.accounts ?? []).filter((a) => hsTokenVisible.has(a.value))
+      : (hsData?.accounts ?? []);
+  // A stored account the rail switch just hid would submit a bind the picker can't display —
+  // clear it (and the dependent pixel), same self-heal idiom as the unlisted-pixel guard above.
+  const hsAccountHidden = Boolean(c.account) && hsTokenVisible !== null && !hsTokenVisible.has(c.account);
+  useEffect(() => {
+    if (hsAccountHidden) onPatch(c.id, { account: "", pixel: "" });
+  }, [hsAccountHidden, onPatch, c.id]);
   const hsCurrency = hsMode ? hsData?.currencies?.[c.account] || "" : "";
   // The LION-validated name prefix is DERIVED (date + ACR + redirect label + geo) — it re-renders
   // live as the buyer flips redirect type or geo; the server rebuilds the exact same string.
@@ -529,14 +548,18 @@ export function CampaignCard({
                     <SearchSelect
                       value={c.account}
                       onChange={(v) => patch({ account: v, pixel: "" })}
-                      options={decorateAccountOptions(hsData?.accounts ?? [], limits)}
+                      options={decorateAccountOptions(hsAccountOptions, limits)}
                       placeholder="Search account"
                       emptyHint={
                         !c.profile
                           ? "Pick a profile first"
-                          : hsData
-                            ? "No accounts on this profile"
-                            : "Loading accounts…"
+                          : !hsData
+                            ? "Loading accounts…"
+                            : hsTokenVisible !== null &&
+                                (hsData.accounts?.length ?? 0) > 0 &&
+                                hsAccountOptions.length === 0
+                              ? "No accounts here are visible to our FB token — use the LION API rail (or another profile)"
+                              : "No accounts on this profile"
                       }
                       metaWhenClosed
                     />
