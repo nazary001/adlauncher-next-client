@@ -10,8 +10,10 @@ import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-
 import { limitMoney, moneyLabel, parseMoney } from "@/lib/types";
 import { geoSummary } from "@/lib/catalog";
 import { todaySaoPauloDDMM } from "@/lib/hs-launch";
+import { relabelNameGeo } from "@/lib/targeting-override";
 import type { PartnerId } from "@/lib/partners";
-import { CopyIcon, EyeIcon, PlusIcon, TrashIcon } from "./icons";
+import { CopyIcon, EyeIcon, GlobeIcon, PlusIcon, TrashIcon } from "./icons";
+import { HsTargetingModal } from "./hs-targeting-modal";
 import type { SessionUser } from "./user-menu";
 
 const MAX_COPIES = 20;
@@ -35,6 +37,10 @@ type Row = {
   bid: string; // editable override; "" = inherit from source (safe default)
   budget: string; // editable, display string → cents on the wire
   suffix: string;
+  /** Targeting override (modal): geo codes (["WW"] = worldwide) — empty = inherit the source's. */
+  countries: string[];
+  /** Targeting override: FB locale ids from the picked profile — empty = inherit the source's. */
+  locales: string[];
   state: "idle" | "sending" | "ok" | "error";
   msg?: string;
 };
@@ -94,8 +100,14 @@ const freshRow = (campaignId: string, n: number): Row => ({
   bid: "",
   budget: "10",
   suffix: "", // becomes the source's old TAIL once LION answers — an editable replacement
+  countries: [],
+  locales: [],
   state: "idle",
 });
+
+/** Display label for a row's geo override ("World" for WW, else the summary of the codes). */
+const overrideGeoLabel = (codes: string[]): string =>
+  codes.includes("WW") ? "World" : geoSummary(codes);
 
 /**
  * HS duplicator, structured like LION's own duplicator UI: a Settings column (destination binds
@@ -148,6 +160,7 @@ export function HsCloneBoard({
     }
   };
   const [draftId, setDraftId] = useState("");
+  const [targetingRowId, setTargetingRowId] = useState<string | null>(null);
   const counter = useRef(1);
   // One waveId per PREPARED wave (same binds + same shots): a retry-click after a lost answer
   // re-sends the same id, and the server's wave claim makes the re-POST a no-op instead of a
@@ -326,12 +339,20 @@ export function HsCloneBoard({
     // activation all happen server-side, so the tab may be closed right after this resolves.
     const shots = validRows.flatMap((r) => {
       const cid = r.campaignId.trim();
-      const geo = r.info?.countries.length
-        ? geoSummary(r.info.countries)
-        : r.info?.name
-          ? geoFromName(r.info.name, geoSummary) || "inherited"
-          : "inherited";
+      const overridden = r.countries.length > 0;
+      const geo = overridden
+        ? overrideGeoLabel(r.countries)
+        : r.info?.countries.length
+          ? geoSummary(r.info.countries)
+          : r.info?.name
+            ? geoFromName(r.info.name, geoSummary) || "inherited"
+            : "inherited";
       const label = r.info?.name || `#${cid}`;
+      // Geo override relabels the name's [CODES] slot too — names must never disagree with the
+      // clone's real targeting (their ecosystem parses geo from names).
+      const prefix = r.info?.name
+        ? relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)
+        : "";
       return Array.from({ length: copiesN }, (_, copy) => ({
         campaignId: cid,
         budget: r.budget,
@@ -342,9 +363,11 @@ export function HsCloneBoard({
         geo,
         // Full name = fixed grammar prefix + the buyer's tail (replaces the old one).
         // When the source couldn't be read there's no prefix — LION rebuilds the name.
-        ...(r.info?.name
-          ? { name: `${splitLionName(r.info.name, todaySaoPauloDDMM()).prefix}${r.suffix.trim()}`.trim() }
-          : {}),
+        ...(r.info?.name ? { name: `${prefix}${r.suffix.trim()}`.trim() } : {}),
+        // Targeting override — the server patches the clone (token rail: before creating the ad
+        // set; LION rail: through the Graph once the clone is born).
+        ...(overridden ? { countries: r.countries } : {}),
+        ...(r.locales.length ? { locales: r.locales } : {}),
         label: copiesN > 1 ? `${label} · copy ${copy + 1}/${copiesN}` : label,
       }));
     });
@@ -599,7 +622,8 @@ export function HsCloneBoard({
                             ) : r.info?.status === "UNREADABLE" ? (
                               <span className="text-danger">LION can’t read this campaign</span>
                             ) : r.info?.name ? (
-                              splitLionName(r.info.name, todaySaoPauloDDMM()).prefix || r.info.name
+                              relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries) ||
+                              r.info.name
                             ) : (
                               "—"
                             )}
@@ -614,12 +638,36 @@ export function HsCloneBoard({
                           />
                         </div>
                       </td>
-                      <td className="px-2 py-3 text-[11.5px] text-dim">
-                        {r.info?.countries.length
-                          ? geoSummary(r.info.countries)
-                          : r.info?.name
-                            ? geoFromName(r.info.name, geoSummary) || "inherited"
-                            : "—"}
+                      <td className="px-2 py-3 text-[11.5px]">
+                        <div className="flex flex-col gap-1.5">
+                          {r.countries.length > 0 ? (
+                            <span
+                              className="font-medium text-[#9db8ff]"
+                              title="Geo override — the clone launches with THIS targeting, not the source's"
+                            >
+                              {overrideGeoLabel(r.countries)}
+                              <span className="ml-1 rounded border border-accent/40 bg-accent/10 px-1 py-px text-[9px] font-semibold uppercase tracking-wide">
+                                override
+                              </span>
+                            </span>
+                          ) : (
+                            <span className="text-dim">
+                              {r.info?.countries.length
+                                ? geoSummary(r.info.countries)
+                                : r.info?.name
+                                  ? geoFromName(r.info.name, geoSummary) || "inherited"
+                                  : "—"}
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setTargetingRowId(r.id)}
+                            className="inline-flex w-fit items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] font-medium text-dim transition-colors hover:bg-accent/10 hover:text-[#9db8ff] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                          >
+                            <GlobeIcon className="h-3 w-3" />
+                            Targeting
+                          </button>
+                        </div>
                       </td>
                       <td className="px-2 py-3 text-right font-mono text-[11.5px] tabular-nums text-dim">
                         {r.info?.budget != null ? `$${moneyLabel(r.info.budget)}` : "—"}
@@ -725,11 +773,18 @@ export function HsCloneBoard({
                     <p key={r.id} className="text-[12px] text-dim">
                       <span className="text-ink">
                         {r.info?.name
-                          ? `${splitLionName(r.info.name, todaySaoPauloDDMM()).prefix}${r.suffix.trim()}`.slice(0, 110)
+                          ? `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}${r.suffix.trim()}`.slice(
+                              0,
+                              110,
+                            )
                           : `#${r.campaignId}`}
                       </span>{" "}
                       → {copiesN} cop{copiesN === 1 ? "y" : "ies"} @ ${moneyLabel(r.budget)}/day
                       {r.bid.trim() ? ` · bid ${r.bid}` : " · bid inherited"}
+                      {r.countries.length > 0 ? (
+                        <span className="text-[#9db8ff]"> · geo → {overrideGeoLabel(r.countries)}</span>
+                      ) : null}
+                      {r.locales.length > 0 ? <span className="text-[#9db8ff]"> · {r.locales.length} lang</span> : null}
                     </p>
                   ))}
                   <p className="mt-1 border-t border-line pt-2 text-[12px] text-ink">
@@ -741,6 +796,28 @@ export function HsCloneBoard({
           </section>
         </div>
       </main>
+
+      {(() => {
+        const r = targetingRowId ? rows.find((x) => x.id === targetingRowId) : null;
+        if (!r) return null;
+        const locales = (profile ? (hs.dataFor(profile)?.locales ?? []) : []).map((l) => ({
+          value: l.id,
+          label: l.name,
+        }));
+        return (
+          <HsTargetingModal
+            title={r.info?.name || `#${r.campaignId}`}
+            countries={r.countries}
+            locales={r.locales}
+            localeOptions={locales}
+            onClose={() => setTargetingRowId(null)}
+            onApply={(patch) => {
+              patchRow(r.id, patch);
+              setPreviewed(false); // the wave changed — re-preview before firing
+            }}
+          />
+        );
+      })()}
     </>
   );
 }

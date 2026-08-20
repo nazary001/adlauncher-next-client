@@ -2,6 +2,12 @@ import { NextResponse, after } from "next/server";
 import { bidKind, parseMoney } from "@/lib/types";
 import { hsWireBid } from "@/lib/hs-launch";
 import { reportPagesUsed } from "@/lib/hs-pages";
+import {
+  type GeoOverride,
+  applyGeoOverride,
+  geoOverrideRegionalCategories,
+  parseGeoOverride,
+} from "@/lib/targeting-override";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { readAppCache, writeAppCache } from "@/lib/app-cache";
 import { stampHsTaskRow, upsertTaskRow } from "@/lib/task-store";
@@ -91,6 +97,8 @@ type TokenShot = {
   geo: string;
   label: string;
   taskId: string;
+  /** Geo/locales override (Targeting modal) — null = faithful clone of the source's targeting. */
+  override: GeoOverride | null;
   settled?: boolean;
 };
 
@@ -125,6 +133,8 @@ export async function POST(req: Request): Promise<NextResponse> {
       name?: string;
       geo?: string;
       label?: string;
+      countries?: string[];
+      locales?: string[];
     }[];
   };
   try {
@@ -159,6 +169,8 @@ export async function POST(req: Request): Promise<NextResponse> {
     if (bidRaw && (!Number.isFinite(bid) || (bid as number) <= 0 || (bid as number) > 10000)) {
       return bad("bid_invalid");
     }
+    const override = parseGeoOverride(raw?.countries, raw?.locales);
+    if (override && "error" in override) return bad(`targeting_override_${override.error}`);
     shots.push({
       campaignId,
       budget,
@@ -168,6 +180,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       name: String(raw?.name ?? "").trim().slice(0, 200),
       geo: String(raw?.geo ?? "").slice(0, 40) || "inherited",
       label: String(raw?.label ?? "").trim().slice(0, 200),
+      override,
       taskId: `hstd-${waveId}-${String(shots.length).padStart(2, "0")}`,
     });
   }
@@ -438,10 +451,13 @@ async function pumpTokenBatch(
         created.campaign_id = String(camp.id);
         await rowWrite(user, s.taskId, { status: "running", stage: "adset", campaign_id: created.campaign_id });
 
-        // adset — the source's targeting VERBATIM (faithful duplicate), the binds' pixel, the
-        // partner's +30 min start gap; regional declarations self-heal inside hsCreateAdset.
-        const targeting = JSON.parse(JSON.stringify(tree.adset.targeting ?? {})) as Json;
+        // adset — the source's targeting VERBATIM (faithful duplicate) unless the buyer set a
+        // Targeting override (geo/locales swapped in, everything else — age, placements,
+        // advantage flags — stays the source's), the binds' pixel, the partner's +30 min start
+        // gap; regional declarations self-heal inside hsCreateAdset.
+        let targeting = JSON.parse(JSON.stringify(tree.adset.targeting ?? {})) as Json;
         delete targeting.age_range; // read-only echo field
+        if (s.override) targeting = applyGeoOverride(targeting, s.override);
         const srcPromoted = (tree.adset.promoted_object ?? {}) as Json;
         const adsetPayload: Json = {
           name,
@@ -457,6 +473,12 @@ async function pumpTokenBatch(
         if (srcPromoted.pixel_id) adsetPayload.promoted_object = { ...srcPromoted, pixel_id: binds.pixel };
         if (bidAmount != null) adsetPayload.bid_amount = bidAmount;
         if (bidConstraints) adsetPayload.bid_constraints = bidConstraints;
+        // A WW override needs the TW/SG universal-ads declarations up front (further regions
+        // self-heal inside hsCreateAdset, same as the launcher's create path).
+        if (s.override) {
+          const cats = geoOverrideRegionalCategories(s.override);
+          if (cats.length) adsetPayload.regional_regulated_categories = cats;
+        }
         const adset = await hsCreateAdset(`act_${binds.account}/adsets`, adsetPayload);
         created.adset_id = String(adset.id);
         await rowWrite(user, s.taskId, { status: "running", stage: "ads", adset_id: created.adset_id });

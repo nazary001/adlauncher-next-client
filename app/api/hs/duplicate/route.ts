@@ -25,6 +25,13 @@ import {
   lionProfileData,
   lionSetCampaignStatus,
 } from "@/lib/lion";
+import { hsFbGet, hsFbPost, hsTokenAccountIds, hsTokenConfigured } from "@/lib/hs-token-launch";
+import {
+  type GeoOverride,
+  applyGeoOverride,
+  geoOverrideRegionalCategories,
+  parseGeoOverride,
+} from "@/lib/targeting-override";
 
 export const runtime = "nodejs";
 // The batch path keeps working AFTER the response (`after()` pump: jittered submits + status
@@ -64,7 +71,7 @@ async function validateBinds(
   account: string,
   page: string,
   pixel: string,
-): Promise<{ error: NextResponse } | { currency: string; accountName: string }> {
+): Promise<{ error: NextResponse } | { currency: string; accountName: string; pageName: string }> {
   let data;
   try {
     data = await lionProfileData(profile);
@@ -75,7 +82,8 @@ async function validateBinds(
   const acct = data.accounts.find((a) => a.id === account);
   if (!acct) return { error: bad("account_not_on_profile") };
   if (acct.status !== 1) return { error: bad("account_disabled") };
-  if (!data.pages.some((p) => p.id === page)) return { error: bad("page_not_on_profile") };
+  const pageRow = data.pages.find((p) => p.id === page);
+  if (!pageRow) return { error: bad("page_not_on_profile") };
   let pixels;
   try {
     pixels = await lionAccountPixels(profile, account);
@@ -83,7 +91,8 @@ async function validateBinds(
     return { error: bad(`lion_unreachable: ${(e as Error).message}`, 502) };
   }
   if (!pixels.some((p) => p.id === pixel)) return { error: bad("pixel_not_on_account") };
-  return { currency: acct.currency || "USD", accountName: acct.name || "" };
+  // pageName feeds the geo-override patch's DSA declaration (EU-reaching overrides).
+  return { currency: acct.currency || "USD", accountName: acct.name || "", pageName: pageRow.name || "" };
 }
 
 type BatchShot = {
@@ -96,8 +105,15 @@ type BatchShot = {
   geo: string;
   label: string;
   taskId: string;
+  /** Geo/locales override (Targeting modal). LION's duplicate/ IGNORES targeting fields (probed
+   *  live 08-20), so the pump patches the born clone's ad set through the Graph instead — which
+   *  is why override shots demand a token-visible target account. */
+  override: GeoOverride | null;
   lionTaskId?: string;
   cloneId?: string;
+  /** Geo override landed on the clone's ad set (Graph patch verified) — finalize/activation of
+   *  an override shot waits for this, so a clone can never go ACTIVE on the source's geo. */
+  patched?: boolean;
   settled?: boolean;
 };
 
@@ -139,6 +155,8 @@ export async function POST(req: Request): Promise<NextResponse> {
       geo?: string;
       /** Row title for the shared task list (source name + copy counter). */
       label?: string;
+      countries?: string[];
+      locales?: string[];
     }[];
     // ---- legacy single-shot shape ----
     campaignId?: string;
@@ -188,6 +206,8 @@ export async function POST(req: Request): Promise<NextResponse> {
       if (bidRaw && (!Number.isFinite(bid) || (bid as number) <= 0 || (bid as number) > 10000)) {
         return bad("bid_invalid");
       }
+      const override = parseGeoOverride(raw?.countries, raw?.locales);
+      if (override && "error" in override) return bad(`targeting_override_${override.error}`);
       shots.push({
         campaignId,
         budget,
@@ -197,6 +217,7 @@ export async function POST(req: Request): Promise<NextResponse> {
         name: String(raw?.name ?? "").trim().slice(0, 200),
         geo: String(raw?.geo ?? "").slice(0, 40) || "inherited",
         label: String(raw?.label ?? "").trim().slice(0, 200),
+        override,
         // Zero-padded index: the drawer breaks queued_at ties by STRING id, so "-10" must not
         // sort between "-01" and "-02" (waves share one stamp timestamp).
         taskId: `hsd-${waveId}-${String(shots.length).padStart(2, "0")}`,
@@ -204,6 +225,22 @@ export async function POST(req: Request): Promise<NextResponse> {
     }
     const binds = await validateBinds(profile, account, page, pixel);
     if ("error" in binds) return binds.error;
+
+    // Geo-override clones are patched THROUGH the Graph after LION births them (LION's own
+    // duplicate/ ignores targeting fields) — that needs our partner-side token to see the target
+    // account. Refuse up front, mirroring the token rail's guard; a failed sweep (null) falls
+    // OPEN and the patch phase itself becomes the backstop.
+    if (shots.some((s) => s.override)) {
+      if (!hsTokenConfigured()) {
+        return bad("targeting_override_needs_fb_token — set FB_HS_LAUNCH_TOKEN/FB_HS_VOLUME_TOKEN");
+      }
+      const visible = await hsTokenAccountIds();
+      if (visible && !visible.has(account.replace(/^act_/, ""))) {
+        return bad(
+          "targeting_override_account_not_visible — geo overrides are applied via our FB token after LION builds the clone, and that token was never granted this ad account; pick a token-visible account or clear the Targeting override",
+        );
+      }
+    }
 
     const alreadyAccepted = () =>
       NextResponse.json({
@@ -286,7 +323,14 @@ export async function POST(req: Request): Promise<NextResponse> {
 
     const user = session.username;
     const deadline = startedAt + PUMP_BUDGET_MS;
-    after(() => pumpBatch(user, { profile, account, page, pixel, accountName: binds.accountName }, shots, deadline));
+    after(() =>
+      pumpBatch(
+        user,
+        { profile, account, page, pixel, accountName: binds.accountName, pageName: binds.pageName },
+        shots,
+        deadline,
+      ),
+    );
 
     return NextResponse.json({
       ok: true,
@@ -451,7 +495,7 @@ const rowWrite = (user: string, taskId: string, fields: Record<string, unknown>)
  */
 async function pumpBatch(
   user: string,
-  binds: { profile: string; account: string; page: string; pixel: string; accountName?: string },
+  binds: { profile: string; account: string; page: string; pixel: string; accountName?: string; pageName?: string },
   shots: BatchShot[],
   deadline: number,
 ): Promise<void> {
@@ -621,7 +665,20 @@ async function pumpBatch(
             // could sit PAUSED unnoticed.
             await rowWrite(user, s.taskId, { campaign_id: s.cloneId });
           }
-          if (r.status === "COMPLETED" && r.campaign_id) {
+          // Geo override: patch the born clone's ad set through the Graph BEFORE any finalize —
+          // an override shot must never go ACTIVE on the source's geo. The adset exists while
+          // the task still reads CREATING_ADS (probed live 08-20, ~40-70s after submit);
+          // transient misses just retry next tick (every step is idempotent).
+          if (s.cloneId && s.override && !s.patched) {
+            try {
+              await patchCloneTargeting(s.cloneId, s.override, binds.pageName ?? "", s.name);
+              s.patched = true;
+              await rowWrite(user, s.taskId, { geo: s.geo });
+            } catch {
+              /* adset not born yet / throttled — next tick */
+            }
+          }
+          if (r.status === "COMPLETED" && r.campaign_id && (!s.override || s.patched)) {
             await finalize(s, String(r.campaign_id), (r.ad_ids ?? []).length || 1);
           } else if (r.status === "NO_COUNTRIES_LEFT") {
             s.settled = true;
@@ -641,7 +698,8 @@ async function pumpBatch(
             const real = await lionCampaignAds(ids).catch(() => ({}) as Record<string, never>);
             for (const s of shots.filter((x) => !x.settled && x.cloneId)) {
               const c = (real as Record<string, { status: string; adsCount: number } | undefined>)[s.cloneId as string];
-              if (c && c.adsCount > 0) await finalize(s, s.cloneId as string, c.adsCount);
+              // Override shots wait for the patch here too — same activation gate as above.
+              if (c && c.adsCount > 0 && (!s.override || s.patched)) await finalize(s, s.cloneId as string, c.adsCount);
             }
           }
         }
@@ -651,7 +709,58 @@ async function pumpBatch(
       if (Date.now() >= deadline) break;
       await sleep(10_000);
     }
+
+    // Deadline hit with an unpatched override: the clone EXISTS but still targets the source's
+    // geo, and the activation gate above kept it PAUSED. Surface it loudly instead of letting a
+    // later poller quietly activate the wrong geo.
+    for (const s of shots) {
+      if (s.settled || !s.override || s.patched || !s.cloneId) continue;
+      s.settled = true;
+      await rowWrite(user, s.taskId, {
+        status: "error",
+        error: `clone ${s.cloneId} created but the geo override was NOT applied in time — it stays PAUSED; set the targeting in Ads Manager and activate, or delete and re-fire`,
+        campaign_id: s.cloneId,
+        finished_at: Date.now(),
+      });
+    }
   } catch {
     /* the pump must never throw into the runtime — rows left running are picked up later */
+  }
+}
+
+/**
+ * Apply a geo override to a freshly-born LION clone THROUGH the Graph (partner-side token):
+ * patch the ad set's targeting (+ WW universal-ads declarations + the DSA beneficiary/payor
+ * LION's duplicate never sets), rename the campaign to the board's relabeled name (LION ignores
+ * duplicate `name` — probed live 08-20), and VERIFY the stored geo before reporting success.
+ * Throws on any miss; the pump's poll loop retries and every step is idempotent.
+ */
+async function patchCloneTargeting(
+  campaignId: string,
+  o: GeoOverride,
+  pageName: string,
+  newName: string,
+): Promise<void> {
+  type Json = Record<string, unknown>;
+  const camp = await hsFbGet(`${campaignId}?fields=adsets{id}`);
+  const adsetId = String((camp.adsets as { data?: { id?: string }[] } | undefined)?.data?.[0]?.id ?? "");
+  if (!adsetId) throw new Error("adset_not_born_yet");
+  const cur = await hsFbGet(`${adsetId}?fields=targeting`);
+  const patched = applyGeoOverride((cur.targeting ?? {}) as Json, o);
+  const cats = geoOverrideRegionalCategories(o);
+  await hsFbPost(adsetId, {
+    targeting: patched,
+    ...(cats.length ? { regional_regulated_categories: cats } : {}),
+    ...(pageName ? { dsa_beneficiary: pageName, dsa_payor: pageName } : {}),
+  });
+  if (newName) await hsFbPost(campaignId, { name: newName });
+  if (o.countries.length) {
+    const ver = await hsFbGet(`${adsetId}?fields=targeting`);
+    const geo = ((ver.targeting as Json | undefined)?.geo_locations ?? {}) as Json;
+    const ww = o.countries.includes("WW");
+    const got = (ww ? geo.country_groups : geo.countries) as string[] | undefined;
+    const want = ww ? ["worldwide"] : o.countries;
+    const norm = (a?: string[]) => [...(a ?? [])].sort().join(",");
+    if (norm(got) !== norm(want)) throw new Error(`geo_verify_mismatch ${JSON.stringify(geo)}`);
   }
 }
