@@ -834,7 +834,7 @@ export function CampaignCard({
                   className="col-span-6"
                   hint={
                     kind === "roas"
-                      ? "1,20 = 120% ROAS · type 120"
+                      ? undefined
                       : bidCapEnabled
                         ? "Digits fill cents — 50 → 0,50"
                         : "Lowest cost bids automatically"
