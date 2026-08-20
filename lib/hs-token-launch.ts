@@ -13,16 +13,19 @@ import { FbError, createAdsetSelfHealing, fbGet, fbPost } from "./fb-graph";
 import { uploadImage, uploadVideo, videoThumb, waitForVideo } from "./fb-media";
 import { readAppCache, writeAppCache } from "./app-cache";
 
-// ---- token POOL with automatic failover (owner ask 08-20) --------------------------------------
-// Two bearers for the same partner-side user "Gcforhs2", issued through DIFFERENT FB apps
-// (probed live 08-20: T1 app ≠ T2 app "GC for HS 2.1", ad-account sets identical 222=222) — the
-// (#4) "Application request limit" that stormed the rail on 08-20 is APP-level, so when T1 hits
-// it every call falls over to T2 mid-flight and the launch keeps building. Same user ⇒ zero
-// permission drift: objects created by one token are fully manageable by the other.
-// Server-only: no token ever reaches the browser (the status endpoint ships fingerprints only).
+// ---- token POOL with automatic failover (owner ask 08-20, widened to 4 same day) ---------------
+// FOUR bearers for the same partner-side user "Gcforhs2", each issued through a DIFFERENT FB app
+// (probed live 08-20: T1 app + "GC for HS 2.1"/"2.2"/"2.4"; ad-account sets identical, 379 each).
+// The (#4) "Application request limit" that stormed the rail on 08-20 is APP-level, so the pool
+// rotates T1→T2→T3→T4 by health: a burned app's bearer is skipped/failed-over mid-call and comes
+// back when its cooldown lifts. Same user ⇒ zero permission drift: objects created by one token
+// are fully manageable by any other. Server-only: no token ever reaches the browser (the status
+// endpoint ships fingerprints only).
 const RAW_TOKENS = [
   process.env.FB_HS_LAUNCH_TOKEN || process.env.FB_HS_VOLUME_TOKEN || "",
   process.env.FB_HS_LAUNCH_TOKEN_2 || "",
+  process.env.FB_HS_LAUNCH_TOKEN_3 || "",
+  process.env.FB_HS_LAUNCH_TOKEN_4 || "",
 ];
 
 export type HsPoolToken = { token: string; fp: string; index: number };
