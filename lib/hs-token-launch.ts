@@ -8,34 +8,297 @@
 //   3. delivery starts ≥30 min after creation — their ingestion routines need the minutes to add
 //      the campaign id to the reportable keys, so the ad set carries a future start_time.
 
-import { createAdsetSelfHealing, fbGet, fbPost } from "./fb-graph";
+import { createHash } from "node:crypto";
+import { FbError, createAdsetSelfHealing, fbGet, fbPost } from "./fb-graph";
 import { uploadImage, uploadVideo, videoThumb, waitForVideo } from "./fb-media";
+import { readAppCache, writeAppCache } from "./app-cache";
 
-// The write token: FB_HS_LAUNCH_TOKEN when provisioned, else the FB_HS_VOLUME_TOKEN fallback —
-// that is "Gcforhs2", the partner-side user with the ~30 VD-C1 pool accounts (the badge sweep
-// proves it READS them; whether Meta lets it WRITE surfaces as a clear per-launch error, not a
-// config failure). Server-only: neither token ever reaches the browser.
-const HS_FB_TOKEN = process.env.FB_HS_LAUNCH_TOKEN || process.env.FB_HS_VOLUME_TOKEN || "";
+// ---- token POOL with automatic failover (owner ask 08-20) --------------------------------------
+// Two bearers for the same partner-side user "Gcforhs2", issued through DIFFERENT FB apps
+// (probed live 08-20: T1 app ≠ T2 app "GC for HS 2.1", ad-account sets identical 222=222) — the
+// (#4) "Application request limit" that stormed the rail on 08-20 is APP-level, so when T1 hits
+// it every call falls over to T2 mid-flight and the launch keeps building. Same user ⇒ zero
+// permission drift: objects created by one token are fully manageable by the other.
+// Server-only: no token ever reaches the browser (the status endpoint ships fingerprints only).
+const RAW_TOKENS = [
+  process.env.FB_HS_LAUNCH_TOKEN || process.env.FB_HS_VOLUME_TOKEN || "",
+  process.env.FB_HS_LAUNCH_TOKEN_2 || "",
+];
 
-export const hsTokenConfigured = (): boolean => HS_FB_TOKEN.length > 0;
-/** Raw bearer for lib/clone-run's parameterized Graph calls (server-only, never to the browser). */
-export const hsRawToken = (): string => HS_FB_TOKEN;
+export type HsPoolToken = { token: string; fp: string; index: number };
+const POOL: HsPoolToken[] = [];
+{
+  const seen = new Set<string>();
+  for (const t of RAW_TOKENS) {
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    POOL.push({ token: t, fp: createHash("sha256").update(t).digest("hex").slice(0, 12), index: POOL.length + 1 });
+  }
+}
+
+export const hsTokenConfigured = (): boolean => POOL.length > 0;
+
+// Health = per-token cooldown marks in the SHARED app-cache row (Strapi), so every serverless
+// instance — and the header's status widget — sees the same failover state. Keyed by token
+// FINGERPRINT (sha256 prefix), never by the token itself. Module L1 keeps reads cheap.
+type TokenHealth = { limitedUntil: number; reason: string };
+type HealthRow = {
+  health: Record<string, TokenHealth>;
+  /** Resolved display identities ({user, app} per fingerprint) — written once by the prober. */
+  names: Record<string, { user?: string; app?: string }>;
+};
+const HEALTH_KEY = "hs-token-health";
+const HEALTH_L1_MS = 20_000;
+/** A 429 thrown through fbGet/fbPost's OWN retry ladder = the limit is sustained, not a blip. */
+const FAILURE_COOLDOWN_MS = 30 * 60_000;
+/** OAuth-dead token (code 190: expired/deauthorized) — park it long; the prober keeps checking. */
+const DEAD_COOLDOWN_MS = 6 * 60 * 60_000;
+
+let healthL1: { at: number; row: HealthRow; docId: string | null } | null = null;
+
+const emptyRow = (): HealthRow => ({ health: {}, names: {} });
+
+async function readHealth(): Promise<{ row: HealthRow; docId: string | null }> {
+  if (healthL1 && Date.now() - healthL1.at < HEALTH_L1_MS) return healthL1;
+  try {
+    const r = await readAppCache<HealthRow>(HEALTH_KEY);
+    const v = r?.value;
+    healthL1 = {
+      at: Date.now(),
+      row: v && typeof v === "object" ? { ...emptyRow(), ...v, health: v.health ?? {}, names: v.names ?? {} } : emptyRow(),
+      docId: r?.documentId ?? null,
+    };
+  } catch {
+    // Store unreachable → run on whatever this instance already knows (fail open).
+    healthL1 = { at: Date.now(), row: healthL1?.row ?? emptyRow(), docId: healthL1?.docId ?? null };
+  }
+  return healthL1;
+}
+
+async function writeHealth(mutate: (row: HealthRow) => void): Promise<void> {
+  const { row, docId } = await readHealth();
+  mutate(row);
+  healthL1 = { at: Date.now(), row, docId };
+  try {
+    const id = await writeAppCache(HEALTH_KEY, row, docId);
+    if (id) healthL1.docId = id;
+  } catch {
+    /* store blip — the L1 mark still steers THIS instance; others learn via their own failures */
+  }
+}
+
+export const hsMarkTokenLimited = (fp: string, reason: string, cooldownMs = FAILURE_COOLDOWN_MS): Promise<void> =>
+  writeHealth((row) => {
+    row.health[fp] = { limitedUntil: Date.now() + cooldownMs, reason: reason.slice(0, 200) };
+  });
+
+export const hsClearTokenLimited = (fp: string): Promise<void> =>
+  writeHealth((row) => {
+    delete row.health[fp];
+  });
+
+export const hsRememberTokenNames = (fp: string, names: { user?: string; app?: string }): Promise<void> =>
+  writeHealth((row) => {
+    row.names[fp] = { ...row.names[fp], ...names };
+  });
+
+export type HsTokenState = {
+  index: number;
+  fp: string;
+  user: string;
+  app: string;
+  limitedUntil: number;
+  reason: string;
+};
+
+/** Shared-row snapshot for the status endpoint (no probing here — see /api/hs/token-status). */
+export async function hsTokenHealthSnapshot(): Promise<HsTokenState[]> {
+  const { row } = await readHealth();
+  const now = Date.now();
+  return POOL.map((t) => {
+    const h = row.health[t.fp];
+    const limited = h && h.limitedUntil > now ? h : null;
+    return {
+      index: t.index,
+      fp: t.fp,
+      user: row.names[t.fp]?.user ?? "",
+      app: row.names[t.fp]?.app ?? "",
+      limitedUntil: limited?.limitedUntil ?? 0,
+      reason: limited?.reason ?? "",
+    };
+  });
+}
+
+/** Pool entries for the prober (server-only caller — the raw bearer stays inside lib/ + routes). */
+export const hsPoolTokens = (): HsPoolToken[] => [...POOL];
+
+/** Next-call order: healthy tokens first in configured priority (T1 → T2), cooled-down ones
+ *  last by soonest expiry — an expired cooldown gets retried naturally and clears on success. */
+async function orderedPool(): Promise<{ t: HsPoolToken; limited: boolean }[]> {
+  const { row } = await readHealth();
+  const now = Date.now();
+  const entries = POOL.map((t) => ({ t, limited: (row.health[t.fp]?.limitedUntil ?? 0) > now }));
+  return [
+    ...entries.filter((e) => !e.limited),
+    ...entries
+      .filter((e) => e.limited)
+      .sort((a, b) => (row.health[a.t.fp]?.limitedUntil ?? 0) - (row.health[b.t.fp]?.limitedUntil ?? 0)),
+  ];
+}
+
+/** The bearer the next call would use — for callers that need a RAW token (media migration). */
+export async function hsActiveToken(): Promise<string> {
+  const order = await orderedPool();
+  if (order.length === 0) throw new FbError("no_hs_token", null, 500);
+  return order[0].t.token;
+}
+
+/** Rate-limit answer that survived the client's whole retry ladder (fbGet/fbPost map those to
+ *  HTTP 429) — the failover trigger. */
+const isRateLimitErr = (e: unknown): boolean => e instanceof FbError && e.status === 429;
+/** Token itself is dead (OAuth 190: expired/deauthorized/checkpointed user session). */
+const isDeadTokenErr = (e: unknown): boolean =>
+  e instanceof FbError && (e.detail as { error?: { code?: number } } | null)?.error?.code === 190;
+
+/**
+ * Run one Graph call through the pool: try tokens in health order; a sustained rate limit or a
+ * dead token marks the bearer (shared row) and the SAME call retries on the next one — the
+ * calling launch never notices beyond the latency. Any other error is the call's own problem
+ * and propagates untouched (failing over would just repeat it). A token that answers fine while
+ * still inside a cooldown mark heals the mark early.
+ */
+async function poolCall<T>(fn: (token: string) => Promise<T>): Promise<T> {
+  const order = await orderedPool();
+  if (order.length === 0) throw new FbError("no_hs_token", null, 500);
+  let lastErr: unknown = null;
+  for (const { t, limited } of order) {
+    try {
+      const out = await fn(t.token);
+      if (limited) void hsClearTokenLimited(t.fp);
+      return out;
+    } catch (e) {
+      if (isRateLimitErr(e)) {
+        await hsMarkTokenLimited(t.fp, (e as FbError).message || "rate limited", FAILURE_COOLDOWN_MS);
+        lastErr = e;
+        continue;
+      }
+      if (isDeadTokenErr(e)) {
+        await hsMarkTokenLimited(t.fp, `token dead: ${(e as FbError).message || "OAuth 190"}`, DEAD_COOLDOWN_MS);
+        lastErr = e;
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw (lastErr as Error) ?? new FbError("no_hs_token", null, 500);
+}
+
+// ---- health prober (feeds /api/hs/token-status and the header widget) --------------------------
+// One RAW single-shot `GET /me` per token (no retry ladder — a health check must answer in
+// seconds), cached briefly so many open tabs don't multiply Graph calls. Besides reporting, the
+// prober STEERS the pool: a probe that sees the rate limit marks the token (short sliding
+// cooldown, refreshed every poll while the limit persists), so launches skip the burned token
+// without ever paying the ladder latency; a probe that sees it healthy again clears the mark.
+const PROBE_TTL_MS = 30_000;
+const PROBE_COOLDOWN_MS = 10 * 60_000;
+const PROBE_RATE_CODES = new Set([4, 17, 613, 80004, 80014]);
+
+export type HsTokenProbe = HsTokenState & { state: "ok" | "limited" | "dead"; active: boolean };
+
+let probeCache: { at: number; states: HsTokenProbe[] } | null = null;
+
+export async function hsProbeTokenHealth(): Promise<HsTokenProbe[]> {
+  if (probeCache && Date.now() - probeCache.at < PROBE_TTL_MS) return probeCache.states;
+  const states: (HsTokenState & { state: "ok" | "limited" | "dead" })[] = [];
+  for (const t of POOL) {
+    let state: "ok" | "limited" | "dead" = "ok";
+    let probeReason = "";
+    try {
+      const res = await fetch(`https://graph.facebook.com/v21.0/me?fields=id,name`, {
+        headers: { Authorization: `Bearer ${t.token}` },
+        cache: "no-store",
+        signal: AbortSignal.timeout(8_000),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        id?: string;
+        name?: string;
+        error?: { code?: number; message?: string; is_transient?: boolean };
+      };
+      if (body.error) {
+        const code = body.error.code ?? 0;
+        probeReason = `(#${code}) ${body.error.message ?? ""}`.trim();
+        if (PROBE_RATE_CODES.has(code) || body.error.is_transient === true) {
+          state = "limited";
+          await hsMarkTokenLimited(t.fp, probeReason, PROBE_COOLDOWN_MS);
+        } else {
+          // 190 = dead session; anything else unexpected is equally unusable for launches.
+          state = "dead";
+          await hsMarkTokenLimited(t.fp, probeReason, code === 190 ? DEAD_COOLDOWN_MS : PROBE_COOLDOWN_MS);
+        }
+      } else if (body.id) {
+        const { row } = await readHealth();
+        if ((row.health[t.fp]?.limitedUntil ?? 0) > Date.now()) await hsClearTokenLimited(t.fp);
+        if (!row.names[t.fp]?.user || !row.names[t.fp]?.app) {
+          // Resolve display identity once: the user behind the bearer + the APP it was issued
+          // through (the (#4) limit is app-level — the app name IS the meaningful label).
+          let app = row.names[t.fp]?.app ?? "";
+          try {
+            const ares = await fetch(`https://graph.facebook.com/v21.0/app?fields=name`, {
+              headers: { Authorization: `Bearer ${t.token}` },
+              cache: "no-store",
+              signal: AbortSignal.timeout(8_000),
+            });
+            const abody = (await ares.json().catch(() => ({}))) as { name?: string };
+            if (abody.name) app = String(abody.name);
+          } catch {
+            /* name resolution is decoration */
+          }
+          await hsRememberTokenNames(t.fp, { user: String(body.name ?? ""), ...(app ? { app } : {}) });
+        }
+      }
+    } catch {
+      probeReason = "probe timeout"; // network blip — report, but never mark on it
+    }
+    const { row } = await readHealth();
+    const h = row.health[t.fp];
+    const limited = h && h.limitedUntil > Date.now() ? h : null;
+    states.push({
+      index: t.index,
+      fp: t.fp,
+      user: row.names[t.fp]?.user ?? "",
+      app: row.names[t.fp]?.app ?? "",
+      limitedUntil: limited?.limitedUntil ?? 0,
+      reason: limited?.reason || probeReason,
+      state: limited ? state === "dead" ? "dead" : "limited" : state,
+    });
+  }
+  // "active" = the token the next launch call would actually pick (orderedPool's head).
+  const firstOk = states.findIndex((s) => s.state === "ok");
+  const activeIdx =
+    firstOk >= 0
+      ? firstOk
+      : states.reduce((best, s, i) => (s.limitedUntil < (states[best]?.limitedUntil ?? Infinity) ? i : best), 0);
+  const out = states.map((s, i) => ({ ...s, active: i === activeIdx }));
+  probeCache = { at: Date.now(), states: out };
+  return out;
+}
 
 type Json = Record<string, unknown>;
 
-/** Graph calls on the HS partner-side token — same client (backoff, budget, error mapping) as
- *  the MO rail, only the bearer differs. The media/adset helpers below bind the same token so
- *  the route never handles it directly. */
-export const hsFbGet = (path: string): Promise<Json> => fbGet(path, HS_FB_TOKEN);
-export const hsFbPost = (path: string, params: Json): Promise<Json> => fbPost(path, params, HS_FB_TOKEN);
+/** Graph calls on the HS partner-side token pool — same client (backoff, budget, error mapping)
+ *  as the MO rail, with transparent T1→T2 failover per call. The media/adset helpers below ride
+ *  the same pool so the routes never handle a bearer directly. */
+export const hsFbGet = (path: string): Promise<Json> => poolCall((tok) => fbGet(path, tok));
+export const hsFbPost = (path: string, params: Json): Promise<Json> => poolCall((tok) => fbPost(path, params, tok));
 export const hsUploadVideo = (accountId: string, fileUrl: string, name: string): Promise<string> =>
-  uploadVideo(accountId, fileUrl, name, HS_FB_TOKEN);
+  poolCall((tok) => uploadVideo(accountId, fileUrl, name, tok));
 export const hsUploadImage = (accountId: string, buf: Buffer): Promise<string> =>
-  uploadImage(accountId, buf, HS_FB_TOKEN);
-export const hsWaitForVideo = (videoId: string): Promise<void> => waitForVideo(videoId, undefined, HS_FB_TOKEN);
-export const hsVideoThumb = (videoId: string): Promise<string> => videoThumb(videoId, HS_FB_TOKEN);
+  poolCall((tok) => uploadImage(accountId, buf, tok));
+export const hsWaitForVideo = (videoId: string): Promise<void> =>
+  poolCall((tok) => waitForVideo(videoId, undefined, tok));
+export const hsVideoThumb = (videoId: string): Promise<string> => poolCall((tok) => videoThumb(videoId, tok));
 export const hsCreateAdset = (path: string, payload: Json): Promise<Json> =>
-  createAdsetSelfHealing(path, payload, HS_FB_TOKEN);
+  poolCall((tok) => createAdsetSelfHealing(path, payload, tok));
 
 // ---- Token-visible ad accounts ----------------------------------------------------------------
 // The partner's park is bigger than what they share to our token user: LION profiles bind whole

@@ -13,10 +13,10 @@ import { readAppCache, writeAppCache } from "@/lib/app-cache";
 import { stampHsTaskRow, upsertTaskRow } from "@/lib/task-store";
 import { FbError, withFbBudget } from "@/lib/fb-graph";
 import {
+  hsActiveToken,
   hsCreateAdset,
   hsFbGet,
   hsFbPost,
-  hsRawToken,
   hsTokenAccountIds,
   hsTokenConfigured,
   hsTokenStartTime,
@@ -429,7 +429,7 @@ async function pumpTokenBatch(
             const mKey = `${s.campaignId}:${m}→${binds.account}`;
             let done = migratedCache.get(mKey);
             if (!done) {
-              done = await migrateMediaToAccount(tree.medias[m], tree.accountId, binds.account, `${s.name || tree.name} · media ${m + 1}`, hsRawToken());
+              done = await migrateMediaToAccount(tree.medias[m], tree.accountId, binds.account, `${s.name || tree.name} · media ${m + 1}`, await hsActiveToken());
               migratedCache.set(mKey, done);
             }
             migrated.push(done);

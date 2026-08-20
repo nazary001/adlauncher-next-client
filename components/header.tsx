@@ -3,6 +3,7 @@
 import { FacebookMark, GoogleMark, RocketIcon, TikTokMark } from "./icons";
 import { PartnerSwitcher } from "./partner-switcher";
 import { AcctLimitWidget } from "./acct-limit-widget";
+import { HsTokenStatusWidget } from "./hs-token-status";
 import { AifTaskManagerButton, TaskManagerButton } from "./task-manager";
 import { HsTaskManagerButton } from "./hs-task-manager";
 import { UserMenu, type SessionUser } from "./user-menu";
@@ -89,6 +90,10 @@ export function Header({
         </div>
         <PartnerSwitcher value={partner} onChange={onPartnerChange} />
         <div className="flex items-center gap-2.5 justify-self-end">
+          {/* HS launch-token pool (T1→T2 failover) — health dots + which bearer is in use;
+              keeping it on screen also keeps the shared failover state fresh (the status
+              endpoint's probe marks burned tokens for the whole fleet). */}
+          {partnerConfig(partner).lionLaunch ? <HsTokenStatusWidget /> : null}
           {/* Per-account launch-limit timer (5 campaigns / 30 min) — visible on every partner
               and both boards; the panel lists each account's live window. */}
           <AcctLimitWidget />
