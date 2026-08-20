@@ -84,14 +84,19 @@ const MKLEARN_LANDINGS: Landing[] = [
   { slug: "curso-marketing-digital", title: "Curso de Marketing Digital", lang: "ES", niche: "MK Digital" },
   { slug: "paying-twice-for-netflix", title: "Paying Twice for Netflix", lang: "EN", niche: "Streaming" },
   { slug: "retiree-health-coverage", title: "Retiree Health Coverage", lang: "EN", niche: "Health" },
+  { slug: "nighttime-habit-ruining-your-sleep", title: "Nighttime Habit Ruining Your Sleep", lang: "EN", niche: "Health" },
+  { slug: "doctors-recommend-this-before-its-too-late", title: "Doctors Recommend Before It's Too Late", lang: "EN", niche: "Health" },
   { slug: "never-do-this-on-a-plane", title: "Never Do This on a Plane", lang: "EN", niche: "Travel" },
   { slug: "secret-code-in-your-passport", title: "Secret Code in Your Passport", lang: "EN", niche: "Travel" },
   { slug: "hidden-rooms-on-cruise-ships", title: "Hidden Rooms on Cruise Ships", lang: "EN", niche: "Travel" },
   { slug: "never-book-this-cruise-cabin", title: "Never Book This Cruise Cabin", lang: "EN", niche: "Travel" },
+  { slug: "what-hotel-staff-never-tell-guests", title: "What Hotel Staff Never Tell Guests", lang: "EN", niche: "Travel" },
   { slug: "veneers-implants-abroad", title: "Veneers & Implants Abroad", lang: "EN", niche: "Dental" },
   { slug: "flew-abroad-for-new-teeth", title: "Flew Abroad for New Teeth", lang: "EN", niche: "Dental" },
   { slug: "world-capital-of-cheap-dentistry", title: "World Capital of Cheap Dentistry", lang: "EN", niche: "Dental" },
   { slug: "paid-to-film-your-cleaning", title: "Paid to Film Your Cleaning", lang: "EN", niche: "Side Gigs" },
+  { slug: "dermatologists-ditching-this-popular-product", title: "Dermatologists Ditching This Product", lang: "EN", niche: "Beauty" },
+  { slug: "hidden-sign-your-house-has-a-problem", title: "Hidden Sign Your House Has a Problem", lang: "EN", niche: "Home" },
 ];
 
 // Indians defaults: the token sees the ACTIVE GC-Magicoffers-BR-* accounts — the ACCOUNT is
