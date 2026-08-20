@@ -190,7 +190,42 @@ async function poolCall<T>(fn: (token: string) => Promise<T>): Promise<T> {
       throw e;
     }
   }
+  // EVERY bearer answered a sustained limit (or is dead) for this one call — surface it as the
+  // pool-wide condition, not the last token's raw message; the gate keeps NEW launches from
+  // firing while this holds, and cooldown expiry / the prober re-open the pool automatically.
+  if (lastErr instanceof FbError && lastErr.status === 429) {
+    throw new FbError(
+      "all_hs_tokens_limited — every FB launch token is rate-limited right now; the pool re-opens after a cooldown (watch the Tokens widget)",
+      lastErr.detail,
+      429,
+    );
+  }
   throw (lastErr as Error) ?? new FbError("no_hs_token", null, 500);
+}
+
+/**
+ * Pre-flight gate for the token-rail routes: may a NEW launch/duplicate start right now?
+ * Healthy token in the pool → yes. All bearers marked → one probe pass (raw, cheap, 30s-cached)
+ * checks whether a limit already lifted — a healed token clears its mark and the gate opens; if
+ * every token is STILL burned, the gate refuses with the soonest retry time, so waves die as a
+ * clean 429 BEFORE any row is stamped or campaign shell created (owner ask 08-20: when both
+ * tokens are exhausted, launches must be blocked with an explicit "tokens are out" error).
+ */
+export async function hsTokenGate(): Promise<{ ok: true } | { ok: false; error: string; retryAt: number }> {
+  if (POOL.length === 0) return { ok: false, error: "hs_fb_token_missing", retryAt: 0 };
+  const now = Date.now();
+  const { row } = await readHealth();
+  if (POOL.some((t) => (row.health[t.fp]?.limitedUntil ?? 0) <= now)) return { ok: true };
+  await hsProbeTokenHealth(); // maybe a limit already lifted — the probe clears healed marks
+  const { row: after } = await readHealth();
+  if (POOL.some((t) => (after.health[t.fp]?.limitedUntil ?? 0) <= Date.now())) return { ok: true };
+  const retryAt = Math.min(...POOL.map((t) => after.health[t.fp]?.limitedUntil ?? Date.now()));
+  const mins = Math.max(1, Math.ceil((retryAt - Date.now()) / 60_000));
+  return {
+    ok: false,
+    retryAt,
+    error: `all_hs_tokens_limited — ${POOL.length === 1 ? "the FB launch token is" : `all ${POOL.length} FB launch tokens are`} rate-limited/dead right now; launches are blocked for ~${mins} min (the pool re-opens automatically — watch the Tokens widget in the header)`,
+  };
 }
 
 // ---- health prober (feeds /api/hs/token-status and the header widget) --------------------------

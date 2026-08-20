@@ -19,6 +19,7 @@ import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { Header } from "./header";
 import { CampaignCard } from "./campaign-card";
 import { useFanpages } from "./use-fanpages";
+import { hsTokensAllDown, useHsTokenStatus } from "./hs-token-status";
 import { type AdAccountOption, defaultPixelFor, useAdAccounts } from "./use-adaccounts";
 import { type AcctLimits, acctIdKey, useAcctLimits } from "./use-acct-limit";
 import { useHs } from "./use-hs";
@@ -157,6 +158,10 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     partner.pageAdLimit ?? 250,
     partner.aifLaunch ? { list: "/api/aif/fanpages", volume: "/api/aif/fanpages/volume" } : undefined,
   );
+  // HS launch-token pool health — powers the "all tokens burned" banner (the server gate is the
+  // enforcement; this is the courtesy warning before buyers build a wave into a 429).
+  const hsTokenStatus = useHsTokenStatus(Boolean(partner.lionLaunch));
+  const hsTokensDown = partner.lionLaunch ? hsTokensAllDown(hsTokenStatus.tokens, hsTokenStatus.loaded) : false;
   // Token ad accounts (with their pixels) for the account/pixel pickers.
   const adAccounts = useAdAccounts(
     Boolean(partner.accountsFromToken),
@@ -545,6 +550,20 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
               {poolFree === 0
                 ? `No free ${pool!.label} codes left — all ${pool!.max} are in use. Launching is blocked until codes are freed in the registry.`
                 : `Only ${poolFree} free ${pool!.label} code${poolFree === 1 ? "" : "s"} left of ${pool!.max} — a bigger wave won't fit.`}
+            </div>
+          </div>
+        ) : null}
+        {/* HS launch-token pool exhausted: FB Token launches are refused by the server gate —
+            tell buyers up front (the LION API channel keeps working). */}
+        {partner.lionLaunch && hsTokensDown ? (
+          <div className="mx-auto w-full max-w-[1440px] px-4 pt-4 sm:px-6">
+            <div
+              role="alert"
+              className="flex items-center gap-3 rounded-xl border border-danger/45 bg-danger/10 px-4 py-3 text-[13px] font-semibold text-danger"
+            >
+              <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-danger" />
+              All FB launch tokens are rate-limited — FB Token launches are blocked until a
+              cooldown lifts (see the Tokens widget). The LION API channel keeps working.
             </div>
           </div>
         ) : null}

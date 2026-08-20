@@ -19,6 +19,7 @@ import {
   hsFbPost,
   hsTokenAccountIds,
   hsTokenConfigured,
+  hsTokenGate,
   hsTokenStartTime,
 } from "@/lib/hs-token-launch";
 import {
@@ -118,6 +119,11 @@ export async function POST(req: Request): Promise<NextResponse> {
     return bad("hs_fb_token_missing — set FB_HS_LAUNCH_TOKEN (or FB_HS_VOLUME_TOKEN) in the environment", 500);
   }
   if (!lionConfigured()) return bad("lion_not_configured", 500);
+  // Both bearers burned → refuse the whole wave BEFORE stamping rows, with the retry ETA.
+  {
+    const gate = await hsTokenGate();
+    if (!gate.ok) return bad(gate.error, 429);
+  }
 
   let body: {
     profile?: string;

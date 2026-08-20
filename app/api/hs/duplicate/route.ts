@@ -25,7 +25,7 @@ import {
   lionProfileData,
   lionSetCampaignStatus,
 } from "@/lib/lion";
-import { hsFbGet, hsFbPost, hsTokenAccountIds, hsTokenConfigured } from "@/lib/hs-token-launch";
+import { hsFbGet, hsFbPost, hsTokenAccountIds, hsTokenConfigured, hsTokenGate } from "@/lib/hs-token-launch";
 import {
   type GeoOverride,
   applyGeoOverride,
@@ -234,6 +234,10 @@ export async function POST(req: Request): Promise<NextResponse> {
       if (!hsTokenConfigured()) {
         return bad("targeting_override_needs_fb_token — set FB_HS_LAUNCH_TOKEN/FB_HS_VOLUME_TOKEN");
       }
+      // The Graph patch that lands the override needs a live bearer — with the whole pool burned
+      // the clones would be born and stuck PAUSED, so refuse the wave up front instead.
+      const gate = await hsTokenGate();
+      if (!gate.ok) return bad(`targeting_override_blocked — ${gate.error}`, 429);
       const visible = await hsTokenAccountIds();
       if (visible && !visible.has(account.replace(/^act_/, ""))) {
         return bad(

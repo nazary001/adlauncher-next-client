@@ -24,6 +24,7 @@ import {
   hsFbPost,
   hsTokenAccountIds,
   hsTokenConfigured,
+  hsTokenGate,
   hsTokenStartTime,
   hsUploadImage,
   hsUploadVideo,
@@ -68,6 +69,11 @@ export async function POST(req: Request): Promise<Response> {
   if (!session) return bad("unauthorized", 401);
   if (!hsTokenConfigured()) {
     return bad("hs_fb_token_missing — set FB_HS_LAUNCH_TOKEN (or FB_HS_VOLUME_TOKEN) in the environment", 500);
+  }
+  // Both bearers burned → refuse BEFORE any work (no row, no campaign shell) with the retry ETA.
+  {
+    const gate = await hsTokenGate();
+    if (!gate.ok) return bad(gate.error, 429);
   }
   // Binds are validated against LION's catalog BY DESIGN (owner decision 08-17: keep the tie —
   // token launches may only go where LION profiles are bound): an account no weapon profile sees

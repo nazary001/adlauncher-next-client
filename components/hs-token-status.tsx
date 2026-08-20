@@ -9,7 +9,7 @@ import { FacebookMark } from "./icons";
 // on a burned one. The status endpoint's probe also STEERS the failover server-side, so keeping
 // this widget on screen keeps the pool state fresh for the whole team.
 
-type TokenRow = {
+export type HsTokenRow = {
   index: number;
   fp: string;
   user: string;
@@ -19,13 +19,20 @@ type TokenRow = {
   limitedUntil: number;
   reason: string;
 };
+type TokenRow = HsTokenRow;
 
 const POLL_MS = 60_000;
 
-function useTokenStatus(): { tokens: TokenRow[]; loaded: boolean } {
+/** Every configured launch bearer is burned right now → the boards must not fire token-rail
+ *  work (the server gate refuses it anyway — this powers the friendly UI block). */
+export const hsTokensAllDown = (tokens: HsTokenRow[], loaded: boolean): boolean =>
+  loaded && tokens.length > 0 && tokens.every((t) => t.state !== "ok");
+
+export function useHsTokenStatus(enabled = true): { tokens: TokenRow[]; loaded: boolean } {
   const [tokens, setTokens] = useState<TokenRow[]>([]);
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
+    if (!enabled) return;
     let alive = true;
     async function load() {
       try {
@@ -49,7 +56,7 @@ function useTokenStatus(): { tokens: TokenRow[]; loaded: boolean } {
       clearInterval(iv);
       window.removeEventListener("focus", onFocus);
     };
-  }, []);
+  }, [enabled]);
   return { tokens, loaded };
 }
 
@@ -70,7 +77,7 @@ function stateChip(t: TokenRow): { text: string; cls: string } {
 }
 
 export function HsTokenStatusWidget() {
-  const { tokens, loaded } = useTokenStatus();
+  const { tokens, loaded } = useHsTokenStatus();
   const [open, setOpen] = useState(false);
   const boxRef = useRef<HTMLDivElement | null>(null);
 

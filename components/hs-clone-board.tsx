@@ -7,13 +7,14 @@ import { SearchSelect } from "./search-select";
 import { useHs } from "./use-hs";
 import { useHsTaskManager } from "./hs-task-manager";
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
-import { limitMoney, moneyLabel, parseMoney } from "@/lib/types";
+import { limitMoney, limitMoneyCents, moneyLabel, parseMoney } from "@/lib/types";
 import { geoSummary } from "@/lib/catalog";
 import { todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { relabelNameGeo } from "@/lib/targeting-override";
 import type { PartnerId } from "@/lib/partners";
 import { CopyIcon, EyeIcon, GlobeIcon, PlusIcon, TrashIcon } from "./icons";
 import { HsTargetingModal } from "./hs-targeting-modal";
+import { hsTokensAllDown, useHsTokenStatus } from "./hs-token-status";
 import type { SessionUser } from "./user-menu";
 
 const MAX_COPIES = 20;
@@ -269,8 +270,10 @@ export function HsCloneBoard({
                   adsCount: s.adsCount,
                 },
                 // Prefill the editable bid with the source's own (LION-UI does the same); the
-                // buyer clearing it back to "" means "inherit".
-                bid: r.bid || (s.bid != null ? String(s.bid).replace(".", ",") : ""),
+                // buyer clearing it back to "" means "inherit". Two-decimal comma format on
+                // purpose — the field is cash-register (digits fill cents), and "1,2" would
+                // re-read as 0,12 there; "1,20" is the stable spelling.
+                bid: r.bid || (s.bid != null ? s.bid.toFixed(2).replace(".", ",") : ""),
                 // Prefill the editable TAIL with the source's old one + the owner's name.
                 suffix: r.suffix || withOwner(splitLionName(s.name, todaySaoPauloDDMM()).tail, user?.username ?? ""),
               };
@@ -304,6 +307,10 @@ export function HsCloneBoard({
   const MAX_SHOTS_PER_FIRE = 45;
   const MAX_TOKEN_SHOTS_PER_FIRE = 10;
   const effDupChannel: "lion" | "token" = dupChannel === "token" && hs.tokenLaunch ? "token" : "lion";
+  // Whole launch-token pool burned → the token rail is closed (the server gate refuses waves
+  // anyway — this keeps the click honest instead of round-tripping into a 429).
+  const tokenStatus = useHsTokenStatus();
+  const tokensDown = hsTokensAllDown(tokenStatus.tokens, tokenStatus.loaded);
 
   // FB Token rail: offer only accounts OUR token can act on — LION binds cover segments the token
   // was never granted (aleph, 08-19), and a clone there dies on the first Graph POST. null sweep →
@@ -325,6 +332,17 @@ export function HsCloneBoard({
 
   async function duplicateAll() {
     if (!bindsReady || validRows.length === 0 || firing || acctOver || limits.staleBuild) return;
+    // Token-rail wave while the whole pool is burned → honest local stop (the server gate would
+    // refuse it with the same message anyway). Geo-override LION waves need a live token too.
+    if (tokensDown && (effDupChannel === "token" || validRows.some((r) => r.countries.length > 0 || r.locales.length > 0))) {
+      alert(
+        "All FB launch tokens are rate-limited right now — " +
+          (effDupChannel === "token"
+            ? "the FB Token rail is blocked until a cooldown lifts. Fire on the LION API rail or wait (see the Tokens widget)."
+            : "Targeting-override clones need a live token for the Graph patch. Clear the overrides or wait (see the Tokens widget)."),
+      );
+      return;
+    }
     const cap = effDupChannel === "token" ? MAX_TOKEN_SHOTS_PER_FIRE : MAX_SHOTS_PER_FIRE;
     if (totalClones > cap) {
       alert(
@@ -492,8 +510,8 @@ export function HsCloneBoard({
                 <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
                   {(
                     [
-                      { key: "lion" as const, label: "LION API", ready: true },
-                      { key: "token" as const, label: "FB Token", ready: hs.tokenLaunch },
+                      { key: "lion" as const, label: "LION API", ready: true, down: false },
+                      { key: "token" as const, label: "FB Token", ready: hs.tokenLaunch, down: tokensDown },
                     ]
                   ).map((opt) => {
                     const active = dupChannel === opt.key;
@@ -503,14 +521,24 @@ export function HsCloneBoard({
                         type="button"
                         disabled={!opt.ready}
                         aria-pressed={active}
-                        title={opt.ready ? undefined : "FB token not configured on the server (FB_HS_LAUNCH_TOKEN)"}
+                        title={
+                          !opt.ready
+                            ? "FB token not configured on the server (FB_HS_LAUNCH_TOKEN)"
+                            : opt.down
+                              ? "All FB launch tokens are rate-limited — the rail re-opens after a cooldown (see the Tokens widget)"
+                              : undefined
+                        }
                         onClick={() => changeDupChannel(opt.key)}
                         className={
                           "h-8 rounded-[10px] text-[12px] font-semibold transition-all duration-150 " +
                           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
                           (active
-                            ? "bg-accent/20 text-[#9db8ff] shadow-[inset_0_0_0_1px_rgba(122,150,255,0.35)]"
-                            : "text-dim hover:text-ink") +
+                            ? opt.down
+                              ? "bg-danger/15 text-danger shadow-[inset_0_0_0_1px_rgba(255,107,107,0.35)]"
+                              : "bg-accent/20 text-[#9db8ff] shadow-[inset_0_0_0_1px_rgba(122,150,255,0.35)]"
+                            : opt.down
+                              ? "text-danger/70 hover:text-danger"
+                              : "text-dim hover:text-ink") +
                           (opt.ready ? "" : " cursor-not-allowed opacity-40")
                         }
                       >
@@ -519,10 +547,17 @@ export function HsCloneBoard({
                     );
                   })}
                 </div>
-                <p className="text-center text-[10px] leading-relaxed text-faint">
-                  {effDupChannel === "token"
-                    ? `Our FB token rebuilds each tree · starts +30 min · max ${MAX_TOKEN_SHOTS_PER_FIRE}/wave`
-                    : "LION's clone weapon builds on the weapon side"}
+                <p
+                  className={
+                    "text-center text-[10px] leading-relaxed " +
+                    (effDupChannel === "token" && tokensDown ? "font-medium text-danger" : "text-faint")
+                  }
+                >
+                  {effDupChannel === "token" && tokensDown
+                    ? "Both FB launch tokens are rate-limited — this rail is blocked until a cooldown lifts; fire on LION API or wait"
+                    : effDupChannel === "token"
+                      ? `Our FB token rebuilds each tree · starts +30 min · max ${MAX_TOKEN_SHOTS_PER_FIRE}/wave`
+                      : "LION's clone weapon builds on the weapon side"}
                 </p>
               </div>
 
@@ -685,14 +720,25 @@ export function HsCloneBoard({
                       <td className="w-[110px] px-2 py-2.5">
                         <input
                           value={r.bid}
-                          onChange={(e) => patchRow(r.id, { bid: limitMoney(e.target.value, 10000) })}
-                          // HUMAN units, same as LION's reads prefill them: ROAS decimal for
-                          // MIN_ROAS sources (0,34 = 34%), $ for cap sources. The duplicate route
-                          // scales to Meta-native wire units by the source's strategy — never
-                          // type pre-scaled values here. Empty inherits the source's own bid.
+                          // Cash-register entry, SAME as the launcher's bid/ROAS field: typed
+                          // digits fill hundredths from the right (34 → 0,34 · 120 → 1,20), so a
+                          // missed comma can never inflate a bid 100×. HUMAN units, like LION's
+                          // reads prefill them: ROAS decimal for MIN_ROAS sources, $ for cap —
+                          // the duplicate route scales to Meta-native wire units by the SOURCE's
+                          // strategy. Empty inherits the source's own bid.
+                          onChange={(e) =>
+                            patchRow(r.id, {
+                              bid: limitMoneyCents(
+                                e.target.value,
+                                r.info?.bidStrategy === "LOWEST_COST_WITH_MIN_ROAS" ? 100 : 1000,
+                              ),
+                            })
+                          }
                           placeholder={
                             r.info?.bidStrategy === "LOWEST_COST_WITH_MIN_ROAS" ? "inherits ROAS goal" : "inherit"
                           }
+                          title="Digits fill cents — 34 → 0,34 · 120 → 1,20"
+                          inputMode="decimal"
                           aria-label="Bid / ROAS goal"
                           className={cellInput}
                         />
