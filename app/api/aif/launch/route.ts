@@ -30,6 +30,7 @@ import {
 } from "@/lib/aif-launch";
 import { backfillBrand, claimBrand, deleteBrand } from "@/lib/aif-claim";
 import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
+import { reportPagesUsed } from "@/lib/hs-pages";
 import { taskWriter } from "@/lib/task-store";
 import { del } from "@vercel/blob";
 
@@ -366,7 +367,9 @@ export async function POST(req: Request) {
         if (!ad.id) throw new FbError("ad create returned no id", ad);
         created.ad_id = String(ad.id);
 
-        // 4) record the FB ids against the claimed brand (best-effort)
+        // 4) tell the hs-tools pages registry (AIF scope — inert until the box syncs AIF pages)
+        // + record the FB ids against the claimed brand (best-effort)
+        await reportPagesUsed("us", [{ pageId: binds.pageId, delta: 1 }]);
         await backfillBrand(claim.documentId, {
           campaign_id: created.campaign_id,
           adset_id: created.adset_id,

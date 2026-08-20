@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { Campaign } from "@/lib/types";
 import { hsCampaignError, hsCountryCodes, hsCreatePayload, todaySaoPauloDDMM } from "@/lib/hs-launch";
+import { reportPagesUsed } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { stampHsTaskRow } from "@/lib/task-store";
 import { AcctLimitedError, acctKey, claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
@@ -121,6 +122,9 @@ export async function POST(req: Request): Promise<NextResponse> {
           kind: "launch",
         });
       }
+      // Registry ledger, optimistically at submit: the weapon builds one ad per creative URL on
+      // this fanka (fire-safe; a failed LION task is reconciled by the box's next Facebook sweep).
+      await reportPagesUsed("br", [{ pageId: c.page, delta: creatives.length }]);
       return NextResponse.json({ ok: true, lionTaskId, name, currency: account.currency || "USD" });
     }
     // Per-campaign rejection — LION's reason is the actionable text (name mismatch, missing field…).

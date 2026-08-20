@@ -27,6 +27,7 @@ import {
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import { backfillBrand, claimBrand, deleteBrand } from "@/lib/aif-claim";
 import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
+import { reportPagesUsed } from "@/lib/hs-pages";
 import { taskWriter } from "@/lib/task-store";
 import type { CloneEdit } from "@/lib/clone";
 import {
@@ -412,6 +413,10 @@ export async function POST(req: Request) {
           // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
           if (!ad.id) throw new FbError("ad create returned no id", ad);
           created.ad_id = String(ad.id);
+
+          // Registry ledger: this clone took one slot on its fanka (fire-safe; the box's next
+          // Facebook sweep reconciles either way).
+          await reportPagesUsed(aif ? "us" : "in", [{ pageId: editBinds.pageId, delta: 1 }]);
 
           if (aif) {
             await backfillBrand(claim.documentId, {

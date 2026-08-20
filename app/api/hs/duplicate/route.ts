@@ -1,6 +1,7 @@
 import { NextResponse, after } from "next/server";
 import { bidKind, parseMoney } from "@/lib/types";
 import { hsWireBid } from "@/lib/hs-launch";
+import { reportPagesUsed } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { readAppCache, writeAppCache } from "@/lib/app-cache";
 import {
@@ -397,6 +398,9 @@ export async function POST(req: Request): Promise<NextResponse> {
       if (acctSlots.length > taskIds.length) {
         await Promise.all(acctSlots.slice(taskIds.length).map((d) => releaseAcctSlot(d)));
       }
+      // Registry ledger, optimistically at submit: each accepted copy re-creates every source ad
+      // on the bind fanka (fire-safe; failed LION tasks reconcile on the box's next sweep).
+      await reportPagesUsed("br", [{ pageId: page, delta: (await sourceAdsCount(campaignId)) * taskIds.length }]);
       return NextResponse.json({ ok: true, rows, taskIds, currency: binds.currency });
     }
     // Preflight rejection — LION's reason is the actionable text ("No valid creative URL found
@@ -412,6 +416,17 @@ export async function POST(req: Request): Promise<NextResponse> {
     const status = e instanceof LionError && e.status && e.status < 500 ? 400 : 502;
     if (status === 400) await Promise.all(acctSlots.map((d) => releaseAcctSlot(d)));
     return bad(`lion_duplicate_failed: ${(e as Error).message}`, status);
+  }
+}
+
+/** Ads one clone of a source re-creates (each copy replicates every source ad) — a details/
+ *  read for the registry ledger. Unreadable sources count as 1: a clone carries at least one ad,
+ *  and the box's Facebook sweep replaces the estimate with facts anyway. */
+async function sourceAdsCount(campaignId: string): Promise<number> {
+  try {
+    return Math.max((await lionCampaignAds([campaignId]))[campaignId]?.adsCount ?? 0, 1);
+  } catch {
+    return 1;
   }
 }
 
@@ -442,6 +457,7 @@ async function pumpBatch(
 ): Promise<void> {
   try {
     const strategyCache = new Map<string, string>();
+    const adsCountCache = new Map<string, number>();
     const familyFailed = new Map<string, string>();
 
     // ---- phase 1: jittered submits ----
@@ -524,6 +540,14 @@ async function pumpBatch(
           // started_at = the REAL submit moment (rows are stamped minutes earlier): the drawer's
           // elapsed timer and the 3h cap then measure time ON LION, not time in our queue.
           await rowWrite(user, s.taskId, { link: lionTaskId, started_at: Date.now() });
+          // Registry ledger, optimistically at submit: this copy re-creates every source ad on
+          // the bind fanka (fire-safe; failed LION tasks reconcile on the box's next sweep).
+          let srcAds = adsCountCache.get(s.campaignId);
+          if (srcAds === undefined) {
+            srcAds = await sourceAdsCount(s.campaignId);
+            adsCountCache.set(s.campaignId, srcAds);
+          }
+          await reportPagesUsed("br", [{ pageId: binds.page, delta: srcAds }]);
         } else {
           // Preflight rejection kills the whole family (object-story creatives, dead source…).
           // No clone was created → the account slot goes back to the pool.

@@ -64,9 +64,16 @@ export function useHs(enabled: boolean): HsCatalog {
   const [profiles, setProfiles] = useState<RichOption[] | null>(null);
   const [data, setData] = useState<Map<string, HsProfileData | null>>(new Map());
   const [pixels, setPixels] = useState<Map<string, PixelInfo[] | null>>(new Map());
-  // page id → active-ads count, one global map for every profile (mirrors of one pool).
-  // null = not landed (yet / at all) → pages render untagged, exactly like MO's loading state.
-  const [pageCounts, setPageCounts] = useState<Record<string, number> | null>(null);
+  // page id → active-ads count (+ per-page real limits in registry mode), one global map for
+  // every profile (mirrors of one pool). null = not landed (yet / at all) → pages render
+  // untagged, exactly like MO's loading state.
+  const [pageVolume, setPageVolume] = useState<{
+    counts: Record<string, number>;
+    limits: Record<string, number>;
+    /** hs-tools registry: a page absent from counts is UNKNOWN (untagged, pickable). Legacy
+     *  sweep: absent means 0 counted ads — the old "0/limit" contract. */
+    mode: "registry" | "legacy";
+  } | null>(null);
   // Fetch guards live in refs, NOT in the state maps: a state-updater runs whenever React gets to
   // it, so "claim the slot inside the updater" races the render and can silently never start the
   // fetch. Refs are synchronous — one caller wins, everyone else no-ops.
@@ -129,10 +136,16 @@ export function useHs(enabled: boolean): HsCatalog {
         const d = (await r.json().catch(() => ({}))) as {
           ok?: boolean;
           counts?: Record<string, number>;
+          limits?: Record<string, number>;
+          mode?: string;
         };
         if (!alive) return;
         if (r.ok && d?.ok && d.counts) {
-          setPageCounts(d.counts);
+          setPageVolume({
+            counts: d.counts,
+            limits: d.limits ?? {},
+            mode: d.mode === "registry" ? "registry" : "legacy",
+          });
           return;
         }
         throw new Error(`HTTP ${r.status}`);
@@ -260,10 +273,13 @@ export function useHs(enabled: boolean): HsCatalog {
   );
 
   // Same badge grammar as MO's fanpage picker (use-fanpages): right-aligned "N/limit", dim →
-  // warn ≥80% → danger ≥100%. A page missing from the map counted 0 active ads — that is a
-  // real (and the most useful) number, so it tags "0/limit" rather than staying blank.
+  // warn ≥80% → danger ≥100%, with the page's REAL limit in registry mode. Registry mode: a page
+  // absent from the map is UNKNOWN (the box never read its meter) → untagged and pickable —
+  // "0/250" there would be an invitation onto numbers nobody has. Legacy sweep keeps its old
+  // contract: absent = 0 counted ads → tags "0/limit".
   const decorated = useMemo(() => {
-    if (!pageCounts) return data;
+    if (!pageVolume) return data;
+    const { counts, limits, mode } = pageVolume;
     const next = new Map<string, HsProfileData | null>();
     for (const [slug, d] of data) {
       next.set(
@@ -271,18 +287,21 @@ export function useHs(enabled: boolean): HsCatalog {
         d && {
           ...d,
           pages: d.pages.map((p) => {
-            const n = pageCounts[p.value] ?? 0;
-            const ratio = PAGE_AD_LIMIT > 0 ? n / PAGE_AD_LIMIT : 0;
+            const raw = counts[p.value];
+            const n = typeof raw === "number" ? raw : mode === "legacy" ? 0 : null;
+            if (n === null) return p;
+            const lim = limits[p.value] ?? PAGE_AD_LIMIT;
+            const ratio = lim > 0 ? n / lim : 0;
             const tagTone: RichOption["tagTone"] = ratio >= 1 ? "danger" : ratio >= 0.8 ? "warn" : "dim";
             // Full pages stay listed (the red count explains itself) but can't be picked — a
             // launch would just burn against Meta's per-page ad limit.
-            return { ...p, tag: `${n}/${PAGE_AD_LIMIT}`, tagTone, disabled: ratio >= 1 };
+            return { ...p, tag: `${n}/${lim}`, tagTone, disabled: ratio >= 1 };
           }),
         },
       );
     }
     return next;
-  }, [data, pageCounts]);
+  }, [data, pageVolume]);
 
   const dataFor = useCallback((slug: string) => (slug ? decorated.get(slug) : undefined), [decorated]);
   const pixelsFor = useCallback(

@@ -209,12 +209,12 @@ function CloneInner({
 
   const partner = partnerConfig(partnerId);
   const aifMode = Boolean(partner.aifLaunch);
-  // Token fanpages for the batch fanka picker (with live N/limit fill tags; AIF reads its own
-  // token's pages, no volume badges — same as the launcher board).
+  // Token fanpages for the batch fanka picker (with live N/limit fill tags from the hs-tools
+  // registry; AIF's scope fills in the day the box syncs AIF pages — same as the launcher board).
   const fanpages = useFanpages(
     Boolean(partner.fanpagesFromToken),
     partner.pageAdLimit ?? 250,
-    aifMode ? { list: "/api/aif/fanpages", volume: null } : undefined,
+    aifMode ? { list: "/api/aif/fanpages", volume: "/api/aif/fanpages/volume" } : undefined,
   );
   const fanpageMissing = Boolean(partner.fanpagesFromToken) && !settings.pageId;
   // Token ad accounts for the destination pick. The destination is an EXPLICIT choice:

@@ -32,6 +32,7 @@ import {
   parseTokenCreatives,
 } from "@/lib/hs-token-launch";
 import { LION_ACR, LionError, lionAccountPixels, lionConfigured, lionProfileData } from "@/lib/lion";
+import { reportPagesUsed } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { taskWriter } from "@/lib/task-store";
 import { acctKey, claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
@@ -341,6 +342,9 @@ export async function POST(req: Request): Promise<Response> {
           });
         } finally {
           clearInterval(beat);
+          // Registry ledger: every ad that DID land occupies a slot on the fanka — partial trees
+          // included (fire-safe; the box's next Facebook sweep reconciles either way).
+          if (adIds.length) await reportPagesUsed("br", [{ pageId: binds.pageId, delta: adIds.length }]);
           // No Blob cleanup here on purpose: the HS rail keeps creatives in Blob either way (the
           // LION rail leaves them for the weapon to fetch), and a retry re-uses the same URLs.
           await tw.flush();

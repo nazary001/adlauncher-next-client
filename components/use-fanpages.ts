@@ -58,10 +58,13 @@ export function useFanpages(
         const v = (await fetch(volumeApi).then((r) => r.json())) as {
           ok?: boolean;
           counts?: Record<string, number | null>;
+          /** Registry mode (hs-tools): per-page REAL limits ride along; absent = unknown page. */
+          limits?: Record<string, number>;
         };
         if (!alive) return;
         if (v?.ok && v.counts) {
           const counts = v.counts;
+          const limits = v.limits ?? {};
           missing = ids.filter((id) => typeof counts[id] !== "number").length;
           setState((prev) =>
             prev.key === key && prev.list
@@ -70,10 +73,11 @@ export function useFanpages(
                   list: prev.list.map((o) => {
                     const n = counts[o.value];
                     if (typeof n !== "number") return o;
-                    const ratio = limit > 0 ? n / limit : 0;
+                    const lim = limits[o.value] ?? limit;
+                    const ratio = lim > 0 ? n / lim : 0;
                     const tagTone: FanpageOption["tagTone"] =
                       ratio >= 1 ? "danger" : ratio >= 0.8 ? "warn" : "dim";
-                    return { ...o, adCount: n, tag: `${n}/${limit}`, tagTone };
+                    return { ...o, adCount: n, tag: `${n}/${lim}`, tagTone };
                   }),
                 }
               : prev,

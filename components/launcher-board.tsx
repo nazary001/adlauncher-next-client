@@ -149,12 +149,13 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // without extra requests. Drives the exhaustion banner and the Launch hard-block below.
   const poolFree = pool && reserved ? Math.max(0, pool.max - reserved.size) : null;
   const poolExhausted = Boolean(pool) && poolFree === 0;
-  // Token fanpages for the per-card fanka picker, each with its live N/limit fill tag (MO); AIF
-  // reads its own token's pages and ships v1 without the volume badges.
+  // Token fanpages for the per-card fanka picker, each with its live N/limit fill tag from the
+  // hs-tools registry (AIF reads its own token's pages; its registry scope fills the badges the
+  // day the box starts syncing AIF pages — empty until then).
   const fanpages = useFanpages(
     Boolean(partner.fanpagesFromToken),
     partner.pageAdLimit ?? 250,
-    partner.aifLaunch ? { list: "/api/aif/fanpages", volume: null } : undefined,
+    partner.aifLaunch ? { list: "/api/aif/fanpages", volume: "/api/aif/fanpages/volume" } : undefined,
   );
   // Token ad accounts (with their pixels) for the account/pixel pickers.
   const adAccounts = useAdAccounts(

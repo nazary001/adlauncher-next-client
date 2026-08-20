@@ -28,6 +28,7 @@ import {
 import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 import { fetchValidatedImage, uploadImage, uploadVideo, videoThumb, waitForVideo } from "@/lib/fb-media";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
+import { reportPagesUsed } from "@/lib/hs-pages";
 import { taskWriter } from "@/lib/task-store";
 import { del } from "@vercel/blob";
 
@@ -420,7 +421,10 @@ export async function POST(req: Request) {
         if (!ad.id) throw new FbError("ad create returned no id", ad);
         created.ad_id = String(ad.id);
 
-        // 4) record the FB ids against the claimed gcm (best-effort; mirrors into the ledger epoch)
+        // 4) tell the hs-tools pages registry this fanka just took one more slot (fire-safe;
+        // the box's next Facebook sweep reconciles either way) + record the FB ids against the
+        // claimed gcm (best-effort; mirrors into the ledger epoch)
+        await reportPagesUsed("in", [{ pageId: binds.pageId, delta: 1 }]);
         await backfillGcm(
           claim.documentId,
           {

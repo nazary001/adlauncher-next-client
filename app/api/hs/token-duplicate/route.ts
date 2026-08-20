@@ -1,6 +1,7 @@
 import { NextResponse, after } from "next/server";
 import { bidKind, parseMoney } from "@/lib/types";
 import { hsWireBid } from "@/lib/hs-launch";
+import { reportPagesUsed } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { readAppCache, writeAppCache } from "@/lib/app-cache";
 import { stampHsTaskRow, upsertTaskRow } from "@/lib/task-store";
@@ -484,6 +485,9 @@ async function pumpTokenBatch(
           finished_at: Date.now(),
           error: null,
         });
+        // Registry ledger: every ad this clone landed occupies a slot on the bind fanka
+        // (fire-safe; the box's next Facebook sweep reconciles either way).
+        await reportPagesUsed("br", [{ pageId: binds.page, delta: adIds.length }]);
       } catch (e) {
         const err = e as FbError;
         if (acctSlot && !created.campaign_id) await releaseAcctSlot(acctSlot.documentId);
