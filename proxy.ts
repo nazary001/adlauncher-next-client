@@ -23,9 +23,13 @@ export function proxy(request: NextRequest) {
 
 export const config = {
   // Excluded from the proxy (they gate themselves):
-  //   • api/launch      — video is now a small JSON URL, but it still auth-checks inline.
-  //   • api/blob-upload — Blob's server-to-server "upload completed" callback carries no cookie;
-  //                       the route enforces auth in onBeforeGenerateToken instead.
+  //   • api/launch         — video is now a small JSON URL, but it still auth-checks inline.
+  //   • api/blob-upload    — Blob's server-to-server "upload completed" callback carries no cookie;
+  //                          the route enforces auth in onBeforeGenerateToken instead.
+  //   • api/hs/token-cron  — Vercel Cron's 30-min token-pool sweep authenticates with the
+  //                          CRON_SECRET bearer (no cookie on cron requests); sessions pass too.
   // `api/launch(?!-)` keeps /api/launch-tasks proxied.
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|login|api/auth|api/launch(?![\\w-])|api/blob-upload).*)"],
+  matcher: [
+    "/((?!_next/static|_next/image|favicon.ico|login|api/auth|api/launch(?![\\w-])|api/blob-upload|api/hs/token-cron).*)",
+  ],
 };

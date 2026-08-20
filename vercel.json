@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/hs/token-cron",
+      "schedule": "*/30 * * * *"
+    }
+  ]
+}
