@@ -220,7 +220,10 @@ export const PARTNERS: PartnerConfig[] = [
     preferredPixel: MO_DEFAULT_PIXEL,
     launchNote: "Submits directly via Graph API",
     pageAdLimit: 250,
-    maxCreatives: 1,
+    // Up to 5 creatives per campaign (owner ask 08-20): one campaign → one ad set → one ad per
+    // creative, same tree shape as the HS token rail. Files ride through the Blob broker
+    // (500MB/video ceiling, images pre-validated ≤8MB) — never through a function body.
+    maxCreatives: 5,
   },
   {
     id: "us",

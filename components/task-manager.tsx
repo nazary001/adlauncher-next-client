@@ -101,10 +101,22 @@ function stageIndexFor(kind: TaskKind, stage: string | null): number {
 
 // ---------- task model ----------
 
+/** One creative captured at enqueue (session-local object URLs). */
+export type QueuedMedia = {
+  url: string;
+  name: string;
+  kind: "video" | "image";
+  /** Custom cover for a VIDEO creative — uploaded next to it and pinned as the ad's thumbnail. */
+  cover?: { url: string; name: string };
+};
+
 type LaunchInput = {
   kind: "launch";
   partnerId: PartnerId;
   campaign: Campaign;
+  /** All creatives of this launch (1..partner.maxCreatives). The single-media fields below stay
+   *  filled with the FIRST one — legacy shape for anything still reading them. */
+  medias?: QueuedMedia[];
   mediaUrl: string;
   mediaName: string;
   mediaKind: "video" | "image";
@@ -130,6 +142,8 @@ const lsKeyFor = (user: SessionUser | undefined, base: string) =>
 export type EnqueueArgs = {
   partnerId: PartnerId;
   campaign: Campaign;
+  /** All creatives (1..partner.maxCreatives); when absent the single-media fields drive alone. */
+  medias?: QueuedMedia[];
   mediaUrl: string;
   mediaName: string;
   mediaKind: "video" | "image";
@@ -533,62 +547,57 @@ function TaskManagerCore({
       // failed (previously Strapi kept the initial "upload" even for FB-side failures).
       let lastStage = "upload";
       try {
-        // Recover the creative bytes from the (session-lived) object URL captured at enqueue.
-        const fallbackType = input.mediaKind === "image" ? "image/jpeg" : "video/mp4";
-        const fallbackName = input.mediaKind === "image" ? "creative.jpg" : "creative.mp4";
-        const blob = await fetch(input.mediaUrl).then((r) => r.blob());
-        const file = new File([blob], input.mediaName || fallbackName, {
-          type: blob.type || fallbackType,
-        });
+        // Everything this launch ships (1..maxCreatives): the multi shape when present, else the
+        // legacy single-media fields (restored tasks / older enqueues).
+        const queued: QueuedMedia[] =
+          input.medias && input.medias.length > 0
+            ? input.medias
+            : [{ url: input.mediaUrl, name: input.mediaName, kind: input.mediaKind, cover: input.cover }];
 
-        // Upload the creative straight to Vercel Blob — this bypasses the serverless request-body
-        // limit (~4.5MB) entirely. The launch route then gets just the URL and FB pulls the video
-        // from it via file_url (images are re-read server-side into adimages). Bounded by
-        // UPLOAD_TIMEOUT_MS so a hung connection fails the task (retryable) instead of spinning
-        // forever and blocking the queue.
-        const safeName = (file.name || fallbackName).replace(/[^\w.-]+/g, "_");
-        const uploadAbort = new AbortController();
-        const uploadTimer = window.setTimeout(() => uploadAbort.abort(), UPLOAD_TIMEOUT_MS);
-        let mediaUrl: string;
-        try {
-          ({ url: mediaUrl } = await upload(`creatives/${id}-${safeName}`, file, {
-            access: "public",
-            contentType: file.type || fallbackType,
-            handleUploadUrl: "/api/blob-upload",
-            abortSignal: uploadAbort.signal,
-          }));
-        } catch (e) {
-          throw uploadAbort.signal.aborted
-            ? new Error(`creative upload timed out after ${UPLOAD_TIMEOUT_MS / 60_000} min — check the connection and retry`)
-            : e;
-        } finally {
-          window.clearTimeout(uploadTimer);
-        }
-
-        // Custom video cover: ships to Blob next to the creative; the route pins it as the ad's
-        // thumbnail (image_hash). Video creatives only — images ARE their own cover.
-        let coverUrl: string | undefined;
-        if (input.cover && input.mediaKind === "video") {
-          const cblob = await fetch(input.cover.url).then((r) => r.blob());
-          const cfile = new File([cblob], input.cover.name || "cover.jpg", { type: cblob.type || "image/jpeg" });
-          const cSafe = (cfile.name || "cover.jpg").replace(/[^\w.-]+/g, "_");
-          const cAbort = new AbortController();
-          const cTimer = window.setTimeout(() => cAbort.abort(), UPLOAD_TIMEOUT_MS);
+        // One bounded Blob upload: bytes recovered from the (session-lived) object URL, streamed
+        // straight to Vercel Blob — bypassing the serverless request-body limit (~4.5MB) entirely;
+        // the launch route then gets just URLs and FB pulls videos via file_url (images are
+        // re-read server-side into adimages). UPLOAD_TIMEOUT_MS keeps a hung connection a
+        // retryable task failure instead of a stuck queue.
+        const uploadToBlob = async (objUrl: string, rawName: string, kind: "video" | "image", tag: string) => {
+          const fallbackType = kind === "image" ? "image/jpeg" : "video/mp4";
+          const fallbackName = kind === "image" ? "creative.jpg" : "creative.mp4";
+          const blob = await fetch(objUrl).then((r) => r.blob());
+          const file = new File([blob], rawName || fallbackName, { type: blob.type || fallbackType });
+          const safeName = (file.name || fallbackName).replace(/[^\w.-]+/g, "_");
+          const abort = new AbortController();
+          const timer = window.setTimeout(() => abort.abort(), UPLOAD_TIMEOUT_MS);
           try {
-            ({ url: coverUrl } = await upload(`creatives/${id}-cover-${cSafe}`, cfile, {
+            const { url } = await upload(`creatives/${id}-${tag}${safeName}`, file, {
               access: "public",
-              contentType: cfile.type || "image/jpeg",
+              contentType: file.type || fallbackType,
               handleUploadUrl: "/api/blob-upload",
-              abortSignal: cAbort.signal,
-            }));
+              abortSignal: abort.signal,
+            });
+            return url;
           } catch (e) {
-            throw cAbort.signal.aborted
-              ? new Error(`cover upload timed out after ${UPLOAD_TIMEOUT_MS / 60_000} min — check the connection and retry`)
+            throw abort.signal.aborted
+              ? new Error(`creative upload timed out after ${UPLOAD_TIMEOUT_MS / 60_000} min — check the connection and retry`)
               : e;
           } finally {
-            window.clearTimeout(cTimer);
+            window.clearTimeout(timer);
           }
+        };
+
+        // Upload every creative (+ its video cover) in order — sequential on purpose: parallel
+        // multi-hundred-MB uploads would fight for the same uplink and all crawl into the timeout.
+        const medias: { url: string; kind: "video" | "image"; coverUrl?: string }[] = [];
+        for (let i = 0; i < queued.length; i++) {
+          const m = queued[i];
+          const tag = queued.length > 1 ? `${i + 1}-` : "";
+          const url = await uploadToBlob(m.url, m.name, m.kind, tag);
+          let coverUrl: string | undefined;
+          if (m.cover && m.kind === "video") {
+            coverUrl = await uploadToBlob(m.cover.url, m.cover.name || "cover.jpg", "image", `${tag}cover-`);
+          }
+          medias.push({ url, kind: m.kind, ...(coverUrl ? { coverUrl } : {}) });
         }
+        const first = medias[0];
 
         const streamAbort = new AbortController();
         const streamTimer = window.setTimeout(() => streamAbort.abort(), STREAM_TIMEOUT_MS);
@@ -605,9 +614,12 @@ function TaskManagerCore({
             body: JSON.stringify({
               partnerId: input.partnerId,
               campaign: input.campaign,
-              mediaUrl,
-              mediaKind: input.mediaKind,
-              ...(coverUrl ? { coverUrl } : {}),
+              // Multi-creative shape + the legacy single-media fields (first creative) so a
+              // mid-deploy server on either side of the wire keeps working.
+              medias,
+              mediaUrl: first.url,
+              mediaKind: first.kind,
+              ...(first.coverUrl ? { coverUrl: first.coverUrl } : {}),
               taskId: id,
             }),
             signal: streamAbort.signal,
@@ -882,6 +894,7 @@ function TaskManagerCore({
         kind: "launch",
         partnerId: args.partnerId,
         campaign: args.campaign,
+        ...(args.medias && args.medias.length > 0 ? { medias: args.medias } : {}),
         mediaUrl: args.mediaUrl,
         mediaName: args.mediaName,
         mediaKind: args.mediaKind,

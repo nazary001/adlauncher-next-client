@@ -378,13 +378,25 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
         continue;
       }
       if (nextReserved && c.gcm) nextReserved.add(c.gcm);
+      // Every creative on the card (capped by the partner, e.g. MO = 5) — one ad each under the
+      // campaign's single ad set. Legacy single-media fields carry the first one alongside.
+      const medias = c.files
+        .filter((f) => f.kind === "video" || f.kind === "image")
+        .slice(0, Math.max(1, partner.maxCreatives ?? 1))
+        .map((f) => ({
+          url: f.url,
+          name: f.name,
+          kind: f.kind === "image" ? ("image" as const) : ("video" as const),
+          // Custom video cover picked in the dropzone (images are their own cover).
+          ...(f.kind === "video" && f.cover ? { cover: f.cover } : {}),
+        }));
       enqueue({
         partnerId,
         campaign: c,
+        medias,
         mediaUrl: media.url,
         mediaName: media.name,
         mediaKind: media.kind === "image" ? "image" : "video",
-        // Custom video cover picked in the dropzone (images are their own cover).
         ...(media.kind === "video" && media.cover ? { cover: media.cover } : {}),
         name: fullName(c),
         gcm: c.gcm,

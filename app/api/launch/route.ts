@@ -94,17 +94,18 @@ export async function POST(req: Request) {
 
   let campaign: Campaign;
   let partnerId: PartnerId;
-  let mediaUrl = "";
-  let mediaKind: "video" | "image" = "video";
-  let coverUrl = "";
+  /** Creatives of this launch (1..maxCreatives): own-Blob URLs; cover = video thumbnail image. */
+  let medias: { url: string; kind: "video" | "image"; coverUrl: string }[] = [];
   let taskId: string | null = null;
   try {
     const j = (await req.json()) as {
       campaign?: Campaign;
       partnerId?: string;
+      /** Multi-creative shape (5-creative MO, 08-20). */
+      medias?: { url?: string; kind?: string; coverUrl?: string }[];
+      /** Single-creative fields — the pre-multi wire, still sent (and accepted) for open tabs. */
       mediaUrl?: string;
       mediaKind?: string;
-      /** Custom cover image for a video creative (own-Blob URL) — pinned as the thumbnail. */
       coverUrl?: string;
       /** Legacy client field (pre-image builds still in open tabs) — video by definition. */
       videoUrl?: string;
@@ -112,9 +113,23 @@ export async function POST(req: Request) {
     };
     campaign = (j.campaign ?? {}) as Campaign;
     partnerId = String(j.partnerId ?? "in") as PartnerId;
-    mediaUrl = typeof j.mediaUrl === "string" && j.mediaUrl ? j.mediaUrl : typeof j.videoUrl === "string" ? j.videoUrl : "";
-    mediaKind = j.mediaKind === "image" ? "image" : "video";
-    coverUrl = mediaKind === "video" && typeof j.coverUrl === "string" ? j.coverUrl.trim() : "";
+    if (Array.isArray(j.medias) && j.medias.length > 0) {
+      medias = j.medias.slice(0, 10).map((m) => {
+        const kind = m?.kind === "image" ? ("image" as const) : ("video" as const);
+        return {
+          url: typeof m?.url === "string" ? m.url : "",
+          kind,
+          coverUrl: kind === "video" && typeof m?.coverUrl === "string" ? m.coverUrl.trim() : "",
+        };
+      });
+    } else {
+      const url =
+        typeof j.mediaUrl === "string" && j.mediaUrl ? j.mediaUrl : typeof j.videoUrl === "string" ? j.videoUrl : "";
+      const kind = j.mediaKind === "image" ? ("image" as const) : ("video" as const);
+      medias = [
+        { url, kind, coverUrl: kind === "video" && typeof j.coverUrl === "string" ? j.coverUrl.trim() : "" },
+      ];
+    }
     // The Task Manager row this run belongs to. When present, progress + the terminal state are
     // ALSO written to Strapi server-side, so every account keeps seeing the truth live even if the
     // launching browser dies mid-run (the run itself continues here regardless).
@@ -227,7 +242,7 @@ export async function POST(req: Request) {
       );
     }
   }
-  if (!mediaUrl) {
+  if (medias.length === 0 || medias.some((m) => !m.url)) {
     return NextResponse.json({ ok: false, stage: "media", error: "media_required" }, { status: 400 });
   }
   // The creative must be a Vercel Blob URL our OWN broker produced — never an arbitrary URL.
@@ -236,6 +251,15 @@ export async function POST(req: Request) {
   // on the *.blob.vercel-storage.com host over https, so we require both the host suffix AND that
   // path prefix — narrowing the surface to blobs this app actually creates (rev-api #2).
   {
+    // Server-side creative cap — the partner's own limit, never the client's word (a stale tab
+    // could still POST more; the tree would then blow the function window mid-wave).
+    const cap = Math.max(1, partner.maxCreatives ?? 1);
+    if (medias.length > cap) {
+      return NextResponse.json(
+        { ok: false, stage: "media", error: `too_many_creatives — this partner launches at most ${cap} per campaign` },
+        { status: 400 },
+      );
+    }
     const ownBlob = (raw: string): boolean => {
       try {
         const u = new URL(raw);
@@ -244,12 +268,14 @@ export async function POST(req: Request) {
         return false;
       }
     };
-    if (!ownBlob(mediaUrl)) {
-      return NextResponse.json({ ok: false, stage: "media", error: "media_url_invalid" }, { status: 400 });
-    }
-    // The cover is fetched server-side into adimages — same own-Blob fence as the creative.
-    if (coverUrl && !ownBlob(coverUrl)) {
-      return NextResponse.json({ ok: false, stage: "media", error: "cover_url_invalid" }, { status: 400 });
+    for (const m of medias) {
+      if (!ownBlob(m.url)) {
+        return NextResponse.json({ ok: false, stage: "media", error: "media_url_invalid" }, { status: 400 });
+      }
+      // Covers are fetched server-side into adimages — same own-Blob fence as the creatives.
+      if (m.coverUrl && !ownBlob(m.coverUrl)) {
+        return NextResponse.json({ ok: false, stage: "media", error: "cover_url_invalid" }, { status: 400 });
+      }
     }
   }
   if (bidAmountMissing(campaign)) {
@@ -294,14 +320,17 @@ export async function POST(req: Request) {
     );
   }
 
-  // Image launches + custom video covers: fetch + validate BEFORE the stream — an oversized
-  // image must die here as a clean 400 (nothing claimed, no campaign shell), not 20s into the
-  // wave at adimages. The validated bytes ride into the stream so the Blob isn't fetched twice.
-  let imageBuf: Buffer | null = null;
-  let coverBuf: Buffer | null = null;
+  // Image launches + custom video covers: fetch + validate EVERY one BEFORE the stream — an
+  // oversized image must die here as a clean 400 (nothing claimed, no campaign shell), not 20s
+  // into the wave at adimages. Validated bytes ride into the stream so no Blob is fetched twice.
+  // Worst case is bounded: 5 creatives × ≤8MB (fetchValidatedImage ceiling) ≈ 40MB in memory.
+  const imageBufs = new Map<number, Buffer>();
+  const coverBufs = new Map<number, Buffer>();
   try {
-    if (mediaKind === "image") imageBuf = await fetchValidatedImage(mediaUrl);
-    if (coverUrl) coverBuf = await fetchValidatedImage(coverUrl);
+    for (let i = 0; i < medias.length; i++) {
+      if (medias[i].kind === "image") imageBufs.set(i, await fetchValidatedImage(medias[i].url));
+      if (medias[i].coverUrl) coverBufs.set(i, await fetchValidatedImage(medias[i].coverUrl));
+    }
   } catch (e) {
     return NextResponse.json(
       { ok: false, stage: "media", error: (e as FbError).message ?? String(e) },
@@ -371,25 +400,36 @@ export async function POST(req: Request) {
         const link = fullLandingUrl(partner, campaign.landing, gcm, conversions, binds.pixelId);
         if (!link) throw new FbError("no landing selected — cannot build destination link", {});
 
-        // 2) register the creative. Video: FB pulls it from the Blob URL, then we wait out
-        // processing. Image: the bytes go straight into the account's image library (no
-        // processing step) and the creative is built as link_data around the returned hash.
+        // 2) register EVERY creative. Videos: FB pulls each from its Blob URL — all uploads are
+        // fired first (advideos answers immediately, Meta processes in the background, in
+        // parallel), THEN processing is waited out one by one, so a 5-video card's wall-clock is
+        // ~the slowest video, not the sum. Images: validated bytes go straight into the account's
+        // image library (no processing step).
         progress("video");
-        let videoId = "";
-        let thumbUrl = "";
-        let imageHash = "";
-        let coverHash = "";
-        if (mediaKind === "image") {
-          imageHash = await uploadImage(binds.accountId, imageBuf as Buffer); // validated pre-flight
-          created.image_hash = imageHash;
-        } else {
-          videoId = await uploadVideo(binds.accountId, mediaUrl, `${name} · video`);
-          created.video_id = videoId;
-          progress("processing");
-          await waitForVideo(videoId);
+        type RegisteredMedia =
+          | { kind: "image"; imageHash: string }
+          | { kind: "video"; videoId: string; thumbUrl: string; coverHash?: string };
+        const regs: RegisteredMedia[] = new Array(medias.length);
+        for (let i = 0; i < medias.length; i++) {
+          const m = medias[i];
+          if (m.kind === "image") {
+            regs[i] = { kind: "image", imageHash: await uploadImage(binds.accountId, imageBufs.get(i) as Buffer) };
+          } else {
+            const suffix = medias.length > 1 ? ` · video ${i + 1}` : " · video";
+            regs[i] = { kind: "video", videoId: await uploadVideo(binds.accountId, m.url, `${name}${suffix}`), thumbUrl: "" };
+          }
+        }
+        created.video_id = regs.find((r) => r.kind === "video")?.videoId ?? undefined;
+        created.image_hash = (regs.find((r) => r.kind === "image") as { imageHash?: string } | undefined)?.imageHash;
+        progress("processing");
+        for (let i = 0; i < medias.length; i++) {
+          const r = regs[i];
+          if (r.kind !== "video") continue;
+          await waitForVideo(r.videoId);
           // A custom cover replaces the auto-thumbnail entirely (no thumbnail poll needed).
-          if (coverBuf) coverHash = await uploadImage(binds.accountId, coverBuf);
-          else thumbUrl = await videoThumb(videoId);
+          const coverBuf = coverBufs.get(i);
+          if (coverBuf) r.coverHash = await uploadImage(binds.accountId, coverBuf);
+          else r.thumbUrl = await videoThumb(r.videoId);
         }
         const localeIds = await resolveLocales(campaign.locales);
 
@@ -405,26 +445,44 @@ export async function POST(req: Request) {
         created.adset_id = String(adset.id);
 
         progress("creative");
-        const creative = await fbPost(
-          `act_${binds.accountId}/adcreatives`,
-          mediaKind === "image"
-            ? imageCreativePayload(campaign, name, binds, { imageHash, link })
-            : creativePayload(campaign, name, binds, { videoId, thumbUrl, link, ...(coverHash ? { coverHash } : {}) }),
-        );
-        created.creative_id = String(creative.id);
+        const creativeIds: string[] = [];
+        for (let i = 0; i < regs.length; i++) {
+          const r = regs[i];
+          const adName = regs.length > 1 ? `${name} · ${i + 1}` : name;
+          const creative = await fbPost(
+            `act_${binds.accountId}/adcreatives`,
+            r.kind === "image"
+              ? imageCreativePayload(campaign, adName, binds, { imageHash: r.imageHash, link })
+              : creativePayload(campaign, adName, binds, {
+                  videoId: r.videoId,
+                  thumbUrl: r.thumbUrl,
+                  link,
+                  ...(r.coverHash ? { coverHash: r.coverHash } : {}),
+                }),
+          );
+          creativeIds.push(String(creative.id));
+        }
+        created.creative_id = creativeIds[0];
 
         progress("ad");
-        const ad = await withParentRetry(String(adset.id), () =>
-          fbPost(`act_${binds.accountId}/ads`, adPayload(name, String(adset.id), String(creative.id))),
-        );
-        // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
-        if (!ad.id) throw new FbError("ad create returned no id", ad);
-        created.ad_id = String(ad.id);
+        const adIds: string[] = [];
+        for (let i = 0; i < creativeIds.length; i++) {
+          const adName = creativeIds.length > 1 ? `${name} · ${i + 1}` : name;
+          const ad = await withParentRetry(String(adset.id), () =>
+            fbPost(`act_${binds.accountId}/ads`, adPayload(adName, String(adset.id), creativeIds[i])),
+          );
+          // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
+          if (!ad.id) throw new FbError("ad create returned no id", ad);
+          adIds.push(String(ad.id));
+          send({ stage: "ad", done: adIds.length, total: creativeIds.length });
+        }
+        created.ad_id = adIds[0];
+        if (adIds.length > 1) created.ad_ids = adIds;
 
-        // 4) tell the hs-tools pages registry this fanka just took one more slot (fire-safe;
-        // the box's next Facebook sweep reconciles either way) + record the FB ids against the
-        // claimed gcm (best-effort; mirrors into the ledger epoch)
-        await reportPagesUsed("in", [{ pageId: binds.pageId, delta: 1 }]);
+        // 4) tell the hs-tools pages registry how many slots this fanka just took (one per ad;
+        // fire-safe — the box's next Facebook sweep reconciles either way) + record the FB ids
+        // against the claimed gcm (best-effort; mirrors into the ledger epoch)
+        await reportPagesUsed("in", [{ pageId: binds.pageId, delta: adIds.length }]);
         await backfillGcm(
           claim.documentId,
           {
@@ -485,11 +543,13 @@ export async function POST(req: Request) {
         send({ ok: false, stage: "error", error: err.message ?? String(e), detail: err.detail ?? null, created });
       } finally {
         clearInterval(beat);
-        // Drop the temporary Blob whether the launch succeeded or failed — never orphan the upload.
-        // Awaited (not fire-and-forget) so it completes before the stream closes and Vercel can
-        // freeze the function. The "done"/"error" event was already sent, so this adds no visible wait.
-        await del(mediaUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
-        if (coverUrl) await del(coverUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
+        // Drop EVERY temporary Blob (creatives + covers) whether the launch succeeded or failed —
+        // never orphan an upload. Awaited (not fire-and-forget) so it completes before the stream
+        // closes and Vercel can freeze the function; "done"/"error" was already sent, no visible wait.
+        for (const m of medias) {
+          await del(m.url, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
+          if (m.coverUrl) await del(m.coverUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
+        }
         // Flush the task-row writer too — its last transition must land before Vercel freezes us.
         await tw.flush();
         controller.close();
