@@ -11,7 +11,7 @@ import Link from "next/link";
 import { Header } from "./header";
 import type { SessionUser } from "./user-menu";
 import { useAdAccounts } from "./use-adaccounts";
-import { CheckIcon, ChevronDownIcon, PlusIcon, SearchIcon, UsersIcon, XIcon } from "./icons";
+import { CheckIcon, PlusIcon, SearchIcon, UsersIcon, XIcon } from "./icons";
 import { PARTNERS, type PartnerId } from "@/lib/partners";
 
 type TeamUser = { username: string; role: string | null; source: string };
@@ -394,56 +394,44 @@ export function AccountAccessBoard({
   const moAccounts = useAdAccounts(true, undefined, "/api/adaccounts");
   const aifAccounts = useAdAccounts(true, undefined, "/api/aif/adaccounts");
 
-  // HS: profile slugs once, then each profile's accounts on expand (a full sweep of every LION
-  // profile is heavy — hundreds of accounts per profile — so expansion is the load trigger).
-  const [hsProfiles, setHsProfiles] = useState<string[] | null>(null);
-  const [hsData, setHsData] = useState<Map<string, HsAccount[] | null>>(new Map());
-  const [hsExpanded, setHsExpanded] = useState<ReadonlySet<string>>(new Set());
+  // HS: ONE flat list — the MAIN pool only (owner ask 08-21). The globecoders profiles mirror
+  // one VD-C1 account pool, so the page loads the first non-FARM profile's bind space and shows
+  // its enabled accounts; FARM and other side segments are deliberately not listed. null =
+  // loading, "error" = load failed (Retry re-runs the whole chain).
+  const [hs, setHs] = useState<{ slug: string; list: HsAccount[] } | null | "error">(null);
   const hsWanted = rail === "br";
+  const hsStartedRef = useRef(false);
+
+  const loadHs = useCallback(async () => {
+    setHs(null);
+    try {
+      const pr = await fetch("/api/hs/profiles");
+      const pd = (await pr.json().catch(() => ({}))) as { ok?: boolean; profiles?: string[] };
+      const profiles = pr.ok && pd.ok && Array.isArray(pd.profiles) ? pd.profiles : [];
+      // Main pool = the first non-FARM profile (slugs arrive sorted; FARM mirrors carry the
+      // side segment, not the 318 VD-C1 accounts the owner splits).
+      const slug = profiles.find((p) => !/farm/i.test(p)) ?? profiles[0];
+      if (!slug) {
+        setHs("error");
+        return;
+      }
+      const r = await fetch(`/api/hs/profile-data?slug=${encodeURIComponent(slug)}`);
+      const d = (await r.json().catch(() => ({}))) as { ok?: boolean; accounts?: HsAccount[] };
+      if (r.ok && d.ok && Array.isArray(d.accounts)) {
+        setHs({ slug, list: d.accounts.filter((a) => a.status === 1) });
+      } else {
+        setHs("error");
+      }
+    } catch {
+      setHs("error");
+    }
+  }, []);
 
   useEffect(() => {
-    if (!hsWanted || hsProfiles !== null) return;
-    let alive = true;
-    (async () => {
-      try {
-        const r = await fetch("/api/hs/profiles");
-        const d = (await r.json().catch(() => ({}))) as { ok?: boolean; profiles?: string[] };
-        if (alive && r.ok && d.ok && Array.isArray(d.profiles)) setHsProfiles(d.profiles);
-        else if (alive) setHsProfiles([]);
-      } catch {
-        if (alive) setHsProfiles([]);
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [hsWanted, hsProfiles]);
-
-  const toggleProfile = (slug: string) => {
-    setHsExpanded((cur) => {
-      const next = new Set(cur);
-      if (next.has(slug)) next.delete(slug);
-      else next.add(slug);
-      return next;
-    });
-    if (!hsData.has(slug)) {
-      setHsData((m) => new Map(m).set(slug, null));
-      void (async () => {
-        try {
-          const r = await fetch(`/api/hs/profile-data?slug=${encodeURIComponent(slug)}`);
-          const d = (await r.json().catch(() => ({}))) as { ok?: boolean; accounts?: HsAccount[] };
-          const rows = r.ok && d.ok && Array.isArray(d.accounts) ? d.accounts.filter((a) => a.status === 1) : [];
-          setHsData((m) => new Map(m).set(slug, rows));
-        } catch {
-          setHsData((m) => {
-            const next = new Map(m);
-            next.delete(slug); // retry on next expand
-            return next;
-          });
-        }
-      })();
-    }
-  };
+    if (!hsWanted || hsStartedRef.current) return;
+    hsStartedRef.current = true;
+    void loadHs();
+  }, [hsWanted, loadHs]);
 
   // ---- saving ----------------------------------------------------------------------------------
   const save = useCallback(
@@ -730,51 +718,30 @@ export function AccountAccessBoard({
               </div>
             ) : (
               <div className="flex flex-col gap-2.5">
-                {hsProfiles === null ? (
-                  <div className="overflow-hidden rounded-2xl border border-line bg-surface/60">
-                    <SkeletonRows n={6} />
-                  </div>
-                ) : hsProfiles.length === 0 ? (
-                  <p className="rounded-2xl border border-line bg-surface/60 px-3 py-6 text-center text-[12px] text-faint">
-                    LION returned no profiles.
+                <div className="overflow-hidden rounded-2xl border border-line bg-surface/60">
+                  {hs === "error" ? (
+                    <div className="flex flex-col items-center gap-2.5 px-3 py-8">
+                      <p className="text-[12px] text-faint">Couldn&apos;t load the HS account pool.</p>
+                      <button
+                        type="button"
+                        onClick={() => void loadHs()}
+                        className="h-8 rounded-lg border border-line bg-surface2 px-3 text-[12px] font-medium text-dim transition-colors hover:border-accent/40 hover:text-[#9db8ff]"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  ) : hs === null ? (
+                    <SkeletonRows n={8} />
+                  ) : (
+                    renderRows(hs.list.map((a) => ({ id: a.id, name: a.name })))
+                  )}
+                </div>
+                {hs !== null && hs !== "error" ? (
+                  <p className="px-1 text-[10.5px] leading-relaxed text-faint">
+                    Main HS pool · {hs.list.length} accounts. An assignment follows the account
+                    into every LION profile and the FB Token rail automatically.
                   </p>
-                ) : (
-                  hsProfiles.map((slug) => {
-                    const openP = hsExpanded.has(slug);
-                    const rows = hsData.get(slug);
-                    return (
-                      <div key={slug} className="overflow-hidden rounded-2xl border border-line bg-surface/60">
-                        <button
-                          type="button"
-                          onClick={() => toggleProfile(slug)}
-                          aria-expanded={openP}
-                          className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-raise/40"
-                        >
-                          <ChevronDownIcon
-                            className={`h-4 w-4 text-faint transition-transform duration-150 ${openP ? "" : "-rotate-90"}`}
-                          />
-                          <span className="flex-1 truncate font-mono text-[12.5px] font-medium text-ink">{slug}</span>
-                          <span className="font-mono text-[10.5px] text-faint">
-                            {rows ? `${rows.length} accounts` : openP ? "loading…" : ""}
-                          </span>
-                        </button>
-                        {openP ? (
-                          rows === undefined || rows === null ? (
-                            <SkeletonRows n={3} />
-                          ) : (
-                            <div className="border-t border-line">
-                              {renderRows(rows.map((a) => ({ id: a.id, name: a.name })))}
-                            </div>
-                          )
-                        ) : null}
-                      </div>
-                    );
-                  })
-                )}
-                <p className="px-1 text-[10.5px] leading-relaxed text-faint">
-                  LION profiles mirror one account pool — an assignment follows the account into
-                  every profile (and into the FB Token rail) automatically.
-                </p>
+                ) : null}
               </div>
             )}
           </section>
