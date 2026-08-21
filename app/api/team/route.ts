@@ -49,20 +49,28 @@ async function directoryUsers(): Promise<TeamUser[] | null> {
   }
 }
 
-/** Usernames seen on recent launch-task rows (one newest-first page ≈ the active team). */
+/** Usernames seen on recent launch-task rows (newest-first, up to 3×100 — Strapi clamps
+ *  pageSize to 100). This is the roster's mainstay when the directory token isn't configured,
+ *  so it reaches deeper than one page: one busy wave day can fill 100 rows with 2-3 owners. */
 async function activityUsers(): Promise<string[]> {
   if (!STRAPI || !TOKEN) return [];
+  const out: string[] = [];
   try {
-    const res = await fetch(
-      `${STRAPI}/api/launch-tasks?fields[0]=owner&sort[0]=updatedAt:desc&pagination[pageSize]=100`,
-      { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store", signal: AbortSignal.timeout(8000) },
-    );
-    if (!res.ok) return [];
-    const body = (await res.json().catch(() => ({}))) as { data?: Array<{ owner?: unknown }> };
-    return (body.data ?? []).map((r) => String(r.owner ?? "").trim()).filter(Boolean);
+    for (let page = 1; page <= 3; page++) {
+      const res = await fetch(
+        `${STRAPI}/api/launch-tasks?fields[0]=owner&sort[0]=updatedAt:desc&pagination[page]=${page}&pagination[pageSize]=100`,
+        { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store", signal: AbortSignal.timeout(8000) },
+      );
+      if (!res.ok) break;
+      const body = (await res.json().catch(() => ({}))) as { data?: Array<{ owner?: unknown }> };
+      const rows = body.data ?? [];
+      out.push(...rows.map((r) => String(r.owner ?? "").trim()).filter(Boolean));
+      if (rows.length < 100) break;
+    }
   } catch {
-    return [];
+    /* partial list is fine — merged with directory + registry names */
   }
+  return out;
 }
 
 /**

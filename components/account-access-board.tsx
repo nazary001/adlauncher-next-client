@@ -573,8 +573,11 @@ export function AccountAccessBoard({
       <main className="flex-1">
         <div className="mx-auto grid w-full max-w-[1440px] items-start gap-6 px-4 pb-28 pt-6 sm:px-6 lg:grid-cols-[300px_minmax(0,1fr)]">
           {/* ---- left: intro + team roster ---- */}
-          <section className="flex flex-col gap-4 lg:sticky lg:top-[88px]">
-            <div className="flex flex-col gap-1.5">
+          {/* Sticky sidebar is HEIGHT-CAPPED to the viewport and the roster scrolls INSIDE it —
+              a sticky element taller than the screen can never be scrolled, which made every
+              user below the fold unreachable once the team grew past a handful. */}
+          <section className="flex flex-col gap-4 lg:sticky lg:top-[88px] lg:max-h-[calc(100vh-112px)]">
+            <div className="flex shrink-0 flex-col gap-1.5">
               <Link
                 href="/"
                 className="w-fit text-[11px] font-medium text-faint transition-colors hover:text-[#9db8ff]"
@@ -589,10 +592,11 @@ export function AccountAccessBoard({
               </p>
             </div>
 
-            <div className="overflow-hidden rounded-2xl border border-line bg-surface/60">
-              <p className="border-b border-line px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-faint">
+            <div className="flex flex-col overflow-hidden rounded-2xl border border-line bg-surface/60 lg:min-h-0">
+              <p className="shrink-0 border-b border-line px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-faint">
                 Team
               </p>
+              <div className="max-h-[45vh] min-h-0 overflow-y-auto overscroll-contain lg:max-h-none">
               <button
                 type="button"
                 onClick={() => setFocus(null)}
@@ -666,6 +670,7 @@ export function AccountAccessBoard({
                   );
                 })
               )}
+              </div>
             </div>
           </section>
 
