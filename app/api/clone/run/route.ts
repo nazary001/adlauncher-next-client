@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { AIF_PIXEL, ROAS_PIXEL, partnerConfig, type PartnerId } from "@/lib/partners";
-import { bidAmountMissing, bidKind, parseMoney } from "@/lib/types";
+import { bidAmountMissing, bidKind, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
 import {
   FbError,
@@ -305,20 +305,29 @@ export async function POST(req: Request) {
           if (!SUPPORTED_BID_STRATEGIES.has(campaign.bidStrategy)) {
             throw new FbError(`source bid strategy ${campaign.bidStrategy} can't be cloned — recreate it manually`, { campaignId: edit.campaignId });
           }
-          // AIF bans min-ROAS outright (its CAPI Purchases carry value 0 — nothing to optimize;
-          // same rule as /api/aif/launch) — a roas source can't be cloned on this rail.
-          if (aif && bidKind(campaign.bidStrategy) === "roas") {
-            throw new FbError(
-              "roas_not_supported — AIF conversions carry value 0 (postback CAPI); this source can't be cloned on the AIF rail",
-              { campaignId: edit.campaignId },
-            );
-          }
           if (bidAmountMissing(campaign)) {
             throw new FbError("source uses a bid cap but no ROAS goal was set on the clone row", { campaignId: edit.campaignId });
           }
-          // Mirror the HS/launch guard: a min-ROAS goal above 100 (10 000%) is a typo, not a bid.
-          if (bidKind(campaign.bidStrategy) === "roas" && parseMoney(campaign.bidCap) > 100) {
-            throw new FbError("ROAS goal must be 0–100 on the clone row", { campaignId: edit.campaignId });
+          // Mirror the launch routes: a min-ROAS goal above 100 (10 000%) is a typo, not a bid,
+          // and the ambiguous 10–20 band is refused rather than guessed (normalizeRoasGoal) —
+          // here, BEFORE any claim/write, so no campaign/marker gets orphaned over it.
+          if (bidKind(campaign.bidStrategy) === "roas") {
+            const goal = parseMoney(campaign.bidCap);
+            if (goal > 100) {
+              throw new FbError("ROAS goal must be 0–100 on the clone row", { campaignId: edit.campaignId });
+            }
+            if (normalizeRoasGoal(goal) == null) {
+              throw new FbError("roas_goal_ambiguous — type the decimal goal (0,30 = 30%) on the clone row", { campaignId: edit.campaignId });
+            }
+          }
+          // AIF min-ROAS rides the derived postback pixel — a roas source that somehow carries no
+          // promoted pixel has nothing to value-optimize on; refuse before any claim/write (Meta
+          // would only reject the VALUE ad set after the campaign exists — orphan + burnt brand).
+          if (aif && bidKind(campaign.bidStrategy) === "roas" && !editBinds.pixelId) {
+            throw new FbError(
+              "roas_pixel_missing — the source has no promoted pixel; a min-ROAS clone can't value-optimize",
+              { campaignId: edit.campaignId },
+            );
           }
           // Owner rule (2026-08-11): MO min-ROAS clones may only optimize on the partner's value
           // pixel — same gate as /api/launch, before any claim/write.

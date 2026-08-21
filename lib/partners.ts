@@ -61,7 +61,8 @@ export type PartnerConfig = {
    *  is the partner's RW page (destination = a free-typed article slug) carrying a brand marker
    *  from the test01..test700 pool (the revenue key — one brand per campaign, own registry).
    *  Conversions arrive via the postback→CAPI forwarder into the AIF pixel, so conversion
-   *  launches pin that pixel + Purchase; min-ROAS is banned (CAPI value is 0). */
+   *  launches pin that pixel + Purchase; min-ROAS rides the SAME derived pixel (enabled
+   *  2026-08-21 — floors only bite once the forwarder sends real purchase values). */
   aifLaunch?: boolean;
   /** Not built out yet → the switcher renders this partner disabled ("in development"). */
   inDevelopment?: boolean;
@@ -293,9 +294,9 @@ export function launchReadyOpts(p: PartnerConfig): {
     // LION builds ads from the typed destination link + title/copy — all hard-required by create/.
     link: Boolean(p.lionLaunch),
     adText: Boolean(p.lionLaunch),
-    // MO min-ROAS is pinned to the partner's value pixel; LION partners validate pixels their own
-    // way; AIF bans min-ROAS outright (its CAPI Purchases carry value 0 — nothing to optimize).
-    roasPixel: p.accountsFromToken && !p.aifLaunch ? ROAS_PIXEL.id : "",
+    // Min-ROAS pins the partner's value pixel: MO → VD-C1-HS-1, AIF → the postback CAPI pixel
+    // (the only pixel that rail ever optimizes on); LION partners validate pixels their own way.
+    roasPixel: p.aifLaunch ? AIF_PIXEL.id : p.accountsFromToken ? ROAS_PIXEL.id : "",
   };
 }
 
@@ -378,7 +379,8 @@ export function fullLandingUrl(
 /** Pin account/pixel/fanpage to the partner's single bound values (Indians), and keep AIF cards
  *  on their derived invariants: the pixel follows the optimization (conversions → the AIF pixel,
  *  clicks → none), the objective/event are pinned to SALES/Purchase (the only event the CAPI
- *  forwarder ever sends), and min-ROAS snaps back to lowest cost (banned — CAPI value is 0).
+ *  forwarder ever sends), and min-ROAS pins conversions + that same pixel (purchase-value
+ *  optimization — same recipe as MO, enabled 2026-08-21).
  *  Pure and idempotent; covers fresh, duplicated, copy-to-all'ed and restored cards alike. */
 export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[] {
   const acct = p.lockedAccount?.name;
@@ -392,8 +394,12 @@ export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[
     if (px && r.pixel !== px) patch.pixel = px;
     if (fan && r.page !== fan) patch.page = fan;
     if (p.aifLaunch) {
-      if (bidKind(r.bidStrategy) === "roas") patch.bidStrategy = "LOWEST_COST_WITHOUT_CAP";
-      const pixel = r.optimization === "conversions" ? AIF_PIXEL.id : "";
+      // Min-ROAS always optimizes purchase VALUE — the optimization pins to conversions (the
+      // card disables the select; this converges restored/copied drafts too) and the pixel then
+      // derives to the postback pixel below.
+      const roas = bidKind(r.bidStrategy) === "roas";
+      if (roas && r.optimization !== "conversions") patch.optimization = "conversions";
+      const pixel = roas || r.optimization === "conversions" ? AIF_PIXEL.id : "";
       if (r.pixel !== pixel) patch.pixel = pixel;
       if (r.objective !== "OUTCOME_SALES") patch.objective = "OUTCOME_SALES";
       if (r.conversionEvent !== "PURCHASE") patch.conversionEvent = "PURCHASE";

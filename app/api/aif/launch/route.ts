@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
-import { type Campaign, bidAmountMissing, bidKind } from "@/lib/types";
+import { type Campaign, bidAmountMissing, bidKind, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { AIF_PIXEL, type PartnerId, fullLandingUrl, partnerConfig } from "@/lib/partners";
 import {
   type LaunchBinds,
+  SUPPORTED_BID_STRATEGIES,
   adPayload,
   adsetPayload,
   campaignPayload,
@@ -45,11 +46,6 @@ type Json = Record<string, unknown>;
 const FB_BUDGET_MS = 240_000;
 const FB_BUDGET_RETRIES = 8;
 
-// Bid strategies this rail rebuilds faithfully. Min-ROAS is DELIBERATELY absent: AIF conversions
-// are postback→CAPI Purchases with value 0 — VALUE optimization would have nothing to optimize,
-// so a roas card is rejected before any claim/write (the UI hides the strategy too).
-const AIF_BID_STRATEGIES = new Set(["LOWEST_COST_WITHOUT_CAP", "LOWEST_COST_WITH_BID_CAP", "COST_CAP"]);
-
 // A destination slug the RW page can serve: bare article slug, no slashes/spaces/query junk.
 const SLUG_RE = /^[\w-]{1,200}$/;
 
@@ -87,7 +83,9 @@ async function resolveLocales(names: string[]): Promise<number[]> {
  * the tree is built on the AIF token, the marker comes from the BRAND registry (aif-maps,
  * test01..test700), the ad link is the partner's RW page with the destination slug, and the
  * pixel is derived server-side — conversions pin the AIF postback pixel + Purchase, clicks
- * carry no pixel at all.
+ * carry no pixel at all. Min-ROAS (enabled 2026-08-21) is a conversion launch on that same
+ * derived pixel — fb-launch pins goal VALUE + the ×10000 roas_average_floor, recipe identical
+ * to MO's.
  */
 export async function POST(req: Request) {
   // Proxy-gated, but self-checks the session too (parity with /api/launch).
@@ -127,7 +125,10 @@ export async function POST(req: Request) {
   }
 
   const partner = partnerConfig("us" as PartnerId);
-  const conversions = campaign.optimization === "conversions";
+  // Min-ROAS ALWAYS optimizes purchase value (goal VALUE, event Purchase — fb-launch pins both),
+  // so it derives the postback pixel like any conversion launch, no matter what optimization a
+  // stale/edited draft sent — the UI pins it, but the server is the truth (mirror of /api/launch).
+  const conversions = campaign.optimization === "conversions" || bidKind(campaign.bidStrategy) === "roas";
   // The account and fanka are the buyer's PICKS, validated against the AIF token's own data; the
   // pixel is never picked — it's derived from the optimization right here (server is the truth).
   const pickedAccount = String(campaign.account ?? "").trim().replace(/^act_/, "");
@@ -221,24 +222,32 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, stage: "media", error: "cover_url_invalid" }, { status: 400 });
     }
   }
-  if (!AIF_BID_STRATEGIES.has(campaign.bidStrategy)) {
-    const roas = bidKind(campaign.bidStrategy) === "roas";
-    return NextResponse.json(
-      {
-        ok: false,
-        stage: "config",
-        error: roas
-          ? "roas_not_supported — AIF conversions carry value 0 (postback CAPI), min-ROAS has nothing to optimize"
-          : "bid_strategy_invalid",
-      },
-      { status: 400 },
-    );
+  if (!SUPPORTED_BID_STRATEGIES.has(campaign.bidStrategy)) {
+    return NextResponse.json({ ok: false, stage: "config", error: "bid_strategy_invalid" }, { status: 400 });
   }
   if (bidAmountMissing(campaign)) {
     return NextResponse.json(
       { ok: false, stage: "config", error: "Bid amount required for the selected bid strategy" },
       { status: 400 },
     );
+  }
+  // Mirror /api/launch: a min-ROAS goal above 100 (10 000%) is a typo, not a bid, and the
+  // ambiguous 10–20 band is refused rather than guessed (normalizeRoasGoal). Rejected here so no
+  // campaign/brand exists yet (Meta would only refuse at the ad-set step, orphaning both).
+  if (bidKind(campaign.bidStrategy) === "roas") {
+    const goal = parseMoney(campaign.bidCap);
+    if (goal > 100) {
+      return NextResponse.json(
+        { ok: false, stage: "config", error: "roas_goal_invalid — ROAS goal must be 0–100" },
+        { status: 400 },
+      );
+    }
+    if (normalizeRoasGoal(goal) == null) {
+      return NextResponse.json(
+        { ok: false, stage: "config", error: "roas_goal_ambiguous — type the decimal goal (0,30 = 30%)" },
+        { status: 400 },
+      );
+    }
   }
   if (!Array.isArray(campaign.countries) || campaign.countries.length === 0) {
     return NextResponse.json(
