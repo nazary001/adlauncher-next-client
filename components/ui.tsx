@@ -1,6 +1,6 @@
 "use client";
 
-import { useId } from "react";
+import { useEffect, useId, useRef } from "react";
 import type {
   ButtonHTMLAttributes,
   InputHTMLAttributes,
@@ -11,6 +11,7 @@ import type {
 import { cloneElement } from "react";
 import { ChevronDownIcon } from "./icons";
 import type { Option } from "@/lib/catalog";
+import { bidKind } from "@/lib/types";
 
 export const controlCls =
   "w-full rounded-lg border border-line bg-surface2 px-3 text-[13px] text-ink placeholder:text-faint " +
@@ -131,5 +132,105 @@ export function IconButton({
     >
       {children}
     </button>
+  );
+}
+
+/** Full label per bid strategy (the launcher picker's wording) — the tag's tooltip. Doubles as
+ *  the known-strategy set: an unknown/empty strategy renders NO tag (a wrong tag is worse than
+ *  none). */
+const BID_STRATEGY_TITLES: Record<string, string> = {
+  LOWEST_COST_WITHOUT_CAP: "Lowest cost — bids automatically",
+  LOWEST_COST_WITH_BID_CAP: "Lowest cost + bid cap ($)",
+  COST_CAP: "Cost cap ($)",
+  LOWEST_COST_WITH_MIN_ROAS: "Lowest cost + min ROAS — the goal is a ROAS decimal (0,34 = 34%)",
+};
+
+/** Tiny per-row marker naming HOW a campaign bids — a min-ROAS goal vs a $ cap vs automatic.
+ *  One shared look across the clone boards so "roas or bid?" reads the same everywhere:
+ *  blue = ROAS decimal, amber = $ cap, muted = auto. */
+export function BidKindTag({ strategy, className = "" }: { strategy: string; className?: string }) {
+  const title = BID_STRATEGY_TITLES[strategy];
+  if (!title) return null;
+  const kind = bidKind(strategy);
+  const label = kind === "roas" ? "ROAS" : kind === "cap" ? "CAP" : "AUTO";
+  const tone =
+    kind === "roas"
+      ? "border-accent/40 bg-accent/10 text-[#9db8ff]"
+      : kind === "cap"
+        ? "border-warn/40 bg-warn/10 text-warn"
+        : "border-line bg-surface2 text-faint";
+  return (
+    <span
+      title={title}
+      className={`inline-flex w-fit items-center rounded border px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${tone} ${className}`}
+    >
+      {label}
+    </span>
+  );
+}
+
+/** Textarea that grows to fit its content (no inner scrollbar) — for long editable name parts.
+ *  `singleLine` keeps the VALUE newline-free (Enter is swallowed, pasted breaks collapse to
+ *  spaces) while the text still WRAPS visually — the adaptive alternative to a horizontally
+ *  scrolling input. Extracted from clone-board (08-21) to share with the HS duplicator. */
+export function AutoTextarea({
+  value,
+  onChange,
+  className = "",
+  maxLength,
+  ariaLabel,
+  placeholder,
+  singleLine = false,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  className?: string;
+  maxLength?: number;
+  ariaLabel?: string;
+  placeholder?: string;
+  singleLine?: boolean;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    // +2 covers the 1px top/bottom border: box-sizing:border-box excludes it from scrollHeight,
+    // so without it the content is 2px too tall and a scrollbar appears.
+    const fit = () => {
+      el.style.height = "0px";
+      el.style.height = `${el.scrollHeight + 2}px`;
+    };
+    fit();
+    // Re-fit when the column width changes (window resize / layout shift) so a rewrap can't clip
+    // the text. Guard on width to avoid a height-driven ResizeObserver loop.
+    let lastW = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth !== lastW) {
+        lastW = el.clientWidth;
+        fit();
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [value]);
+  return (
+    <textarea
+      ref={ref}
+      value={value}
+      onChange={(e) => onChange(singleLine ? e.target.value.replace(/[\r\n]+/g, " ") : e.target.value)}
+      onKeyDown={
+        singleLine
+          ? (e) => {
+              if (e.key === "Enter") e.preventDefault();
+            }
+          : undefined
+      }
+      rows={1}
+      maxLength={maxLength}
+      spellCheck={false}
+      aria-label={ariaLabel}
+      placeholder={placeholder}
+      className={className}
+    />
   );
 }

@@ -14,10 +14,10 @@ import {
   loadSampleSources,
   makeCloneRow,
 } from "@/lib/clone";
-import { limitMoney, limitMoneyCents, moneyLabel } from "@/lib/types";
+import { bidKind, limitMoney, limitMoneyCents, moneyLabel } from "@/lib/types";
 import { OS_OPTIONS, countryName, geoSummary } from "@/lib/catalog";
 import { type PartnerId, partnerConfig } from "@/lib/partners";
-import { Field, Select } from "./ui";
+import { AutoTextarea, BidKindTag, Field, Select } from "./ui";
 import {
   AlertIcon,
   CopyIcon,
@@ -72,57 +72,6 @@ function LockedRow({ label, value }: { label: string; value: string }) {
         <LockIcon className="h-3 w-3 shrink-0 text-faint" />
       </span>
     </div>
-  );
-}
-
-/** Textarea that grows to fit its content (no inner scrollbar) — for the long campaign name. */
-function AutoTextarea({
-  value,
-  onChange,
-  className = "",
-  maxLength,
-  ariaLabel,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  className?: string;
-  maxLength?: number;
-  ariaLabel?: string;
-}) {
-  const ref = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    // +2 covers the 1px top/bottom border: box-sizing:border-box excludes it from scrollHeight,
-    // so without it the content is 2px too tall and a scrollbar appears.
-    const fit = () => {
-      el.style.height = "0px";
-      el.style.height = `${el.scrollHeight + 2}px`;
-    };
-    fit();
-    // Re-fit when the column width changes (window resize / layout shift) so a rewrap can't clip
-    // the text. Guard on width to avoid a height-driven ResizeObserver loop.
-    let lastW = el.clientWidth;
-    const ro = new ResizeObserver(() => {
-      if (el.clientWidth !== lastW) {
-        lastW = el.clientWidth;
-        fit();
-      }
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [value]);
-  return (
-    <textarea
-      ref={ref}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      rows={1}
-      maxLength={maxLength}
-      spellCheck={false}
-      aria-label={ariaLabel}
-      className={className}
-    />
   );
 }
 
@@ -689,9 +638,9 @@ function CloneInner({
                       <th className="px-3 py-2.5">Campaign name</th>
                       <th className="w-[110px] px-2 py-2.5">Geo</th>
                       <th className="w-[58px] px-2 py-2.5 text-right">Orig $</th>
-                      <th className="w-[84px] px-2 py-2.5 text-right">Orig ROAS</th>
+                      <th className="w-[96px] px-2 py-2.5 text-right">Orig bid</th>
                       <th className="w-[54px] px-2 py-2.5 text-center">Videos</th>
-                      <th className="w-[86px] border-l border-line px-2 py-2.5">ROAS goal</th>
+                      <th className="w-[86px] border-l border-line px-2 py-2.5">Bid</th>
                       <th className="w-[86px] px-2 py-2.5">Budget</th>
                       <th className="w-[112px] px-2 py-2.5">Config</th>
                       <th className="w-[44px] px-1 py-2.5" />
@@ -754,8 +703,17 @@ function CloneInner({
                           </span>
                         </td>
                         <td className="px-2 py-3.5 text-right">
-                          <span className="flex h-8 items-center justify-end font-mono text-[12px] text-faint">
-                            {r.source.originalRoas || "—"}
+                          {/* The source's OWN bid, marked by HOW it bids: blue ROAS tag + the goal
+                              decimal, amber CAP tag + $, or "auto" for lowest cost. */}
+                          <span className="flex h-8 flex-wrap items-center justify-end gap-1 font-mono text-[12px] text-faint">
+                            <BidKindTag strategy={r.source.bidStrategy} />
+                            {bidKind(r.source.bidStrategy) === "none"
+                              ? r.source.bidStrategy === "LOWEST_COST_WITHOUT_CAP"
+                                ? "auto"
+                                : r.source.originalRoas || "—"
+                              : r.source.originalRoas
+                                ? `${bidKind(r.source.bidStrategy) === "cap" ? "$" : ""}${r.source.originalRoas}`
+                                : "—"}
                           </span>
                         </td>
                         <td className="px-2 py-3.5 text-center">
@@ -770,14 +728,52 @@ function CloneInner({
                             CloneEdit.roasGoal/budget → money()=0 → an ad set Meta rejects
                             (orphan + burnt gcm). */}
                         <td className="border-l border-line px-2 py-3.5">
-                          <input
-                            value={r.roasGoal}
-                            onChange={(e) => patchRow(r.id, { roasGoal: limitMoneyCents(e.target.value, 1000) })}
-                            inputMode="decimal"
-                            placeholder="1,20"
-                            aria-label="ROAS goal"
-                            className={cellInput}
-                          />
+                          {/* Dual-purpose by the SOURCE's strategy (cloneToCampaign wires it as
+                              bidCap): a ROAS decimal on min-ROAS rows (blue R, clamp 100 like the
+                              launcher card), a $ cap on cap rows — the in-field marker mirrors
+                              the Orig-bid tag so the unit is readable where the buyer types. */}
+                          <div className="relative">
+                            {bidKind(r.source.bidStrategy) !== "none" ? (
+                              <span
+                                className={
+                                  "pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[11px] " +
+                                  (bidKind(r.source.bidStrategy) === "roas"
+                                    ? "font-semibold text-[#9db8ff]"
+                                    : "text-faint")
+                                }
+                              >
+                                {bidKind(r.source.bidStrategy) === "roas" ? "R" : "$"}
+                              </span>
+                            ) : null}
+                            <input
+                              value={r.roasGoal}
+                              onChange={(e) =>
+                                patchRow(r.id, {
+                                  roasGoal: limitMoneyCents(
+                                    e.target.value,
+                                    bidKind(r.source.bidStrategy) === "roas" ? 100 : 1000,
+                                  ),
+                                })
+                              }
+                              inputMode="decimal"
+                              placeholder={
+                                bidKind(r.source.bidStrategy) === "roas"
+                                  ? "1,20"
+                                  : bidKind(r.source.bidStrategy) === "cap"
+                                    ? "0,50"
+                                    : "auto"
+                              }
+                              title={
+                                bidKind(r.source.bidStrategy) === "roas"
+                                  ? "ROAS decimal — 34 → 0,34 (34%)"
+                                  : bidKind(r.source.bidStrategy) === "cap"
+                                    ? "Bid cap in $ — digits fill cents, 34 → $0,34"
+                                    : "Source bids automatically (lowest cost)"
+                              }
+                              aria-label="Bid / ROAS goal"
+                              className={cellInput + (bidKind(r.source.bidStrategy) !== "none" ? " pl-5" : "")}
+                            />
+                          </div>
                         </td>
                         <td className="px-2 py-3.5">
                           <div className="relative">
@@ -862,7 +858,13 @@ function CloneInner({
                         {p.name}
                       </span>
                       <GeoChips codes={p.countries} />
-                      <span className="shrink-0 font-mono text-[11px] text-faint">ROAS {p.roasGoal}</span>
+                      <span className="shrink-0 font-mono text-[11px] text-faint">
+                        {bidKind(p.bidStrategy) === "roas"
+                          ? `ROAS ${p.roasGoal || "inherited"}`
+                          : bidKind(p.bidStrategy) === "cap"
+                            ? `bid ${p.roasGoal ? `$${p.roasGoal}` : "inherited"}`
+                            : "bid auto"}
+                      </span>
                       <span className="shrink-0 font-mono text-[11px] text-dim">${moneyLabel(p.budget)}/day</span>
                     </div>
                   ))}

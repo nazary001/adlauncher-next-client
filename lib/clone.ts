@@ -25,7 +25,9 @@ export type CloneSource = {
   userOs: "all" | "android";
   /** Daily budget as a display string in major units ("10" / "10,00"). */
   originalBudget: string;
-  /** ROAS goal the source runs at, raw ("1,20" = 120%). */
+  /** The source's OWN bid in human units, meaning follows bidStrategy: a min-ROAS goal decimal
+   *  ("1,20" = 120%) or a $ cap ("0,50"); "" = none (lowest cost) or unknown. Field name predates
+   *  the cap case — every consumer renders it through bidKind(bidStrategy). */
   originalRoas: string;
   bidStrategy: string;
   objective: string;
@@ -54,7 +56,7 @@ export type CloneRow = {
   category: string;
   placement: string;
   ageMin: string;
-  roasGoal: string; // the "Bid" column
+  roasGoal: string; // the "Bid" column — ROAS decimal or $ cap, by the SOURCE's bid strategy
   budget: string; // target daily budget, display string
   redirectType: string;
   highOffer: HighOfferConfig;
@@ -190,6 +192,8 @@ export type ClonePreviewItem = {
   name: string;
   budget: string;
   roasGoal: string;
+  /** The SOURCE's bid strategy — the preview labels the bid by its kind (ROAS / $ cap / auto). */
+  bidStrategy: string;
   countries: string[];
 };
 
@@ -209,6 +213,7 @@ export function flattenPreview(rows: CloneRow[], copies: number): ClonePreviewIt
         name: total > 1 ? `${fullCloneName(r)} (${k})` : fullCloneName(r),
         budget: r.budget,
         roasGoal: r.roasGoal,
+        bidStrategy: r.source.bidStrategy,
         countries: r.countries,
       });
     }
@@ -223,11 +228,13 @@ export function flattenPreview(rows: CloneRow[], copies: number): ClonePreviewIt
 /** Sample campaign ids for the local "Load sample" button (when the page is opened with no ids). */
 export const SAMPLE_IDS = ["120210000000101", "120210000000102", "120210000000103"];
 
+// Strategies vary on purpose so "Load sample" exercises every bid-kind rendering (ROAS / $ cap /
+// auto) the way real mixed selections do.
 const MOCK_TEMPLATES = [
-  { geo: ["WW"], budget: "10", roas: "0,40", creatives: 2, redirect: "META ADX", tail: "GIFT - Digital-marketing es" },
-  { geo: ["BR"], budget: "15", roas: "0,55", creatives: 1, redirect: "HIGH ADX", tail: "LOAN - Personal loans en" },
-  { geo: ["MX", "CO", "AR"], budget: "8", roas: "0,35", creatives: 3, redirect: "#ADX", tail: "AUTO - Financiamiento es" },
-  { geo: ["US"], budget: "20", roas: "1,20", creatives: 2, redirect: "META ADX", tail: "HEALTH - Retiree coverage en" },
+  { geo: ["WW"], budget: "10", roas: "0,40", strategy: "LOWEST_COST_WITH_MIN_ROAS", creatives: 2, redirect: "META ADX", tail: "GIFT - Digital-marketing es" },
+  { geo: ["BR"], budget: "15", roas: "0,55", strategy: "LOWEST_COST_WITH_BID_CAP", creatives: 1, redirect: "HIGH ADX", tail: "LOAN - Personal loans en" },
+  { geo: ["MX", "CO", "AR"], budget: "8", roas: "0,35", strategy: "LOWEST_COST_WITH_MIN_ROAS", creatives: 3, redirect: "#ADX", tail: "AUTO - Financiamiento es" },
+  { geo: ["US"], budget: "20", roas: "", strategy: "LOWEST_COST_WITHOUT_CAP", creatives: 2, redirect: "META ADX", tail: "HEALTH - Retiree coverage en" },
 ];
 
 function mockSource(campaignId: string, i: number): CloneSource {
@@ -245,7 +252,7 @@ function mockSource(campaignId: string, i: number): CloneSource {
     userOs: "all",
     originalBudget: t.budget,
     originalRoas: t.roas,
-    bidStrategy: "LOWEST_COST_WITHOUT_CAP",
+    bidStrategy: t.strategy,
     objective: "OUTCOME_SALES",
     optimization: "conversions",
     conversionEvent: "PURCHASE",
