@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { FacebookMark, GoogleMark, RocketIcon, TikTokMark } from "./icons";
 import { PartnerSwitcher } from "./partner-switcher";
 import { AcctLimitWidget } from "./acct-limit-widget";
@@ -11,7 +12,7 @@ import { partnerConfig, type PartnerId } from "@/lib/partners";
 
 function Logo() {
   return (
-    <div className="group flex select-none items-center gap-3">
+    <Link href="/" className="group flex select-none items-center gap-3">
       <span
         className={
           "relative flex h-9 w-9 items-center justify-center overflow-hidden rounded-xl " +
@@ -31,7 +32,7 @@ function Logo() {
           Campaign console
         </span>
       </span>
-    </div>
+    </Link>
   );
 }
 
