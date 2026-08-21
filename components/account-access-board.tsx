@@ -202,6 +202,7 @@ function AccountRow({
   onToggleSelect,
   onSave,
   readonly,
+  assign,
 }: {
   id: string;
   name: string;
@@ -212,28 +213,47 @@ function AccountRow({
   onSave: (users: string[]) => void;
   /** Registry unreadable → chips render but nothing is editable (a save would be refused). */
   readonly: boolean;
+  /** Quick-assign mode (owner picked a teammate in the sidebar): the checkbox shows whether THIS
+   *  account is granted to them and the WHOLE ROW is the toggle — tick through a list fast.
+   *  Bulk-select and the per-row popover are suppressed while the mode is on. */
+  assign?: { user: string; on: boolean; toggle: () => void };
 }) {
   const [editing, setEditing] = useState(false);
   const key = keyOf(id);
+  const quickOn = Boolean(assign?.on);
 
   return (
     <div
+      onClick={assign && !readonly ? assign.toggle : undefined}
       className={
         "group relative flex items-center gap-3 border-b border-line/60 px-3 py-2 transition-colors last:border-b-0 " +
-        (selected ? "bg-accent/[0.06]" : "hover:bg-raise/40")
+        (assign ? "cursor-pointer select-none " : "") +
+        (quickOn || selected ? "bg-accent/[0.06] hover:bg-accent/[0.09]" : "hover:bg-raise/40")
       }
     >
-      <button
-        type="button"
-        onClick={onToggleSelect}
-        aria-label={selected ? "Deselect account" : "Select account"}
-        className={
-          "grid h-4 w-4 shrink-0 place-items-center rounded border transition-colors " +
-          (selected ? "border-accent bg-accent text-white" : "border-line2 bg-surface2 text-transparent hover:border-accent/50")
-        }
-      >
-        <CheckIcon className="h-3 w-3" />
-      </button>
+      {assign ? (
+        <span
+          aria-hidden="true"
+          className={
+            "grid h-4 w-4 shrink-0 place-items-center rounded border transition-colors " +
+            (quickOn ? "border-accent bg-accent text-white" : "border-line2 bg-surface2 text-transparent group-hover:border-accent/50")
+          }
+        >
+          <CheckIcon className="h-3 w-3" />
+        </span>
+      ) : (
+        <button
+          type="button"
+          onClick={onToggleSelect}
+          aria-label={selected ? "Deselect account" : "Select account"}
+          className={
+            "grid h-4 w-4 shrink-0 place-items-center rounded border transition-colors " +
+            (selected ? "border-accent bg-accent text-white" : "border-line2 bg-surface2 text-transparent hover:border-accent/50")
+          }
+        >
+          <CheckIcon className="h-3 w-3" />
+        </button>
+      )}
 
       <div className="min-w-0 flex-1">
         <p className="truncate text-[13px] font-medium text-ink" title={name}>
@@ -248,44 +268,54 @@ function AccountRow({
             everyone
           </span>
         ) : (
-          assigned.map((u) => (
-            <span
-              key={u}
-              className="flex items-center gap-1 rounded-full border border-accent/30 bg-accent/10 py-0.5 pl-1 pr-1.5 text-[11px] font-medium text-[#9db8ff]"
-            >
-              <Avatar name={u} className="h-3.5 w-3.5 text-[8px]" />
-              {u}
-              {readonly ? null : (
-                <button
-                  type="button"
-                  aria-label={`Remove ${u}`}
-                  onClick={() => onSave(assigned.filter((x) => !eq(x, u)))}
-                  className="text-[#9db8ff]/60 transition-colors hover:text-danger"
-                >
-                  <XIcon className="h-3 w-3" />
-                </button>
-              )}
-            </span>
-          ))
+          assigned.map((u) => {
+            const isTarget = assign ? eq(u, assign.user) : false;
+            return (
+              <span
+                key={u}
+                className={
+                  "flex items-center gap-1 rounded-full border py-0.5 pl-1 pr-1.5 text-[11px] font-medium " +
+                  (isTarget
+                    ? "border-accent/60 bg-accent/25 text-[#c3d4ff]"
+                    : "border-accent/30 bg-accent/10 text-[#9db8ff]")
+                }
+              >
+                <Avatar name={u} className="h-3.5 w-3.5 text-[8px]" />
+                {u}
+                {readonly || assign ? null : (
+                  <button
+                    type="button"
+                    aria-label={`Remove ${u}`}
+                    onClick={() => onSave(assigned.filter((x) => !eq(x, u)))}
+                    className="text-[#9db8ff]/60 transition-colors hover:text-danger"
+                  >
+                    <XIcon className="h-3 w-3" />
+                  </button>
+                )}
+              </span>
+            );
+          })
         )}
       </div>
 
-      <button
-        type="button"
-        disabled={readonly}
-        onClick={() => setEditing((v) => !v)}
-        className={
-          "flex h-7 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-[11.5px] font-medium transition-all " +
-          (editing
-            ? "border-accent/50 bg-accent/15 text-[#9db8ff]"
-            : "border-line bg-surface2 text-dim opacity-0 hover:border-accent/40 hover:text-[#9db8ff] focus-visible:opacity-100 group-hover:opacity-100")
-        }
-      >
-        <UsersIcon className="h-3.5 w-3.5" />
-        Assign
-      </button>
+      {assign ? null : (
+        <button
+          type="button"
+          disabled={readonly}
+          onClick={() => setEditing((v) => !v)}
+          className={
+            "flex h-7 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-[11.5px] font-medium transition-all " +
+            (editing
+              ? "border-accent/50 bg-accent/15 text-[#9db8ff]"
+              : "border-line bg-surface2 text-dim opacity-0 hover:border-accent/40 hover:text-[#9db8ff] focus-visible:opacity-100 group-hover:opacity-100")
+          }
+        >
+          <UsersIcon className="h-3.5 w-3.5" />
+          Assign
+        </button>
+      )}
 
-      {editing ? (
+      {editing && !assign ? (
         <AssignPopover
           title={name || key}
           roster={roster}
@@ -328,6 +358,8 @@ export function AccountAccessBoard({
   const [regError, setRegError] = useState<string | null>(null);
   const [team, setTeam] = useState<TeamUser[] | null>(null);
   const [focus, setFocus] = useState<string | null>(null);
+  /** Quick-assign target (sidebar pick): rows become one-click membership toggles for them. */
+  const [assignTo, setAssignTo] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -434,32 +466,64 @@ export function AccountAccessBoard({
   }, [hsWanted, loadHs]);
 
   // ---- saving ----------------------------------------------------------------------------------
+  // Queued + batched: quick-assign fires one save per tick, and the server persists the registry
+  // as ONE row via read-modify-write — concurrent PUTs would race each other and lose updates.
+  // So the UI applies every change optimistically at once, but keeps a single PUT in flight;
+  // ticks made meanwhile pile into `pending` and ship as one merged batch when it returns.
+  const pendingRef = useRef<AssignMap>({});
+  const inflightSaveRef = useRef(false);
+
+  /** Pull the server's registry back into state (after a failed write the local optimistic
+   *  picture is unreliable — resync instead of trying to unwind interleaved batches). */
+  const resync = useCallback(async () => {
+    try {
+      const r = await fetch("/api/acct-assignments");
+      const d = (await r.json().catch(() => ({}))) as { ok?: boolean; accounts?: AssignMap };
+      if (r.ok && d.ok && d.accounts) setAssignments(d.accounts);
+    } catch {
+      /* keep the local picture — the next successful save resyncs anyway */
+    }
+  }, []);
+
+  const flush = useCallback(async () => {
+    if (inflightSaveRef.current || Object.keys(pendingRef.current).length === 0) return;
+    inflightSaveRef.current = true;
+    const batch = pendingRef.current;
+    pendingRef.current = {};
+    try {
+      const r = await fetch("/api/acct-assignments", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ set: batch }),
+      });
+      const d = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      setSavedAt(Date.now());
+    } catch (e) {
+      setSaveError(String((e as Error).message ?? e));
+      pendingRef.current = {}; // drop queued work — it may build on the failed state
+      await resync();
+    } finally {
+      inflightSaveRef.current = false;
+      if (Object.keys(pendingRef.current).length) void flush();
+    }
+  }, [resync]);
+
   const save = useCallback(
-    async (set: Record<string, string[]>) => {
+    (set: Record<string, string[]>) => {
       setSaveError(null);
-      const snapshot = assignments ?? {};
-      const next: AssignMap = { ...snapshot };
-      for (const [k, users] of Object.entries(set)) {
-        if (users.length) next[k] = users;
-        else delete next[k];
-      }
-      setAssignments(next); // optimistic
-      try {
-        const r = await fetch("/api/acct-assignments", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ set }),
-        });
-        const d = (await r.json().catch(() => ({}))) as { ok?: boolean; accounts?: AssignMap; error?: string };
-        if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
-        if (d.accounts) setAssignments(d.accounts);
-        setSavedAt(Date.now());
-      } catch (e) {
-        setAssignments(snapshot); // revert
-        setSaveError(String((e as Error).message ?? e));
-      }
+      setAssignments((cur) => {
+        const next: AssignMap = { ...(cur ?? {}) };
+        for (const [k, users] of Object.entries(set)) {
+          if (users.length) next[k] = users;
+          else delete next[k];
+        }
+        return next;
+      });
+      Object.assign(pendingRef.current, set); // last write per account wins
+      void flush();
     },
-    [assignments],
+    [flush],
   );
 
   // Transient "Saved" tick.
@@ -491,6 +555,23 @@ export function AccountAccessBoard({
     [assignments],
   );
   const unassignedIsFocus = focus === UNASSIGNED;
+
+  // ---- quick-assign mode -----------------------------------------------------------------------
+  /** Sidebar pick: enter (or leave) tick-through mode for one teammate. */
+  const pickAssignTarget = (name: string | null) => {
+    setAssignTo((cur) => (name !== null && cur !== null && eq(cur, name) ? null : name));
+    setFocus(null);
+    setSelected(new Set());
+    setBulkOpen(false);
+  };
+
+  /** One tick: grant the account to the target, or revoke it (row/checkbox click). */
+  const toggleMembership = (id: string) => {
+    if (!assignTo || assignments === null) return;
+    const cur = assignedOf(id);
+    const has = cur.some((u) => eq(u, assignTo));
+    save({ [keyOf(id)]: has ? cur.filter((u) => !eq(u, assignTo)) : [...cur, assignTo] });
+  };
 
   // ---- selection / bulk ------------------------------------------------------------------------
   const toggleSelect = (id: string) => {
@@ -549,8 +630,17 @@ export function AccountAccessBoard({
         roster={roster}
         selected={selected.has(keyOf(r.id))}
         onToggleSelect={() => toggleSelect(r.id)}
-        onSave={(users) => void save({ [keyOf(r.id)]: users })}
+        onSave={(users) => save({ [keyOf(r.id)]: users })}
         readonly={assignments === null}
+        assign={
+          assignTo
+            ? {
+                user: assignTo,
+                on: assignedOf(r.id).some((u) => eq(u, assignTo)),
+                toggle: () => toggleMembership(r.id),
+              }
+            : undefined
+        }
       />
     ));
   };
@@ -587,10 +677,10 @@ export function AccountAccessBoard({
               <div className="max-h-[45vh] min-h-0 overflow-y-auto overscroll-contain lg:max-h-none">
               <button
                 type="button"
-                onClick={() => setFocus(null)}
+                onClick={() => pickAssignTarget(null)}
                 className={
                   "flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors " +
-                  (focus === null ? "bg-accent/10" : "hover:bg-raise/50")
+                  (focus === null && assignTo === null ? "bg-accent/10" : "hover:bg-raise/50")
                 }
               >
                 <span className="grid h-6 w-6 place-items-center rounded-full border border-line bg-surface2 text-faint">
@@ -612,6 +702,9 @@ export function AccountAccessBoard({
                 <span className="flex-1 text-[12.5px] font-medium text-dim">Unassigned only</span>
               </button>
               <div className="h-px bg-line" />
+              <p className="px-3 pb-1 pt-2 text-[9.5px] font-medium uppercase tracking-[0.16em] text-faint select-none">
+                Pick a teammate to assign
+              </p>
               {team === null && roster.length === 0 ? (
                 <div className="flex flex-col gap-2 p-3">
                   {Array.from({ length: 3 }, (_, i) => (
@@ -625,16 +718,16 @@ export function AccountAccessBoard({
                 </p>
               ) : (
                 roster.map((u) => {
-                  const active = focus !== null && focus !== UNASSIGNED && eq(focus, u.username);
+                  const active = assignTo !== null && eq(assignTo, u.username);
                   const n = countFor(u.username);
                   return (
                     <button
                       key={u.username}
                       type="button"
-                      onClick={() => setFocus(active ? null : u.username)}
+                      onClick={() => pickAssignTarget(u.username)}
                       className={
                         "flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors " +
-                        (active ? "bg-accent/10" : "hover:bg-raise/50")
+                        (active ? "bg-accent/15 shadow-[inset_2px_0_0_var(--color-accent)]" : "hover:bg-raise/50")
                       }
                     >
                       <Avatar name={u.username} className="h-6 w-6 text-[10px]" />
@@ -676,6 +769,43 @@ export function AccountAccessBoard({
               </div>
             ) : null}
 
+            {/* quick-assign mode banner */}
+            {assignTo ? (
+              <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-accent/40 bg-accent/10 px-3.5 py-2.5">
+                <Avatar name={assignTo} className="h-7 w-7 text-[11px]" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-[13px] font-semibold text-ink">
+                    Assigning to {assignTo}
+                    <span className="ml-2 rounded-full bg-accent/20 px-2 py-0.5 font-mono text-[10.5px] font-medium text-[#9db8ff]">
+                      {countFor(assignTo)} accounts
+                    </span>
+                  </p>
+                  <p className="text-[11px] leading-snug text-faint">
+                    Click an account to grant it — click again to revoke. Saves instantly.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setFocus(focus !== null && focus !== UNASSIGNED ? null : assignTo)}
+                  className={
+                    "flex h-8 items-center rounded-lg border px-3 text-[12px] font-medium transition-colors " +
+                    (focus !== null && focus !== UNASSIGNED
+                      ? "border-accent/60 bg-accent/20 text-[#c3d4ff]"
+                      : "border-line bg-surface2 text-dim hover:border-accent/40 hover:text-[#9db8ff]")
+                  }
+                >
+                  Only theirs
+                </button>
+                <button
+                  type="button"
+                  onClick={() => pickAssignTarget(null)}
+                  className="flex h-8 items-center rounded-lg bg-accent px-3.5 text-[12px] font-semibold text-white transition-all hover:brightness-110 active:scale-[0.97]"
+                >
+                  Done
+                </button>
+              </div>
+            ) : null}
+
             <div className="flex items-center gap-2.5">
               <div className="relative min-w-0 flex-1">
                 <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-faint" />
@@ -686,13 +816,13 @@ export function AccountAccessBoard({
                   className="h-9 w-full rounded-xl border border-line bg-surface2 pl-9 pr-3 text-[13px] text-ink placeholder:text-faint outline-none transition-colors focus:border-accent/60"
                 />
               </div>
-              {focus ? (
+              {focus === UNASSIGNED ? (
                 <button
                   type="button"
                   onClick={() => setFocus(null)}
                   className="flex h-9 items-center gap-1.5 rounded-xl border border-accent/40 bg-accent/10 px-3 text-[12px] font-medium text-[#9db8ff] transition-colors hover:border-accent/60"
                 >
-                  {focus === UNASSIGNED ? "Unassigned" : focus}
+                  Unassigned
                   <XIcon className="h-3.5 w-3.5" />
                 </button>
               ) : null}
@@ -748,8 +878,8 @@ export function AccountAccessBoard({
         </div>
       </main>
 
-      {/* ---- bulk bar ---- */}
-      {selected.size > 0 && assignments !== null ? (
+      {/* ---- bulk bar (normal mode only — quick-assign has its own banner) ---- */}
+      {selected.size > 0 && assignments !== null && !assignTo ? (
         <div className="fixed bottom-5 left-1/2 z-40 -translate-x-1/2">
           <div className="relative flex items-center gap-2 rounded-2xl border border-line bg-surface px-3 py-2 shadow-[0_18px_50px_rgba(0,0,0,0.55)]">
             <span className="pr-1 text-[12.5px] font-medium text-ink">
