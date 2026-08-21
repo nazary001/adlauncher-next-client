@@ -381,7 +381,7 @@ export async function POST(req: Request): Promise<NextResponse> {
     if (kind === "none") return bad("bid_not_applicable_to_lowest_cost_source");
     // ROAS goals live in 0.001..1000 at Meta; the board caps at 100 (create-side parity).
     if (kind === "roas" && bid > 100) return bad("roas_goal_invalid");
-    const wire = hsWireBid(bid, strategy);
+    const wire = hsWireBid(bid, strategy, "lion");
     // For ROAS the null also covers the ambiguous 10–20 band (percent? ×10 slip?) — name it.
     if (wire == null)
       return bad(kind === "roas" ? "roas_goal_ambiguous — type the decimal goal (0,30 = 30%)" : "bid_invalid");
@@ -549,7 +549,7 @@ async function pumpBatch(
           }
           const kind = strategy ? bidKind(strategy) : "none";
           const wire =
-            strategy && kind !== "none" && !(kind === "roas" && s.bid > 100) ? hsWireBid(s.bid, strategy) : null;
+            strategy && kind !== "none" && !(kind === "roas" && s.bid > 100) ? hsWireBid(s.bid, strategy, "lion") : null;
           if (wire == null) {
             // Deterministic per source — the same bid re-fails every copy.
             const reason = "bid not applicable/resolvable for this source — clear the Bid to inherit";

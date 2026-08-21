@@ -410,7 +410,8 @@ async function pumpTokenBatch(
         let bidAmount: number | undefined;
         let bidConstraints: Json | undefined;
         if (s.bid != null) {
-          const wire = kind !== "none" && !(kind === "roas" && s.bid > 100) ? hsWireBid(s.bid, tree.bidStrategy) : null;
+          // "graph": this rail writes bid_constraints straight to Meta — floor stays ×10000.
+          const wire = kind !== "none" && !(kind === "roas" && s.bid > 100) ? hsWireBid(s.bid, tree.bidStrategy, "graph") : null;
           if (wire == null) {
             const reason = "bid not applicable/resolvable for this source — clear the Bid to inherit";
             familyFailed.set(s.campaignId, reason);

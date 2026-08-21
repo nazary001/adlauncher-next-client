@@ -164,27 +164,31 @@ export function hsCampaignError(c: Campaign, creatives: string[]): string | null
 export type HsLocale = { id: number; name: string };
 
 /**
- * LION write-side bid units are META-NATIVE minor units — LION forwards the value to the Graph
- * verbatim: cap strategies take integer CENTS (Meta bid_amount), MIN_ROAS takes the ROAS floor
- * × 10000 as an integer (Meta bid_constraints.roas_average_floor). Their own weapon UI scales the
- * human decimal client-side before POSTing. Sending the human decimal instead wedges the task at
- * CREATING_ADSET in a retry loop — Meta answers "roas_average_floor … should be larger than or
- * equal to 0.001 and smaller than or equal to 1000 … integer and scaled up 10000x" (live 08-10:
- * three GLO-01 tasks; weapon launches with identical goals sailed through the same day, so the
- * backend provably does NOT scale). Reads stay MAJOR/decimal (details 2.45 == metrics 2.45).
+ * Bid wire units are CHANNEL-SPECIFIC for MIN_ROAS and identical for cap strategies:
+ *  - cap (bid cap / cost cap): integer CENTS everywhere (Meta bid_amount; LION forwards verbatim).
+ *  - roas, channel "graph" (direct Meta writes — token-duplicate override, fb-launch does its
+ *    own): Meta-native floor = ROAS × 10000 (bid_constraints.roas_average_floor).
+ *  - roas, channel "lion" (create `bid` / duplicate `starting_bid`): ROAS × 100. LION's FB
+ *    backend NOW multiplies the incoming ROAS bid ×100 before its Graph write — owner-observed
+ *    live 08-21: a launch typed 0,40 (wire 4000, the ×10000 unit verified verbatim back on
+ *    08-10) landed as floor 40. Cap bids and non-LION channels are unaffected ("только по Lion
+ *    и только ROAS"). This ×100 backend is also what the 20–50 floors of the 08-20 mass ÷100
+ *    fix really were: correctly-typed 0,2–0,5 goals, not (only) percent-form typos.
+ * Reads stay MAJOR/decimal everywhere (details 2.45 == metrics 2.45; ROAS goals 0.34).
  *
- * `bid` here is the human decimal from the card (ROAS 1,20 = 120%; cap $ amount) → scaled to the
- * wire unit per strategy. Null = strategy takes no bid (lowest cost) or a non-positive value.
+ * `bid` here is the human decimal from the card (ROAS 0,30 = 30%; cap $ amount) → scaled to the
+ * wire unit per strategy. Null = strategy takes no bid (lowest cost), a non-positive value, or
+ * the ambiguous ROAS band.
  */
-export function hsWireBid(bid: number, strategy: string): number | null {
+export function hsWireBid(bid: number, strategy: string, channel: "lion" | "graph"): number | null {
   if (!Number.isFinite(bid) || bid <= 0) return null;
   const kind = bidKind(strategy);
   if (kind === "roas") {
     // Percent-form / ×10-slip entries are normalized to the real decimal goal BEFORE scaling
-    // (30 → 0,30 → 3000) — the ×100/×10 floors of the 08-20 mass fix must never ship again.
+    // (30 → 0,30) — the mis-typed floors of the 08-20 mass fix must never ship again.
     // null = the ambiguous 10–20 band, refused like any other unresolvable bid.
     const goal = normalizeRoasGoal(bid);
-    return goal == null ? null : Math.round(goal * 10000);
+    return goal == null ? null : Math.round(goal * (channel === "lion" ? 100 : 10000));
   }
   if (kind === "cap") return Math.round(bid * 100);
   return null;
@@ -216,7 +220,7 @@ export function hsCreatePayload(
   acr: string,
   ddmm: string,
 ): Record<string, unknown> {
-  const wireBid = hsWireBid(parseMoney(c.bidCap), c.bidStrategy);
+  const wireBid = hsWireBid(parseMoney(c.bidCap), c.bidStrategy, "lion");
   const localeById = new Map(profileLocales.map((l) => [String(l.id), l.name]));
   // c.locales stores FB locale ids as strings; unknown ids (profile switched) are dropped.
   const locales = c.locales
