@@ -142,6 +142,27 @@ export function bidKind(strategy: string): "none" | "cap" | "roas" {
   return "none";
 }
 
+/**
+ * Min-ROAS goals the team actually runs are decimals well under 2 (0,20–0,50 typical; the live
+ * optimizer nudges floors ±0,01). Buyers still keep typing the PERCENT form (30 = 30%) or a ×10
+ * slip (3 = 0,30) — exactly what put ×100/×10 floors on 1159 campaigns (mass ÷100 Graph fix
+ * 2026-08-20). One shared rule, same bands as that fix, applied at EVERY wire point (MO create,
+ * MO clones, HS token create, LION create/duplicate, token-duplicate) so a mis-entered goal can
+ * never reach Meta again:
+ *   goal < 2       → already the decimal → kept as typed;
+ *   2 ≤ goal ≤ 10  → ×10 slip           → ÷10  (3 → 0,30);
+ *   goal ≥ 20      → percent form       → ÷100 (30 → 0,30);
+ *   10 < goal < 20 → ambiguous (1,2? 0,12?) → null = refuse, the buyer must retype.
+ * Rounded to 4 decimals — the Meta wire unit is the floor × 10000 integer.
+ */
+export function normalizeRoasGoal(goal: number): number | null {
+  if (!Number.isFinite(goal) || goal <= 0) return null;
+  if (goal < 2) return goal;
+  if (goal <= 10) return Math.round(goal * 1000) / 10000;
+  if (goal >= 20) return Math.round(goal * 100) / 10000;
+  return null;
+}
+
 /** Cap-based bid strategies (bid cap / cost cap) need a positive bid amount; without it Meta
  *  rejects the ad set ("Bid amount required for the bid strategy provided"). Min-ROAS equally
  *  needs its positive ROAS goal (same field). Lowest-cost bids automatically and needs none. */

@@ -382,7 +382,9 @@ export async function POST(req: Request): Promise<NextResponse> {
     // ROAS goals live in 0.001..1000 at Meta; the board caps at 100 (create-side parity).
     if (kind === "roas" && bid > 100) return bad("roas_goal_invalid");
     const wire = hsWireBid(bid, strategy);
-    if (wire == null) return bad("bid_invalid");
+    // For ROAS the null also covers the ambiguous 10–20 band (percent? ×10 slip?) — name it.
+    if (wire == null)
+      return bad(kind === "roas" ? "roas_goal_ambiguous — type the decimal goal (0,30 = 30%)" : "bid_invalid");
     startingBid = wire;
   }
 

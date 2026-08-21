@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { type Campaign, bidAmountMissing, bidKind, parseMoney } from "@/lib/types";
+import { type Campaign, bidAmountMissing, bidKind, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { conversionEventsFor } from "@/lib/catalog";
 import { ROAS_PIXEL, partnerConfig, fullLandingUrl, type PartnerId } from "@/lib/partners";
 import {
@@ -284,13 +284,23 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  // Mirror the HS guard: a min-ROAS goal above 100 (10 000%) is a typo, not a bid. Rejected here
-  // so no campaign/gcm exists yet (Meta would only refuse at the ad-set step, orphaning both).
-  if (bidKind(campaign.bidStrategy) === "roas" && parseMoney(campaign.bidCap) > 100) {
-    return NextResponse.json(
-      { ok: false, stage: "config", error: "roas_goal_invalid — ROAS goal must be 0–100" },
-      { status: 400 },
-    );
+  // Mirror the HS guard: a min-ROAS goal above 100 (10 000%) is a typo, not a bid, and the
+  // ambiguous 10–20 band is refused rather than guessed (normalizeRoasGoal). Rejected here so no
+  // campaign/gcm exists yet (Meta would only refuse at the ad-set step, orphaning both).
+  if (bidKind(campaign.bidStrategy) === "roas") {
+    const goal = parseMoney(campaign.bidCap);
+    if (goal > 100) {
+      return NextResponse.json(
+        { ok: false, stage: "config", error: "roas_goal_invalid — ROAS goal must be 0–100" },
+        { status: 400 },
+      );
+    }
+    if (normalizeRoasGoal(goal) == null) {
+      return NextResponse.json(
+        { ok: false, stage: "config", error: "roas_goal_ambiguous — type the decimal goal (0,30 = 30%)" },
+        { status: 400 },
+      );
+    }
   }
   // Geo is required — an empty country list builds geo_locations:{countries:[]}, which Meta rejects
   // only at the ad-set step, AFTER the campaign is created → orphan + burnt gcm. (isReady guards it

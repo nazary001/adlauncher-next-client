@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { Campaign } from "@/lib/types";
-import { bidAmountMissing, bidKind, fullName, isHttpUrl, isLaunchable, limitMoney, limitMoneyCents, moneyLabel, parseMoney } from "@/lib/types";
+import { bidAmountMissing, bidKind, fullName, isHttpUrl, isLaunchable, limitMoney, limitMoneyCents, moneyLabel, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import {
   AGES,
   BID_STRATEGIES,
@@ -297,6 +297,10 @@ export function CampaignCard({
     if (hsMode && c.profile && c.account) hs?.ensurePixels(c.profile, c.account);
   }, [hsMode, c.profile, c.account, hs]);
   const kind = bidKind(c.bidStrategy);
+  // ROAS-goal echo for the bid field: what the wire will actually set (normalizeRoasGoal), so a
+  // percent-form entry is visible as its decimal goal right under the input.
+  const roasEntered = kind === "roas" ? parseMoney(c.bidCap) : 0;
+  const roasGoal = roasEntered > 0 ? normalizeRoasGoal(roasEntered) : null;
   // Self-heal restored/copied min-ROAS drafts: the value-pixel pin is STATE, not just display —
   // a draft restored with another pixel converges to the only ROAS-allowed one. Idempotent
   // (patches only on mismatch), so the unstable `patch` identity is safe to leave out of deps.
@@ -834,19 +838,29 @@ export function CampaignCard({
                   className="col-span-6"
                   hint={
                     kind === "roas"
-                      ? undefined
+                      ? // Live echo of normalizeRoasGoal: a percent/×10 entry shows the goal it
+                        // will actually set, a clean decimal shows the semantics reminder.
+                        roasEntered > 0 && roasGoal != null && roasGoal !== roasEntered
+                        ? `sets goal ${String(roasGoal).replace(".", ",")} — % form auto-converted`
+                        : "decimal: 0,30 = 30%"
                       : bidCapEnabled
                         ? "Digits fill cents — 50 → 0,50"
                         : "Lowest cost bids automatically"
                   }
-                  error={bidAmountMissing(c) ? "Required for this bid strategy" : undefined}
+                  error={
+                    bidAmountMissing(c)
+                      ? "Required for this bid strategy"
+                      : kind === "roas" && roasEntered > 0 && roasGoal == null
+                        ? "10–20 is ambiguous — type the decimal goal (0,30 = 30%)"
+                        : undefined
+                  }
                 >
                   <MoneyInput
                     value={c.bidCap}
                     onChange={(e) =>
                       patch({ bidCap: limitMoneyCents(e.target.value, kind === "roas" ? 100 : 1000) })
                     }
-                    placeholder={kind === "roas" ? "1,20" : "0,50"}
+                    placeholder={kind === "roas" ? "0,30" : "0,50"}
                     disabled={!bidCapEnabled}
                     maxLength={7}
                   />

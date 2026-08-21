@@ -1,6 +1,6 @@
 import { NextResponse, after } from "next/server";
 import { bidKind, parseMoney } from "@/lib/types";
-import { hsWireBid } from "@/lib/hs-launch";
+import { hsNormalizedConstraints, hsWireBid } from "@/lib/hs-launch";
 import { reportPagesUsed } from "@/lib/hs-pages";
 import {
   type GeoOverride,
@@ -419,9 +419,11 @@ async function pumpTokenBatch(
           if (kind === "roas") bidConstraints = { roas_average_floor: wire };
           else bidAmount = wire;
         } else {
-          // No override → inherit the source ad set's own bid verbatim.
+          // No override → inherit the source ad set's own bid, normalizing a percent/×10 ROAS
+          // floor a pre-fix source may still carry (hsNormalizedConstraints) — a broken floor
+          // must not propagate into the newborn clone.
           if (typeof tree.adset.bid_amount === "number") bidAmount = tree.adset.bid_amount as number;
-          if (tree.adset.bid_constraints) bidConstraints = tree.adset.bid_constraints as Json;
+          if (tree.adset.bid_constraints) bidConstraints = hsNormalizedConstraints(tree.adset.bid_constraints as Json);
         }
 
         // Cross-account: re-home EVERY reusable media in the target before any write (cached per

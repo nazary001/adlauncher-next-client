@@ -1,7 +1,7 @@
 // Pure builders for HS (LION) launches — importable from both the card preview and the server
 // route, so the name/payload the buyer sees is byte-identical to what LION receives. No env, no IO.
 
-import { type Campaign, bidKind, parseMoney } from "./types";
+import { type Campaign, bidKind, normalizeRoasGoal, parseMoney } from "./types";
 import type { LinkSegment } from "./partners";
 import { CONVERSION_EVENTS } from "./catalog";
 
@@ -156,6 +156,8 @@ export function hsCampaignError(c: Campaign, creatives: string[]): string | null
   const bid = parseMoney(c.bidCap);
   if (kind === "cap" && bid <= 0) return "bid_required";
   if (kind === "roas" && (bid <= 0 || bid > 100)) return "roas_goal_invalid";
+  // 10–20 can be a ×10 slip OR a percent — refuse instead of guessing (normalizeRoasGoal).
+  if (kind === "roas" && normalizeRoasGoal(bid) == null) return "roas_goal_ambiguous — type the decimal goal (0,30 = 30%)";
   return null;
 }
 
@@ -177,9 +179,28 @@ export type HsLocale = { id: number; name: string };
 export function hsWireBid(bid: number, strategy: string): number | null {
   if (!Number.isFinite(bid) || bid <= 0) return null;
   const kind = bidKind(strategy);
-  if (kind === "roas") return Math.round(bid * 10000);
+  if (kind === "roas") {
+    // Percent-form / ×10-slip entries are normalized to the real decimal goal BEFORE scaling
+    // (30 → 0,30 → 3000) — the ×100/×10 floors of the 08-20 mass fix must never ship again.
+    // null = the ambiguous 10–20 band, refused like any other unresolvable bid.
+    const goal = normalizeRoasGoal(bid);
+    return goal == null ? null : Math.round(goal * 10000);
+  }
   if (kind === "cap") return Math.round(bid * 100);
   return null;
+}
+
+/**
+ * Inherited-bid guard for clone paths that copy the SOURCE ad set's `bid_constraints` verbatim:
+ * a source whose floor still carries the percent/×10 entry (pre-fix launches) must not propagate
+ * it into the newborn clone. Floor is Meta-native (decimal × 10000). The ambiguous 10–20 band
+ * stays verbatim — a faithful clone beats a guessed rewrite there.
+ */
+export function hsNormalizedConstraints<T extends { roas_average_floor?: unknown }>(constraints: T): T {
+  const floor = Number(constraints?.roas_average_floor);
+  if (!Number.isFinite(floor) || floor < 20000) return constraints;
+  const goal = normalizeRoasGoal(floor / 10000);
+  return goal == null ? constraints : { ...constraints, roas_average_floor: Math.round(goal * 10000) };
 }
 
 /**

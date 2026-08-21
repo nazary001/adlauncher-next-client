@@ -1,5 +1,5 @@
 import type { Campaign } from "./types";
-import { bidKind, parseMoney } from "./types";
+import { bidKind, normalizeRoasGoal, parseMoney } from "./types";
 
 /** Resolved, server-enforced binds for a launch (locked partner values). */
 export type LaunchBinds = {
@@ -146,7 +146,12 @@ export function adsetPayload(
   // exact combination Meta accepts (bid_amount alongside would be a different, unprobed shape).
   const roas = bidKind(c.bidStrategy) === "roas";
   if (roas) {
-    p.bid_constraints = { roas_average_floor: Math.round(parseMoney(c.bidCap) * 10000) };
+    // Percent-form / ×10-slip goals normalize to the real decimal BEFORE scaling (30 → 0,30 →
+    // 3000) — see normalizeRoasGoal. The launch routes reject the ambiguous band up front; the
+    // throw is the backstop so no unvalidated caller can ever ship a mis-scaled floor.
+    const goal = normalizeRoasGoal(parseMoney(c.bidCap));
+    if (goal == null) throw new Error("roas_goal_ambiguous — type the decimal goal (0,30 = 30%)");
+    p.bid_constraints = { roas_average_floor: Math.round(goal * 10000) };
   }
 
   // The promoted pixel needs its event for BOTH conversions and clicks — LINK_CLICKS with a
