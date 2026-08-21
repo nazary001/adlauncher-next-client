@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { SESSION_COOKIE, verifySession } from "@/lib/session";
+import { isOwnerSession } from "@/lib/roles";
 import { CloneBoard } from "@/components/clone-board";
 import { HsCloneBoard } from "@/components/hs-clone-board";
 import { type PartnerId, partnerConfig, sanitizePartnerId } from "@/lib/partners";
@@ -52,7 +53,7 @@ export default async function ClonePage({
         // HS clones go through LION's duplicate weapon — a different rail entirely (no Graph
         // token, no gcm), so it gets its own board.
         <HsCloneBoard
-          user={{ username: session.username, role: session.role ?? null }}
+          user={{ username: session.username, role: session.role ?? null, owner: isOwnerSession(session) }}
           partner={partner}
           initialIds={ids}
         />
@@ -60,7 +61,7 @@ export default async function ClonePage({
         // MO and AIF share the Graph clone board — the partner prop picks the rail (token,
         // marker registry, pixel policy) end to end.
         <CloneBoard
-          user={{ username: session.username, role: session.role ?? null }}
+          user={{ username: session.username, role: session.role ?? null, owner: isOwnerSession(session) }}
           initialIds={ids}
           partner={partner}
         />

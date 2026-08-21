@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { FbError } from "@/lib/fb-graph";
 import { aifTokenAdAccounts, aifTokenConfigured } from "@/lib/aif-launch";
+import { filterAccountsFor } from "@/lib/acct-assignments";
 import { sessionFromCookieHeader } from "@/lib/session";
 
 export const runtime = "nodejs";
@@ -19,12 +20,14 @@ export const maxDuration = 60;
  * mapped status (429 rate-limited / 502 otherwise).
  */
 export async function GET(req: Request) {
-  if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
+  const session = sessionFromCookieHeader(req.headers.get("cookie"));
+  if (!session) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
   if (!aifTokenConfigured()) return NextResponse.json({ ok: false, reason: "no_token", accounts: [] });
   try {
-    const accounts = await aifTokenAdAccounts();
+    // Owner assignments: a non-owner sees only accounts assigned to them (unassigned = shared).
+    const accounts = await filterAccountsFor(session, await aifTokenAdAccounts(), (a) => a.id);
     return NextResponse.json({ ok: true, accounts });
   } catch (e) {
     const err = e as FbError;

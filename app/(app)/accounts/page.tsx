@@ -1,11 +1,17 @@
+import type { Metadata } from "next";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { SESSION_COOKIE, verifySession } from "@/lib/session";
 import { isOwnerSession } from "@/lib/roles";
 import { sanitizePartnerId } from "@/lib/partners";
-import { LauncherBoard } from "@/components/launcher-board";
+import { AccountAccessBoard } from "@/components/account-access-board";
 
-export default async function Home({
+export const metadata: Metadata = {
+  title: "Account access — Ad Launcher",
+};
+
+/** Owner-only: split FB ad accounts between the team (per-user picker visibility). */
+export default async function AccountsPage({
   searchParams,
 }: {
   searchParams: Promise<{ partner?: string | string[] }>;
@@ -13,12 +19,14 @@ export default async function Home({
   const jar = await cookies();
   const session = verifySession(jar.get(SESSION_COOKIE)?.value);
   if (!session) redirect("/login");
-  // The picked partner rides in the URL (?partner=br|in) so a refresh stays where the buyer was.
+  // Non-owners have no business here — and the APIs behind the page 403 them anyway.
+  if (!isOwnerSession(session)) redirect("/");
+
   const initialPartner = sanitizePartnerId((await searchParams).partner);
 
   return (
     <>
-      {/* ambient backdrop: aurora glows + fading grid horizon */}
+      {/* ambient backdrop: aurora glows + fading grid horizon (same as the launcher) */}
       <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden" aria-hidden="true">
         <div className="absolute -top-44 left-1/2 h-[480px] w-[920px] -translate-x-1/2 rounded-full bg-accent/[0.07] blur-[120px]" />
         <div className="absolute -top-24 right-[8%] h-[320px] w-[440px] rounded-full bg-accent2/[0.06] blur-[110px]" />
@@ -32,8 +40,8 @@ export default async function Home({
         />
       </div>
 
-      <LauncherBoard
-        user={{ username: session.username, role: session.role ?? null, owner: isOwnerSession(session) }}
+      <AccountAccessBoard
+        user={{ username: session.username, role: session.role ?? null, owner: true }}
         initialPartner={initialPartner}
       />
     </>

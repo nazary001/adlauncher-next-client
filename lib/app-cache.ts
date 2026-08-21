@@ -10,25 +10,38 @@ const TOKEN = process.env.STRAPI_TOKEN ?? "";
 export type AppCacheRow<T> = { documentId: string; value: T | null; refreshedAt: number };
 
 export async function readAppCache<T>(key: string): Promise<AppCacheRow<T> | null> {
-  if (!STRAPI || !TOKEN) return null;
+  const r = await readAppCacheDetailed<T>(key);
+  return r.ok ? r.row : null;
+}
+
+/** Like readAppCache, but DISTINGUISHES "no row yet" (ok:true, row:null) from "store
+ *  unavailable" (ok:false) — read-modify-write callers must refuse to write over a row they
+ *  could not read, or a Strapi blip would silently wipe it. */
+export async function readAppCacheDetailed<T>(
+  key: string,
+): Promise<{ ok: boolean; row: AppCacheRow<T> | null }> {
+  if (!STRAPI || !TOKEN) return { ok: false, row: null };
   try {
     const res = await fetch(
       `${STRAPI}/api/app-caches?filters[ckey][$eq]=${encodeURIComponent(key)}&pagination[pageSize]=1`,
       { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
     );
-    if (!res.ok) return null;
+    if (!res.ok) return { ok: false, row: null };
     const body = (await res.json().catch(() => ({}))) as {
       data?: Array<{ documentId?: string; cvalue?: unknown; refreshed_at?: unknown }>;
     };
     const row = body.data?.[0];
-    if (!row?.documentId) return null;
+    if (!row?.documentId) return { ok: true, row: null };
     return {
-      documentId: String(row.documentId),
-      value: (row.cvalue ?? null) as T | null,
-      refreshedAt: Number(row.refreshed_at) || 0,
+      ok: true,
+      row: {
+        documentId: String(row.documentId),
+        value: (row.cvalue ?? null) as T | null,
+        refreshedAt: Number(row.refreshed_at) || 0,
+      },
     };
   } catch {
-    return null;
+    return { ok: false, row: null };
   }
 }
 
