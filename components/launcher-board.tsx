@@ -344,7 +344,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
         hsTasks.enqueue({
           campaign: c,
           files: media,
-          name: hsFullName(c, hs.acr, ddmm),
+          // Channel-marked display name (FB Token rail → fixed TOKEN marker) — the drawer row
+          // must read like the campaign the server actually creates.
+          name: hsFullName(c, hs.acr, ddmm, channel),
           profile: c.profile,
           geo: geoSummary(c.countries),
           budget: c.budget,

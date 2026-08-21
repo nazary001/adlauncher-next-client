@@ -113,26 +113,70 @@ export function todaySaoPauloDDMM(now: Date = new Date()): string {
   }).format(now);
 }
 
-/** LION-validated name prefix: `[DD/MM] (ACR) API - (LABEL) - [CODES] - `. Placeholders keep the
- *  card preview readable while segments are still unpicked; the server never sends placeholders
- *  (validation rejects the campaign first). */
+/**
+ * Channel marker inside the FIXED name part (owner ask 08-21): every campaign born through OUR
+ * FB token — launcher's FB Token rail and the token duplicator alike — carries ` - TOKEN - `
+ * right before the buyer's editable tail, so token-born and LION-born runs are tellable apart
+ * in every list that only shows names. The marker means "HOW THIS RUN WAS CREATED": cloning a
+ * token-born source over LION strips it (splitHsGrammar puts it in the tail; the clone board
+ * drops it), and the token routes re-ensure it server-side (client names are never the truth).
+ */
+export const HS_TOKEN_MARK = "TOKEN - ";
+
+/** Drop a leading channel marker from a parsed TAIL — token-born sources carry it right before
+ *  the free text, and it must never leak into an editable suffix (or double-apply). */
+export function stripTokenMark(tail: string): string {
+  return tail.replace(/^TOKEN\s*-\s*/, "");
+}
+
+/**
+ * Split a name by the LION-validated grammar: the STRUCTURED prefix
+ * `[DD/MM] (ACR) API[ (CLONE)] - (LABEL) - [CODES] - … - ` vs the free-text TAIL after it.
+ * Pure split — no re-dating, no "(CLONE)" ensuring (the clone board layers those on top).
+ * Null = the name doesn't follow the grammar (everything is tail).
+ */
+export function splitHsGrammar(name: string): { prefix: string; tail: string } | null {
+  const m =
+    /^((?:\[\d{2}\/\d{2}\])\s*\([^)]*\)\s*API(?:\s*\(CLONE\))?\s*-\s*\([^)]*\)\s*(?:-\s*\[[^\]]*\]\s*)*-\s*)([\s\S]*)$/.exec(
+      name,
+    );
+  return m ? { prefix: m[1], tail: m[2] } : null;
+}
+
+/** Guarantee the TOKEN marker on a name about to be created through the FB token (server-side
+ *  truth — an old/tampered client may send an unmarked name). Grammar names get it between the
+ *  fixed prefix and the tail; grammar-less ones (manual Ads-Manager sources) get it prepended —
+ *  no grammar to preserve there. Already-marked names pass through untouched. */
+export function hsEnsureTokenMark(name: string): string {
+  if (/(?:^|\s)TOKEN\s*-\s*/.test(name)) return name;
+  const split = splitHsGrammar(name);
+  return split ? `${split.prefix}${HS_TOKEN_MARK}${split.tail}` : `${HS_TOKEN_MARK}${name}`;
+}
+
+/** LION-validated name prefix: `[DD/MM] (ACR) API - (LABEL) - [CODES] - `; the FB Token channel
+ *  appends its ` TOKEN - ` marker (fixed part — the buyer's tail starts after it). Placeholders
+ *  keep the card preview readable while segments are still unpicked; the server never sends
+ *  placeholders (validation rejects the campaign first). */
 export function hsNamePrefix(
   c: Pick<Campaign, "redirectType" | "countries">,
   acr: string,
   ddmm: string,
+  channel: "lion" | "token" = "lion",
 ): string {
   const label = HS_REDIRECT_LABELS[c.redirectType] ?? "…";
   const codes = c.countries.length ? hsCountryCodes(c.countries).join(", ") : "…";
-  return `[${ddmm}] (${acr || "ACR"}) API - (${label}) - [${codes}] - `;
+  return `[${ddmm}] (${acr || "ACR"}) API - (${label}) - [${codes}] - ${channel === "token" ? HS_TOKEN_MARK : ""}`;
 }
 
-/** Full campaign name = LION prefix + the user's free-text suffix. */
+/** Full campaign name = LION prefix (channel-marked for the FB Token rail) + the user's
+ *  free-text suffix. */
 export function hsFullName(
   c: Pick<Campaign, "redirectType" | "countries" | "name">,
   acr: string,
   ddmm: string,
+  channel: "lion" | "token" = "lion",
 ): string {
-  return `${hsNamePrefix(c, acr, ddmm)}${c.name.trim()}`;
+  return `${hsNamePrefix(c, acr, ddmm, channel)}${c.name.trim()}`;
 }
 
 const isHttpUrl = (v: string): boolean => /^https?:\/\/\S+$/i.test(v.trim());

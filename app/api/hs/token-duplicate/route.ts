@@ -1,6 +1,6 @@
 import { NextResponse, after } from "next/server";
 import { bidKind, parseMoney } from "@/lib/types";
-import { hsNormalizedConstraints, hsWireBid } from "@/lib/hs-launch";
+import { hsEnsureTokenMark, hsNormalizedConstraints, hsWireBid } from "@/lib/hs-launch";
 import { reportPagesUsed } from "@/lib/hs-pages";
 import {
   type GeoOverride,
@@ -250,7 +250,9 @@ export async function POST(req: Request): Promise<NextResponse> {
     shots.map((s) =>
       stampHsTaskRow(session.username, {
         taskId: s.taskId,
-        name: s.name || s.label || `Clone of ${s.campaignId}`,
+        // TOKEN-marked like the campaign itself will be (hsEnsureTokenMark at create) — the
+        // drawer row and the born clone must never disagree about the channel.
+        name: hsEnsureTokenMark(s.name || s.label || `Clone of ${s.campaignId}`),
         geo: s.geo,
         budget: s.budgetRaw,
         lionTaskId: "",
@@ -446,7 +448,10 @@ async function pumpTokenBatch(
           medias = migrated;
         }
 
-        const name = s.name || `${tree.name} (copy)`;
+        // Server-side truth for the channel marker: whatever name arrives (new clients send it
+        // marked, old/unreadable paths don't), a token-born clone ALWAYS carries TOKEN in its
+        // fixed part.
+        const name = hsEnsureTokenMark(s.name || `${tree.name} (copy)`);
 
         // campaign — CBO with the buyer's budget, the source's objective/strategy, ACTIVE.
         const camp = await hsFbPost(`act_${binds.account}/campaigns`, {

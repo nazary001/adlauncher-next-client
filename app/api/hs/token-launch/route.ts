@@ -177,8 +177,9 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
-  // Server-authoritative name/link — same pure builders the card preview and the LION rail use.
-  const name = hsFullName(c, LION_ACR, todaySaoPauloDDMM());
+  // Server-authoritative name/link — same pure builders the card preview and the LION rail use;
+  // "token" stamps the fixed TOKEN marker (this rail is the FB token by definition).
+  const name = hsFullName(c, LION_ACR, todaySaoPauloDDMM(), "token");
   const link = hsFinalLink(c.link, c.pixel, LION_ACR, c);
   const geo = hsCountryCodes(c.countries).join(", ");
   const startTime = hsTokenStartTime();

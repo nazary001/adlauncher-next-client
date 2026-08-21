@@ -2,14 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Header } from "./header";
-import { Field } from "./ui";
+import { AutoTextarea, BidKindTag, Field } from "./ui";
 import { SearchSelect } from "./search-select";
 import { useHs } from "./use-hs";
 import { useHsTaskManager } from "./hs-task-manager";
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
-import { limitMoney, limitMoneyCents, moneyLabel, parseMoney } from "@/lib/types";
+import { bidKind, limitMoney, limitMoneyCents, moneyLabel, parseMoney } from "@/lib/types";
 import { geoSummary } from "@/lib/catalog";
-import { todaySaoPauloDDMM } from "@/lib/hs-launch";
+import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { relabelNameGeo } from "@/lib/targeting-override";
 import type { PartnerId } from "@/lib/partners";
 import { CopyIcon, EyeIcon, GlobeIcon, PlusIcon, TrashIcon } from "./icons";
@@ -50,26 +50,36 @@ const cellInput =
   "h-8 w-full rounded-md border border-line bg-surface2 px-2 text-[12px] font-mono tabular-nums text-ink " +
   "outline-none transition-colors duration-150 hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15";
 
-const STRATEGY_SHORT: Record<string, string> = {
-  LOWEST_COST_WITHOUT_CAP: "lowest",
-  LOWEST_COST_WITH_BID_CAP: "bid cap",
-  COST_CAP: "cost cap",
-  LOWEST_COST_WITH_MIN_ROAS: "min ROAS",
-};
+/** Human display of a source's OWN bid, formatted by how it bids (BidKindTag names the how):
+ *  min-ROAS goal = plain decimal ("0,34" = 34%), cap = "$0,34", lowest = "auto" (no bid at all).
+ *  "—" = the bid is unknown right now (roas goals only exist in LION's metrics read — when that
+ *  is down the goal is null while the strategy still names the kind). Exotic strategies fall
+ *  through to the raw number, unmarked — same honesty rule as the tag. */
+function origBidLabel(info: NonNullable<Row["info"]>): string {
+  const v = info.bid != null ? String(info.bid).replace(".", ",") : "";
+  switch (bidKind(info.bidStrategy)) {
+    case "roas":
+      return v || "—";
+    case "cap":
+      return v ? `$${v}` : "—";
+    default:
+      return info.bidStrategy === "LOWEST_COST_WITHOUT_CAP" ? "auto" : v || "—";
+  }
+}
 
-/** Split a LION name by its validated grammar: the STRUCTURED prefix
+/** Split a LION name by its validated grammar (shared splitHsGrammar): the STRUCTURED prefix
  *  `[DD/MM] (ACR) API[ (CLONE)] - (LABEL) - [CODES] - [LANG] - ...` stays fixed (re-dated to
  *  today, "(CLONE)" ensured — that part LION owns), while the free-text TAIL after it is the
- *  buyer's to replace. Unparseable names fall back to everything-is-tail. */
+ *  buyer's to replace. A source's channel marker ("TOKEN - ", sits right before the tail) is
+ *  STRIPPED here: the marker states how a run was CREATED, so the clone re-earns it only from
+ *  the rail it fires on — never by inheritance. Unparseable names fall back to
+ *  everything-is-tail (marker-stripped all the same). */
 function splitLionName(sourceName: string, ddmm: string): { prefix: string; tail: string } {
-  const m =
-    /^((?:\[\d{2}\/\d{2}\])\s*\([^)]*\)\s*API(?:\s*\(CLONE\))?\s*-\s*\([^)]*\)\s*(?:-\s*\[[^\]]*\]\s*)*-\s*)([\s\S]*)$/.exec(
-      sourceName,
-    );
-  if (!m) return { prefix: "", tail: sourceName };
-  let prefix = m[1].replace(/^\[\d{2}\/\d{2}\]/, `[${ddmm}]`);
+  const m = splitHsGrammar(sourceName);
+  if (!m) return { prefix: "", tail: stripTokenMark(sourceName) };
+  let prefix = m.prefix.replace(/^\[\d{2}\/\d{2}\]/, `[${ddmm}]`);
   if (!/\(CLONE\)/.test(prefix)) prefix = prefix.replace(/API/, "API (CLONE)");
-  return { prefix, tail: m[2].trim() };
+  return { prefix, tail: stripTokenMark(m.tail.trim()) };
 }
 
 /** Default tail = the source's old tail + " - <owner>" (the buyer duplicating it), matching the
@@ -371,6 +381,10 @@ export function HsCloneBoard({
       const prefix = r.info?.name
         ? relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)
         : "";
+      // The channel marker is re-earned per fire: token waves stamp TOKEN into the fixed part
+      // (the server ensures it too), LION waves stay unmarked — splitLionName already stripped
+      // any marker the SOURCE was born with.
+      const mark = effDupChannel === "token" ? HS_TOKEN_MARK : "";
       return Array.from({ length: copiesN }, (_, copy) => ({
         campaignId: cid,
         budget: r.budget,
@@ -379,9 +393,9 @@ export function HsCloneBoard({
         // rides in HUMAN units and is scaled to LION's Meta-native wire unit server-side.
         ...(r.info?.bidStrategy ? { bidStrategy: r.info.bidStrategy } : {}),
         geo,
-        // Full name = fixed grammar prefix + the buyer's tail (replaces the old one).
-        // When the source couldn't be read there's no prefix — LION rebuilds the name.
-        ...(r.info?.name ? { name: `${prefix}${r.suffix.trim()}`.trim() } : {}),
+        // Full name = fixed grammar prefix + channel marker + the buyer's tail (replaces the
+        // old one). When the source couldn't be read there's no prefix — LION rebuilds the name.
+        ...(r.info?.name ? { name: `${prefix}${mark}${r.suffix.trim()}`.trim() } : {}),
         // Targeting override — the server patches the clone (token rail: before creating the ad
         // set; LION rail: through the Graph once the clone is born).
         ...(overridden ? { countries: r.countries } : {}),
@@ -657,19 +671,31 @@ export function HsCloneBoard({
                             ) : r.info?.status === "UNREADABLE" ? (
                               <span className="text-danger">LION can’t read this campaign</span>
                             ) : r.info?.name ? (
-                              relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries) ||
-                              r.info.name
+                              // Fixed part = grammar prefix + the FIRE channel's marker (token →
+                              // TOKEN, live-toggles with the rail switch; source markers were
+                              // stripped into the tail parse).
+                              (() => {
+                                const p = relabelNameGeo(
+                                  splitLionName(r.info.name, todaySaoPauloDDMM()).prefix,
+                                  r.countries,
+                                );
+                                return p ? p + (effDupChannel === "token" ? HS_TOKEN_MARK : "") : r.info.name;
+                              })()
                             ) : (
                               "—"
                             )}
                           </p>
-                          <input
+                          {/* Grows with the typed tail (wraps, no inner scroll) — same adaptive
+                              name editing as the MO clone board; Enter/newlines never reach the
+                              campaign name (singleLine). */}
+                          <AutoTextarea
                             value={r.suffix}
-                            onChange={(e) => patchRow(r.id, { suffix: e.target.value })}
+                            onChange={(v) => patchRow(r.id, { suffix: v })}
                             placeholder="tail — edit to rename the clone"
-                            aria-label="Name suffix"
+                            ariaLabel="Name suffix"
                             maxLength={80}
-                            className="mt-1.5 h-7 w-full rounded border border-line bg-surface px-2 text-[12px] text-ink outline-none transition-colors hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
+                            singleLine
+                            className="mt-1.5 block w-full resize-none overflow-hidden rounded border border-line bg-surface px-2 py-1 text-[12px] leading-snug text-ink outline-none transition-colors hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
                           />
                         </div>
                       </td>
@@ -708,40 +734,66 @@ export function HsCloneBoard({
                         {r.info?.budget != null ? `$${moneyLabel(r.info.budget)}` : "—"}
                       </td>
                       <td className="px-2 py-3 text-right font-mono text-[11.5px] tabular-nums text-dim">
-                        {r.info?.bid != null
-                          ? String(r.info.bid).replace(".", ",")
-                          : r.info?.bidStrategy
-                            ? (STRATEGY_SHORT[r.info.bidStrategy] ?? "—")
-                            : "—"}
+                        {r.info ? (
+                          <span className="inline-flex flex-wrap items-center justify-end gap-1">
+                            <BidKindTag strategy={r.info.bidStrategy} />
+                            <span>{origBidLabel(r.info)}</span>
+                          </span>
+                        ) : (
+                          "—"
+                        )}
                       </td>
                       <td className="px-2 py-3 text-center font-mono text-[11.5px] text-dim">
                         {r.info ? r.info.adsCount : "—"}
                       </td>
                       <td className="w-[110px] px-2 py-2.5">
-                        <input
-                          value={r.bid}
-                          // Cash-register entry, SAME as the launcher's bid/ROAS field: typed
-                          // digits fill hundredths from the right (34 → 0,34 · 120 → 1,20), so a
-                          // missed comma can never inflate a bid 100×. HUMAN units, like LION's
-                          // reads prefill them: ROAS decimal for MIN_ROAS sources, $ for cap —
-                          // the duplicate route scales to Meta-native wire units by the SOURCE's
-                          // strategy. Empty inherits the source's own bid.
-                          onChange={(e) =>
-                            patchRow(r.id, {
-                              bid: limitMoneyCents(
-                                e.target.value,
-                                r.info?.bidStrategy === "LOWEST_COST_WITH_MIN_ROAS" ? 100 : 1000,
-                              ),
-                            })
-                          }
-                          placeholder={
-                            r.info?.bidStrategy === "LOWEST_COST_WITH_MIN_ROAS" ? "inherits ROAS goal" : "inherit"
-                          }
-                          title="Digits fill cents — 34 → 0,34 · 120 → 1,20"
-                          inputMode="decimal"
-                          aria-label="Bid / ROAS goal"
-                          className={cellInput}
-                        />
+                        {/* The same field means a ROAS decimal on a min-ROAS row and $ on a cap
+                            row — the in-field marker (blue R / faint $) keeps the unit readable
+                            right where the buyer types, matching the row's BidKindTag. */}
+                        <div className="relative">
+                          {r.info && bidKind(r.info.bidStrategy) !== "none" ? (
+                            <span
+                              className={
+                                "pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[11px] " +
+                                (bidKind(r.info.bidStrategy) === "roas"
+                                  ? "font-semibold text-[#9db8ff]"
+                                  : "text-faint")
+                              }
+                            >
+                              {bidKind(r.info.bidStrategy) === "roas" ? "R" : "$"}
+                            </span>
+                          ) : null}
+                          <input
+                            value={r.bid}
+                            // Cash-register entry, SAME as the launcher's bid/ROAS field: typed
+                            // digits fill hundredths from the right (34 → 0,34 · 120 → 1,20), so a
+                            // missed comma can never inflate a bid 100×. HUMAN units, like LION's
+                            // reads prefill them: ROAS decimal for MIN_ROAS sources, $ for cap —
+                            // the duplicate route scales to Meta-native wire units by the SOURCE's
+                            // strategy. Empty inherits the source's own bid.
+                            onChange={(e) =>
+                              patchRow(r.id, {
+                                bid: limitMoneyCents(
+                                  e.target.value,
+                                  bidKind(r.info?.bidStrategy ?? "") === "roas" ? 100 : 1000,
+                                ),
+                              })
+                            }
+                            placeholder={
+                              bidKind(r.info?.bidStrategy ?? "") === "roas" ? "inherits ROAS goal" : "inherit"
+                            }
+                            title={
+                              bidKind(r.info?.bidStrategy ?? "") === "roas"
+                                ? "ROAS decimal — 34 → 0,34 (34%) · empty = inherit the source's goal"
+                                : bidKind(r.info?.bidStrategy ?? "") === "cap"
+                                  ? "Bid cap in $ — digits fill cents, 34 → $0,34 · empty = inherit the source's cap"
+                                  : "Digits fill cents — 34 → 0,34 · 120 → 1,20"
+                            }
+                            inputMode="decimal"
+                            aria-label="Bid / ROAS goal"
+                            className={cellInput + (r.info && bidKind(r.info.bidStrategy) !== "none" ? " pl-5" : "")}
+                          />
+                        </div>
                       </td>
                       <td className="w-[100px] px-2 py-2.5">
                         <input
@@ -819,14 +871,18 @@ export function HsCloneBoard({
                     <p key={r.id} className="text-[12px] text-dim">
                       <span className="text-ink">
                         {r.info?.name
-                          ? `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}${r.suffix.trim()}`.slice(
+                          ? `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}${effDupChannel === "token" ? HS_TOKEN_MARK : ""}${r.suffix.trim()}`.slice(
                               0,
                               110,
                             )
                           : `#${r.campaignId}`}
                       </span>{" "}
                       → {copiesN} cop{copiesN === 1 ? "y" : "ies"} @ ${moneyLabel(r.budget)}/day
-                      {r.bid.trim() ? ` · bid ${r.bid}` : " · bid inherited"}
+                      {r.bid.trim()
+                        ? bidKind(r.info?.bidStrategy ?? "") === "roas"
+                          ? ` · ROAS ${r.bid}`
+                          : ` · bid ${bidKind(r.info?.bidStrategy ?? "") === "cap" ? "$" : ""}${r.bid}`
+                        : " · bid inherited"}
                       {r.countries.length > 0 ? (
                         <span className="text-[#9db8ff]"> · geo → {overrideGeoLabel(r.countries)}</span>
                       ) : null}

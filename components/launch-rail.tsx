@@ -59,8 +59,11 @@ export function LaunchRail({
   const pool = markerPool(partner);
   const gcmBlocked = Boolean(pool) && poolFree === 0;
   const ddmm = partner.lionLaunch ? todaySaoPauloDDMM() : "";
+  // The bay previews the name the launch will really create — the FB Token rail's fixed TOKEN
+  // marker included (same effective-channel rule as the launch itself: picked AND provisioned).
+  const nameChannel = hsChannel === "token" && hsTokenReady ? ("token" as const) : ("lion" as const);
   const nameOf = (c: Campaign) =>
-    partner.lionLaunch ? (c.name.trim() ? hsFullName(c, hsAcr ?? "", ddmm) : "") : fullName(c);
+    partner.lionLaunch ? (c.name.trim() ? hsFullName(c, hsAcr ?? "", ddmm, nameChannel) : "") : fullName(c);
 
   return (
     <aside className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-20">

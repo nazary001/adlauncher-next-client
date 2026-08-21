@@ -344,9 +344,12 @@ export function CampaignCard({
     if (hsAccountHidden) onPatch(c.id, { account: "", pixel: "" });
   }, [hsAccountHidden, onPatch, c.id]);
   const hsCurrency = hsMode ? hsData?.currencies?.[c.account] || "" : "";
-  // The LION-validated name prefix is DERIVED (date + ACR + redirect label + geo) — it re-renders
-  // live as the buyer flips redirect type or geo; the server rebuilds the exact same string.
-  const displayPrefix = hsMode ? hsNamePrefix(c, hs?.acr ?? "", todaySaoPauloDDMM()) : c.namePrefix;
+  // The LION-validated name prefix is DERIVED (date + ACR + redirect label + geo, and the FB
+  // Token rail's fixed TOKEN marker) — it re-renders live as the buyer flips redirect type, geo
+  // or the launch rail; the server rebuilds the exact same string.
+  const displayPrefix = hsMode
+    ? hsNamePrefix(c, hs?.acr ?? "", todaySaoPauloDDMM(), hsTokenRail ? "token" : "lion")
+    : c.namePrefix;
   const displayName = hsMode ? (c.name.trim() ? displayPrefix + c.name : "") : fullName(c);
 
   // Indians pin one account → its pixel and fanpage render locked, not searchable.
@@ -649,9 +652,11 @@ export function CampaignCard({
                   className={setupCol}
                   hint={
                     aifMode
-                      ? conversions
-                        ? "postback CAPI pixel"
-                        : "clicks need no pixel"
+                      ? kind === "roas"
+                        ? "pinned by min ROAS"
+                        : conversions
+                          ? "postback CAPI pixel"
+                          : "clicks need no pixel"
                       : !hsMode && partner.accountsFromToken && kind === "roas"
                         ? "pinned by min ROAS"
                         : undefined
@@ -782,29 +787,34 @@ export function CampaignCard({
                     value={c.bidStrategy}
                     onChange={(e) => {
                       const bidStrategy = e.target.value;
-                      // Min-ROAS optimizes purchase value — the event pins to Purchase, (MO) the
-                      // optimization pins to conversions so the link keeps &fire=click, and the
-                      // pixel pins to the partner's value pixel (the only ROAS-allowed one).
+                      // Min-ROAS optimizes purchase value — the event pins to Purchase, the
+                      // optimization pins to conversions (MO's link keeps &fire=click), and the
+                      // pixel pins to the partner's value pixel: MO → VD-C1-HS-1, AIF → the
+                      // postback CAPI pixel (the only pixel either rail may ROAS on).
                       if (bidKind(bidStrategy) === "roas") {
                         patch({
                           bidStrategy,
                           conversionEvent: "PURCHASE",
                           optimization: "conversions",
-                          ...(partner.accountsFromToken ? { pixel: ROAS_PIXEL.id } : {}),
+                          ...(aifMode
+                            ? { pixel: AIF_PIXEL.id }
+                            : partner.accountsFromToken
+                              ? { pixel: ROAS_PIXEL.id }
+                              : {}),
                         });
                       } else {
                         // Leaving min-ROAS unlocks the pixel back to the partner default (bid
-                        // launches keep the choice, defaulting to GC for MO).
+                        // launches keep the choice, defaulting to GC for MO). AIF pixels stay
+                        // derived from the optimization (applyPartnerLocks) — never refilled.
                         patch({
                           bidStrategy,
-                          ...(kind === "roas" && partner.accountsFromToken
+                          ...(kind === "roas" && !aifMode && partner.accountsFromToken
                             ? { pixel: defaultPixelFor(adAccounts ?? null, c.account, partner.preferredPixel) }
                             : {}),
                         });
                       }
                     }}
-                    // AIF bans min-ROAS (its CAPI Purchases carry value 0 — nothing to optimize).
-                    options={aifMode ? BID_STRATEGIES.filter((o) => bidKind(o.value) !== "roas") : BID_STRATEGIES}
+                    options={BID_STRATEGIES}
                   />
                 </Field>
                 {!aifMode ? (
