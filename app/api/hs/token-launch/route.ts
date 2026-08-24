@@ -22,6 +22,7 @@ import {
   type HsTokenCreative,
   hsCreateAdset,
   hsFbPost,
+  hsPauseCampaign,
   hsTokenAccountIds,
   hsTokenConfigured,
   hsTokenGate,
@@ -37,6 +38,7 @@ import { reportPagesUsed } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { taskWriter } from "@/lib/task-store";
 import { acctKey, claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
+import { launchFailureDisposition, partialFailureNote } from "@/lib/launch-guards";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -325,10 +327,13 @@ export async function POST(req: Request): Promise<Response> {
           // Free the account's launch slot when NO campaign was created — the window meters only
           // campaigns that exist. Once one exists the slot stays consumed.
           if (acctSlot && !created.campaign_id) await releaseAcctSlot(acctSlot.documentId);
-          // Partial trees stay traceable: the ids that DID land ride in the row and the error
-          // event, and the client blocks a retry once a campaign exists (a re-fire would build a
-          // second one — the buyer settles the partial in Ads Manager instead).
-          const partial = adIds.length ? ` (created ${adIds.length}/${creatives.length} ads)` : "";
+          // Partial trees stay traceable AND must not deliver: the tree is born ACTIVE with only
+          // the +30 min start gap, so the campaign is paused (bounded) and the confirmed state
+          // rides in the message — same contract as the MO rail. The client still blocks a retry
+          // once a campaign exists (a re-fire would build a second one).
+          const disposition = launchFailureDisposition({ ...created, ad_ids: adIds });
+          const pausedOk = disposition.pauseNeeded ? await hsPauseCampaign(String(created.campaign_id)) : false;
+          const partial = partialFailureNote(disposition, pausedOk);
           settled = true;
           tw.write({
             ...statics,

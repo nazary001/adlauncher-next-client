@@ -1,6 +1,14 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { findTaskRow, pickTaskFields, readTeamTasks, storeConfigured, strapiFetch, upsertTaskRow } from "@/lib/task-store";
+import {
+  findTaskRow,
+  findTaskRowStrict,
+  pickTaskFields,
+  readTeamTasks,
+  storeConfigured,
+  strapiFetch,
+  upsertTaskRow,
+} from "@/lib/task-store";
 
 // HS tasks share the `launch-task` collection (no separate deploy), tagged partner="br" so they
 // live alongside MO rows without colliding — the MO reader excludes "br", this reader takes only
@@ -96,29 +104,39 @@ export async function POST(req: Request) {
   // legit first-write is always queued/running/submitted (client) or the server-side stamp.
   // "done" stays writable as a first write — losing a real completion would be worse.
   const failureStates = new Set(["error", "interrupted"]);
-  for (let i = 0; i < items.length; i += 8) {
-    const results = await Promise.all(
-      items.slice(i, i + 8).map(async (item) => {
-        const fields = pickTaskFields(item);
-        const incoming = String(fields.status ?? "");
-        if (incoming !== "done") {
-          const existing = await findTaskRow(String(item.task_id));
-          if (!existing && failureStates.has(incoming)) return { ok: true as const };
-          // done is TERMINAL: a stale tab's heartbeat, 60-min cap or late error must never
-          // demote a row that already recorded the real completion (live 08-13: tasks the
-          // buyer saw finish were re-written to "Still not finished after 60 min").
-          if (existing?.status === "done") return { ok: true as const };
+  try {
+    for (let i = 0; i < items.length; i += 8) {
+      const results = await Promise.all(
+        items.slice(i, i + 8).map(async (item) => {
+          const fields = pickTaskFields(item);
+          const incoming = String(fields.status ?? "");
+          if (incoming !== "done") {
+            // STRICT read: a Strapi blip must not read as "row absent" — the zombie-guard on the
+            // next line would swallow a terminal error-write while answering ok:true, and the
+            // client never retries a claimed success. A store failure throws instead → the batch
+            // answers 502 below and the client's next save retries it.
+            const existing = await findTaskRowStrict(String(item.task_id));
+            if (!existing && failureStates.has(incoming)) return { ok: true as const };
+            // done is TERMINAL: a stale tab's heartbeat, 60-min cap or late error must never
+            // demote a row that already recorded the real completion (live 08-13: tasks the
+            // buyer saw finish were re-written to "Still not finished after 60 min").
+            if (existing?.status === "done") return { ok: true as const };
+          }
+          // partner:"br" is forced here — the wire never sets it, so an MO row can't masquerade as HS.
+          return upsertTaskRow(user, String(item.task_id), { ...fields, partner: HS_PARTNER });
+        }),
+      );
+      for (const r of results) {
+        if (!r.ok) {
+          if (r.reason === "forbidden") forbidden = true;
+          else failed = r.detail ?? r.reason;
         }
-        // partner:"br" is forced here — the wire never sets it, so an MO row can't masquerade as HS.
-        return upsertTaskRow(user, String(item.task_id), { ...fields, partner: HS_PARTNER });
-      }),
-    );
-    for (const r of results) {
-      if (!r.ok) {
-        if (r.reason === "forbidden") forbidden = true;
-        else failed = r.detail ?? r.reason;
       }
     }
+  } catch (e) {
+    // Store down / timed out mid-batch — answer structured JSON (the proxyless 500 of a raised
+    // rejection carries no body the client can read), and let the caller's next save retry.
+    return NextResponse.json({ ok: false, error: `store: ${(e as Error).message ?? String(e)}` }, { status: 502 });
   }
   if (forbidden && items.length === 1) return NextResponse.json({ ok: false, reason: "forbidden" }, { status: 403 });
   if (failed) return NextResponse.json({ ok: false, error: failed }, { status: 502 });

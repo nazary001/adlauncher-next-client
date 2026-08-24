@@ -4,6 +4,7 @@
 // Server-only: FB_LAUNCH_TOKEN never reaches the browser.
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { isAppLevelLimitCode } from "./token-pool-guards";
 import { readAppCache, writeAppCache } from "./app-cache";
 
 const FB = "https://graph.facebook.com/v21.0";
@@ -17,13 +18,28 @@ const TOKEN = process.env.FB_LAUNCH_TOKEN ?? "";
 // it mid-stream — a timeout skips the error path entirely (no gcm release/retire, task row stuck).
 // AsyncLocalStorage so the budget flows through every nested helper without threading params;
 // callers outside a budget (UI reads) keep the old snappy 5×backoff behaviour.
-type FbBudget = { deadlineAt: number; retries: number };
+type FbBudget = { deadlineAt?: number; retries?: number; appLimitFailFast?: boolean };
 const fbBudgetALS = new AsyncLocalStorage<FbBudget>();
 
 export function withFbBudget<T>(budget: FbBudget, fn: () => T): T {
   // fn runs synchronously inside the context; every async continuation it starts (including a
   // ReadableStream's start() begun during construction) inherits the budget via ALS.
   return fbBudgetALS.run(budget, fn);
+}
+
+/** Arm app-limit fail-fast for everything `fn` awaits (any outer budget's fields pass through):
+ *  an APP-scoped throttle — (#4)/(#17), the codes a DIFFERENT app's bearer escapes — then throws
+ *  its 429 on the FIRST sighting instead of riding the retry ladder, so the HS token pool
+ *  rotates bearers in milliseconds, not after minutes of regain-estimate sleeps on a burned app.
+ *  Account-scoped throttles keep the ladder (rotation cannot help those). */
+export function withFbAppLimitFailFast<T>(fn: () => T): T {
+  return fbBudgetALS.run({ ...fbBudgetALS.getStore(), appLimitFailFast: true }, fn);
+}
+
+/** Inside an armed fail-fast context, an app-level limit skips the ladder entirely. */
+function shouldFailFastAppLimit(body: Json): boolean {
+  if (!fbBudgetALS.getStore()?.appLimitFailFast) return false;
+  return isAppLevelLimitCode(((body?.error ?? {}) as { code?: number }).code);
 }
 
 export function hasFbToken(): boolean {
@@ -112,7 +128,8 @@ function retryWaitMs(res: Response, attempt: number): number | null {
   const budget = fbBudgetALS.getStore();
   const maxAttempts = budget?.retries ?? RATE_RETRIES;
   if (attempt >= maxAttempts) return null;
-  if (!budget) return rateBackoff(attempt);
+  // A flag-only context (fail-fast armed outside any budget) keeps the snappy default ladder.
+  if (!budget || budget.deadlineAt == null) return rateBackoff(attempt);
   const { regainMin } = usageOf(res);
   const wait = Math.max(rateBackoff(attempt), Math.min(regainMin * 60_000, 60_000));
   return Date.now() + wait <= budget.deadlineAt ? wait : null;
@@ -140,7 +157,7 @@ export async function fbGet(path: string, token: string = TOKEN): Promise<Json> 
       await throttle(res);
       return body;
     }
-    if (isRateLimited(body)) {
+    if (isRateLimited(body) && !shouldFailFastAppLimit(body)) {
       const wait = retryWaitMs(res, attempt);
       if (wait !== null) {
         await sleep(wait);
@@ -753,7 +770,7 @@ export async function fbPost(path: string, params: Json, token: string = TOKEN):
       await throttle(res);
       return body;
     }
-    if (isRateLimited(body)) {
+    if (isRateLimited(body) && !shouldFailFastAppLimit(body)) {
       const wait = retryWaitMs(res, attempt);
       if (wait !== null) {
         await sleep(wait);

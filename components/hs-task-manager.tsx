@@ -452,6 +452,19 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         for (const [id, ts] of tombstones.current) if (ts < cutoff) tombstones.current.delete(id);
         const fetched = d.tasks.map(fromRemote);
         const tomb = new Set(tombstones.current.keys());
+        // A tombstoned id still coming back means the dismiss DELETE hasn't landed (it fires
+        // once and a Strapi blip can eat it) — keep the row buried AND re-fire the delete;
+        // letting the tombstone lapse after 60s resurrects the dismissed row (review find
+        // 08-24). Same re-stamp loop the MO manager runs on its polls.
+        for (const f of fetched) {
+          if (f.id && tomb.has(f.id)) {
+            tombstones.current.set(f.id, Date.now());
+            void fetch(`/api/hs-tasks?taskId=${encodeURIComponent(f.id)}`, {
+              method: "DELETE",
+              signal: AbortSignal.timeout(20_000),
+            }).catch(() => {});
+          }
+        }
         setTasks((cur) => mergeShared(cur, fetched, tomb));
       })
       .catch(() => {});

@@ -692,16 +692,14 @@ function TaskManagerCore({
             error: null,
           });
           inputs.current.delete(id); // done → never re-run; free the captured Campaign/video url
-        } else {
+        } else if (f) {
           const finishedAt = Date.now();
-          const msg = f
-            ? (f.error as string) || (f.stage as string) || `HTTP ${resStatus}`
-            : `stream ended unexpectedly (HTTP ${resStatus}) — the server may have timed out mid-launch; check Ads Manager before retrying`;
+          const msg = (f.error as string) || (f.stage as string) || `HTTP ${resStatus}`;
           // Record which stage failed + whatever FB objects were created before the failure. A
           // created campaign means a blind retry would DUPLICATE it (fresh gcm, second full tree),
           // so we surface the campaign id on the task (result.campaignId) → the UI hides Retry and
           // we drop the input so it can never re-run.
-          const created = ((f?.created ?? {}) as Record<string, unknown>) || {};
+          const created = ((f.created ?? {}) as Record<string, unknown>) || {};
           const createdCampaign = created.campaign_id ? String(created.campaign_id) : undefined;
           const createdAdset = created.adset_id ? String(created.adset_id) : undefined;
           patch(id, {
@@ -720,6 +718,21 @@ function TaskManagerCore({
             ...(createdAdset ? { adset_id: createdAdset } : {}),
           });
           if (createdCampaign) inputs.current.delete(id); // partial success is not safely retryable
+        } else {
+          // NO final event: the stream was cut without a verdict (server timeout, dropped
+          // socket). The build may have FINISHED server-side — the server keeps writing the
+          // shared row to the end, so release local authority (local:false) and let mergeShared
+          // adopt the server's truth on the next poll. No remote write (it could demote the
+          // server's own done/error) and NO Retry affordance: re-firing an ambiguous outcome
+          // builds a second tree under a fresh gcm — same contract as the HS token rail.
+          patch(id, {
+            status: "error",
+            stage: lastStage,
+            finishedAt: Date.now(),
+            local: false,
+            error: `stream ended unexpectedly (HTTP ${resStatus}) — the launch may still have finished server-side; this row updates from the server, check Ads Manager before re-firing`,
+          });
+          inputs.current.delete(id); // never offer a one-click re-fire of an ambiguous outcome
         }
       } catch (e) {
         const finishedAt = Date.now();

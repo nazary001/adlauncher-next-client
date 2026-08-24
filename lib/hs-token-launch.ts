@@ -9,7 +9,8 @@
 //      the campaign id to the reportable keys, so the ad set carries a future start_time.
 
 import { createHash } from "node:crypto";
-import { FbError, createAdsetSelfHealing, fbGet, fbPost } from "./fb-graph";
+import { FbError, createAdsetSelfHealing, fbGet, fbPost, withFbAppLimitFailFast } from "./fb-graph";
+import { type TokenHealthDelta, applyHealthDelta } from "./token-pool-guards";
 import { uploadImage, uploadVideo, videoThumb, waitForVideo } from "./fb-media";
 import { readAppCache, writeAppCache } from "./app-cache";
 
@@ -61,8 +62,8 @@ let healthL1: { at: number; row: HealthRow; docId: string | null } | null = null
 
 const emptyRow = (): HealthRow => ({ health: {}, names: {} });
 
-async function readHealth(): Promise<{ row: HealthRow; docId: string | null }> {
-  if (healthL1 && Date.now() - healthL1.at < HEALTH_L1_MS) return healthL1;
+async function readHealth(maxAgeMs: number = HEALTH_L1_MS): Promise<{ row: HealthRow; docId: string | null }> {
+  if (healthL1 && Date.now() - healthL1.at < maxAgeMs) return healthL1;
   try {
     const r = await readAppCache<HealthRow>(HEALTH_KEY);
     const v = r?.value;
@@ -78,12 +79,17 @@ async function readHealth(): Promise<{ row: HealthRow; docId: string | null }> {
   return healthL1;
 }
 
-async function writeHealth(mutate: (row: HealthRow) => void): Promise<void> {
-  const { row, docId } = await readHealth();
-  mutate(row);
-  healthL1 = { at: Date.now(), row, docId };
+/** Apply one typed delta on a FRESH read of the shared row (L1 bypassed): the old blind
+ *  read-modify-write over a ≤20s-stale snapshot let two instances marking DIFFERENT tokens
+ *  clobber each other's whole-row PUTs (last write wins) — a genuinely limited token popped
+ *  back "healthy" and got picked again. applyHealthDelta merges monotonically (a stale mark
+ *  never shortens a stored cooldown), so racing writers converge instead. */
+async function writeHealth(delta: TokenHealthDelta): Promise<void> {
+  const { row, docId } = await readHealth(0);
+  const next = applyHealthDelta(row, delta);
+  healthL1 = { at: Date.now(), row: next, docId };
   try {
-    const id = await writeAppCache(HEALTH_KEY, row, docId);
+    const id = await writeAppCache(HEALTH_KEY, next, docId);
     if (id) healthL1.docId = id;
   } catch {
     /* store blip — the L1 mark still steers THIS instance; others learn via their own failures */
@@ -91,19 +97,12 @@ async function writeHealth(mutate: (row: HealthRow) => void): Promise<void> {
 }
 
 export const hsMarkTokenLimited = (fp: string, reason: string, cooldownMs = FAILURE_COOLDOWN_MS): Promise<void> =>
-  writeHealth((row) => {
-    row.health[fp] = { limitedUntil: Date.now() + cooldownMs, reason: reason.slice(0, 200) };
-  });
+  writeHealth({ kind: "mark", fp, mark: { limitedUntil: Date.now() + cooldownMs, reason: reason.slice(0, 200) } });
 
-export const hsClearTokenLimited = (fp: string): Promise<void> =>
-  writeHealth((row) => {
-    delete row.health[fp];
-  });
+export const hsClearTokenLimited = (fp: string): Promise<void> => writeHealth({ kind: "clear", fp });
 
 export const hsRememberTokenNames = (fp: string, names: { user?: string; app?: string }): Promise<void> =>
-  writeHealth((row) => {
-    row.names[fp] = { ...row.names[fp], ...names };
-  });
+  writeHealth({ kind: "names", fp, names });
 
 export type HsTokenState = {
   index: number;
@@ -176,7 +175,11 @@ async function poolCall<T>(fn: (token: string) => Promise<T>): Promise<T> {
   let lastErr: unknown = null;
   for (const { t, limited } of order) {
     try {
-      const out = await fn(t.token);
+      // Fail-fast armed: an APP-level limit — (#4)/(#17), what a different app's bearer escapes —
+      // throws its 429 on the first sighting instead of riding the retry ladder on the burned
+      // app, so the failover below happens in milliseconds. Account-scoped throttles keep the
+      // ladder inside the call (rotating bearers cannot help those).
+      const out = await withFbAppLimitFailFast(() => fn(t.token));
       if (limited) void hsClearTokenLimited(t.fp);
       return out;
     } catch (e) {
@@ -337,6 +340,26 @@ export const hsWaitForVideo = (videoId: string): Promise<void> =>
 export const hsVideoThumb = (videoId: string): Promise<string> => poolCall((tok) => videoThumb(videoId, tok));
 export const hsCreateAdset = (path: string, payload: Json): Promise<Json> =>
   poolCall((tok) => createAdsetSelfHealing(path, payload, tok));
+
+/**
+ * Best-effort bounded pause of a token-rail campaign whose build just failed: the tree is born
+ * ACTIVE with only the +30 min start gap between a partial failure and unattended delivery.
+ * Bounded — the failure is often the throttle itself, so the pause attempt must not hang the
+ * pump on its own retry ladder; past the window the caller reports "not confirmed" honestly.
+ */
+export async function hsPauseCampaign(campaignId: string, confirmMs = 20_000): Promise<boolean> {
+  try {
+    return await Promise.race([
+      hsFbPost(String(campaignId), { status: "PAUSED" }).then(
+        () => true,
+        () => false,
+      ),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), confirmMs)),
+    ]);
+  } catch {
+    return false;
+  }
+}
 
 // ---- Token-visible ad accounts ----------------------------------------------------------------
 // The partner's park is bigger than what they share to our token user: LION profiles bind whole

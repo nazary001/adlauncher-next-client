@@ -17,6 +17,7 @@ import {
   hsCreateAdset,
   hsFbGet,
   hsFbPost,
+  hsPauseCampaign,
   hsTokenAccountIds,
   hsTokenConfigured,
   hsTokenGate,
@@ -28,7 +29,9 @@ import {
   cloneCreativePayload,
   extractAdMedia,
   migrateMediaToAccount,
+  swapPixel,
 } from "@/lib/clone-run";
+import { launchFailureDisposition, partialFailureNote } from "@/lib/launch-guards";
 import { LionError, lionAccountPixels, lionConfigured, lionProfileData } from "@/lib/lion";
 import { ACCT_LIMIT, AcctLimitedError, acctKey, acctLimitMessage, acctLimitSnapshot, claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 
@@ -497,18 +500,24 @@ async function pumpTokenBatch(
         created.adset_id = String(adset.id);
         await rowWrite(user, s.taskId, { status: "running", stage: "ads", adset_id: created.adset_id });
 
-        // creatives + ads — one per reusable source ad, links VERBATIM ({{campaign.id}} macros
-        // re-resolve for the new campaign; HS links carry no per-campaign marker to swap).
+        // creatives + ads — one per reusable source ad. Links keep the {{campaign.id}} macros
+        // ({{…}} re-resolves for the new campaign) but the `pixel=` param is swapped to the BIND
+        // pixel: the ad set optimizes on binds.pixel (promoted_object above) while the funnel
+        // fires whatever the link names — a verbatim link on a cross-account clone would starve
+        // the optimization pixel of every conversion (review find 08-24).
         const adIds: string[] = [];
         for (let m = 0; m < medias.length; m++) {
           const adName = medias.length > 1 ? `${name} · ${m + 1}` : name;
           const creative = await hsFbPost(
             `act_${binds.account}/adcreatives`,
-            cloneCreativePayload(adName, binds.page, medias[m], "", "", (l) => l),
+            cloneCreativePayload(adName, binds.page, medias[m], "", "", (l) => swapPixel(l, binds.pixel)),
           );
           const ad = await hsFbPost(`act_${binds.account}/ads`, adPayload(adName, String(adset.id), String(creative.id)));
           if (!ad.id) throw new FbError("ad create returned no id", ad);
           adIds.push(String(ad.id));
+          // Progress lands on `created` AS ads are born — the catch below reads it to know
+          // whether the ACTIVE tree already carries deliverable ads when a later ad throws.
+          created.ad_ids = [...adIds];
         }
 
         s.settled = true;
@@ -537,10 +546,15 @@ async function pumpTokenBatch(
           }
           break;
         }
+        // The clone tree is born ACTIVE with only the +30 min start gap between a partial
+        // failure and unattended delivery — pause the campaign (bounded) and put the confirmed
+        // state into the row, same contract as the launch rails (review find 08-24).
+        const disposition = launchFailureDisposition(created);
+        const pausedOk = disposition.pauseNeeded ? await hsPauseCampaign(String(created.campaign_id)) : false;
         s.settled = true;
         await rowWrite(user, s.taskId, {
           status: "error",
-          error: err.message ?? String(e),
+          error: `${err.message ?? String(e)}${partialFailureNote(disposition, pausedOk)}`,
           finished_at: Date.now(),
           ...(created.campaign_id ? { campaign_id: created.campaign_id } : {}),
           ...(created.adset_id ? { adset_id: created.adset_id } : {}),

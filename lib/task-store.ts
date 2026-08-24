@@ -103,14 +103,17 @@ export function pickTaskFields(body: Record<string, unknown>): TaskRowData {
   return out;
 }
 
-export async function findTaskRow(
-  taskId: string,
-): Promise<{ documentId: string; owner: string | null; status: string | null } | null> {
+type FoundTaskRow = { documentId: string; owner: string | null; status: string | null };
+
+async function findTaskRowImpl(taskId: string, strict: boolean): Promise<FoundTaskRow | null> {
   const res = await strapiFetch(
     `${STRAPI}/api/launch-tasks?filters[task_id][$eq]=${encodeURIComponent(taskId)}&fields[0]=task_id&fields[1]=owner&fields[2]=status&pagination[pageSize]=1`,
     { headers: H(), cache: "no-store" },
   );
-  if (!res.ok) return null;
+  if (!res.ok) {
+    if (strict) throw new Error(`launch-task read ${res.status}`);
+    return null;
+  }
   const body = await res.json().catch(() => ({}));
   const row = body?.data?.[0];
   return row?.documentId
@@ -120,6 +123,18 @@ export async function findTaskRow(
         status: row.status ? String(row.status) : null,
       }
     : null;
+}
+
+export async function findTaskRow(taskId: string): Promise<FoundTaskRow | null> {
+  return findTaskRowImpl(taskId, false);
+}
+
+/** findTaskRow that DISTINGUISHES "confirmed absent" (null) from "store failed" (throws) — for
+ *  guards where a Strapi blip must not read as absence: the hs-tasks zombie-guard would
+ *  otherwise swallow a terminal write while answering ok:true, and the client never retries a
+ *  claimed success. (A network/timeout rejection from strapiFetch propagates in both modes.) */
+export async function findTaskRowStrict(taskId: string): Promise<FoundTaskRow | null> {
+  return findTaskRowImpl(taskId, true);
 }
 
 export type UpsertResult = { ok: true } | { ok: false; reason: "forbidden" | "store" | "not_configured"; detail?: string };
