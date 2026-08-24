@@ -23,6 +23,7 @@ export function LaunchRail({
   onJump,
   onPreview,
   onLaunch,
+  launching = false,
 }: {
   campaigns: Campaign[];
   partner: PartnerConfig;
@@ -44,6 +45,9 @@ export function LaunchRail({
   onJump: (id: string) => void;
   onPreview: () => void;
   onLaunch: () => void;
+  /** launch() in flight — the button greys out while the wave enqueues (double-clicks are latched
+   *  in the board too; this is the visible half of the same guard). */
+  launching?: boolean;
 }) {
   const total = campaigns.reduce((s, c) => s + parseMoney(c.budget), 0);
   const opts = launchReadyOpts(partner);
@@ -243,7 +247,7 @@ export function LaunchRail({
             <button
               type="button"
               onClick={onLaunch}
-              disabled={readyCount === 0 || gcmBlocked || limits.staleBuild}
+              disabled={readyCount === 0 || gcmBlocked || limits.staleBuild || launching}
               className={
                 "animate-pop-in group flex h-11 w-full items-center justify-center gap-2 rounded-xl " +
                 "bg-gradient-to-b from-launch2 to-launch text-[13.5px] font-bold text-[#032e20] " +

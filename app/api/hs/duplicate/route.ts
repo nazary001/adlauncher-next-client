@@ -1,6 +1,7 @@
 import { NextResponse, after } from "next/server";
 import { bidKind, parseMoney } from "@/lib/types";
 import { hsWireBid } from "@/lib/hs-launch";
+import { overrideDeadlineError } from "@/lib/launch-guards";
 import { reportPagesUsed } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { readAppCache, writeAppCache } from "@/lib/app-cache";
@@ -114,6 +115,10 @@ type BatchShot = {
   /** Geo override landed on the clone's ad set (Graph patch verified) — finalize/activation of
    *  an override shot waits for this, so a clone can never go ACTIVE on the source's geo. */
   patched?: boolean;
+  /** The newborn clone was confirmed PAUSED — belt for LION's unpredictable birth status
+   *  ("ACTIVE by afternoon", lib/lion.ts): an override clone must not deliver on the source's
+   *  geo while the Graph patch is still landing. finalize() re-activates after the patch. */
+  hardPaused?: boolean;
   settled?: boolean;
 };
 
@@ -676,6 +681,14 @@ async function pumpBatch(
           // the task still reads CREATING_ADS (probed live 08-20, ~40-70s after submit);
           // transient misses just retry next tick (every step is idempotent).
           if (s.cloneId && s.override && !s.patched) {
+            // Belt for LION's unpredictable birth status ("ACTIVE by afternoon" — lib/lion.ts):
+            // force the newborn PAUSED before patching, so a clone born live can't deliver on the
+            // source's geo while the patch is still landing. Retried every tick until confirmed;
+            // finalize() re-activates once the verified patch is in.
+            if (!s.hardPaused) {
+              const paused = await lionSetCampaignStatus(s.cloneId, "PAUSED");
+              if (paused.ok) s.hardPaused = true;
+            }
             try {
               await patchCloneTargeting(s.cloneId, s.override, binds.pageName ?? "", s.name);
               s.patched = true;
@@ -717,14 +730,16 @@ async function pumpBatch(
     }
 
     // Deadline hit with an unpatched override: the clone EXISTS but still targets the source's
-    // geo, and the activation gate above kept it PAUSED. Surface it loudly instead of letting a
-    // later poller quietly activate the wrong geo.
+    // geo — and the activation gate only withholds OUR activation, it cannot undo an ACTIVE
+    // birth. Pause it now (or stand on the earlier confirmed pause) and tell the buyer the true
+    // state instead of letting a later poller quietly activate the wrong geo.
     for (const s of shots) {
       if (s.settled || !s.override || s.patched || !s.cloneId) continue;
       s.settled = true;
+      const pausedOk = s.hardPaused || (await lionSetCampaignStatus(s.cloneId, "PAUSED")).ok;
       await rowWrite(user, s.taskId, {
         status: "error",
-        error: `clone ${s.cloneId} created but the geo override was NOT applied in time — it stays PAUSED; set the targeting in Ads Manager and activate, or delete and re-fire`,
+        error: overrideDeadlineError(s.cloneId, pausedOk),
         campaign_id: s.cloneId,
         finished_at: Date.now(),
       });

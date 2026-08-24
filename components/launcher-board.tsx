@@ -16,6 +16,7 @@ import {
   partnerConfig,
 } from "@/lib/partners";
 import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
+import { makeGate } from "@/lib/launch-guards";
 import { Header } from "./header";
 import { CampaignCard } from "./campaign-card";
 import { useFanpages } from "./use-fanpages";
@@ -281,10 +282,29 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     });
   }, [tasks, poolApi, partnerId]);
 
-  /** Non-blocking launch: every launchable campaign is captured + dropped into the Task Manager
-   *  instantly, then flies off the board so you can keep building. The queue creates them one by
-   *  one (ACTIVE since 08-11) in the background. */
+  // Single-flight latch for the Launch click: launchWave() awaits a fresh limits fetch before
+  // anything enqueues, and a double-click's second call lands inside that window — both calls
+  // would pass every guard and fire the whole wave twice (real duplicate campaigns within the
+  // account's 5/30min headroom). React state can't close a same-tick window; the synchronous
+  // gate does. launchBusy greys the rail button for the visible part of the wave.
+  const launchGate = useRef(makeGate());
+  const [launchBusy, setLaunchBusy] = useState(false);
+
   async function launch() {
+    if (!launchGate.current.enter()) return; // double-click — the first call owns this wave
+    setLaunchBusy(true);
+    try {
+      await launchWave();
+    } finally {
+      launchGate.current.exit();
+      setLaunchBusy(false);
+    }
+  }
+
+  /** Non-blocking launch (guarded by launch()'s gate above): every launchable campaign is captured
+   *  + dropped into the Task Manager instantly, then flies off the board so you can keep building.
+   *  The queue creates them one by one (ACTIVE since 08-11) in the background. */
+  async function launchWave() {
     // Pool exhausted → nothing may launch: stale card previews would only burn failed claims
     // (the rail button is disabled too; the server-side claim is the last-resort guard).
     if (poolExhausted) return;
@@ -700,6 +720,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
           <LaunchRail
             campaigns={campaigns}
             partner={partner}
+            launching={launchBusy}
             hsAcr={hs.acr}
             hsChannel={hsChannel}
             hsTokenReady={hs.tokenLaunch}

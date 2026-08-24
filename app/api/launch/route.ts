@@ -26,6 +26,7 @@ import {
   withParentRetry,
 } from "@/lib/fb-graph";
 import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
+import { launchFailureDisposition, partialFailureNote } from "@/lib/launch-guards";
 import { fetchValidatedImage, uploadImage, uploadVideo, videoThumb, waitForVideo } from "@/lib/fb-media";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import { reportPagesUsed } from "@/lib/hs-pages";
@@ -46,6 +47,11 @@ type Json = Record<string, unknown>;
 // row never settled), which is strictly worse than a clean per-launch error.
 const FB_BUDGET_MS = 240_000;
 const FB_BUDGET_RETRIES = 8;
+
+// A failed launch pauses its campaign (the tree is born ACTIVE — see step 3 below), but the
+// failure is often the throttle itself, so the pause attempt gets a hard confirmation window
+// instead of riding fbPost's full retry ladder; past it the row honestly says "not confirmed".
+const PAUSE_CONFIRM_MS = 20_000;
 
 // Ad-set creation self-heal and the media upload/processing helpers moved to lib/fb-graph
 // (createAdsetSelfHealing) and lib/fb-media — shared with the HS token-launch rail, byte-identical
@@ -484,10 +490,12 @@ export async function POST(req: Request) {
           // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
           if (!ad.id) throw new FbError("ad create returned no id", ad);
           adIds.push(String(ad.id));
+          // Progress lands on `created` AS ads are born (not after the loop): the catch below
+          // reads it to know whether money is already moving when a later ad throws.
+          created.ad_id = adIds[0];
+          if (adIds.length > 1) created.ad_ids = [...adIds];
           send({ stage: "ad", done: adIds.length, total: creativeIds.length });
         }
-        created.ad_id = adIds[0];
-        if (adIds.length > 1) created.ad_ids = adIds;
 
         // 4) tell the hs-tools pages registry how many slots this fanka just took (one per ad;
         // fire-safe — the box's next Facebook sweep reconciles either way) + record the FB ids
@@ -521,9 +529,25 @@ export async function POST(req: Request) {
         // Free the account's launch slot when NO campaign was created — the window only meters
         // campaigns that actually exist on FB. Once one exists the slot stays consumed.
         if (acctSlot && !created.campaign_id) await releaseAcctSlot(acctSlot.documentId);
+        // The tree is born ACTIVE (08-11), so a failed launch must never keep delivering: any ads
+        // created before the failure (multi-creative loop) are already spending. Pause the
+        // campaign first — bounded to PAUSE_CONFIRM_MS so a throttle-caused failure can't hang
+        // the stream on its own pause attempt — and carry the confirmed state into the message.
+        const disposition = launchFailureDisposition(created);
+        let pausedOk = false;
+        if (disposition.pauseNeeded) {
+          pausedOk = await Promise.race([
+            fbPost(String(created.campaign_id), { status: "PAUSED" }).then(
+              () => true,
+              () => false,
+            ),
+            new Promise<boolean>((resolve) => setTimeout(() => resolve(false), PAUSE_CONFIRM_MS)),
+          ]);
+        }
+        const failMsg = `${err.message ?? String(e)}${partialFailureNote(disposition, pausedOk)}`;
         // Free the gcm code when nothing was created on FB (early failures like a rate limit or a
         // video error) so the 01–200 pool never leaks; keep the row (marked failed) once a campaign
-        // exists so the orphaned PAUSED campaign stays traceable.
+        // exists so the orphaned (paused above) campaign stays traceable.
         if (claim?.documentId) {
           if (created.campaign_id)
             // "retired" — the registry's status enum is active|retired; "failed" is rejected by
@@ -532,8 +556,8 @@ export async function POST(req: Request) {
               claim.documentId,
               {
                 status: "retired",
-                notes: `launch failed: ${err.message}`,
-                // Record what DID get created so the orphaned PAUSED campaign is traceable by code.
+                notes: `launch failed: ${failMsg}`,
+                // Record what DID get created so the orphaned campaign is traceable by code.
                 campaign_id: created.campaign_id,
                 ...(created.adset_id ? { adset_id: created.adset_id } : {}),
               },
@@ -546,11 +570,11 @@ export async function POST(req: Request) {
           status: "error",
           stage: lastStage,
           finished_at: Date.now(),
-          error: err.message ?? String(e),
+          error: failMsg,
           ...(created.campaign_id ? { campaign_id: created.campaign_id } : {}),
           ...(created.adset_id ? { adset_id: created.adset_id } : {}),
         });
-        send({ ok: false, stage: "error", error: err.message ?? String(e), detail: err.detail ?? null, created });
+        send({ ok: false, stage: "error", error: failMsg, detail: err.detail ?? null, created });
       } finally {
         clearInterval(beat);
         // Drop EVERY temporary Blob (creatives + covers) whether the launch succeeded or failed —
