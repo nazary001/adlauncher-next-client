@@ -176,7 +176,11 @@ export async function lionAccountPixels(slug: string, accountId: string): Promis
       name: str(p.name ?? p.pixel_name) || str(p.id ?? p.pixel_id),
     }));
     const value = pixels.filter((p) => p.id);
-    pixelsCache.set(key, { at: Date.now(), value });
+    // Never cache an EMPTY answer: a transient blank (LION lag) would pin "no pixels" on the
+    // picker and hs/launch's bind validation for the whole TTL (review find 08-24). Profiles/
+    // profile-data throw on empty for the same reason; an account can legitimately be pixel-less,
+    // so here the empty list is returned but re-read on the next call.
+    if (value.length > 0) pixelsCache.set(key, { at: Date.now(), value });
     return value;
   });
 }
@@ -280,7 +284,11 @@ export async function lionSetCampaignStatus(
     return { ok: true };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (/does not have permission/i.test(msg)) return { ok: true, alreadyActive: true };
+    // "does not have permission" = success in disguise ONLY for ACTIVATE (the playbook's probed
+    // already-active answer). For PAUSE it must stay a failure: mapping it to ok would report
+    // "paused" on a genuine rights denial while an override clone keeps delivering on the wrong
+    // geo (review find 08-24) — a false "not confirmed" retry is the safe direction there.
+    if (status === "ACTIVE" && /does not have permission/i.test(msg)) return { ok: true, alreadyActive: true };
     return { ok: false, message: msg };
   }
 }

@@ -309,6 +309,11 @@ export function useHs(enabled: boolean): HsCatalog {
     [pixels],
   );
 
-  if (!enabled) return EMPTY;
-  return { acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels };
+  // Stable identity: a fresh object literal per render forced every memoized card taking `hs`
+  // to re-render on ANY board render (review find 08-24) — the parts are all stable/memoized,
+  // so the wrapper must be too.
+  return useMemo(
+    () => (enabled ? { acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels } : EMPTY),
+    [enabled, acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels],
+  );
 }

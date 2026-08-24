@@ -5,6 +5,8 @@
 // feeds MO money tooling that must never see foreign rows. Server-only.
 
 import { AIF_POOL_MAX, aifBrandCode } from "@/lib/partners";
+// Bounded Strapi client (8s abort) — see lib/gcm-claim: claims fail fast, never hang a launch.
+import { strapiFetch } from "@/lib/task-store";
 
 const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
 const STRAPI_TOKEN = process.env.STRAPI_TOKEN ?? "";
@@ -22,7 +24,7 @@ export async function fetchUsedBrands(): Promise<string[]> {
   // brand is unique → row count ≤ pool size; +1 page of slack, hard-bounded against runaway loops.
   const maxPages = Math.ceil(AIF_POOL_MAX / 100) + 1;
   for (let page = 1; page <= maxPages; page++) {
-    const res = await fetch(
+    const res = await strapiFetch(
       `${STRAPI}/api/aif-maps?fields[0]=brand&pagination[page]=${page}&pagination[pageSize]=100`,
       { headers: { Authorization: `Bearer ${STRAPI_TOKEN}` }, cache: "no-store" },
     );
@@ -55,7 +57,7 @@ async function usedBrands(): Promise<Set<string>> {
  */
 async function wonClaim(brand: string, documentId: string): Promise<boolean> {
   try {
-    const res = await fetch(
+    const res = await strapiFetch(
       `${STRAPI}/api/aif-maps?filters[brand][$eq]=${brand}&sort[0]=createdAt:asc&sort[1]=documentId:asc&fields[0]=brand&pagination[pageSize]=10`,
       { headers: { Authorization: `Bearer ${STRAPI_TOKEN}` }, cache: "no-store" },
     );
@@ -86,7 +88,7 @@ export async function claimBrand(
   for (let n = 1; n < start; n++) if (!used.has(aifBrandCode(n))) candidates.push(aifBrandCode(n));
 
   for (const brand of candidates) {
-    const res = await fetch(`${STRAPI}/api/aif-maps`, {
+    const res = await strapiFetch(`${STRAPI}/api/aif-maps`, {
       method: "POST",
       headers: { Authorization: `Bearer ${STRAPI_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -122,7 +124,7 @@ export async function claimBrand(
 /** Patch the registry row (FB ids after a create, failure notes on a kept-retired row). */
 export async function backfillBrand(documentId: string | null, patch: Json): Promise<void> {
   if (!documentId) return;
-  await fetch(`${STRAPI}/api/aif-maps/${documentId}`, {
+  await strapiFetch(`${STRAPI}/api/aif-maps/${documentId}`, {
     method: "PUT",
     headers: { Authorization: `Bearer ${STRAPI_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({ data: patch }),
@@ -132,7 +134,7 @@ export async function backfillBrand(documentId: string | null, patch: Json): Pro
 /** Release a claimed brand (delete the row) when a launch fails before any FB resource exists —
  *  a brand that never carried traffic is pool capacity, not history. */
 export async function deleteBrand(documentId: string): Promise<void> {
-  await fetch(`${STRAPI}/api/aif-maps/${documentId}`, {
+  await strapiFetch(`${STRAPI}/api/aif-maps/${documentId}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${STRAPI_TOKEN}` },
   }).catch(() => {});

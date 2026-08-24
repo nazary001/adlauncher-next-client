@@ -3,6 +3,9 @@ import { sessionFromCookieHeader } from "@/lib/session";
 import { lionCampaignAds, lionConfigured, lionCreationStatus } from "@/lib/lion";
 
 export const runtime = "nodejs";
+// Bounded upstreams (LION 60s x2 / Graph 15s) — cap the function so an abandoned poll can
+// never idle a long serverless window (the client gives up at 20s).
+export const maxDuration = 60;
 
 const MAX_IDS = 100;
 // Must cover a full duplicate wave (45 shots): the client's verify list is stable-ordered, so a

@@ -4,6 +4,9 @@ import { hsTokenConfigured } from "@/lib/hs-token-launch";
 import { LION_ACR, lionConfigured, lionProfiles } from "@/lib/lion";
 
 export const runtime = "nodejs";
+// Bounded upstreams (LION 60s x2 / Graph 15s) — cap the function so an abandoned poll can
+// never idle a long serverless window (the client gives up at 20s).
+export const maxDuration = 60;
 
 /** LION profiles the token can launch on, plus the token's ACR (the card needs it for the live
  *  campaign-name prefix). Slugs only — profile display names arrive double-encoded from LION.

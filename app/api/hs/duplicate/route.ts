@@ -32,6 +32,7 @@ import {
   applyGeoOverride,
   geoOverrideRegionalCategories,
   parseGeoOverride,
+  relabelNameGeo,
 } from "@/lib/targeting-override";
 
 export const runtime = "nodejs";
@@ -239,10 +240,6 @@ export async function POST(req: Request): Promise<NextResponse> {
       if (!hsTokenConfigured()) {
         return bad("targeting_override_needs_fb_token — set FB_HS_LAUNCH_TOKEN/FB_HS_VOLUME_TOKEN");
       }
-      // The Graph patch that lands the override needs a live bearer — with the whole pool burned
-      // the clones would be born and stuck PAUSED, so refuse the wave up front instead.
-      const gate = await hsTokenGate();
-      if (!gate.ok) return bad(`targeting_override_blocked — ${gate.error}`, 429);
       const visible = await hsTokenAccountIds();
       if (visible && !visible.has(account.replace(/^act_/, ""))) {
         return bad(
@@ -266,6 +263,15 @@ export async function POST(req: Request): Promise<NextResponse> {
     if (existing?.value?.at) {
       rememberWave(waveId);
       return alreadyAccepted();
+    }
+
+    // Geo-override waves also need a live bearer for the Graph patch — checked AFTER the
+    // idempotency answers above (a re-POST of an accepted wave must say alreadyAccepted, not
+    // 429 off a pool its own patches burned); with the whole pool down the clones would be born
+    // stuck on the source geo, so refuse before any row is stamped (review find 08-24).
+    if (shots.some((s) => s.override)) {
+      const gate = await hsTokenGate();
+      if (!gate.ok) return bad(`targeting_override_blocked — ${gate.error}`, 429);
     }
 
     // ---- account launch-limit precheck (5 campaigns / 30 min per ad account, owner rule
@@ -305,6 +311,9 @@ export async function POST(req: Request): Promise<NextResponse> {
           budget: s.budgetRaw,
           lionTaskId: "", // pending — the pump fills it as each shot lands on LION
           kind: "duplicate",
+          // Override shots are born behind the geo gate: activate (server + client poller)
+          // refuses "geo-gate" rows until the pump's verified patch stamps them "patched".
+          ...(s.override ? { stage: "geo-gate" } : {}),
         }),
       ),
     );
@@ -674,7 +683,12 @@ async function pumpBatch(
             // and prunes the finished record before anyone watches again, a later tab can still
             // find the campaign via the reality check and activate it — without this the clone
             // could sit PAUSED unnoticed.
-            await rowWrite(user, s.taskId, { campaign_id: s.cloneId });
+            await rowWrite(user, s.taskId, {
+              campaign_id: s.cloneId,
+              // Re-assert the gate next to the campaign id: any activation path that reads the
+              // row must see the clone is still unpatched (belt over the stamp-time mark).
+              ...(s.override && !s.patched ? { stage: "geo-gate" } : {}),
+            });
           }
           // Geo override: patch the born clone's ad set through the Graph BEFORE any finalize —
           // an override shot must never go ACTIVE on the source's geo. The adset exists while
@@ -692,7 +706,9 @@ async function pumpBatch(
             try {
               await patchCloneTargeting(s.cloneId, s.override, binds.pageName ?? "", s.name);
               s.patched = true;
-              await rowWrite(user, s.taskId, { geo: s.geo });
+              // "patched" lifts the geo gate — /api/hs/activate and the client poller may flip
+              // the clone from here on (finalize below normally does it first).
+              await rowWrite(user, s.taskId, { geo: s.geo, stage: "patched" });
             } catch {
               /* adset not born yet / throttled — next tick */
             }
@@ -763,7 +779,7 @@ async function patchCloneTargeting(
   newName: string,
 ): Promise<void> {
   type Json = Record<string, unknown>;
-  const camp = await hsFbGet(`${campaignId}?fields=adsets{id}`);
+  const camp = await hsFbGet(`${campaignId}?fields=name,adsets{id}`);
   const adsetId = String((camp.adsets as { data?: { id?: string }[] } | undefined)?.data?.[0]?.id ?? "");
   if (!adsetId) throw new Error("adset_not_born_yet");
   const cur = await hsFbGet(`${adsetId}?fields=targeting`);
@@ -774,7 +790,11 @@ async function patchCloneTargeting(
     ...(cats.length ? { regional_regulated_categories: cats } : {}),
     ...(pageName ? { dsa_beneficiary: pageName, dsa_payor: pageName } : {}),
   });
-  if (newName) await hsFbPost(campaignId, { name: newName });
+  // Rename: the board's relabeled name when it sent one; otherwise re-derive the geo label from
+  // LION's auto-name server-side — the [CODES] group their ecosystem parses geo from must never
+  // keep the SOURCE's countries on a clone that now targets the override (review find 08-24).
+  const rename = newName || relabelNameGeo(String(camp.name ?? ""), o.countries);
+  if (rename && rename !== String(camp.name ?? "")) await hsFbPost(campaignId, { name: rename });
   if (o.countries.length) {
     const ver = await hsFbGet(`${adsetId}?fields=targeting`);
     const geo = ((ver.targeting as Json | undefined)?.geo_locations ?? {}) as Json;

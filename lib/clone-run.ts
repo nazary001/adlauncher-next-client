@@ -285,7 +285,7 @@ export async function migrateMediaToAccount(
  *  is REPLACED rather than leaving a duplicate `gcm=` param the funnel would misread. */
 export function swapGcm(link: string, gcm: string): string {
   if (!link) return link;
-  if (/[?&]gcm=[^&#]*/.test(link)) return link.replace(/([?&]gcm=)[^&#]*/, `$1${gcm}`);
+  if (/[?&]gcm=[^&#]*/.test(link)) return link.replace(/([?&]gcm=)[^&#]*/g, `$1${gcm}`);
   return link + (link.includes("?") ? "&" : "?") + `gcm=${gcm}`;
 }
 
@@ -293,7 +293,7 @@ export function swapGcm(link: string, gcm: string): string {
  *  is that rail's revenue key, one per campaign. destination/clientId/ppid stay verbatim. */
 export function swapBrand(link: string, brand: string): string {
   if (!link) return link;
-  if (/[?&]brand=[^&#]*/.test(link)) return link.replace(/([?&]brand=)[^&#]*/, `$1${brand}`);
+  if (/[?&]brand=[^&#]*/.test(link)) return link.replace(/([?&]brand=)[^&#]*/g, `$1${brand}`);
   return link + (link.includes("?") ? "&" : "?") + `brand=${brand}`;
 }
 
@@ -304,7 +304,7 @@ export function swapBrand(link: string, brand: string): string {
  */
 export function swapPixel(link: string, pixelId: string): string {
   if (!link || !/^\d{10,20}$/.test(pixelId)) return link;
-  if (/[?&]pixel=[^&#]*/.test(link)) return link.replace(/([?&]pixel=)[^&#]*/, `$1${pixelId}`);
+  if (/[?&]pixel=[^&#]*/.test(link)) return link.replace(/([?&]pixel=)[^&#]*/g, `$1${pixelId}`);
   return link + (link.includes("?") ? "&" : "?") + `pixel=${pixelId}`;
 }
 
@@ -319,7 +319,11 @@ export function cloneToCampaign(edit: CloneEdit, src: SourceDetail): Campaign {
   c.budget = edit.budget;
   c.countries = [...edit.countries];
   c.locales = [...edit.locales];
-  c.category = edit.category;
+  // The buyer's pick wins, but a source that DECLARED a special category never silently loses
+  // it: a financial/housing/employment clone without its declaration is a policy violation Meta
+  // rejects — or worse, delivers (review find 08-24). Multi-category sources keep their first
+  // (the payload carries one; the token rail patches the full list from its raw tree instead).
+  c.category = edit.category || src.specialCategories[0] || "";
   c.placement = edit.placement;
   c.ageMin = edit.ageMin;
   c.userOs = edit.userOs;

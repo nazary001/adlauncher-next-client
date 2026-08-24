@@ -10,6 +10,10 @@
 // ckey, then re-read and yield if we weren't first — plus an anchor re-check, because two claims
 // racing across the window boundary could otherwise split onto two anchors. Server-only.
 
+// Bounded Strapi client (8s abort): FAIL CLOSED must also mean fail FAST — a hung registry
+// refuses the launch in seconds instead of pinning the function to its maxDuration.
+import { strapiFetch } from "@/lib/task-store";
+
 const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
 const TOKEN = process.env.STRAPI_TOKEN ?? "";
 
@@ -131,7 +135,7 @@ function shapeRow(r: { documentId?: unknown; ckey?: unknown; cvalue?: unknown })
 async function listRows(prefix: string): Promise<Row[]> {
   const out: Row[] = [];
   for (let page = 1; page <= 5; page++) {
-    const res = await fetch(
+    const res = await strapiFetch(
       `${STRAPI}/api/app-caches?filters[ckey][$startsWith]=${encodeURIComponent(prefix)}` +
         `&fields[0]=ckey&fields[1]=cvalue&pagination[page]=${page}&pagination[pageSize]=100`,
       { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
@@ -150,7 +154,7 @@ async function listRows(prefix: string): Promise<Row[]> {
 }
 
 async function readRow(ckey: string): Promise<Row | null> {
-  const res = await fetch(
+  const res = await strapiFetch(
     `${STRAPI}/api/app-caches?filters[ckey][$eq]=${encodeURIComponent(ckey)}&pagination[pageSize]=1`,
     { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
   ).catch((e) => {
@@ -167,7 +171,7 @@ async function postRow(
   ckey: string,
   cvalue: unknown,
 ): Promise<{ documentId: string; unique?: never } | { unique: true }> {
-  const res = await fetch(`${STRAPI}/api/app-caches`, {
+  const res = await strapiFetch(`${STRAPI}/api/app-caches`, {
     method: "POST",
     headers: HEADERS(),
     body: JSON.stringify({ data: { ckey, cvalue, refreshed_at: Date.now() } }),
@@ -183,7 +187,7 @@ async function postRow(
 }
 
 async function putRow(documentId: string, ckey: string, cvalue: unknown): Promise<void> {
-  const res = await fetch(`${STRAPI}/api/app-caches/${documentId}`, {
+  const res = await strapiFetch(`${STRAPI}/api/app-caches/${documentId}`, {
     method: "PUT",
     headers: HEADERS(),
     body: JSON.stringify({ data: { ckey, cvalue, refreshed_at: Date.now() } }),
@@ -195,7 +199,7 @@ async function putRow(documentId: string, ckey: string, cvalue: unknown): Promis
 
 /** Best-effort delete — releasing/sweeping must never fail a launch. */
 async function deleteRow(documentId: string): Promise<void> {
-  await fetch(`${STRAPI}/api/app-caches/${documentId}`, {
+  await strapiFetch(`${STRAPI}/api/app-caches/${documentId}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${TOKEN}` },
   }).catch(() => {});
@@ -206,7 +210,7 @@ async function deleteRow(documentId: string): Promise<void> {
  *  otherwise. Optimistic true on a read failure (mirror of aif-claim). */
 async function wonRow(ckey: string, documentId: string): Promise<boolean> {
   try {
-    const res = await fetch(
+    const res = await strapiFetch(
       `${STRAPI}/api/app-caches?filters[ckey][$eq]=${encodeURIComponent(ckey)}` +
         `&sort[0]=createdAt:asc&sort[1]=documentId:asc&fields[0]=ckey&pagination[pageSize]=10`,
       { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },

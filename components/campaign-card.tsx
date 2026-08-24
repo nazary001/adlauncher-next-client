@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import type { Campaign } from "@/lib/types";
 import { bidAmountMissing, bidKind, fullName, isHttpUrl, isLaunchable, limitMoney, limitMoneyCents, moneyLabel, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import {
@@ -218,7 +218,10 @@ function CopyLinkButton({
   );
 }
 
-export function CampaignCard({
+// memo + the board's stable (useCallback) handlers: only the card whose `campaign` object
+// actually changed re-renders — typing in one card of a 200-card wave no longer re-executes
+// every card body (normalize/fillAccountDefaults preserve identity for untouched cards).
+function CampaignCardBase({
   campaign: c,
   index,
   partner,
@@ -1190,3 +1193,5 @@ export function CampaignCard({
     </article>
   );
 }
+
+export const CampaignCard = memo(CampaignCardBase);

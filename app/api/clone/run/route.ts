@@ -219,7 +219,16 @@ export async function POST(req: Request) {
   const stream = withFbBudget({ deadlineAt: Date.now() + FB_BUDGET_MS, retries: FB_BUDGET_RETRIES }, () =>
     new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (o: Json) => controller.enqueue(encoder.encode(JSON.stringify(o) + "\n"));
+      // No-throw: a client that closed the tab mid-batch makes enqueue throw — the batch must
+      // keep building the REMAINING clones (the task rows carry the truth to the drawer), not
+      // die between clones with beats leaked and rows stuck "running".
+      const send = (o: Json) => {
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(o) + "\n"));
+        } catch {
+          /* stream gone — rows keep the team informed */
+        }
+      };
       let ok = 0;
       let failed = 0;
 
@@ -269,7 +278,11 @@ export async function POST(req: Request) {
           // pixel-less. The RW link carries no &pixel= param, so only the adset needs it.
           if (aif) {
             binds.pixelId = /^\d{10,20}$/.test(src.pixelId) ? AIF_PIXEL.id : "";
-            if (binds.cross && binds.pixelId) {
+            // Validate on EVERY account, same-account clones included: the swap to AIF_PIXEL
+            // replaces whatever the source promoted, and a cabinet the shared pixel never
+            // reached would otherwise orphan the campaign only at adset-create time — after the
+            // brand marker is already burned (review find 08-24).
+            if (binds.pixelId) {
               const pixels = await pixelsOf(binds.accountId);
               if (!pixels.some((p) => p.id === binds.pixelId)) {
                 throw new FbError(
@@ -493,14 +506,21 @@ export async function POST(req: Request) {
             ...(created.adset_id ? { adset_id: created.adset_id } : {}),
           });
           send({ idx, ok: false, stage: "error", error: err.message ?? String(e), detail: err.detail ?? null, created });
+        } finally {
+          // The clone's last transition must land before the loop moves on / the function
+          // freezes — in a `finally` so no escape path (however unlikely) can leak the 30s beat
+          // or skip the flush (review find 08-24; the launch route already does this).
+          clearInterval(beat);
+          await tw.flush();
         }
-        // The clone's last transition must land before the loop moves on / the function freezes.
-        clearInterval(beat);
-        await tw.flush();
       }
 
       send({ stage: "batch-done", ok, failed, total: edits.length });
-      controller.close();
+      try {
+        controller.close();
+      } catch {
+        /* already closed by a disconnect */
+      }
     },
     }),
   );

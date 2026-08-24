@@ -52,10 +52,14 @@ export async function readTeamTasks<T>(
   if (hit && now - hit.at < TEAM_CACHE_TTL_MS) return { ok: true, tasks: hit.tasks as T[] };
   try {
     const rows: Record<string, unknown>[] = [];
+    let complete = true;
     for (let page = 1; page <= opts.maxPages; page++) {
       const res = await strapiFetch(pageUrl(page), { headers: H(), cache: "no-store" });
       if (!res.ok) {
-        if (rows.length > 0) break; // keep the pages we got
+        if (rows.length > 0) {
+          complete = false; // keep the pages we got, but they are NOT the whole list
+          break;
+        }
         if (hit) return { ok: true, tasks: hit.tasks as T[] }; // serve stale rather than blank
         return { ok: false, tasks: [], status: res.status };
       }
@@ -65,7 +69,10 @@ export async function readTeamTasks<T>(
       if (data.length < opts.pageSize) break;
     }
     const tasks = rows.map(mapRow);
-    teamCache.set(scopeKey, { at: now, tasks });
+    // Only a COMPLETE read becomes the cached team list: caching a truncated one would serve
+    // rows-beyond-page-1 as silently missing to the whole team for the TTL — a partial answer
+    // is returned once and the next poll re-reads Strapi.
+    if (complete) teamCache.set(scopeKey, { at: now, tasks });
     return { ok: true, tasks };
   } catch {
     if (hit) return { ok: true, tasks: hit.tasks as T[] }; // timeout/network → last good list
@@ -233,7 +240,17 @@ export async function upsertTaskRow(user: string, taskId: string, fields: TaskRo
  */
 export async function stampHsTaskRow(
   user: string,
-  row: { taskId: string; name: string; geo: string; budget: string; lionTaskId: string; kind: "launch" | "duplicate" },
+  row: {
+    taskId: string;
+    name: string;
+    geo: string;
+    budget: string;
+    lionTaskId: string;
+    kind: "launch" | "duplicate";
+    /** Override stamp: "geo-gate" marks a geo-override clone whose Graph patch has not landed —
+     *  /api/hs/activate and the client poller refuse to flip such a row ACTIVE. */
+    stage?: string;
+  },
 ): Promise<void> {
   if (!storeConfigured()) return;
   const now = Date.now();
@@ -243,7 +260,7 @@ export async function stampHsTaskRow(
     geo: row.geo,
     budget: row.budget,
     status: row.kind === "launch" ? "done" : "running",
-    stage: "queue",
+    stage: row.stage ?? "queue",
     link: row.lionTaskId,
     gcm: row.kind,
     queued_at: now,

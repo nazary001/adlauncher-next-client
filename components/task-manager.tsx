@@ -313,6 +313,17 @@ function TaskManagerCore({
   // is frozen (hidden tab, network loss) must never "settle" rows off stale data.
   const lastPollOkRef = useRef(0);
 
+  // Long-lived tabs: the per-task bookkeeping (save chains, static meta, terminal/interrupt
+  // marks) grew one entry per task EVER seen and was never pruned — a days-long power-user tab
+  // leaks monotonically (review find 08-24). Drop entries whose task left the drawer entirely.
+  useEffect(() => {
+    const ids = new Set(tasks.map((t) => t.id));
+    for (const k of [...meta.current.keys()]) if (!ids.has(k)) meta.current.delete(k);
+    for (const k of [...saveChains.current.keys()]) if (!ids.has(k)) saveChains.current.delete(k);
+    for (const k of [...terminalSaved.current]) if (!ids.has(k)) terminalSaved.current.delete(k);
+    for (const k of [...interruptsPersisted.current]) if (!ids.has(k)) interruptsPersisted.current.delete(k);
+  }, [tasks]);
+
   /** Upsert one task's state to Strapi. Non-blocking for the caller, but chained PER TASK so
    *  queued→running→done apply in order (no racing creates that would drop fields). One retry on
    *  failure — a dropped terminal save would leave the team a forever-"running" ghost. */

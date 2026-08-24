@@ -122,11 +122,6 @@ export async function POST(req: Request): Promise<NextResponse> {
     return bad("hs_fb_token_missing — set FB_HS_LAUNCH_TOKEN (or FB_HS_VOLUME_TOKEN) in the environment", 500);
   }
   if (!lionConfigured()) return bad("lion_not_configured", 500);
-  // Both bearers burned → refuse the whole wave BEFORE stamping rows, with the retry ETA.
-  {
-    const gate = await hsTokenGate();
-    if (!gate.ok) return bad(gate.error, 429);
-  }
 
   let body: {
     profile?: string;
@@ -245,6 +240,14 @@ export async function POST(req: Request): Promise<NextResponse> {
   if (existing?.value?.at) {
     rememberWave(waveId);
     return alreadyAccepted();
+  }
+
+  // All bearers burned → refuse the wave BEFORE stamping rows, with the retry ETA. Runs AFTER
+  // the idempotency answers above: a re-POST of an already-accepted wave must say
+  // alreadyAccepted, not 429 off the pool its own pump just burned (review find 08-24).
+  {
+    const gate = await hsTokenGate();
+    if (!gate.ok) return bad(gate.error, 429);
   }
 
   // Rows land in the shared store BEFORE the claim and the response (team visibility + retry

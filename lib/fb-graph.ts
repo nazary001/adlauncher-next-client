@@ -149,6 +149,9 @@ export async function fbGet(path: string, token: string = TOKEN): Promise<Json> 
     const res = await fetch(`${FB}/${path}`, {
       headers: { Authorization: `Bearer ${token}` },
       cache: "no-store",
+      // A stalled Graph socket must not pin the function to its maxDuration (the 504 class) —
+      // an abort rejects like any network error and rides the same retry/error mapping.
+      signal: AbortSignal.timeout(60_000),
     });
     const body = (await res.json().catch(() => ({}))) as Json;
     // Meta can ship an error body WITH HTTP 200 (seen live: the account-checkpoint error 31 on
@@ -345,6 +348,7 @@ async function resolveAccounts(cat: TokenCatalog): Promise<TokenAdAccount[]> {
           const res = await fetch(`${FB}/act_${acct.id}/adspixels?fields=id,name&limit=50`, {
             headers: { Authorization: `Bearer ${cat.token}` },
             cache: "no-store",
+            signal: AbortSignal.timeout(30_000),
           });
           const body = (await res.json().catch(() => ({}))) as Json;
           const err = body.error as { code?: number } | undefined;
@@ -489,7 +493,7 @@ async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<
       try {
         const res = await fetch(
           `${FB}/act_${accountId}/ads_volume?page_id=${id}&fields=ads_running_or_in_review_count`,
-          { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
+          { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store", signal: AbortSignal.timeout(30_000) },
         );
         const body = (await res.json().catch(() => ({}))) as Json;
         const err = body.error as { code?: number } | undefined;
@@ -551,7 +555,7 @@ async function tallyRunningAdsByPage(): Promise<Map<string, number> | null> {
         for (let hop = 0; hop < 10; hop++) {
           const res = await fetch(
             `${FB}/act_${accounts[i].id}/ads?fields=effective_status,creative{object_story_spec{page_id},object_story_id}&limit=200${after ? `&after=${encodeURIComponent(after)}` : ""}`,
-            { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
+            { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store", signal: AbortSignal.timeout(30_000) },
           );
           const body = (await res.json().catch(() => ({}))) as Json;
           const err = body.error as { code?: number } | undefined;
@@ -763,6 +767,10 @@ export async function fbPost(path: string, params: Json, token: string = TOKEN):
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/x-www-form-urlencoded" },
       body: form,
+      // Same bound as fbGet: a stalled socket aborts into the normal error path instead of
+      // eating the whole function window. Writes stay exactly-once — an abort is surfaced as
+      // the same ambiguous failure a network cut always was.
+      signal: AbortSignal.timeout(60_000),
     });
     const body = (await res.json().catch(() => ({}))) as Json;
     // Same as fbGet: an error body can arrive with HTTP 200 — never treat those as success.

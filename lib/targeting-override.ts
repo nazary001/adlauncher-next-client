@@ -69,6 +69,8 @@ export function geoOverrideRegionalCategories(o: GeoOverride): string[] {
  *  ecosystem parses geo from must never disagree with the patched targeting. */
 export function relabelNameGeo(name: string, countries: string[]): string {
   if (!countries.length) return name;
-  const label = countries.includes("WW") ? "WORLD" : countries.join(",");
+  // ", " separator — byte-identical to hsNamePrefix's [CODES] grammar (lib/hs-launch), so the
+  // partner's geo parser sees the same shape on relabeled clones as on launched campaigns.
+  const label = countries.includes("WW") ? "WORLD" : countries.join(", ");
   return name.replace(/(\)\s*-\s*)\[[^\]]*\]/, `$1[${label}]`);
 }

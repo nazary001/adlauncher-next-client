@@ -25,7 +25,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  *  reset, DNS, CORS-invisible resets. Chrome says "Failed to fetch", Firefox "NetworkError",
  *  Safari "Load failed". */
 function isNetworkFlake(e: unknown): boolean {
-  if (e instanceof TypeError) return true;
+  // Message-match only — a bare `instanceof TypeError` also swallowed NON-network TypeErrors
+  // (bad argument, SDK internals), retrying them 3× and then blaming the buyer's proxy/VPN.
+  // Every browser's genuine network failure carries one of these phrases.
   const msg = String((e as Error | null)?.message ?? e).toLowerCase();
   return /failed to fetch|networkerror|network error|load failed|fetch failed|socket|econn|network request failed/.test(msg);
 }

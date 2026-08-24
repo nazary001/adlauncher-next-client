@@ -66,7 +66,9 @@ async function resolveLocales(names: string[]): Promise<number[]> {
         const hit = data.find((d) => d.name && norm(d.name) === norm(raw));
         localeCache.set(raw, typeof hit?.key === "number" ? hit.key : null);
       } catch {
-        localeCache.set(raw, null);
+        // Transient throttle/network — do NOT cache: a permanent null here would silently drop
+        // this language from every later launch of the instance (broader targeting). The name
+        // resolves again on the next launch; only a CONFIRMED no-match is cached above.
       }
     }
     const key = localeCache.get(raw);
@@ -204,6 +206,18 @@ export async function POST(req: Request) {
   }
   if (!mediaUrl) {
     return NextResponse.json({ ok: false, stage: "media", error: "media_required" }, { status: 400 });
+  }
+  // Same contract as /api/launch: a video creative's destination link lives inside its CTA
+  // (creativePayload) — a "No CTA" video would ship link-less (review find 08-24).
+  if (!String(campaign.cta ?? "").trim() && mediaKind === "video") {
+    return NextResponse.json(
+      {
+        ok: false,
+        stage: "media",
+        error: "cta_required_for_video — pick a CTA button (its link is the video ad's destination); image cards may keep No CTA",
+      },
+      { status: 400 },
+    );
   }
   // The creative must be a Vercel Blob URL our OWN broker produced — same SSRF fence as /api/launch.
   {

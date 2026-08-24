@@ -364,6 +364,15 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
   useEffect(() => {
     tasksRef.current = tasks;
   }, [tasks]);
+  // Long-lived tabs: the per-task bookkeeping (save chains, static meta, activation marks) grew
+  // one entry per task ever seen and was never pruned (review find 08-24). Drop entries whose
+  // task left the drawer entirely.
+  useEffect(() => {
+    const ids = new Set(tasks.map((t) => t.id));
+    for (const k of [...meta.current.keys()]) if (!ids.has(k)) meta.current.delete(k);
+    for (const k of [...saveChains.current.keys()]) if (!ids.has(k)) saveChains.current.delete(k);
+    for (const k of [...activatedRef.current]) if (!ids.has(k)) activatedRef.current.delete(k);
+  }, [tasks]);
   useEffect(() => {
     openRef.current = open;
   }, [open]);
@@ -941,6 +950,12 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       // moment a duplicate finishes, whether the task record said so or the reality check did.
       // Once per task; a failed flip is a note, not a failure.
       const activateDuplicate = (taskId: string, campaignId: string) => {
+        // Geo-override clones are activated EXCLUSIVELY by the server pump's patch gate: the row
+        // rides stage "geo-gate" until the Graph patch is verified in ("patched"), and flipping
+        // it from here would put spend on the SOURCE geo (review find 08-24). The guard sits
+        // BEFORE the once-marker so the task can still activate later, once the stage changes.
+        const gated = tasksRef.current.find((x) => x.id === taskId);
+        if (gated?.stage === "geo-gate") return;
         if (activatedRef.current.has(taskId)) return;
         activatedRef.current.add(taskId);
         void fetch("/api/hs/activate", {

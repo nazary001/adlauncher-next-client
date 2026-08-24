@@ -3,6 +3,9 @@ import { sessionFromCookieHeader } from "@/lib/session";
 import { lionAccountPixels, lionConfigured } from "@/lib/lion";
 
 export const runtime = "nodejs";
+// Bounded upstreams (LION 60s x2 / Graph 15s) — cap the function so an abandoned poll can
+// never idle a long serverless window (the client gives up at 20s).
+export const maxDuration = 60;
 
 /** Pixels of one ad account under a LION profile (dependent picker feed). */
 export async function GET(req: Request): Promise<NextResponse> {

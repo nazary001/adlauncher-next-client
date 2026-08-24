@@ -79,7 +79,9 @@ async function resolveLocales(names: string[]): Promise<number[]> {
         const hit = data.find((d) => d.name && norm(d.name) === norm(raw));
         localeCache.set(raw, typeof hit?.key === "number" ? hit.key : null);
       } catch {
-        localeCache.set(raw, null);
+        // Transient throttle/network — do NOT cache: a permanent null here would silently drop
+        // this language from every later launch of the instance (broader targeting). The name
+        // resolves again on the next launch; only a CONFIRMED no-match is cached above.
       }
     }
     const key = localeCache.get(raw);
@@ -250,6 +252,20 @@ export async function POST(req: Request) {
   }
   if (medias.length === 0 || medias.some((m) => !m.url)) {
     return NextResponse.json({ ok: false, stage: "media", error: "media_required" }, { status: 400 });
+  }
+  // A video ad's destination rides ONLY on its CTA button (creativePayload puts the link inside
+  // call_to_action) — a "No CTA" video would reach Meta with no link at all: rejected after the
+  // campaign/adset/marker already exist, or delivered unclickable (review find 08-24). Image
+  // creatives carry a top-level link and may stay CTA-less.
+  if (!String(campaign.cta ?? "").trim() && medias.some((m) => m.kind === "video")) {
+    return NextResponse.json(
+      {
+        ok: false,
+        stage: "media",
+        error: "cta_required_for_video — pick a CTA button (its link is the video ad's destination); image-only cards may keep No CTA",
+      },
+      { status: 400 },
+    );
   }
   // The creative must be a Vercel Blob URL our OWN broker produced — never an arbitrary URL.
   // Otherwise a logged-in user could make FB (or this function, for images) fetch any URL, or make

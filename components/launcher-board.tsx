@@ -31,6 +31,22 @@ import { useAifTaskManager, useTaskManager } from "./task-manager";
 import { type HsLaunchChannel, useHsTaskManager } from "./hs-task-manager";
 import type { SessionUser } from "./user-menu";
 
+/** Card clone for duplication: fresh array/object identities for every mutable field (files —
+ *  cover objects included — countries, locales), so a future in-place edit on one card can never
+ *  bleed into siblings sharing the refs (review find 08-24). gcm intentionally cleared — every
+ *  card claims its own code; blob `url`s stay shared by design (dups reuse the session upload). */
+function cloneCardFrom(src: Campaign, id: string): Campaign {
+  return {
+    ...src,
+    id,
+    collapsed: false,
+    gcm: "",
+    countries: [...src.countries],
+    locales: [...src.locales],
+    files: src.files.map((f) => ({ ...f })),
+  };
+}
+
 /** Today as DD.MM for the campaign-name prefix. Runs client-side (and on the local dev server). */
 function todayDDMM(): string {
   const d = new Date();
@@ -443,12 +459,18 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     queuedTimer.current = window.setTimeout(() => setJustQueued(0), 3500);
   }
 
-  function mutate(fn: (cs: Campaign[]) => Campaign[]) {
-    setCampaigns((cs) =>
-      fillAccountDefaults(normalize(fn(cs), partner, reserved), partner, adAccountsRef.current, limitsRef.current),
-    );
-    setPreviewed(false);
-  }
+  // Stable identity (useCallback): every card handler derives from mutate, and the cards are
+  // memoized — handler churn would re-render the whole wave on each keystroke (review find
+  // 08-24). Refs carry the volatile lookups; only partner/reserved changes (rare) re-mint it.
+  const mutate = useCallback(
+    (fn: (cs: Campaign[]) => Campaign[]) => {
+      setCampaigns((cs) =>
+        fillAccountDefaults(normalize(fn(cs), partner, reserved), partner, adAccountsRef.current, limitsRef.current),
+      );
+      setPreviewed(false);
+    },
+    [partner, reserved],
+  );
 
   function changePartner(id: PartnerId) {
     setPartnerId(id);
@@ -465,11 +487,15 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     window.history.replaceState(null, "", url);
   }
 
-  const patch = (id: string, p: Partial<Campaign>) =>
-    mutate((cs) => cs.map((c) => (c.id === id ? { ...c, ...p } : c)));
+  const patch = useCallback(
+    (id: string, p: Partial<Campaign>) => mutate((cs) => cs.map((c) => (c.id === id ? { ...c, ...p } : c))),
+    [mutate],
+  );
 
-  const toggleCollapse = (id: string) =>
-    setCampaigns((cs) => cs.map((c) => (c.id === id ? { ...c, collapsed: !c.collapsed } : c)));
+  const toggleCollapse = useCallback(
+    (id: string) => setCampaigns((cs) => cs.map((c) => (c.id === id ? { ...c, collapsed: !c.collapsed } : c))),
+    [],
+  );
 
   /** Launch-bay row click → expand the card, smooth-scroll the page to it, then focus-pulse it. */
   const jumpTo = (id: string) => {
@@ -487,22 +513,19 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     mutate((cs) => [...cs, freshCard(`c${nextId.current++}`, partner, user?.username ?? "")]);
   };
 
-  const duplicate = (id: string) =>
-    mutate((cs) => {
-      const i = cs.findIndex((c) => c.id === id);
-      if (i === -1) return cs;
-      const src = cs[i];
-      const clone: Campaign = {
-        ...src,
-        id: `c${nextId.current++}`,
-        collapsed: false,
-        gcm: "", // each ad claims its own code — re-assigned by assignGcmCodes
-        // primary text carried over verbatim from the source (see the spread above)
-      };
-      return [...cs.slice(0, i + 1), clone, ...cs.slice(i + 1)];
-    });
+  const duplicate = useCallback(
+    (id: string) =>
+      mutate((cs) => {
+        const i = cs.findIndex((c) => c.id === id);
+        if (i === -1) return cs;
+        // primary text carried over verbatim from the source (cloneCardFrom spreads it)
+        const clone = cloneCardFrom(cs[i], `c${nextId.current++}`);
+        return [...cs.slice(0, i + 1), clone, ...cs.slice(i + 1)];
+      }),
+    [mutate],
+  );
 
-  const remove = (id: string) => mutate((cs) => cs.filter((c) => c.id !== id));
+  const remove = useCallback((id: string) => mutate((cs) => cs.filter((c) => c.id !== id)), [mutate]);
 
   /** Copy the picked settings from the first campaign onto every other one. gcm is NEVER copied
    *  (each ad keeps its own code); every other field including `name` is copied only when the user
@@ -526,7 +549,16 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
         patch.objective = src.objective;
         patch.conversionEvent = src.conversionEvent;
       }
-      return cs.map((c, i) => (i === 0 ? c : { ...c, ...(patch as Partial<Campaign>) }));
+      // Fresh array/object identities PER TARGET — one shared array across N cards is the exact
+      // sibling-bleed footgun cloneCardFrom exists to prevent (review find 08-24).
+      return cs.map((c, i) => {
+        if (i === 0) return c;
+        const mine: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(patch)) {
+          mine[k] = Array.isArray(v) ? v.map((x) => (x && typeof x === "object" ? { ...(x as object) } : x)) : v;
+        }
+        return { ...c, ...(mine as Partial<Campaign>) };
+      });
     });
   };
 
@@ -542,8 +574,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       if (cs.length === 0) return cs;
       const out = [...cs];
       for (let k = 0; k < n && out.length < MAX_CARDS; k++) {
-        const src = cs[k % cs.length];
-        out.push({ ...src, id: `c${nextId.current++}`, collapsed: false, gcm: "" });
+        out.push(cloneCardFrom(cs[k % cs.length], `c${nextId.current++}`));
       }
       return out;
     });
@@ -554,8 +585,12 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   const removeAll = () =>
     mutate(() => [freshCard(`c${nextId.current++}`, partner, user?.username ?? "")]);
 
-  /** Copy one card's creatives onto every card — build a wave, drop the video once, apply to all. */
-  const applyFilesToAll = (files: FileItem[]) => mutate((cs) => cs.map((c) => ({ ...c, files })));
+  /** Copy one card's creatives onto every card — build a wave, drop the video once, apply to all.
+   *  Each card gets its OWN array + file objects (identity-fresh — see cloneCardFrom's rationale). */
+  const applyFilesToAll = useCallback(
+    (files: FileItem[]) => mutate((cs) => cs.map((c) => ({ ...c, files: files.map((f) => ({ ...f })) }))),
+    [mutate],
+  );
 
   return (
     <>

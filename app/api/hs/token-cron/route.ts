@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { hsProbeTokenHealth, hsTokenConfigured } from "@/lib/hs-token-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
@@ -19,7 +20,10 @@ export const maxDuration = 60;
 export async function GET(req: Request) {
   const secret = process.env.CRON_SECRET ?? "";
   const auth = req.headers.get("authorization") ?? "";
-  const cronOk = secret.length > 0 && auth === `Bearer ${secret}`;
+  // Constant-time compare, same discipline as lib/session's HMAC verify.
+  const expected = Buffer.from(`Bearer ${secret}`);
+  const got = Buffer.from(auth);
+  const cronOk = secret.length > 0 && got.length === expected.length && timingSafeEqual(got, expected);
   const sessionOk = Boolean(sessionFromCookieHeader(req.headers.get("cookie")));
   if (!cronOk && !sessionOk) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });

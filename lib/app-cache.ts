@@ -4,6 +4,10 @@
 // swept result and one refresh claim. Every helper degrades to null/no-op when Strapi (or the
 // collection, pre-rebuild) is unavailable — callers must treat this layer as best-effort.
 
+// Bounded Strapi client (8s abort): best-effort must also mean fail-FAST — a hung upstream
+// otherwise pins the calling route to its maxDuration (the task-route 504 class).
+import { strapiFetch } from "@/lib/task-store";
+
 const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
 const TOKEN = process.env.STRAPI_TOKEN ?? "";
 
@@ -22,7 +26,7 @@ export async function readAppCacheDetailed<T>(
 ): Promise<{ ok: boolean; row: AppCacheRow<T> | null }> {
   if (!STRAPI || !TOKEN) return { ok: false, row: null };
   try {
-    const res = await fetch(
+    const res = await strapiFetch(
       `${STRAPI}/api/app-caches?filters[ckey][$eq]=${encodeURIComponent(key)}&pagination[pageSize]=1`,
       { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
     );
@@ -57,14 +61,14 @@ export async function writeAppCache<T>(
   const headers = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
   try {
     if (documentId) {
-      const res = await fetch(`${STRAPI}/api/app-caches/${documentId}`, {
+      const res = await strapiFetch(`${STRAPI}/api/app-caches/${documentId}`, {
         method: "PUT",
         headers,
         body: payload,
       });
       if (res.ok) return documentId;
     }
-    const res = await fetch(`${STRAPI}/api/app-caches`, { method: "POST", headers, body: payload });
+    const res = await strapiFetch(`${STRAPI}/api/app-caches`, { method: "POST", headers, body: payload });
     if (!res.ok) return null;
     const body = (await res.json().catch(() => ({}))) as { data?: { documentId?: string } };
     return body.data?.documentId ?? null;

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { GCM_POOL_MAX, gcmCode } from "@/lib/partners";
 import { fetchUsedGcms } from "@/lib/gcm-claim";
+import { strapiFetch } from "@/lib/task-store";
 
 // Server-only: the Strapi token never reaches the browser.
 const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
@@ -71,7 +72,7 @@ export async function POST(req: Request) {
     landing: body.landing ?? null,
     notes: body.notes ?? "claimed via adlauncher",
   };
-  const res = await fetch(`${STRAPI}/api/gcm-maps`, {
+  const res = await strapiFetch(`${STRAPI}/api/gcm-maps`, {
     method: "POST",
     headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({ data }),

@@ -183,6 +183,15 @@ function CloneInner({
   // AIF derives its pixel server-side (conversions → the postback pixel, clicks → none), so the
   // board never asks for one there.
   const pixelMissing = !aifMode && isTargetAccount && !settings.pixelId;
+  // Self-heal a stale pixel pick: a reloaded account catalog can drop the picked pixel (pixel
+  // unshared / list refresh) — a pick outside the current options must not ride into the POST
+  // (the server rejects it, but only after the buyer fired). Gated on a LOADED list (null =
+  // still fetching) so a legit pick never clears mid-load; mirrors the launcher card's self-heal.
+  useEffect(() => {
+    if (aifMode || !isTargetAccount || !settings.pixelId) return;
+    if (!adAccounts || adAccounts.length === 0) return;
+    if (!targetPixels.some((p) => p.id === settings.pixelId)) setSettings((s) => ({ ...s, pixelId: "" }));
+  }, [aifMode, isTargetAccount, settings.pixelId, adAccounts, targetPixels]);
   const destinationMissing = fanpageMissing || accountMissing || pixelMissing;
   // Account launch limit (5 campaigns / 30 min): a concrete TARGET account must fit the whole
   // batch (rows × copies). From-each-source batches aren't metered here — the sources' accounts

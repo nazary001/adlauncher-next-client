@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 
+export const runtime = "nodejs";
+// One 15s-bounded Graph read — the function itself gets a matching hard cap.
+export const maxDuration = 30;
+
 // Server-only: the FB launch token never reaches the browser.
 const TOKEN = process.env.FB_LAUNCH_TOKEN ?? "";
 const VER = "v21.0";
@@ -31,7 +35,7 @@ export async function GET(req: Request) {
   try {
     const res = await fetch(
       `https://graph.facebook.com/${VER}/act_${account}/ads_volume?fields=ads_running_or_in_review_count`,
-      { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
+      { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store", signal: AbortSignal.timeout(15_000) },
     );
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {

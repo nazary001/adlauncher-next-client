@@ -3,6 +3,9 @@
 // without touching the launch route. Server-only.
 
 import { GCM_POOL_MAX, gcmCode } from "@/lib/partners";
+// Bounded Strapi client (8s abort): a hung registry must fail a claim fast, never pin the
+// launch function to its maxDuration — the same class of hang that caused the task-route 504s.
+import { strapiFetch } from "@/lib/task-store";
 
 const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
 const STRAPI_TOKEN = process.env.STRAPI_TOKEN ?? "";
@@ -20,7 +23,7 @@ export async function fetchUsedGcms(): Promise<string[]> {
   // gcm is unique → row count ≤ pool size; +1 page of slack, hard-bounded against runaway loops.
   const maxPages = Math.ceil(GCM_POOL_MAX / 100) + 1;
   for (let page = 1; page <= maxPages; page++) {
-    const res = await fetch(
+    const res = await strapiFetch(
       `${STRAPI}/api/gcm-maps?fields[0]=gcm&pagination[page]=${page}&pagination[pageSize]=100`,
       { headers: { Authorization: `Bearer ${STRAPI_TOKEN}` }, cache: "no-store" },
     );
@@ -54,7 +57,7 @@ async function usedCodes(): Promise<Set<string>> {
  */
 async function wonClaim(gcm: string, documentId: string): Promise<boolean> {
   try {
-    const res = await fetch(
+    const res = await strapiFetch(
       `${STRAPI}/api/gcm-maps?filters[gcm][$eq]=${gcm}&sort[0]=createdAt:asc&sort[1]=documentId:asc&fields[0]=gcm&pagination[pageSize]=10`,
       { headers: { Authorization: `Bearer ${STRAPI_TOKEN}` }, cache: "no-store" },
     );
@@ -88,7 +91,7 @@ const LEDGER_FIELDS = new Set([
 /** Open a fresh epoch for a just-won claim. */
 async function ledgerOpen(gcm: string, meta: Json): Promise<void> {
   try {
-    await fetch(`${STRAPI}/api/gcm-binding-logs`, {
+    await strapiFetch(`${STRAPI}/api/gcm-binding-logs`, {
       method: "POST",
       headers: { Authorization: `Bearer ${STRAPI_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -109,7 +112,7 @@ async function ledgerOpen(gcm: string, meta: Json): Promise<void> {
 /** documentId of the code's OPEN epoch (released_at null), newest first, or null. */
 async function ledgerOpenRow(gcm: string): Promise<string | null> {
   try {
-    const res = await fetch(
+    const res = await strapiFetch(
       `${STRAPI}/api/gcm-binding-logs?filters[gcm][$eq]=${gcm}&filters[released_at][$null]=true` +
         `&sort=createdAt:desc&pagination[pageSize]=1&fields[0]=gcm`,
       { headers: { Authorization: `Bearer ${STRAPI_TOKEN}` }, cache: "no-store" },
@@ -131,7 +134,7 @@ async function ledgerPatch(gcm: string, patch: Json): Promise<void> {
   if (Object.keys(data).length === 0) return;
   const doc = await ledgerOpenRow(gcm);
   if (!doc) return;
-  await fetch(`${STRAPI}/api/gcm-binding-logs/${doc}`, {
+  await strapiFetch(`${STRAPI}/api/gcm-binding-logs/${doc}`, {
     method: "PUT",
     headers: { Authorization: `Bearer ${STRAPI_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({ data }),
@@ -143,7 +146,7 @@ async function ledgerPatch(gcm: string, patch: Json): Promise<void> {
 async function ledgerDrop(gcm: string): Promise<void> {
   const doc = await ledgerOpenRow(gcm);
   if (!doc) return;
-  await fetch(`${STRAPI}/api/gcm-binding-logs/${doc}`, {
+  await strapiFetch(`${STRAPI}/api/gcm-binding-logs/${doc}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${STRAPI_TOKEN}` },
   }).catch(() => {});
@@ -167,7 +170,7 @@ export async function claimGcm(
   for (let n = 1; n < start; n++) if (!used.has(gcmCode(n))) candidates.push(gcmCode(n));
 
   for (const gcm of candidates) {
-    const res = await fetch(`${STRAPI}/api/gcm-maps`, {
+    const res = await strapiFetch(`${STRAPI}/api/gcm-maps`, {
       method: "POST",
       headers: { Authorization: `Bearer ${STRAPI_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -206,7 +209,7 @@ export async function claimGcm(
  *  epoch too (FB ids after a create, failure notes on a kept-retired row). */
 export async function backfillGcm(documentId: string | null, patch: Json, gcm?: string): Promise<void> {
   if (documentId) {
-    await fetch(`${STRAPI}/api/gcm-maps/${documentId}`, {
+    await strapiFetch(`${STRAPI}/api/gcm-maps/${documentId}`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${STRAPI_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify({ data: patch }),
@@ -218,7 +221,7 @@ export async function backfillGcm(documentId: string | null, patch: Json, gcm?: 
 /** Release a claimed code (delete the row) when a launch/clone fails before any FB resource is
  *  created. Pass `gcm` to also drop the code's open ledger epoch (never-carried-traffic noise). */
 export async function deleteGcm(documentId: string, gcm?: string): Promise<void> {
-  await fetch(`${STRAPI}/api/gcm-maps/${documentId}`, {
+  await strapiFetch(`${STRAPI}/api/gcm-maps/${documentId}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${STRAPI_TOKEN}` },
   }).catch(() => {});

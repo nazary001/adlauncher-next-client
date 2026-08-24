@@ -501,7 +501,10 @@ export function AccountAccessBoard({
       setSavedAt(Date.now());
     } catch (e) {
       setSaveError(String((e as Error).message ?? e));
-      pendingRef.current = {}; // drop queued work — it may build on the failed state
+      // Only the FAILED batch is dropped (it was already snapshotted out of pendingRef above) —
+      // an edit queued WHILE it was in flight never failed and must not be silently lost: the
+      // per-account lists are absolute, so re-flushing it onto the resynced base carries the
+      // user's full intent for those accounts (review find 08-24).
       await resync();
     } finally {
       inflightSaveRef.current = false;

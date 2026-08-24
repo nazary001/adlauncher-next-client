@@ -28,14 +28,25 @@ export type TeamUser = {
 async function directoryUsers(): Promise<TeamUser[] | null> {
   if (!TOOLS || !TOOLS_TOKEN) return null;
   try {
-    const res = await fetch(
-      `${TOOLS}/api/users?fields[0]=username&fields[1]=app_role&fields[2]=blocked&pagination[pageSize]=100`,
-      { headers: { Authorization: `Bearer ${TOOLS_TOKEN}` }, cache: "no-store", signal: AbortSignal.timeout(8000) },
-    );
-    if (!res.ok) return null;
-    const body = (await res.json().catch(() => null)) as unknown;
-    const rows = Array.isArray(body) ? body : ((body as { data?: unknown })?.data ?? null);
-    if (!Array.isArray(rows)) return null;
+    // Paged (Strapi Cloud clamps pageSize to 100): a single-page read silently truncated the
+    // owner's assignable roster past 100 users. 3 pages = plenty of headroom for the team.
+    const rows: unknown[] = [];
+    for (let page = 1; page <= 3; page++) {
+      const res = await fetch(
+        `${TOOLS}/api/users?fields[0]=username&fields[1]=app_role&fields[2]=blocked` +
+          `&pagination[page]=${page}&pagination[pageSize]=100`,
+        { headers: { Authorization: `Bearer ${TOOLS_TOKEN}` }, cache: "no-store", signal: AbortSignal.timeout(8000) },
+      );
+      if (!res.ok) {
+        if (rows.length === 0) return null; // directory unreachable → the caller's fallback source
+        break; // keep the pages we got — a partial roster still beats the activity fallback
+      }
+      const body = (await res.json().catch(() => null)) as unknown;
+      const pageRows = Array.isArray(body) ? body : ((body as { data?: unknown })?.data ?? null);
+      if (!Array.isArray(pageRows)) return null;
+      rows.push(...pageRows);
+      if (pageRows.length < 100) break;
+    }
     return rows
       .filter((u) => !(u as { blocked?: boolean }).blocked)
       .map((u) => ({

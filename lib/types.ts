@@ -90,7 +90,11 @@ export function fullName(c: Campaign): string {
 }
 
 export function parseMoney(v: string): number {
-  const n = parseFloat(String(v ?? "").replace(/\s/g, "").replace(",", "."));
+  const s = String(v ?? "").replace(/\s/g, "");
+  // Mixed "1,234.56" reads the comma as a thousands separator; otherwise every comma is a
+  // decimal point (the first one wins via parseFloat). The old single-comma replace parsed
+  // "1,234.56" as 1.234 — under-parsing only, but wrong.
+  const n = parseFloat(s.includes(",") && s.includes(".") ? s.replace(/,/g, "") : s.replace(/,/g, "."));
   return Number.isFinite(n) ? n : 0;
 }
 
@@ -167,7 +171,13 @@ export function normalizeRoasGoal(goal: number): number | null {
  *  rejects the ad set ("Bid amount required for the bid strategy provided"). Min-ROAS equally
  *  needs its positive ROAS goal (same field). Lowest-cost bids automatically and needs none. */
 export function bidAmountMissing(c: Campaign): boolean {
-  return c.bidStrategy !== "LOWEST_COST_WITHOUT_CAP" && parseMoney(c.bidCap) <= 0;
+  if (c.bidStrategy === "LOWEST_COST_WITHOUT_CAP") return false;
+  const v = parseMoney(c.bidCap);
+  if (v <= 0) return true;
+  // Min-ROAS: the ambiguous 10–20 band is rejected at EVERY wire point (normalizeRoasGoal →
+  // null) — a card carrying it must not read "ready" while the bid field shows the band error;
+  // the dot, the bay count and the launch filter must agree with the field (review find 08-24).
+  return bidKind(c.bidStrategy) === "roas" && normalizeRoasGoal(v) == null;
 }
 
 type ReadyOpts = {
