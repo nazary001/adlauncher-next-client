@@ -11,6 +11,68 @@ const H = () => ({ Authorization: `Bearer ${TOKEN}`, "Content-Type": "applicatio
 
 export const storeConfigured = () => Boolean(STRAPI && TOKEN);
 
+// Every Strapi call is bounded: the shared Strapi Cloud instance flakes under the team's polling
+// load (repeated 503/timeout incidents), and an unbounded fetch would hang the function to the
+// 60s runtime limit → "Vercel Runtime Timeout Error" (504) and 50× the GB-hours. A bounded call
+// fails fast so the route can serve stale/empty instead of piling up hung invocations.
+export const STRAPI_TIMEOUT_MS = 8_000;
+export async function strapiFetch(url: string, init: RequestInit = {}, timeoutMs = STRAPI_TIMEOUT_MS): Promise<Response> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: ac.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Short shared cache for the team-wide task list. The list is IDENTICAL for every user in a scope,
+// so the whole team's polling (dozens of buyers, every few seconds) collapses to ~one Strapi read
+// per scope per TTL on each warm instance — the difference between Strapi coasting and Strapi
+// falling over. Per-instance (serverless has no shared memory), which is plenty: N warm instances
+// read Strapi at most N×(1/TTL). Owners still see their OWN tasks live — the client overlays local
+// state (mergeShared); only other buyers' rows can lag by up to the TTL.
+const TEAM_CACHE_TTL_MS = 4_000;
+const teamCache = new Map<string, { at: number; tasks: unknown[] }>();
+
+/**
+ * Read the team task list for one scope: served from the short cache when warm, otherwise fetched
+ * from Strapi page-by-page (each page bounded by strapiFetch). On an upstream failure it serves the
+ * last good list if there is one (a Strapi blip must not blank the whole team's drawer). Returns
+ * `ok:false` only when there is nothing cached AND the fetch failed.
+ */
+export async function readTeamTasks<T>(
+  scopeKey: string,
+  pageUrl: (page: number) => string,
+  mapRow: (row: Record<string, unknown>) => T,
+  opts: { pageSize: number; maxPages: number },
+): Promise<{ ok: boolean; tasks: T[]; status?: number }> {
+  const now = Date.now();
+  const hit = teamCache.get(scopeKey);
+  if (hit && now - hit.at < TEAM_CACHE_TTL_MS) return { ok: true, tasks: hit.tasks as T[] };
+  try {
+    const rows: Record<string, unknown>[] = [];
+    for (let page = 1; page <= opts.maxPages; page++) {
+      const res = await strapiFetch(pageUrl(page), { headers: H(), cache: "no-store" });
+      if (!res.ok) {
+        if (rows.length > 0) break; // keep the pages we got
+        if (hit) return { ok: true, tasks: hit.tasks as T[] }; // serve stale rather than blank
+        return { ok: false, tasks: [], status: res.status };
+      }
+      const body = (await res.json().catch(() => ({}))) as { data?: Record<string, unknown>[] };
+      const data = body.data ?? [];
+      rows.push(...data);
+      if (data.length < opts.pageSize) break;
+    }
+    const tasks = rows.map(mapRow);
+    teamCache.set(scopeKey, { at: now, tasks });
+    return { ok: true, tasks };
+  } catch {
+    if (hit) return { ok: true, tasks: hit.tasks as T[] }; // timeout/network → last good list
+    return { ok: false, tasks: [] };
+  }
+}
+
 // Fields persisted per task (Strapi attribute names). Wire format matches this 1:1.
 // `owner` is intentionally NOT here — it is always stamped server-side from the session,
 // never taken from a request body.
@@ -44,7 +106,7 @@ export function pickTaskFields(body: Record<string, unknown>): TaskRowData {
 export async function findTaskRow(
   taskId: string,
 ): Promise<{ documentId: string; owner: string | null; status: string | null } | null> {
-  const res = await fetch(
+  const res = await strapiFetch(
     `${STRAPI}/api/launch-tasks?filters[task_id][$eq]=${encodeURIComponent(taskId)}&fields[0]=task_id&fields[1]=owner&fields[2]=status&pagination[pageSize]=1`,
     { headers: H(), cache: "no-store" },
   );
@@ -73,7 +135,7 @@ export type UpsertResult = { ok: true } | { ok: false; reason: "forbidden" | "st
  */
 async function dedupeTaskRows(user: string, taskId: string, data: TaskRowData): Promise<void> {
   try {
-    const res = await fetch(
+    const res = await strapiFetch(
       `${STRAPI}/api/launch-tasks?filters[task_id][$eq]=${encodeURIComponent(taskId)}` +
         `&fields[0]=task_id&fields[1]=owner&fields[2]=createdAt&sort[0]=createdAt:asc&sort[1]=documentId:asc&pagination[pageSize]=5`,
       { headers: H(), cache: "no-store" },
@@ -86,12 +148,12 @@ async function dedupeTaskRows(user: string, taskId: string, data: TaskRowData): 
     for (const r of extras) {
       const owner = r.owner ? String(r.owner) : null;
       if (owner === user && r.documentId) {
-        await fetch(`${STRAPI}/api/launch-tasks/${r.documentId}`, { method: "DELETE", headers: H() });
+        await strapiFetch(`${STRAPI}/api/launch-tasks/${r.documentId}`, { method: "DELETE", headers: H() });
       }
     }
     const keepOwner = keep.owner ? String(keep.owner) : null;
     if (keepOwner === user && keep.documentId) {
-      await fetch(`${STRAPI}/api/launch-tasks/${keep.documentId}`, {
+      await strapiFetch(`${STRAPI}/api/launch-tasks/${keep.documentId}`, {
         method: "PUT",
         headers: H(),
         body: JSON.stringify({ data }),
@@ -116,12 +178,12 @@ export async function upsertTaskRow(user: string, taskId: string, fields: TaskRo
       const existing = await findTaskRow(taskId);
       if (existing && existing.owner !== user) return { ok: false, reason: "forbidden" };
       const res = existing
-        ? await fetch(`${STRAPI}/api/launch-tasks/${existing.documentId}`, {
+        ? await strapiFetch(`${STRAPI}/api/launch-tasks/${existing.documentId}`, {
             method: "PUT",
             headers: H(),
             body: JSON.stringify({ data }),
           })
-        : await fetch(`${STRAPI}/api/launch-tasks`, {
+        : await strapiFetch(`${STRAPI}/api/launch-tasks`, {
             method: "POST",
             headers: H(),
             // Creates default queued_at (the runners' server-side writes don't carry it, and the

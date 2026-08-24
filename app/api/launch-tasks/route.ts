@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { findTaskRow, pickTaskFields, storeConfigured, upsertTaskRow } from "@/lib/task-store";
+import { findTaskRow, pickTaskFields, readTeamTasks, storeConfigured, strapiFetch, upsertTaskRow } from "@/lib/task-store";
 
 // A pagehide-beacon batch (25 rows) or a bulk clear is ~2 Strapi round-trips per row — the
 // platform default duration (~15s) could cut the tail off mid-write, leaving half a wave unmarked.
@@ -80,28 +80,20 @@ export async function GET(req: Request) {
       ? `&filters[partner][$eq]=us`
       : `&filters[$or][0][partner][$null]=true` +
         `&filters[$or][1][$and][0][partner][$ne]=br&filters[$or][1][$and][1][partner][$ne]=us`;
-  try {
-    const cutoff = Date.now() - WINDOW_MS;
-    const rows: Row[] = [];
-    for (let page = 1; page <= MAX_PAGES; page++) {
-      const res = await fetch(
-        `${STRAPI}/api/launch-tasks?filters[owner][$notNull]=true${partnerFilter}&filters[queued_at][$gte]=${cutoff}` +
-          `&sort[0]=queued_at:desc&pagination[page]=${page}&pagination[pageSize]=${PAGE_SIZE}`,
-        { headers: H(), cache: "no-store" },
-      );
-      if (!res.ok) {
-        if (rows.length === 0) return NextResponse.json({ ok: false, tasks: [], status: res.status });
-        break; // keep what we have — a partial list beats none for a later page's hiccup
-      }
-      const body = await res.json().catch(() => ({}));
-      const data = (body.data ?? []) as Row[];
-      rows.push(...data);
-      if (data.length < PAGE_SIZE) break;
-    }
-    return NextResponse.json({ ok: true, now: Date.now(), tasks: rows.map(toClient) });
-  } catch (e) {
-    return NextResponse.json({ ok: false, tasks: [], error: String(e) });
-  }
+  // Bounded + short-cached read (task-store): the team's polling collapses to ~one Strapi read per
+  // scope per few seconds, and a slow/failing Strapi serves the last good list instead of hanging.
+  const cutoff = Date.now() - WINDOW_MS;
+  const pageUrl = (page: number) =>
+    `${STRAPI}/api/launch-tasks?filters[owner][$notNull]=true${partnerFilter}&filters[queued_at][$gte]=${cutoff}` +
+    `&sort[0]=queued_at:desc&pagination[page]=${page}&pagination[pageSize]=${PAGE_SIZE}`;
+  const { ok, tasks, status } = await readTeamTasks(
+    scope === "aif" ? "launch:aif" : "launch:mo",
+    pageUrl,
+    toClient,
+    { pageSize: PAGE_SIZE, maxPages: MAX_PAGES },
+  );
+  if (!ok) return NextResponse.json({ ok: false, tasks: [], ...(status ? { status } : {}) });
+  return NextResponse.json({ ok: true, now: Date.now(), tasks });
 }
 
 /**
@@ -164,7 +156,7 @@ export async function DELETE(req: Request) {
         ids.slice(i, i + 8).map(async (id) => {
           const found = await findTaskRow(id);
           if (found && found.owner === user) {
-            await fetch(`${STRAPI}/api/launch-tasks/${found.documentId}`, { method: "DELETE", headers: H() });
+            await strapiFetch(`${STRAPI}/api/launch-tasks/${found.documentId}`, { method: "DELETE", headers: H() });
           }
         }),
       );

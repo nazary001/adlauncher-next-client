@@ -9,7 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { upload } from "@vercel/blob/client";
+import { readCreative, safeBlobName, uploadCreativeFile } from "./blob-uploader";
 import { type Campaign, moneyLabel } from "@/lib/types";
 import { type PartnerId, partnerConfig } from "@/lib/partners";
 import type { CloneEdit } from "@/lib/clone";
@@ -61,9 +61,7 @@ const CLONE_STAGES: readonly StageDef[] = [
   { key: "ad", label: "Publishing ad" },
 ];
 
-// A Blob upload has no server-side deadline — a hung connection would otherwise spin the task (and
-// block the one-at-a-time queue) forever. Seen live 08-07: a task stuck at "Uploading video" 30+ min.
-const UPLOAD_TIMEOUT_MS = 5 * 60_000;
+// Blob-upload bounds/retries/diagnostics live in blob-uploader.ts (shared with the HS manager).
 // Breather between consecutive FB-writing tasks — RANDOM 1–3s per gap (owner call 2026-08-11,
 // was a fixed 8s): jittered spacing looks less bot-like to Meta and keeps waves fast; the
 // server-side throttle/budget-retries absorb whatever the shorter gaps cost in (#4)/(#17).
@@ -79,8 +77,11 @@ const STREAM_TIMEOUT_MS = 330_000;
 // ---- shared-view cadence ----
 // The whole team's queue refreshes continuously — the header badge and drawer must be truthful at
 // any moment, not only while the drawer is open (drawer open polls faster for live stage motion).
-const POLL_OPEN_MS = 4_000;
-const POLL_CLOSED_MS = 12_000;
+// Raised 2026-08-24 (4s/12s → 8s/24s): dozens of buyers polling every 4s overloaded the shared
+// Strapi (503→504 incident); the server route now also short-caches the team list, so a slightly
+// slower poll costs no freshness the cache wouldn't have eaten anyway.
+const POLL_OPEN_MS = 8_000;
+const POLL_CLOSED_MS = 24_000;
 // Re-upsert my running task every 25s: the identical PUT bumps the row's updatedAt (verified), so
 // teammates can tell a live-but-slow stage (video processing) from a dead session. Hidden tabs
 // throttle timers to ~60s — still comfortably inside STALE_MS (180s).
@@ -554,48 +555,43 @@ function TaskManagerCore({
             ? input.medias
             : [{ url: input.mediaUrl, name: input.mediaName, kind: input.mediaKind, cover: input.cover }];
 
-        // One bounded Blob upload: bytes recovered from the (session-lived) object URL, streamed
-        // straight to Vercel Blob — bypassing the serverless request-body limit (~4.5MB) entirely;
-        // the launch route then gets just URLs and FB pulls videos via file_url (images are
-        // re-read server-side into adimages). UPLOAD_TIMEOUT_MS keeps a hung connection a
-        // retryable task failure instead of a stuck queue.
-        const uploadToBlob = async (objUrl: string, rawName: string, kind: "video" | "image", tag: string) => {
-          const fallbackType = kind === "image" ? "image/jpeg" : "video/mp4";
-          const fallbackName = kind === "image" ? "creative.jpg" : "creative.mp4";
-          const blob = await fetch(objUrl).then((r) => r.blob());
-          const file = new File([blob], rawName || fallbackName, { type: blob.type || fallbackType });
-          const safeName = (file.name || fallbackName).replace(/[^\w.-]+/g, "_");
-          const abort = new AbortController();
-          const timer = window.setTimeout(() => abort.abort(), UPLOAD_TIMEOUT_MS);
-          try {
-            const { url } = await upload(`creatives/${id}-${tag}${safeName}`, file, {
-              access: "public",
-              contentType: file.type || fallbackType,
-              handleUploadUrl: "/api/blob-upload",
-              abortSignal: abort.signal,
-            });
-            return url;
-          } catch (e) {
-            throw abort.signal.aborted
-              ? new Error(`creative upload timed out after ${UPLOAD_TIMEOUT_MS / 60_000} min — check the connection and retry`)
-              : e;
-          } finally {
-            window.clearTimeout(timer);
-          }
-        };
-
-        // Upload every creative (+ its video cover) in order — sequential on purpose: parallel
-        // multi-hundred-MB uploads would fight for the same uplink and all crawl into the timeout.
-        const medias: { url: string; kind: "video" | "image"; coverUrl?: string }[] = [];
+        // 1) Read + PROBE every creative (and cover) up front — a dead file handle (moved/edited
+        // on disk, cloud-sync offload, attach from before a reload) fails here in seconds with
+        // its NAME and the re-attach remedy, before a single byte is uploaded or anything
+        // happens server-side. Previously this class surfaced minutes in as a bare
+        // "TypeError: Failed to fetch" (live 08-21). Probes read 64KB — cheap even for 5×500MB.
+        const preparedAll: { file: File; kind: "video" | "image"; tag: string; cover?: File }[] = [];
         for (let i = 0; i < queued.length; i++) {
           const m = queued[i];
           const tag = queued.length > 1 ? `${i + 1}-` : "";
-          const url = await uploadToBlob(m.url, m.name, m.kind, tag);
+          const file = await readCreative(m.url, m.name, m.kind, `creative "${m.name || i + 1}"`);
+          const cover =
+            m.cover && m.kind === "video"
+              ? await readCreative(m.cover.url, m.cover.name || "cover.jpg", "image", `cover "${m.cover.name || i + 1}"`)
+              : undefined;
+          preparedAll.push({ file, kind: m.kind, tag, ...(cover ? { cover } : {}) });
+        }
+
+        // 2) Upload every creative (+ its video cover) in order — sequential on purpose: parallel
+        // multi-hundred-MB uploads would fight for the same uplink and all crawl into the
+        // timeout. uploadCreativeFile bounds each attempt, retries the transient network class,
+        // rides multipart for big videos and names the creative in every failure (blob-uploader).
+        const medias: { url: string; kind: "video" | "image"; coverUrl?: string }[] = [];
+        for (const p of preparedAll) {
+          const url = await uploadCreativeFile(
+            `creatives/${id}-${p.tag}${safeBlobName(p.file.name, p.kind === "image" ? "creative.jpg" : "creative.mp4")}`,
+            p.file,
+            `creative "${p.file.name}"`,
+          );
           let coverUrl: string | undefined;
-          if (m.cover && m.kind === "video") {
-            coverUrl = await uploadToBlob(m.cover.url, m.cover.name || "cover.jpg", "image", `${tag}cover-`);
+          if (p.cover) {
+            coverUrl = await uploadCreativeFile(
+              `creatives/${id}-${p.tag}cover-${safeBlobName(p.cover.name, "cover.jpg")}`,
+              p.cover,
+              `cover "${p.cover.name}"`,
+            );
           }
-          medias.push({ url, kind: m.kind, ...(coverUrl ? { coverUrl } : {}) });
+          medias.push({ url, kind: p.kind, ...(coverUrl ? { coverUrl } : {}) });
         }
         const first = medias[0];
 

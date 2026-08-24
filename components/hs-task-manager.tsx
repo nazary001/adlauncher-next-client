@@ -24,7 +24,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { upload } from "@vercel/blob/client";
+import { readCreative, safeBlobName, uploadCreativeFile } from "./blob-uploader";
 import { type Campaign, type FileItem, moneyLabel } from "@/lib/types";
 import type { SessionUser } from "./user-menu";
 import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, XIcon } from "./icons";
@@ -132,8 +132,7 @@ const LION_STAGE: Record<string, { key: string; label: string }> = {
   CREATING_ADS: { key: "ads", label: "Creating ads" },
 };
 
-// Blob uploads have no server deadline — bound them like the MO manager does.
-const UPLOAD_TIMEOUT_MS = 5 * 60_000;
+// Blob-upload bounds/retries/diagnostics live in blob-uploader.ts (shared with the MO manager).
 // Token-launch NDJSON stream cap — a hair over the route's maxDuration (300s) so the server
 // always finishes (or cleanly errors) first; mirrors the MO manager's STREAM_TIMEOUT_MS.
 const STREAM_TIMEOUT_MS = 330_000;
@@ -144,8 +143,10 @@ const TASK_GAP_MIN_MS = 1_000;
 const TASK_GAP_MAX_MS = 3_000;
 const taskGapMs = () => TASK_GAP_MIN_MS + Math.random() * (TASK_GAP_MAX_MS - TASK_GAP_MIN_MS);
 // Status polling cadence (drawer open / closed). One batched call covers every pending task.
-const POLL_OPEN_MS = 8_000;
-const POLL_CLOSED_MS = 20_000;
+// Eased 2026-08-24 (8s/20s → 12s/30s) alongside the server-side short-cache + bounded fetches:
+// the shared Strapi was 503→504-ing under the team's combined MO+HS polling.
+const POLL_OPEN_MS = 12_000;
+const POLL_CLOSED_MS = 30_000;
 // NOT_FOUND right after submit can be replication lag — only settle it after a grace window.
 // Generous on purpose (owner call 08-14): under congestion LION's read side lags far behind
 // accepted tasks, and a false NOT_FOUND error would strand a real campaign unactivated.
@@ -575,65 +576,53 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         if (input.channel === "token" && media.length > 10) {
           throw new Error("the FB Token rail builds at most 10 ads per campaign — trim the creatives or use the LION rail");
         }
-        const urls: string[] = [];
+        // Read + PROBE every blob-backed creative (and cover) FIRST — a dead file handle fails
+        // in seconds with its name and the re-attach remedy, before any bytes go out (the class
+        // that used to surface as a bare "TypeError: Failed to fetch", live 08-21). https URLs
+        // pass straight through — LION downloads them itself.
+        const preparedFiles = new Map<number, File>();
+        const preparedCovers = new Map<number, File>();
         for (let i = 0; i < media.length; i++) {
           const f = media[i];
-          if (/^https?:\/\//i.test(f.url)) {
-            urls.push(f.url);
-            continue;
+          if (!/^https?:\/\//i.test(f.url)) {
+            preparedFiles.set(i, await readCreative(f.url, f.name || `creative-${i}`, f.kind === "image" ? "image" : "video", `creative "${f.name || i + 1}"`));
           }
-          const fallbackType = f.kind === "image" ? "image/jpeg" : "video/mp4";
-          const blob = await fetch(f.url).then((r) => r.blob());
-          const file = new File([blob], f.name || `creative-${i}`, { type: blob.type || fallbackType });
-          const safeName = (file.name || `creative-${i}`).replace(/[^\w.-]+/g, "_");
-          const abort = new AbortController();
-          const timer = window.setTimeout(() => abort.abort(), UPLOAD_TIMEOUT_MS);
-          try {
-            const { url } = await upload(`creatives/hs-${id}-${i}-${safeName}`, file, {
-              access: "public",
-              contentType: file.type || fallbackType,
-              handleUploadUrl: "/api/blob-upload",
-              abortSignal: abort.signal,
-            });
-            urls.push(url);
-          } catch (e) {
-            throw abort.signal.aborted
-              ? new Error(`creative upload timed out after ${UPLOAD_TIMEOUT_MS / 60_000} min — retry`)
-              : e;
-          } finally {
-            window.clearTimeout(timer);
+          const cov = media[i].cover;
+          if (input.channel === "token" && cov && media[i].kind === "video") {
+            preparedCovers.set(i, await readCreative(cov.url, cov.name || `cover-${i}.jpg`, "image", `cover "${cov.name || i + 1}"`));
           }
         }
 
-        // 1b) Custom covers (video creatives, FB Token rail only — LION's create contract takes
+        // Upload sequentially — bounded, network-retrying, creative-named errors (blob-uploader).
+        const urls: string[] = [];
+        for (let i = 0; i < media.length; i++) {
+          const file = preparedFiles.get(i);
+          if (!file) {
+            urls.push(media[i].url); // URL-added creative — passes through untouched
+            continue;
+          }
+          urls.push(
+            await uploadCreativeFile(
+              `creatives/hs-${id}-${i}-${safeBlobName(file.name, `creative-${i}`)}`,
+              file,
+              `creative "${file.name}"`,
+            ),
+          );
+        }
+
+        // Custom covers (video creatives, FB Token rail only — LION's create contract takes
         // bare URLs and picks its own frame): each cover rides to Blob like a creative and the
         // server pins it as the ad's thumbnail.
         const coverUrls = new Map<number, string>();
-        if (input.channel === "token") {
-          for (let i = 0; i < media.length; i++) {
-            const cov = media[i].cover;
-            if (!cov || media[i].kind !== "video") continue;
-            const blob = await fetch(cov.url).then((r) => r.blob());
-            const file = new File([blob], cov.name || `cover-${i}.jpg`, { type: blob.type || "image/jpeg" });
-            const safeName = (file.name || `cover-${i}.jpg`).replace(/[^\w.-]+/g, "_");
-            const abort = new AbortController();
-            const timer = window.setTimeout(() => abort.abort(), UPLOAD_TIMEOUT_MS);
-            try {
-              const { url } = await upload(`creatives/hs-${id}-${i}-cover-${safeName}`, file, {
-                access: "public",
-                contentType: file.type || "image/jpeg",
-                handleUploadUrl: "/api/blob-upload",
-                abortSignal: abort.signal,
-              });
-              coverUrls.set(i, url);
-            } catch (e) {
-              throw abort.signal.aborted
-                ? new Error(`cover upload timed out after ${UPLOAD_TIMEOUT_MS / 60_000} min — retry`)
-                : e;
-            } finally {
-              window.clearTimeout(timer);
-            }
-          }
+        for (const [i, file] of preparedCovers) {
+          coverUrls.set(
+            i,
+            await uploadCreativeFile(
+              `creatives/hs-${id}-${i}-cover-${safeBlobName(file.name, `cover-${i}.jpg`)}`,
+              file,
+              `cover "${file.name}"`,
+            ),
+          );
         }
 
         // 2a) FB Token rail: /api/hs/token-launch builds the whole tree in-request and streams
