@@ -1,14 +1,6 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
-import {
-  findTaskRow,
-  findTaskRowStrict,
-  pickTaskFields,
-  readTeamTasks,
-  storeConfigured,
-  strapiFetch,
-  upsertTaskRow,
-} from "@/lib/task-store";
+import { findTaskRow, pickTaskFields, readTeamTasks, storeConfigured, strapiFetch, upsertTaskRow } from "@/lib/task-store";
 
 // HS tasks share the `launch-task` collection (no separate deploy), tagged partner="br" so they
 // live alongside MO rows without colliding — the MO reader excludes "br", this reader takes only
@@ -115,7 +107,7 @@ export async function POST(req: Request) {
             // next line would swallow a terminal error-write while answering ok:true, and the
             // client never retries a claimed success. A store failure throws instead → the batch
             // answers 502 below and the client's next save retries it.
-            const existing = await findTaskRowStrict(String(item.task_id));
+            const existing = await findTaskRow(String(item.task_id), true);
             if (!existing && failureStates.has(incoming)) return { ok: true as const };
             // done is TERMINAL: a stale tab's heartbeat, 60-min cap or late error must never
             // demote a row that already recorded the real completion (live 08-13: tasks the
