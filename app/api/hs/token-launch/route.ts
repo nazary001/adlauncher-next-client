@@ -38,6 +38,7 @@ import { reportPagesUsed } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { taskWriter } from "@/lib/task-store";
 import { acctKey, claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
+import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import { launchFailureDisposition, partialFailureNote } from "@/lib/launch-guards";
 
 export const runtime = "nodejs";
@@ -142,6 +143,8 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
+  // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST.
+  if (!(await accountAllowedFor(session, c.account))) return bad(ACCOUNT_NOT_ASSIGNED_MSG, 403);
   const binds: LaunchBinds = {
     accountId: c.account.replace(/^act_/, ""),
     pageId: c.page,

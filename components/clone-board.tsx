@@ -137,7 +137,7 @@ function CloneInner({
   const teamTm = useTaskManager();
   const aifTm = useAifTaskManager();
   const { enqueueClone, setOpen } = partnerConfig(partnerId).aifLaunch ? aifTm : teamTm;
-  const [settings, setSettings] = useState<CloneSettings>(() => defaultSettings(initialPartner));
+  const [settings, setSettings] = useState<CloneSettings>(() => defaultSettings());
   const [rows, setRows] = useState<CloneRow[]>([]);
   const [loading, setLoading] = useState<boolean>(initialIds.length > 0);
   const [error, setError] = useState<string | null>(null);
@@ -182,16 +182,17 @@ function CloneInner({
   // their own pixel across (it lives on the source's account) — the server enforces this too.
   // AIF derives its pixel server-side (conversions → the postback pixel, clicks → none), so the
   // board never asks for one there.
-  const pixelMissing = !aifMode && isTargetAccount && !settings.pixelId;
-  // Self-heal a stale pixel pick: a reloaded account catalog can drop the picked pixel (pixel
-  // unshared / list refresh) — a pick outside the current options must not ride into the POST
-  // (the server rejects it, but only after the buyer fired). Gated on a LOADED list (null =
-  // still fetching) so a legit pick never clears mid-load; mirrors the launcher card's self-heal.
-  useEffect(() => {
-    if (aifMode || !isTargetAccount || !settings.pixelId) return;
-    if (!adAccounts || adAccounts.length === 0) return;
-    if (!targetPixels.some((p) => p.id === settings.pixelId)) setSettings((s) => ({ ...s, pixelId: "" }));
-  }, [aifMode, isTargetAccount, settings.pixelId, adAccounts, targetPixels]);
+  // A reloaded account catalog can drop the picked pixel (pixel unshared / list refresh): a pick
+  // outside the current LOADED options counts as missing — the bay blocks firing and the picker
+  // asks again. Purely DERIVED (no state surgery, no effect), so a mid-load list (null) never
+  // clears a legit pick and the server's pixel-on-account check stays the final authority.
+  const pixelStale =
+    !aifMode &&
+    isTargetAccount &&
+    Boolean(settings.pixelId) &&
+    Boolean(adAccounts?.length) &&
+    !targetPixels.some((p) => p.id === settings.pixelId);
+  const pixelMissing = !aifMode && isTargetAccount && (!settings.pixelId || pixelStale);
   const destinationMissing = fanpageMissing || accountMissing || pixelMissing;
   // Account launch limit (5 campaigns / 30 min): a concrete TARGET account must fit the whole
   // batch (rows × copies). From-each-source batches aren't metered here — the sources' accounts
@@ -325,7 +326,9 @@ function CloneInner({
           // too) omits them = each clone builds in its source's own account. AIF never sends a
           // pixel — the server derives it (postback pixel for conversions, none for clicks).
           ...(isTargetAccount
-            ? { accountId: settings.accountId, ...(aifMode ? {} : { pixelId: settings.pixelId }) }
+            ? // Belt: a stale pick (no longer among the account's pixels) must never ride the
+              // POST even if some path skips the destinationMissing gate.
+              { accountId: settings.accountId, ...(aifMode ? {} : { pixelId: pixelStale ? "" : settings.pixelId }) }
             : {}),
         };
         enqueueClone({ partnerId, edit, name, geo: geoSummary(r.countries), budget: r.budget });

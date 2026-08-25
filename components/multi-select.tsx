@@ -187,6 +187,7 @@ export function MultiSelect({
           ref={inputRef}
           role="combobox"
           aria-expanded={open}
+          aria-controls={id ? `${id}-listbox` : undefined}
           autoComplete="off"
           spellCheck={false}
           placeholder={values.length === 0 ? placeholder : ""}
@@ -240,7 +241,7 @@ export function MultiSelect({
               ))}
             </div>
           ) : null}
-          <div ref={listRef} className="max-h-60 overflow-y-auto p-1">
+          <div ref={listRef} id={id ? `${id}-listbox` : undefined} role="listbox" className="max-h-60 overflow-y-auto p-1">
             {filtered.length === 0 ? (
               <p className="px-3 py-3 text-[12px] text-faint">No matches</p>
             ) : (

@@ -485,30 +485,34 @@ export function AccountAccessBoard({
     }
   }, []);
 
+  // Drains pendingRef batch-by-batch in ONE loop (no self-reinvocation from `finally` — that
+  // recursive shape also broke React Compiler memoization). On a failed PUT only the FAILED
+  // batch is dropped: an edit queued WHILE it was in flight never failed, stays in pendingRef
+  // (the per-account lists are absolute, so it carries the user's full intent) and the next
+  // loop turn re-flushes it onto the resynced base (review find 08-24).
   const flush = useCallback(async () => {
-    if (inflightSaveRef.current || Object.keys(pendingRef.current).length === 0) return;
+    if (inflightSaveRef.current) return;
     inflightSaveRef.current = true;
-    const batch = pendingRef.current;
-    pendingRef.current = {};
     try {
-      const r = await fetch("/api/acct-assignments", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ set: batch }),
-      });
-      const d = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      setSavedAt(Date.now());
-    } catch (e) {
-      setSaveError(String((e as Error).message ?? e));
-      // Only the FAILED batch is dropped (it was already snapshotted out of pendingRef above) —
-      // an edit queued WHILE it was in flight never failed and must not be silently lost: the
-      // per-account lists are absolute, so re-flushing it onto the resynced base carries the
-      // user's full intent for those accounts (review find 08-24).
-      await resync();
+      while (Object.keys(pendingRef.current).length > 0) {
+        const batch = pendingRef.current;
+        pendingRef.current = {};
+        try {
+          const r = await fetch("/api/acct-assignments", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ set: batch }),
+          });
+          const d = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+          if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+          setSavedAt(Date.now());
+        } catch (e) {
+          setSaveError(String((e as Error).message ?? e));
+          await resync();
+        }
+      }
     } finally {
       inflightSaveRef.current = false;
-      if (Object.keys(pendingRef.current).length) void flush();
     }
   }, [resync]);
 
@@ -529,14 +533,16 @@ export function AccountAccessBoard({
     [flush],
   );
 
-  // Transient "Saved" tick.
-  const [showSaved, setShowSaved] = useState(false);
+  // Transient "Saved" tick: shown while `now - savedAt < 2.5s`. The effect only schedules the
+  // async hide (a synchronous setState inside an effect trips react-hooks/set-state-in-effect
+  // and can cascade renders); the show itself is derived from `savedAt`.
+  const [savedTickAt, setSavedTickAt] = useState(0);
   useEffect(() => {
     if (!savedAt) return;
-    setShowSaved(true);
-    const t = setTimeout(() => setShowSaved(false), 2500);
+    const t = setTimeout(() => setSavedTickAt(savedAt), 2500);
     return () => clearTimeout(t);
   }, [savedAt]);
+  const showSaved = Boolean(savedAt) && savedTickAt !== savedAt;
 
   // ---- filtering -------------------------------------------------------------------------------
   const assignedOf = useCallback((id: string): string[] => assignments?.[keyOf(id)] ?? [], [assignments]);

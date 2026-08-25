@@ -32,6 +32,7 @@ import {
   swapPixel,
 } from "@/lib/clone-run";
 import { launchFailureDisposition, partialFailureNote } from "@/lib/launch-guards";
+import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import { LionError, lionAccountPixels, lionConfigured, lionProfileData } from "@/lib/lion";
 import { ACCT_LIMIT, AcctLimitedError, acctKey, acctLimitMessage, acctLimitSnapshot, claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 
@@ -189,6 +190,8 @@ export async function POST(req: Request): Promise<NextResponse> {
     });
   }
 
+  // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST.
+  if (!(await accountAllowedFor(session, account))) return bad(ACCOUNT_NOT_ASSIGNED_MSG, 403);
   const binds = await validateBinds(profile, account, page, pixel);
   if ("error" in binds) return binds.error;
 

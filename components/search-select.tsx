@@ -290,6 +290,7 @@ export function SearchSelect({
         ref={inputRef}
         role="combobox"
         aria-expanded={open}
+        aria-controls={id ? `${id}-listbox` : undefined}
         autoComplete="off"
         spellCheck={false}
         disabled={disabled}
@@ -420,6 +421,8 @@ export function SearchSelect({
               ) : null}
               <div
                 ref={listRef}
+                id={id ? `${id}-listbox` : undefined}
+                role="listbox"
                 style={listH != null ? { height: listH } : undefined}
                 className="max-h-72 overflow-y-auto transition-[height] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
               >

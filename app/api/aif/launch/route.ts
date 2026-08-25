@@ -31,6 +31,7 @@ import {
 } from "@/lib/aif-launch";
 import { backfillBrand, claimBrand, deleteBrand } from "@/lib/aif-claim";
 import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
+import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import { reportPagesUsed } from "@/lib/hs-pages";
 import { taskWriter } from "@/lib/task-store";
 import { del } from "@vercel/blob";
@@ -141,6 +142,10 @@ export async function POST(req: Request) {
     pageName: "", // resolved below, once the picked page passes validation
     pixelId: conversions ? AIF_PIXEL.id : "",
   };
+  // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST.
+  if (!(await accountAllowedFor(session, pickedAccount))) {
+    return NextResponse.json({ ok: false, stage: "config", error: ACCOUNT_NOT_ASSIGNED_MSG }, { status: 403 });
+  }
 
   try {
     if (!/^\d{5,}$/.test(pickedAccount)) {

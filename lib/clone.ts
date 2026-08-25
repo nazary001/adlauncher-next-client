@@ -107,7 +107,7 @@ export type CloneSettings = {
   copies: number;
 };
 
-export function defaultSettings(_partner: PartnerId): CloneSettings {
+export function defaultSettings(): CloneSettings {
   return { pageId: "", accountId: "", pixelId: "", userOs: "all", copies: 1 };
 }
 

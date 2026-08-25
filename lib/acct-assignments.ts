@@ -135,3 +135,23 @@ export async function filterAccountsFor<T>(
     return users.some((u) => normUser(u) === me);
   });
 }
+
+/**
+ * Fire-time belt over the picker filter (owner ask 08-25): may `session` launch/clone INTO this
+ * ad account? Same visibility contract as filterAccountsFor — owner, unassigned account or an
+ * unreachable registry all answer yes — so a crafted POST can never reach an account the picker
+ * would not have shown. Every campaign-creating route checks this before any claim or stamp.
+ */
+export async function accountAllowedFor(session: Session | null, accountId: string): Promise<boolean> {
+  if (!session || isOwnerSession(session)) return true;
+  const reg = await cachedAssignments();
+  if (!reg) return true; // store unreachable → fail open (same as the pickers)
+  const users = reg.data.accounts[acctAssignKey(accountId)];
+  if (!users || users.length === 0) return true; // unassigned = shared
+  const me = normUser(session.username);
+  return users.some((u) => normUser(u) === me);
+}
+
+/** The refusal every fire-time gate answers with (403) — names the fix, not just the block. */
+export const ACCOUNT_NOT_ASSIGNED_MSG =
+  "account_not_assigned — this ad account is assigned to other buyers on /accounts; pick one of yours";

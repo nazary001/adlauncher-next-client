@@ -26,6 +26,7 @@ import {
   withParentRetry,
 } from "@/lib/fb-graph";
 import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
+import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import { launchFailureDisposition, partialFailureNote } from "@/lib/launch-guards";
 import { fetchValidatedImage, uploadImage, uploadVideo, videoThumb, waitForVideo } from "@/lib/fb-media";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
@@ -164,6 +165,10 @@ export async function POST(req: Request) {
   };
   if (!binds.accountId && !partner.accountsFromToken) {
     return NextResponse.json({ ok: false, stage: "config", error: "partner_not_launchable" }, { status: 400 });
+  }
+  // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST.
+  if (!(await accountAllowedFor(session, binds.accountId))) {
+    return NextResponse.json({ ok: false, stage: "config", error: ACCOUNT_NOT_ASSIGNED_MSG }, { status: 403 });
   }
   try {
     if (partner.accountsFromToken) {

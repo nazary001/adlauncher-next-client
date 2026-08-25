@@ -5,6 +5,7 @@ import { reportPagesUsed } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { stampHsTaskRow } from "@/lib/task-store";
 import { AcctLimitedError, acctKey, claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
+import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import {
   LION_ACR,
   LionError,
@@ -77,6 +78,8 @@ export async function POST(req: Request): Promise<NextResponse> {
     return bad(`lion_unreachable: ${(e as Error).message}`, 502);
   }
   if (!pixels.some((p) => p.id === c.pixel)) return bad("pixel_not_on_account");
+  // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST.
+  if (!(await accountAllowedFor(session, c.account))) return bad(ACCOUNT_NOT_ASSIGNED_MSG, 403);
 
   // ---- build + submit ----
   const payload = hsCreatePayload(c, creatives, data.locales, LION_ACR, todaySaoPauloDDMM());

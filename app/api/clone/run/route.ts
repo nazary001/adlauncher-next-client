@@ -28,6 +28,7 @@ import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import { backfillBrand, claimBrand, deleteBrand } from "@/lib/aif-claim";
 import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 import { reportPagesUsed } from "@/lib/hs-pages";
+import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import { taskWriter } from "@/lib/task-store";
 import type { CloneEdit } from "@/lib/clone";
 import {
@@ -273,6 +274,11 @@ export async function POST(req: Request) {
             throw new FbError(`source account act_${src.accountId} is not available to the launch token`, { campaignId: edit.campaignId });
           }
           const binds = resolveCloneBinds(edit, src);
+          // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted
+          // POST — and for a same-account clone whose SOURCE lives in someone else's account.
+          if (!(await accountAllowedFor(session, binds.accountId))) {
+            throw new FbError(ACCOUNT_NOT_ASSIGNED_MSG, { campaignId: edit.campaignId }, 403);
+          }
           // AIF pixel policy is DERIVED, never picked (parity with /api/aif/launch): a conversion
           // source pins the postback pixel — shared to every AIF cabinet — and click sources stay
           // pixel-less. The RW link carries no &pixel= param, so only the adset needs it.

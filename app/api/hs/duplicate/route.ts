@@ -3,6 +3,7 @@ import { bidKind, parseMoney } from "@/lib/types";
 import { hsWireBid } from "@/lib/hs-launch";
 import { overrideDeadlineError } from "@/lib/launch-guards";
 import { reportPagesUsed } from "@/lib/hs-pages";
+import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { readAppCache, writeAppCache } from "@/lib/app-cache";
 import {
@@ -229,6 +230,8 @@ export async function POST(req: Request): Promise<NextResponse> {
         taskId: `hsd-${waveId}-${String(shots.length).padStart(2, "0")}`,
       });
     }
+    // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST.
+    if (!(await accountAllowedFor(session, account))) return bad(ACCOUNT_NOT_ASSIGNED_MSG, 403);
     const binds = await validateBinds(profile, account, page, pixel);
     if ("error" in binds) return binds.error;
 
@@ -376,6 +379,8 @@ export async function POST(req: Request): Promise<NextResponse> {
     return bad("bid_invalid");
   }
 
+  // Fire-time belt over the picker filter (legacy single-shot path) — same /accounts contract.
+  if (!(await accountAllowedFor(session, account))) return bad(ACCOUNT_NOT_ASSIGNED_MSG, 403);
   const binds = await validateBinds(profile, account, page, pixel);
   if ("error" in binds) return binds.error;
 
