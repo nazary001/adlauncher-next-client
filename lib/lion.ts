@@ -271,6 +271,167 @@ export async function lionDuplicate(args: {
   return results[0];
 }
 
+export type LionJuroResult = {
+  object_story_ids?: string[];
+  result?: string;
+  message?: string;
+  reason?: string;
+  task_ids?: string[];
+};
+
+/**
+ * Launch a NEW campaign from a source's page posts (`POST /jurar/`) — the JURO clone: every ad
+ * re-uses an existing object story, so the ads live on the SOURCE post's fanpage (no page_id in
+ * the wire — but the executor profile must list that page, probed live 08-25: "Page with ID …
+ * not found in profile data"). Targeting is explicit (countries + locales); LION builds the name
+ * itself (`… API - JURO - …`) and only appends `name_suffix`.
+ * Money: starting_budget = CENTS. Bid: cap = CENTS; MIN_ROAS = goal ×100 int (0,9 → 90 → Meta
+ * floor 9000 — probed live 08-25; the doc's "decimal 1.20" is WRONG: 1.2 lands as floor 100).
+ * ⚠️ Born ACTIVE (probed live 08-25, unlike duplicate's PAUSED births) — a failed shot leaves an
+ * ACTIVE 0-ad shell that LION's status/ endpoint 404s on.
+ * ⚠️ This is a BUILDER, not a cloner: the campaign shell is fixed (OUTCOME_SALES, 18+, FULL
+ * placement — the HS pool's contract, same as the team's bot) — the source's objective/age/
+ * placements are NOT inherited, only its posts and (by the caller) its targeting/bid.
+ */
+export async function lionJurar(args: {
+  profile_slug: string;
+  account_id: string;
+  pixel_id: string;
+  object_story_ids: string[];
+  starting_budget: number;
+  country_codes: string[];
+  locales: { id: number; name: string }[];
+  name_suffix: string;
+  bid_strategy?: string;
+  starting_bid?: number;
+  conversion_event: string;
+}): Promise<LionJuroResult> {
+  const body = (await lionPostOnce("/api/facebook/campaigns/jurar/", {
+    profile_slug: args.profile_slug,
+    account_id: args.account_id,
+    pixel_id: args.pixel_id,
+    campaigns: [
+      {
+        object_story_ids: args.object_story_ids,
+        starting_budget: args.starting_budget,
+        conversion_event: args.conversion_event,
+        age_min: "18",
+        position: "FULL",
+        objective: "OUTCOME_SALES",
+        country_codes: args.country_codes,
+        locales: args.locales,
+        number_of_copies: 1,
+        name_suffix: args.name_suffix,
+        ...(args.bid_strategy ? { bid_strategy: args.bid_strategy } : {}),
+        ...(args.starting_bid != null ? { starting_bid: args.starting_bid } : {}),
+      },
+    ],
+  })) as Record<string, unknown> | null;
+  const results = Array.isArray(body?.juro_results) ? (body!.juro_results as LionJuroResult[]) : [];
+  if (results.length === 0) {
+    throw new LionError("LION jurar returned no juro_results", undefined, body);
+  }
+  return results[0];
+}
+
+export type LionJuroSource = {
+  campaignId: string;
+  name: string;
+  /** "UNREADABLE" = details/ can't see the campaign right now (deleted or fresh-campaign lag). */
+  status: string;
+  /** The page-post ids behind the source's ads — what jurar re-uses. Empty on UNREADABLE. */
+  stories: string[];
+  /** Page carrying those posts (story id prefix) — the executor profile must list it. */
+  page: string;
+  countries: string[];
+  locales: { id: number; name: string }[];
+  adsCount: number;
+  bidStrategy: string;
+  /** Source's own bid in HUMAN units (cap $ / ROAS goal decimal); null = unknown right now. */
+  bid: number | null;
+};
+
+/** Everything the JURO rail needs about source campaigns in ONE details/ + targeting/ pass:
+ *  the ads' object_story_ids (the posts jurar re-launches), the source targeting it inherits by
+ *  default, and the bid facts for the wire scaling. MIN_ROAS goals only exist in metrics —
+ *  filled from lionMyBids like lionSourceInfo does. Uncached: read once at fire time. */
+export async function lionJuroSources(campaignIds: string[]): Promise<Record<string, LionJuroSource>> {
+  const out: Record<string, LionJuroSource> = {};
+  if (campaignIds.length === 0) return out;
+  type Ad = { creative?: { object_story_id?: string } };
+  type DetailsRow = {
+    campaign_id?: string | number;
+    campaign_name?: string;
+    campaign_status?: string;
+    bid_strategy?: string;
+    adsets?: Array<{ bid_amount?: number; adset_bid?: number; ads?: Ad[] }>;
+  };
+  type TargetingRow = {
+    campaign_id?: string | number;
+    countries_code?: string[];
+    locales?: string[];
+    locales_ids?: Array<number | string>;
+  };
+  const [detailsBody, targetingBody] = await Promise.all([
+    lionPost("/api/facebook/campaigns/details/", { campaign_ids: campaignIds }) as Promise<Record<string, unknown> | null>,
+    lionGet(
+      `/api/facebook/campaigns/targeting/?campaign_ids=${encodeURIComponent(JSON.stringify(campaignIds))}`,
+    ) as Promise<Record<string, unknown> | null>,
+  ]);
+  const details = Array.isArray(detailsBody?.campaignsData) ? (detailsBody!.campaignsData as DetailsRow[]) : [];
+  const targeting = Array.isArray(targetingBody?.campaignsData)
+    ? (targetingBody!.campaignsData as TargetingRow[])
+    : [];
+  const tById = new Map(targeting.map((t) => [String(t.campaign_id ?? ""), t]));
+  const dById = new Map(details.map((d) => [String(d.campaign_id ?? ""), d]));
+  for (const cid of campaignIds) {
+    const d = dById.get(cid);
+    const t = tById.get(cid);
+    const locales = (t?.locales_ids ?? [])
+      .map((id, i) => ({ id: Number(id), name: String((t?.locales ?? [])[i] ?? "") }))
+      .filter((l) => Number.isFinite(l.id) && l.id > 0);
+    if (!d) {
+      out[cid] = {
+        campaignId: cid, name: "", status: "UNREADABLE", stories: [], page: "",
+        countries: (t?.countries_code ?? []).map(String), locales, adsCount: 0, bidStrategy: "", bid: null,
+      };
+      continue;
+    }
+    const adsets = Array.isArray(d.adsets) ? d.adsets : [];
+    const ads = adsets.flatMap((a) => (Array.isArray(a.ads) ? a.ads : []));
+    const stories = [...new Set(ads.map((a) => String(a.creative?.object_story_id ?? "")).filter(Boolean))];
+    const bidRaw = adsets[0]?.bid_amount ?? adsets[0]?.adset_bid;
+    out[cid] = {
+      campaignId: cid,
+      name: String(d.campaign_name ?? ""),
+      status: String(d.campaign_status ?? ""),
+      stories,
+      page: stories[0]?.split("_")[0] ?? "",
+      countries: (t?.countries_code ?? []).map(String),
+      locales,
+      adsCount: ads.length,
+      bidStrategy: String(d.bid_strategy ?? ""),
+      bid: typeof bidRaw === "number" ? bidRaw : null,
+    };
+  }
+  // MIN_ROAS goals never appear in details/ — metrics is the only read that has them (same
+  // fallback as lionSourceInfo; metrics down = bid stays null and the route asks for a typed bid).
+  if (campaignIds.some((cid) => out[cid].bid == null && out[cid].status !== "UNREADABLE")) {
+    try {
+      const bids = await lionMyBids();
+      for (const cid of campaignIds) {
+        if (out[cid].bid == null) {
+          const b = bids.get(cid);
+          if (b != null) out[cid].bid = b;
+        }
+      }
+    } catch {
+      /* metrics down — bids stay null */
+    }
+  }
+  return out;
+}
+
 /** Flip one campaign's status. A clone's birth status is unpredictable (PAUSED in the morning,
  *  ACTIVE by afternoon — live 07-07), so the duplicate flow always activates after COMPLETED;
  *  re-activating an already-active campaign answers "Application does not have permission for

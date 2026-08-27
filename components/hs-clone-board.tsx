@@ -120,6 +120,12 @@ const freshRow = (campaignId: string, n: number): Row => ({
 const overrideGeoLabel = (codes: string[]): string =>
   codes.includes("WW") ? "World" : geoSummary(codes);
 
+/** APPROXIMATE preview of a JURO clone's fixed part: LION builds the whole name server-side
+ *  (`[DD/MM] (ACR) API - JURO - (label) - [CC] - <family>` — the family comes from ITS records
+ *  of the posts, live 08-25), so the board only mirrors the shape: the re-dated prefix with the
+ *  JURO marker instead of "(CLONE)". The tail still appends as name_suffix verbatim. */
+const juroPrefixPreview = (prefix: string): string => prefix.replace(/API\s*\(CLONE\)\s*-/, "API - JURO -");
+
 /**
  * HS duplicator, structured like LION's own duplicator UI: a Settings column (destination binds
  * + global copies + Preview→Duplicate) and a Selected Campaigns table whose rows show the REAL
@@ -147,20 +153,36 @@ export function HsCloneBoard({
   const [copies, setCopies] = useState("1");
   const [previewed, setPreviewed] = useState(false);
   const [firing, setFiring] = useState(false);
-  // Duplicate rail: LION's clone weapon (default) vs OUR FB token building each tree directly on
-  // the Graph (owner ask 08-18 — same channel pair as the launcher). Survives refreshes; the
-  // token option unlocks only once the server says the rail is provisioned.
+  // Board mode: the CLONER (duplicate an existing tree) vs JURO (new campaign from the source's
+  // page POSTS via LION /jurar/ — no page bind; geo/locales ride natively in the wire). Each
+  // mode carries its own LION-vs-FB-token channel pair (owner ask 08-26); JURO's token rail is
+  // not built yet, so its chip sits disabled until it ships. Both picks survive refreshes; the
+  // cloner's token option unlocks only once the server says the rail is provisioned.
+  const [mode, setMode] = useState<"clone" | "juro">("clone");
   const [dupChannel, setDupChannel] = useState<"lion" | "token">("lion");
   useEffect(() => {
     try {
+      const m = localStorage.getItem("adlauncher.hs.mode");
       const v = localStorage.getItem("adlauncher.hs.dupchannel");
       // Safe setState-in-effect: runs once on mount (localStorage is unreadable during SSR).
       // eslint-disable-next-line react-hooks/set-state-in-effect
+      if (m === "juro" || m === "clone") setMode(m);
+      // pre-split storage carried the mode inside the channel key ("juro") — map it forward
+      else if (v === "juro") setMode("juro");
       if (v === "token" || v === "lion") setDupChannel(v);
     } catch {
       /* storage disabled — session-local pick only */
     }
   }, []);
+  const changeMode = (m: "clone" | "juro") => {
+    setMode(m);
+    setPreviewed(false);
+    try {
+      localStorage.setItem("adlauncher.hs.mode", m);
+    } catch {
+      /* storage disabled */
+    }
+  };
   const changeDupChannel = (ch: "lion" | "token") => {
     setDupChannel(ch);
     setPreviewed(false);
@@ -189,12 +211,19 @@ export function HsCloneBoard({
   const data = profile ? hs.dataFor(profile) : undefined;
   const pixels = profile && account ? hs.pixelsFor(profile, account) : undefined;
 
+  const effDupChannel: "lion" | "token" | "juro" =
+    mode === "juro" ? "juro" : dupChannel === "token" && hs.tokenLaunch ? "token" : "lion";
+  // JURO relaunches the source's page POSTS — the ads live on the source post's fanpage, so
+  // there is no page bind at all (the executor profile must carry that page; server-checked).
+  const needsPage = effDupChannel !== "juro";
+
   // A one-pixel account needs no picking — the field DERIVES the lone id (no effect write: the
   // react-compiler lint rejects sync setState in effects, and a derived value can't ever lag the
   // list), but only once the page is picked (owner ask 08-13 — the pixel belongs at the fanka
   // step, not right after the account). A real user pick (multi list) still wins via state.
   const onlyPixel = Array.isArray(pixels) && pixels.length === 1 ? pixels[0].id : "";
-  const effectivePixel = pixel || (page ? onlyPixel : "");
+  // JURO has no page step — the lone pixel derives right after the account there.
+  const effectivePixel = pixel || (page || !needsPage ? onlyPixel : "");
 
   const pickProfile = (slug: string) => {
     setProfile(slug);
@@ -298,7 +327,7 @@ export function HsCloneBoard({
     return () => clearTimeout(timer);
   }, [rows, user?.username]);
 
-  const bindsReady = Boolean(profile && account && page && effectivePixel);
+  const bindsReady = Boolean(profile && account && (page || !needsPage) && effectivePixel);
   const copiesN = Math.min(MAX_COPIES, Math.max(1, Math.round(Number(copies) || 1)));
   const validRows = rows.filter((r) => /^\d{5,}$/.test(r.campaignId.trim()) && parseMoney(r.budget) >= 1);
   const unreadable = rows.filter((r) => r.info?.status === "UNREADABLE").length;
@@ -316,7 +345,6 @@ export function HsCloneBoard({
   // wave cap is tighter (mirrors the server's MAX_TOKEN_SHOTS).
   const MAX_SHOTS_PER_FIRE = 45;
   const MAX_TOKEN_SHOTS_PER_FIRE = 10;
-  const effDupChannel: "lion" | "token" = dupChannel === "token" && hs.tokenLaunch ? "token" : "lion";
   // Whole launch-token pool burned → the token rail is closed (the server gate refuses waves
   // anyway — this keeps the click honest instead of round-tripping into a 429).
   const tokenStatus = useHsTokenStatus();
@@ -343,8 +371,13 @@ export function HsCloneBoard({
   async function duplicateAll() {
     if (!bindsReady || validRows.length === 0 || firing || acctOver || limits.staleBuild) return;
     // Token-rail wave while the whole pool is burned → honest local stop (the server gate would
-    // refuse it with the same message anyway). Geo-override LION waves need a live token too.
-    if (tokensDown && (effDupChannel === "token" || validRows.some((r) => r.countries.length > 0 || r.locales.length > 0))) {
+    // refuse it with the same message anyway). Geo-override LION waves need a live token too —
+    // JURO doesn't: its geo/locales ride natively in the jurar wire, no Graph patch involved.
+    if (
+      tokensDown &&
+      (effDupChannel === "token" ||
+        (effDupChannel === "lion" && validRows.some((r) => r.countries.length > 0 || r.locales.length > 0)))
+    ) {
       alert(
         "All FB launch tokens are rate-limited right now — " +
           (effDupChannel === "token"
@@ -393,11 +426,15 @@ export function HsCloneBoard({
         // rides in HUMAN units and is scaled to LION's Meta-native wire unit server-side.
         ...(r.info?.bidStrategy ? { bidStrategy: r.info.bidStrategy } : {}),
         geo,
-        // Full name = fixed grammar prefix + channel marker + the buyer's tail (replaces the
-        // old one). When the source couldn't be read there's no prefix — LION rebuilds the name.
-        ...(r.info?.name ? { name: `${prefix}${mark}${r.suffix.trim()}`.trim() } : {}),
-        // Targeting override — the server patches the clone (token rail: before creating the ad
-        // set; LION rail: through the Graph once the clone is born).
+        // JURO: LION builds the name itself (`… API - JURO - …`) — only the buyer's tail rides
+        // as name_suffix. Other rails: full name = fixed grammar prefix + channel marker + tail.
+        ...(effDupChannel === "juro"
+          ? { suffix: r.suffix.trim() }
+          : r.info?.name
+            ? { name: `${prefix}${mark}${r.suffix.trim()}`.trim() }
+            : {}),
+        // Targeting override — JURO sends it natively in the jurar wire; the other rails patch
+        // the clone (token rail: before creating the ad set; LION rail: Graph after birth).
         ...(overridden ? { countries: r.countries } : {}),
         ...(r.locales.length ? { locales: r.locales } : {}),
         label: copiesN > 1 ? `${label} · copy ${copy + 1}/${copiesN}` : label,
@@ -411,10 +448,20 @@ export function HsCloneBoard({
       waveRef.current = { sig, id: crypto.randomUUID() };
     }
     try {
-      const res = await fetch(effDupChannel === "token" ? "/api/hs/token-duplicate" : "/api/hs/duplicate", {
+      const endpoint =
+        effDupChannel === "token" ? "/api/hs/token-duplicate" : effDupChannel === "juro" ? "/api/hs/jurar" : "/api/hs/duplicate";
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profile, account, page, pixel: effectivePixel, shots, waveId: waveRef.current.id }),
+        body: JSON.stringify({
+          profile,
+          account,
+          // JURO has no page bind — the ads live on the source post's own fanpage.
+          ...(effDupChannel === "juro" ? {} : { page }),
+          pixel: effectivePixel,
+          shots,
+          waveId: waveRef.current.id,
+        }),
       });
       const d = (await res.json().catch(() => ({}))) as { ok?: boolean; queued?: number; error?: string };
       if (d?.ok) {
@@ -481,18 +528,27 @@ export function HsCloneBoard({
                   }
                 />
               </Field>
-              <Field label="Page">
-                <SearchSelect
-                  value={page}
-                  onChange={(v) => {
-                    setPage(v);
-                    setPreviewed(false);
-                  }}
-                  options={data?.pages ?? []}
-                  placeholder="Search page"
-                  emptyHint={!profile ? "Pick a profile first" : data ? "No pages" : "Loading…"}
-                />
-              </Field>
+              {needsPage ? (
+                <Field label="Page">
+                  <SearchSelect
+                    value={page}
+                    onChange={(v) => {
+                      setPage(v);
+                      setPreviewed(false);
+                    }}
+                    options={data?.pages ?? []}
+                    placeholder="Search page"
+                    emptyHint={!profile ? "Pick a profile first" : data ? "No pages" : "Loading…"}
+                  />
+                </Field>
+              ) : (
+                <Field label="Page">
+                  <p className="rounded-lg border border-dashed border-line bg-surface2/50 px-3 py-2 text-[11px] leading-relaxed text-faint">
+                    JURO reuses the source&apos;s page posts — ads land on the source post&apos;s own
+                    fanpage. The picked profile must carry that page (checked per shot).
+                  </p>
+                </Field>
+              )}
               <Field label="Pixel">
                 <SearchSelect
                   value={effectivePixel}
@@ -518,31 +574,75 @@ export function HsCloneBoard({
                 />
               </Field>
 
-              {/* duplicate rail: LION's clone weapon vs our FB token building each tree on the
-                  Graph — same channel pair (and the same provisioning gate) as the launcher. */}
+              {/* board mode (cloner vs JURO), then the mode's own LION-vs-FB-token channel pair.
+                  The cloner pair keeps the launcher's provisioning/cooldown gates; JURO's token
+                  rail is not built yet — its chip is a disabled "in development" stub. */}
               <div className="mt-1 flex flex-col gap-1">
                 <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
                   {(
                     [
-                      { key: "lion" as const, label: "LION API", ready: true, down: false },
-                      { key: "token" as const, label: "FB Token", ready: hs.tokenLaunch, down: tokensDown },
+                      { key: "clone" as const, label: "Cloner" },
+                      { key: "juro" as const, label: "JURO" },
                     ]
                   ).map((opt) => {
-                    const active = dupChannel === opt.key;
+                    const active = mode === opt.key;
+                    return (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        aria-pressed={active}
+                        onClick={() => changeMode(opt.key)}
+                        className={
+                          "h-8 rounded-[10px] text-[12px] font-semibold transition-all duration-150 " +
+                          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
+                          (active
+                            ? "bg-accent/20 text-[#9db8ff] shadow-[inset_0_0_0_1px_rgba(122,150,255,0.35)]"
+                            : "text-dim hover:text-ink")
+                        }
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
+                  {(mode === "juro"
+                    ? [
+                        { key: "lion" as const, label: "LION API", ready: true, down: false, hint: undefined },
+                        {
+                          key: "token" as const,
+                          label: "FB Token",
+                          ready: false,
+                          down: false,
+                          hint: "JURO over our FB token is in development — LION API only for now",
+                        },
+                      ]
+                    : [
+                        { key: "lion" as const, label: "LION API", ready: true, down: false, hint: undefined },
+                        {
+                          key: "token" as const,
+                          label: "FB Token",
+                          ready: hs.tokenLaunch,
+                          down: tokensDown,
+                          hint: hs.tokenLaunch
+                            ? tokensDown
+                              ? "All FB launch tokens are rate-limited — the rail re-opens after a cooldown (see the Tokens widget)"
+                              : undefined
+                            : "FB token not configured on the server (FB_HS_LAUNCH_TOKEN)",
+                        },
+                      ]
+                  ).map((opt) => {
+                    const active = mode === "juro" ? opt.key === "lion" : dupChannel === opt.key;
                     return (
                       <button
                         key={opt.key}
                         type="button"
                         disabled={!opt.ready}
                         aria-pressed={active}
-                        title={
-                          !opt.ready
-                            ? "FB token not configured on the server (FB_HS_LAUNCH_TOKEN)"
-                            : opt.down
-                              ? "All FB launch tokens are rate-limited — the rail re-opens after a cooldown (see the Tokens widget)"
-                              : undefined
-                        }
-                        onClick={() => changeDupChannel(opt.key)}
+                        title={opt.hint}
+                        onClick={() => {
+                          if (mode !== "juro") changeDupChannel(opt.key);
+                        }}
                         className={
                           "h-8 rounded-[10px] text-[12px] font-semibold transition-all duration-150 " +
                           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
@@ -571,7 +671,9 @@ export function HsCloneBoard({
                     ? "Both FB launch tokens are rate-limited — this rail is blocked until a cooldown lifts; fire on LION API or wait"
                     : effDupChannel === "token"
                       ? `Our FB token rebuilds each tree · starts +30 min · max ${MAX_TOKEN_SHOTS_PER_FIRE}/wave`
-                      : "LION's clone weapon builds on the weapon side"}
+                      : effDupChannel === "juro"
+                        ? "New campaign from the source's page posts (social proof kept) · geo/languages editable per row · born ACTIVE · FB Token rail in development"
+                        : "LION's clone weapon builds on the weapon side"}
                 </p>
               </div>
 
@@ -605,7 +707,11 @@ export function HsCloneBoard({
                   }
                 >
                   <CopyIcon className="h-4 w-4" />
-                  {firing ? "Submitting…" : `Duplicate ${totalClones} clone${totalClones === 1 ? "" : "s"}`}
+                  {firing
+                    ? "Submitting…"
+                    : effDupChannel === "juro"
+                      ? `JURO ${totalClones} cop${totalClones === 1 ? "y" : "ies"}`
+                      : `Duplicate ${totalClones} clone${totalClones === 1 ? "" : "s"}`}
                 </button>
               ) : null}
               {bindsReady && acctOver ? (
@@ -621,7 +727,9 @@ export function HsCloneBoard({
                   ? previewed
                     ? "Submits to LION · clones activate automatically"
                     : "Preview first, then duplicate"
-                  : "Pick profile · account · page · pixel"}
+                  : needsPage
+                    ? "Pick profile · account · page · pixel"
+                    : "Pick profile · account · pixel"}
               </p>
             </div>
           </aside>
@@ -679,7 +787,9 @@ export function HsCloneBoard({
                                   splitLionName(r.info.name, todaySaoPauloDDMM()).prefix,
                                   r.countries,
                                 );
-                                return p ? p + (effDupChannel === "token" ? HS_TOKEN_MARK : "") : r.info.name;
+                                if (!p) return r.info.name;
+                                if (effDupChannel === "juro") return `${juroPrefixPreview(p)}…`;
+                                return p + (effDupChannel === "token" ? HS_TOKEN_MARK : "");
                               })()
                             ) : (
                               "—"
@@ -871,10 +981,10 @@ export function HsCloneBoard({
                     <p key={r.id} className="text-[12px] text-dim">
                       <span className="text-ink">
                         {r.info?.name
-                          ? `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}${effDupChannel === "token" ? HS_TOKEN_MARK : ""}${r.suffix.trim()}`.slice(
-                              0,
-                              110,
-                            )
+                          ? (effDupChannel === "juro"
+                              ? `${juroPrefixPreview(relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries))}… ${r.suffix.trim()}`
+                              : `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}${effDupChannel === "token" ? HS_TOKEN_MARK : ""}${r.suffix.trim()}`
+                            ).slice(0, 110)
                           : `#${r.campaignId}`}
                       </span>{" "}
                       → {copiesN} cop{copiesN === 1 ? "y" : "ies"} @ ${moneyLabel(r.budget)}/day
