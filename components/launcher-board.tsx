@@ -195,8 +195,11 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       /* storage disabled */
     }
   }, []);
-  /** The EFFECTIVE soc for this wave ("" = system token): picked AND provisioned server-side. */
-  const moSoc = partnerId === "in" && moChannel && (moSocs ?? []).includes(moChannel) ? moChannel : "";
+  /** The EFFECTIVE soc for this wave ("" = system token): picked AND provisioned server-side.
+   *  An UNHEALTHY soc stays effective — its pickers/launch error with FB's own reason (shown
+   *  under the switch); silently snapping to the system token would defeat the routing. */
+  const moSoc =
+    partnerId === "in" && moChannel && (moSocs ?? []).some((s) => s.name === moChannel) ? moChannel : "";
 
   // Token fanpages for the per-card fanka picker, each with its live N/limit fill tag from the
   // hs-tools registry (AIF reads its own token's pages; its registry scope fills the badges the

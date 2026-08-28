@@ -47,6 +47,54 @@ export function moSocNames(): string[] {
   return SOCS.map((s) => s.name);
 }
 
+// ---- live token health (the board's switch shows WHY a soc's catalogs come back empty) --------
+
+type ProbeResult = { ok: boolean; error?: string };
+/** Verdicts cached per soc for a minute — every board mount pings, and 5 socs must not turn a
+ *  team's morning into a Graph-call storm. Transient probe failures are NOT cached. */
+const probeCache = new Map<string, { at: number; res: ProbeResult }>();
+const PROBE_TTL_MS = 60_000;
+const GRAPH = "https://graph.facebook.com/v21.0";
+
+/** One soc's health: a tiny RAW `/me` read — deliberately not fbGet, whose budget/backoff would
+ *  turn a dead-token verdict into a patient multi-second retry. FB's own error text IS the
+ *  diagnosis the buyer needs ("session has been invalidated…" = re-issue this soc's token). */
+async function probeSoc(e: SocEntry): Promise<ProbeResult> {
+  const hit = probeCache.get(e.name);
+  if (hit && Date.now() - hit.at < PROBE_TTL_MS) return hit.res;
+  let res: ProbeResult;
+  try {
+    const r = await fetch(`${GRAPH}/me?fields=id&access_token=${encodeURIComponent(e.token)}`, {
+      signal: AbortSignal.timeout(8000),
+      cache: "no-store",
+    });
+    const j = (await r.json().catch(() => null)) as
+      | { id?: string; error?: { message?: string; code?: number; error_subcode?: number } }
+      | null;
+    if (j?.id) res = { ok: true };
+    else {
+      const err = j?.error;
+      res = {
+        ok: false,
+        error: err
+          ? `(#${err.code ?? "?"}${err.error_subcode ? `/${err.error_subcode}` : ""}) ${err.message ?? "token rejected"}`
+          : `HTTP ${r.status}`,
+      };
+    }
+  } catch {
+    return { ok: false, error: "probe timeout — Graph unreachable" }; // transient: not cached
+  }
+  probeCache.set(e.name, { at: Date.now(), res });
+  return res;
+}
+
+export type SocStatus = { name: string; ok: boolean; error?: string };
+
+/** Every provisioned soc with its live token verdict (probed in parallel, 60s cache). */
+export async function moSocStatuses(): Promise<SocStatus[]> {
+  return Promise.all(SOCS.map(async (s) => ({ name: s.name, ...(await probeSoc(s)) })));
+}
+
 export type MoChannel =
   | { kind: "system" }
   | { kind: "soc"; name: string; token: string; cat: TokenCatalog };

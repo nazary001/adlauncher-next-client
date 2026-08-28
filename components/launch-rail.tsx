@@ -6,6 +6,7 @@ import { CONVERSION_EVENTS, geoSummary } from "@/lib/catalog";
 import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { type PartnerConfig, launchReadyOpts, markerPool } from "@/lib/partners";
 import type { HsLaunchChannel } from "./hs-task-manager";
+import type { MoSocStatus } from "./use-mo-socs";
 import { CheckIcon, EyeIcon, RocketIcon } from "./icons";
 import { useAcctLimits } from "./use-acct-limit";
 
@@ -38,8 +39,10 @@ export function LaunchRail({
   /** FB Token rail provisioned server-side — until then the Token option renders disabled. */
   hsTokenReady?: boolean;
   onHsChannel?: (ch: HsLaunchChannel) => void;
-  /** MO soc channels provisioned server-side (names; null while loading, [] = switch hidden). */
-  moSocs?: string[] | null;
+  /** MO soc channels provisioned server-side, each with its live token verdict (null while
+   *  loading, [] = switch hidden). A dead soc renders flagged, with FB's reason under the
+   *  switch when picked — so an empty account picker reads as "re-issue this token". */
+  moSocs?: MoSocStatus[] | null;
   /** The STORED MO signer pick ("" = system token) — what the switch highlights. */
   moChannel?: string;
   /** The EFFECTIVE soc for the wave ("" = system): picked AND provisioned — drives the name
@@ -254,35 +257,57 @@ export function LaunchRail({
                 className="grid overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5"
                 style={{ gridTemplateColumns: `repeat(${1 + (moSocs?.length ?? 0)}, minmax(0, 1fr))` }}
               >
-                {[{ key: "", label: "System token" }, ...(moSocs ?? []).map((s) => ({ key: s, label: s }))].map(
-                  (opt) => {
-                    const active = moChannel === opt.key;
-                    return (
-                      <button
-                        key={opt.key || "system"}
-                        type="button"
-                        aria-pressed={active}
-                        title={opt.key ? `Launch as the "${opt.key}" soc token` : "Launch via the system-user token"}
-                        onClick={() => onMoChannel?.(opt.key)}
-                        className={
-                          "h-8 truncate rounded-[10px] px-1 text-[12px] font-semibold transition-all duration-150 " +
-                          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
-                          (active
-                            ? "bg-accent/20 text-[#9db8ff] shadow-[inset_0_0_0_1px_rgba(122,150,255,0.35)]"
+                {[
+                  { key: "", label: "System token", dead: false, err: "" },
+                  ...(moSocs ?? []).map((s) => ({ key: s.name, label: s.name, dead: !s.ok, err: s.error ?? "" })),
+                ].map((opt) => {
+                  const active = moChannel === opt.key;
+                  return (
+                    <button
+                      key={opt.key || "system"}
+                      type="button"
+                      aria-pressed={active}
+                      title={
+                        opt.dead
+                          ? `Token dead — ${opt.err || "re-issue it"}`
+                          : opt.key
+                            ? `Launch as the "${opt.key}" soc token`
+                            : "Launch via the system-user token"
+                      }
+                      onClick={() => onMoChannel?.(opt.key)}
+                      className={
+                        "h-8 truncate rounded-[10px] px-1 text-[12px] font-semibold transition-all duration-150 " +
+                        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
+                        (active
+                          ? opt.dead
+                            ? "bg-red-500/15 text-red-300 shadow-[inset_0_0_0_1px_rgba(248,113,113,0.35)]"
+                            : "bg-accent/20 text-[#9db8ff] shadow-[inset_0_0_0_1px_rgba(122,150,255,0.35)]"
+                          : opt.dead
+                            ? "text-red-400/70 hover:text-red-300"
                             : "text-dim hover:text-ink")
-                        }
-                      >
-                        {opt.label}
-                      </button>
-                    );
-                  },
-                )}
+                      }
+                    >
+                      {opt.dead ? "⚠ " : ""}
+                      {opt.label}
+                    </button>
+                  );
+                })}
               </div>
               <p className="text-center text-[10px] leading-relaxed text-faint">
                 {moSoc
                   ? `Soc token "${moSoc}" signs the tree · names carry the SOC marker`
                   : "System-user token signs the tree"}
               </p>
+              {(() => {
+                // The picked soc's live verdict: FB's own error text turns a silently empty
+                // account picker into an actionable "this token needs re-issuing".
+                const err = moSoc ? (moSocs ?? []).find((s) => s.name === moSoc && !s.ok)?.error : "";
+                return err ? (
+                  <p className="text-center text-[10px] leading-relaxed text-red-400">
+                    Token dead — pickers stay empty and launches will fail: {err}
+                  </p>
+                ) : null;
+              })()}
             </div>
           ) : null}
           <button
