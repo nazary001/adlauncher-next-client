@@ -1,7 +1,7 @@
 "use client";
 
 import type { Campaign } from "@/lib/types";
-import { fullName, isLaunchable, moneyLabel, parseMoney } from "@/lib/types";
+import { fullName, isLaunchable, moEnsureSocMark, moneyLabel, parseMoney } from "@/lib/types";
 import { CONVERSION_EVENTS, geoSummary } from "@/lib/catalog";
 import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { type PartnerConfig, launchReadyOpts, markerPool } from "@/lib/partners";
@@ -16,6 +16,10 @@ export function LaunchRail({
   hsChannel = "lion",
   hsTokenReady = false,
   onHsChannel,
+  moSocs = null,
+  moChannel = "",
+  moSoc = "",
+  onMoChannel,
   previewed,
   justQueued,
   heldBack = 0,
@@ -34,6 +38,14 @@ export function LaunchRail({
   /** FB Token rail provisioned server-side — until then the Token option renders disabled. */
   hsTokenReady?: boolean;
   onHsChannel?: (ch: HsLaunchChannel) => void;
+  /** MO soc channels provisioned server-side (names; null while loading, [] = switch hidden). */
+  moSocs?: string[] | null;
+  /** The STORED MO signer pick ("" = system token) — what the switch highlights. */
+  moChannel?: string;
+  /** The EFFECTIVE soc for the wave ("" = system): picked AND provisioned — drives the name
+   *  preview and the caption, same honor rule the launch itself applies. */
+  moSoc?: string;
+  onMoChannel?: (v: string) => void;
   previewed: boolean;
   /** Count just sent to the Task Manager — shows a brief confirmation; campaigns stay on the board. */
   justQueued: number;
@@ -67,7 +79,13 @@ export function LaunchRail({
   // marker included (same effective-channel rule as the launch itself: picked AND provisioned).
   const nameChannel = hsChannel === "token" && hsTokenReady ? ("token" as const) : ("lion" as const);
   const nameOf = (c: Campaign) =>
-    partner.lionLaunch ? (c.name.trim() ? hsFullName(c, hsAcr ?? "", ddmm, nameChannel) : "") : fullName(c);
+    partner.lionLaunch
+      ? c.name.trim()
+        ? hsFullName(c, hsAcr ?? "", ddmm, nameChannel)
+        : ""
+      : moSoc
+        ? moEnsureSocMark(fullName(c))
+        : fullName(c);
 
   return (
     <aside className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-20">
@@ -224,6 +242,46 @@ export function LaunchRail({
                 {hsChannel === "token"
                   ? "Our FB token builds the tree · delivery starts +30 min"
                   : "LION profiles build the tree on the weapon side"}
+              </p>
+            </div>
+          ) : null}
+          {/* MO launch signer: the system-user token (default) vs a personal soc token — same
+              direct-Graph tree, different bearer. Rendered only when at least one soc is
+              provisioned server-side (FB_MO_SOC_TOKENS). One pick for the whole wave. */}
+          {!partner.lionLaunch && partner.usesGcm && (moSocs?.length ?? 0) > 0 ? (
+            <div className="flex flex-col gap-1">
+              <div
+                className="grid overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5"
+                style={{ gridTemplateColumns: `repeat(${1 + (moSocs?.length ?? 0)}, minmax(0, 1fr))` }}
+              >
+                {[{ key: "", label: "System token" }, ...(moSocs ?? []).map((s) => ({ key: s, label: s }))].map(
+                  (opt) => {
+                    const active = moChannel === opt.key;
+                    return (
+                      <button
+                        key={opt.key || "system"}
+                        type="button"
+                        aria-pressed={active}
+                        title={opt.key ? `Launch as the "${opt.key}" soc token` : "Launch via the system-user token"}
+                        onClick={() => onMoChannel?.(opt.key)}
+                        className={
+                          "h-8 truncate rounded-[10px] px-1 text-[12px] font-semibold transition-all duration-150 " +
+                          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
+                          (active
+                            ? "bg-accent/20 text-[#9db8ff] shadow-[inset_0_0_0_1px_rgba(122,150,255,0.35)]"
+                            : "text-dim hover:text-ink")
+                        }
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  },
+                )}
+              </div>
+              <p className="text-center text-[10px] leading-relaxed text-faint">
+                {moSoc
+                  ? `Soc token "${moSoc}" signs the tree · names carry the SOC marker`
+                  : "System-user token signs the tree"}
               </p>
             </div>
           ) : null}

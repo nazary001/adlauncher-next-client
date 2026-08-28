@@ -89,6 +89,24 @@ export function fullName(c: Campaign): string {
   return `${c.namePrefix}${c.name}`.trim();
 }
 
+/**
+ * Channel marker inside the FIXED name part for MO launches born through a PERSONAL "soc" token
+ * (FB_MO_SOC_TOKENS) instead of the system user — same convention as HS's ` TOKEN - ` marker:
+ * the marker says HOW THE RUN WAS CREATED, so soc-born and system-born campaigns are tellable
+ * apart in every list that only shows names. WHICH soc signed it lives in the gcm registry notes
+ * (`claimed via adlauncher launch (soc:<name>)`), not in the name.
+ */
+export const MO_SOC_MARK = "SOC - ";
+
+/** Guarantee the SOC marker on a name about to be created through a soc token (server-side truth —
+ *  an old/tampered client may send an unmarked name). Prefix-shaped names (`[DD/MM] (MO) - …`)
+ *  get it between the fixed prefix and the tail; anything else gets it prepended. */
+export function moEnsureSocMark(name: string): string {
+  if (/(?:^|\s)SOC\s*-\s*/.test(name)) return name;
+  const m = /^(\[\d{2}[./]\d{2}\]\s*\([^)]*\)\s*-\s*)([\s\S]*)$/.exec(name);
+  return m ? `${m[1]}${MO_SOC_MARK}${m[2]}` : `${MO_SOC_MARK}${name}`;
+}
+
 export function parseMoney(v: string): number {
   const s = String(v ?? "").replace(/\s/g, "");
   // Mixed "1,234.56" reads the comma as a thousands separator; otherwise every comma is a

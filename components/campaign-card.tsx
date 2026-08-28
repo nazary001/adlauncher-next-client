@@ -2,7 +2,7 @@
 
 import { memo, useEffect, useState } from "react";
 import type { Campaign } from "@/lib/types";
-import { bidAmountMissing, bidKind, fullName, isHttpUrl, isLaunchable, limitMoney, limitMoneyCents, moneyLabel, normalizeRoasGoal, parseMoney } from "@/lib/types";
+import { MO_SOC_MARK, bidAmountMissing, bidKind, fullName, isHttpUrl, isLaunchable, limitMoney, limitMoneyCents, moEnsureSocMark, moneyLabel, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import {
   AGES,
   BID_STRATEGIES,
@@ -231,6 +231,7 @@ function CampaignCardBase({
   highlight,
   coversEnabled,
   hsTokenRail,
+  moSocRail,
   onPatch,
   onToggleCollapse,
   onDuplicate,
@@ -257,6 +258,9 @@ function CampaignCardBase({
    *  (LION binds cover segments the token was never granted; a launch there burns on the first
    *  Graph POST — aleph, 2026-08-19). */
   hsTokenRail?: boolean;
+  /** MO: a soc signer is picked — the name preview carries the fixed SOC marker the server
+   *  will really put into the created campaign's name. */
+  moSocRail?: boolean;
   onPatch: (id: string, patch: Partial<Campaign>) => void;
   onToggleCollapse: (id: string) => void;
   onDuplicate: (id: string) => void;
@@ -352,8 +356,14 @@ function CampaignCardBase({
   // or the launch rail; the server rebuilds the exact same string.
   const displayPrefix = hsMode
     ? hsNamePrefix(c, hs?.acr ?? "", todaySaoPauloDDMM(), hsTokenRail ? "token" : "lion")
-    : c.namePrefix;
-  const displayName = hsMode ? (c.name.trim() ? displayPrefix + c.name : "") : fullName(c);
+    : c.namePrefix + (moSocRail ? MO_SOC_MARK : "");
+  const displayName = hsMode
+    ? c.name.trim()
+      ? displayPrefix + c.name
+      : ""
+    : moSocRail
+      ? moEnsureSocMark(fullName(c))
+      : fullName(c);
 
   // Indians pin one account → its pixel and fanpage render locked, not searchable.
   const locked = Boolean(partner.lockedAccount);

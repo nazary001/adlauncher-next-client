@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Campaign, FileItem } from "@/lib/types";
-import { bidKind, firstMedia, fullName, isLaunchable, makeCampaign } from "@/lib/types";
+import { bidKind, firstMedia, fullName, isLaunchable, makeCampaign, moEnsureSocMark } from "@/lib/types";
 import { geoSummary } from "@/lib/catalog";
 import {
   GCM_POOL_MAX,
@@ -20,6 +20,7 @@ import { makeGate } from "@/lib/launch-guards";
 import { Header } from "./header";
 import { CampaignCard } from "./campaign-card";
 import { useFanpages } from "./use-fanpages";
+import { useMoSocs } from "./use-mo-socs";
 import { hsTokensAllDown, useHsTokenStatus } from "./hs-token-status";
 import { type AdAccountOption, defaultPixelFor, useAdAccounts } from "./use-adaccounts";
 import { type AcctLimits, acctIdKey, useAcctLimits } from "./use-acct-limit";
@@ -60,6 +61,10 @@ const GCM_LOW_WATER = 15;
 /** The HS launch-rail pick (LION API vs FB Token) survives refreshes — buyers run whole waves on
  *  one rail, re-picking it every session would invite accidental LION shots mid-token-wave. */
 const HS_CHANNEL_LS = "adlauncher.hs.channel";
+
+/** The MO launch-signer pick (System token vs a soc) survives refreshes for the same reason:
+ *  a wave routed around a system-token restriction must not silently snap back next session. */
+const MO_CHANNEL_LS = "adlauncher.mo.channel";
 
 /** gcm auto-claim (skipping registry-reserved codes) + single account/pixel/fanpage pinning. */
 function normalize(rows: Campaign[], partner: PartnerConfig, reserved: Set<string> | null): Campaign[] {
@@ -167,23 +172,59 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // without extra requests. Drives the exhaustion banner and the Launch hard-block below.
   const poolFree = pool && reserved ? Math.max(0, pool.max - reserved.size) : null;
   const poolExhausted = Boolean(pool) && poolFree === 0;
+  // MO launch signer: the system-user token (default) or one of the provisioned soc tokens.
+  // The soc list comes from the server (names only); a stored pick is honored only while its
+  // name is still provisioned — otherwise the wave rides the system token as before.
+  const moSocs = useMoSocs(partnerId === "in");
+  const [moChannel, setMoChannel] = useState<string>("");
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(MO_CHANNEL_LS);
+      // Safe setState-in-effect: runs once on mount (same pattern as the HS channel restore).
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      if (v) setMoChannel(v);
+    } catch {
+      /* storage disabled — session-local pick only */
+    }
+  }, []);
+  const changeMoChannel = useCallback((v: string) => {
+    setMoChannel(v);
+    try {
+      localStorage.setItem(MO_CHANNEL_LS, v);
+    } catch {
+      /* storage disabled */
+    }
+  }, []);
+  /** The EFFECTIVE soc for this wave ("" = system token): picked AND provisioned server-side. */
+  const moSoc = partnerId === "in" && moChannel && (moSocs ?? []).includes(moChannel) ? moChannel : "";
+
   // Token fanpages for the per-card fanka picker, each with its live N/limit fill tag from the
   // hs-tools registry (AIF reads its own token's pages; its registry scope fills the badges the
-  // day the box starts syncing AIF pages — empty until then).
+  // day the box starts syncing AIF pages — empty until then). A soc channel reads the SOC's own
+  // page catalog (its me/accounts) — the volume badges stay on the shared registry sweep.
   const fanpages = useFanpages(
     Boolean(partner.fanpagesFromToken),
     partner.pageAdLimit ?? 250,
-    partner.aifLaunch ? { list: "/api/aif/fanpages", volume: "/api/aif/fanpages/volume" } : undefined,
+    partner.aifLaunch
+      ? { list: "/api/aif/fanpages", volume: "/api/aif/fanpages/volume" }
+      : moSoc
+        ? { list: `/api/fanpages?channel=soc:${encodeURIComponent(moSoc)}`, volume: "/api/fanpages/volume" }
+        : undefined,
   );
   // HS launch-token pool health — powers the "all tokens burned" banner (the server gate is the
   // enforcement; this is the courtesy warning before buyers build a wave into a 429).
   const hsTokenStatus = useHsTokenStatus(Boolean(partner.lionLaunch));
   const hsTokensDown = partner.lionLaunch ? hsTokensAllDown(hsTokenStatus.tokens, hsTokenStatus.loaded) : false;
-  // Token ad accounts (with their pixels) for the account/pixel pickers.
+  // Token ad accounts (with their pixels) for the account/pixel pickers — read from the picked
+  // signer's catalog (a soc may see a different account set than the system user).
   const adAccounts = useAdAccounts(
     Boolean(partner.accountsFromToken),
     partner.preferredPixel,
-    partner.aifLaunch ? "/api/aif/adaccounts" : undefined,
+    partner.aifLaunch
+      ? "/api/aif/adaccounts"
+      : moSoc
+        ? `/api/adaccounts?channel=soc:${encodeURIComponent(moSoc)}`
+        : undefined,
   );
   // LION catalog (HS): profiles + ACR, per-profile accounts/pages/locales, per-account pixels.
   const hs = useHs(Boolean(partner.lionLaunch));
@@ -431,12 +472,15 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       enqueue({
         partnerId,
         campaign: c,
+        // MO soc channel: the signer rides with the task; the drawer row previews the SOC-marked
+        // name the server will really create (server-side moEnsureSocMark stays the truth).
+        ...(moSoc ? { channel: `soc:${moSoc}` } : {}),
         medias,
         mediaUrl: media.url,
         mediaName: media.name,
         mediaKind: media.kind === "image" ? "image" : "video",
         ...(media.kind === "video" && media.cover ? { cover: media.cover } : {}),
-        name: fullName(c),
+        name: moSoc ? moEnsureSocMark(fullName(c)) : fullName(c),
         gcm: c.gcm,
         geo: geoSummary(c.countries),
         budget: c.budget,
@@ -729,6 +773,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
                 coversEnabled={partner.lionLaunch ? hsChannel === "token" && hs.tokenLaunch : true}
                 // FB Token rail picked → the card's account picker filters to token-visible ones.
                 hsTokenRail={partner.lionLaunch ? hsChannel === "token" && hs.tokenLaunch : false}
+                // Soc channel picked (MO) → the card's name preview carries the fixed SOC marker.
+                moSocRail={Boolean(moSoc)}
                 onPatch={patch}
                 onToggleCollapse={toggleCollapse}
                 onDuplicate={duplicate}
@@ -760,6 +806,10 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
             hsChannel={hsChannel}
             hsTokenReady={hs.tokenLaunch}
             onHsChannel={changeHsChannel}
+            moSocs={moSocs}
+            moChannel={moChannel}
+            moSoc={moSoc}
+            onMoChannel={changeMoChannel}
             previewed={previewed}
             justQueued={justQueued}
             heldBack={heldBack}

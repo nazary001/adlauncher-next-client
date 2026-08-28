@@ -115,6 +115,9 @@ type LaunchInput = {
   kind: "launch";
   partnerId: PartnerId;
   campaign: Campaign;
+  /** MO launch signer: absent = the system-user token, "soc:<name>" = that personal token
+   *  (the board's channel switch) — forwarded to /api/launch verbatim. */
+  channel?: string;
   /** All creatives of this launch (1..partner.maxCreatives). The single-media fields below stay
    *  filled with the FIRST one — legacy shape for anything still reading them. */
   medias?: QueuedMedia[];
@@ -143,6 +146,8 @@ const lsKeyFor = (user: SessionUser | undefined, base: string) =>
 export type EnqueueArgs = {
   partnerId: PartnerId;
   campaign: Campaign;
+  /** MO launch signer (see LaunchInput.channel) — set only for soc-channel waves. */
+  channel?: string;
   /** All creatives (1..partner.maxCreatives); when absent the single-media fields drive alone. */
   medias?: QueuedMedia[];
   mediaUrl: string;
@@ -621,6 +626,7 @@ function TaskManagerCore({
             body: JSON.stringify({
               partnerId: input.partnerId,
               campaign: input.campaign,
+              ...(input.channel ? { channel: input.channel } : {}),
               // Multi-creative shape + the legacy single-media fields (first creative) so a
               // mid-deploy server on either side of the wire keeps working.
               medias,
@@ -914,6 +920,7 @@ function TaskManagerCore({
         kind: "launch",
         partnerId: args.partnerId,
         campaign: args.campaign,
+        ...(args.channel ? { channel: args.channel } : {}),
         ...(args.medias && args.medias.length > 0 ? { medias: args.medias } : {}),
         mediaUrl: args.mediaUrl,
         mediaName: args.mediaName,

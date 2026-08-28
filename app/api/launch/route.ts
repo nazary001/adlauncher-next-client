@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import { type Campaign, bidAmountMissing, bidKind, normalizeRoasGoal, parseMoney } from "@/lib/types";
+import { type Campaign, bidAmountMissing, bidKind, moEnsureSocMark, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { conversionEventsFor } from "@/lib/catalog";
 import { ROAS_PIXEL, partnerConfig, fullLandingUrl, type PartnerId } from "@/lib/partners";
+import { resolveMoChannel } from "@/lib/mo-soc";
 import {
   type LaunchBinds,
   adPayload,
@@ -65,14 +66,16 @@ const PAUSE_CONFIRM_MS = 20_000;
 
 // ---------- locale resolution (best-effort, non-fatal) ----------
 
+// Locale ids are global Meta facts (token-independent) — one shared cache for both channels;
+// the token only signs the search call.
 const localeCache = new Map<string, number | null>();
-async function resolveLocales(names: string[]): Promise<number[]> {
+async function resolveLocales(names: string[], token?: string): Promise<number[]> {
   const ids: number[] = [];
   for (const raw of names) {
     if (/\(all\)/i.test(raw)) continue; // "all" = no language restriction (broadest)
     if (!localeCache.has(raw)) {
       try {
-        const body = await fbGet(`search?type=adlocale&limit=25&q=${encodeURIComponent(raw.replace(/[()]/g, " ").trim())}`);
+        const body = await fbGet(`search?type=adlocale&limit=25&q=${encodeURIComponent(raw.replace(/[()]/g, " ").trim())}`, token);
         const data = (body?.data as Array<{ key?: number; name?: string }> | undefined) ?? [];
         const norm = (s: string) => s.toLowerCase().replace(/[^a-z]/g, "");
         // Only accept an exact normalized-name match — never fall back to data[0], which would
@@ -99,17 +102,20 @@ export async function POST(req: Request) {
   if (!session) {
     return NextResponse.json({ ok: false, stage: "auth", error: "unauthorized" }, { status: 401 });
   }
-  if (!TOKEN) return NextResponse.json({ ok: false, stage: "config", error: "no_fb_token" }, { status: 500 });
 
   let campaign: Campaign;
   let partnerId: PartnerId;
   /** Creatives of this launch (1..maxCreatives): own-Blob URLs; cover = video thumbnail image. */
   let medias: { url: string; kind: "video" | "image"; coverUrl: string }[] = [];
   let taskId: string | null = null;
+  let channelRaw: unknown;
   try {
     const j = (await req.json()) as {
       campaign?: Campaign;
       partnerId?: string;
+      /** Launch signer: absent/"system" = the MO system-user token, "soc:<name>" = that personal
+       *  token from FB_MO_SOC_TOKENS (the board's channel switch). */
+      channel?: string;
       /** Multi-creative shape (5-creative MO, 08-20). */
       medias?: { url?: string; kind?: string; coverUrl?: string }[];
       /** Single-creative fields — the pre-multi wire, still sent (and accepted) for open tabs. */
@@ -122,6 +128,7 @@ export async function POST(req: Request) {
     };
     campaign = (j.campaign ?? {}) as Campaign;
     partnerId = String(j.partnerId ?? "in") as PartnerId;
+    channelRaw = j.channel;
     if (Array.isArray(j.medias) && j.medias.length > 0) {
       medias = j.medias.slice(0, 10).map((m) => {
         const kind = m?.kind === "image" ? ("image" as const) : ("video" as const);
@@ -148,6 +155,28 @@ export async function POST(req: Request) {
   }
 
   const partner = partnerConfig(partnerId);
+  // Launch channel: the system-user token (default) or a personal "soc" token — same Graph tree,
+  // different signer. An unknown/de-provisioned soc is a CLEAN config error, never a silent fall
+  // back to the system token: the wave was aimed at the soc (e.g. routing around a business
+  // restriction that hits system users), and falling back would launch it straight into it.
+  const channel = resolveMoChannel(channelRaw);
+  if (!channel) {
+    return NextResponse.json(
+      { ok: false, stage: "config", error: "soc_channel_unknown — this soc is not provisioned on the server (FB_MO_SOC_TOKENS)" },
+      { status: 400 },
+    );
+  }
+  if (channel.kind === "soc" && !partner.usesGcm) {
+    return NextResponse.json(
+      { ok: false, stage: "config", error: "soc_channel_unsupported — soc launches exist on the MO rail only" },
+      { status: 400 },
+    );
+  }
+  /** Catalog identity of the signer — undefined = the shared MO system-token catalogs. */
+  const cat = channel.kind === "soc" ? channel.cat : undefined;
+  /** The bearer that signs EVERY Graph call of this launch (uploads, tree, failure pause). */
+  const chToken = channel.kind === "soc" ? channel.token : TOKEN;
+  if (!chToken) return NextResponse.json({ ok: false, stage: "config", error: "no_fb_token" }, { status: 500 });
   // The account, fanka and pixel are the buyer's PICKS, but every id is validated against the
   // launch token's own data server-side — the client can't smuggle in arbitrary destinations.
   const pickedPage = partner.fanpagesFromToken ? String(campaign.page ?? "").trim() : "";
@@ -178,7 +207,7 @@ export async function POST(req: Request) {
           { status: 400 },
         );
       }
-      if (!(await isTokenAccount(pickedAccount))) {
+      if (!(await isTokenAccount(pickedAccount, cat))) {
         return NextResponse.json(
           { ok: false, stage: "config", error: "account_not_allowed — the launch token cannot use this ad account" },
           { status: 400 },
@@ -192,7 +221,7 @@ export async function POST(req: Request) {
           { status: 400 },
         );
       }
-      const pixels = await accountPixels(pickedAccount);
+      const pixels = await accountPixels(pickedAccount, cat);
       if (!pixels.some((p) => p.id === pickedPixel)) {
         return NextResponse.json(
           {
@@ -223,7 +252,7 @@ export async function POST(req: Request) {
           { status: 400 },
         );
       }
-      if (!(await isAdvertisablePage(pickedPage))) {
+      if (!(await isAdvertisablePage(pickedPage, cat))) {
         return NextResponse.json(
           { ok: false, stage: "config", error: "fanpage_not_allowed — the launch token cannot advertise with this page" },
           { status: 400 },
@@ -232,7 +261,7 @@ export async function POST(req: Request) {
       // The page's display name feeds the ad set's DSA beneficiary/payor declaration — without it
       // Meta rejects EU-reaching ad sets ("Advertiser not specified") on any account that lacks a
       // default beneficiary. Free: read from the same cached list that just validated the id.
-      binds.pageName = await advertisablePageName(pickedPage);
+      binds.pageName = await advertisablePageName(pickedPage, cat);
     } else if (!binds.pageId) {
       return NextResponse.json({ ok: false, stage: "config", error: "partner_not_launchable" }, { status: 400 });
     }
@@ -375,7 +404,10 @@ export async function POST(req: Request) {
     );
   }
 
-  const name = `${campaign.namePrefix}${campaign.name}`.trim();
+  // Soc-born runs carry the fixed SOC marker in the name (server-side truth — an old/tampered
+  // client may send an unmarked one), mirroring the HS token rail's ` TOKEN - ` convention.
+  const baseName = `${campaign.namePrefix}${campaign.name}`.trim();
+  const name = channel.kind === "soc" ? moEnsureSocMark(baseName) : baseName;
   // &fire=click follows the optimization — and min-ROAS ALWAYS optimizes purchase value, so the
   // funnel must fire Purchase on click regardless of what optimization the client sent (the UI
   // pins it, but the server is the truth: a stale/edited draft could still say "clicks", which
@@ -422,14 +454,15 @@ export async function POST(req: Request) {
           partner: "in",
           channel: "launch",
           name,
-          accountName: await tokenAccountName(binds.accountId).catch(() => ""),
+          accountName: await tokenAccountName(binds.accountId, cat).catch(() => ""),
         });
 
-        // 1) reserve the gcm BEFORE building the link (guarantees no duplicate marker)
+        // 1) reserve the gcm BEFORE building the link (guarantees no duplicate marker). The
+        // registry note records WHICH signer birthed the run — the name only says "SOC".
         claim = await claimGcm(campaign.gcm, {
           campaign_name: name,
           landing: campaign.landing || null,
-          notes: "claimed via adlauncher launch",
+          notes: channel.kind === "soc" ? `claimed via adlauncher launch (soc:${channel.name})` : "claimed via adlauncher launch",
         });
         const gcm = claim.gcm;
         // The link carries the campaign's chosen pixel (binds.pixelId, already validated) so the
@@ -450,10 +483,10 @@ export async function POST(req: Request) {
         for (let i = 0; i < medias.length; i++) {
           const m = medias[i];
           if (m.kind === "image") {
-            regs[i] = { kind: "image", imageHash: await uploadImage(binds.accountId, imageBufs.get(i) as Buffer) };
+            regs[i] = { kind: "image", imageHash: await uploadImage(binds.accountId, imageBufs.get(i) as Buffer, chToken) };
           } else {
             const suffix = medias.length > 1 ? ` · video ${i + 1}` : " · video";
-            regs[i] = { kind: "video", videoId: await uploadVideo(binds.accountId, m.url, `${name}${suffix}`), thumbUrl: "" };
+            regs[i] = { kind: "video", videoId: await uploadVideo(binds.accountId, m.url, `${name}${suffix}`, chToken), thumbUrl: "" };
           }
         }
         created.video_id = regs.find((r) => r.kind === "video")?.videoId ?? undefined;
@@ -462,22 +495,22 @@ export async function POST(req: Request) {
         for (let i = 0; i < medias.length; i++) {
           const r = regs[i];
           if (r.kind !== "video") continue;
-          await waitForVideo(r.videoId);
+          await waitForVideo(r.videoId, undefined, chToken);
           // A custom cover replaces the auto-thumbnail entirely (no thumbnail poll needed).
           const coverBuf = coverBufs.get(i);
-          if (coverBuf) r.coverHash = await uploadImage(binds.accountId, coverBuf);
-          else r.thumbUrl = await videoThumb(r.videoId);
+          if (coverBuf) r.coverHash = await uploadImage(binds.accountId, coverBuf, chToken);
+          else r.thumbUrl = await videoThumb(r.videoId, chToken);
         }
-        const localeIds = await resolveLocales(campaign.locales);
+        const localeIds = await resolveLocales(campaign.locales, chToken);
 
         // 3) campaign → adset → creative → ad, all ACTIVE (live on creation since 08-11)
         progress("campaign");
-        const camp = await fbPost(`act_${binds.accountId}/campaigns`, campaignPayload(campaign, name));
+        const camp = await fbPost(`act_${binds.accountId}/campaigns`, campaignPayload(campaign, name), chToken);
         created.campaign_id = String(camp.id);
 
         progress("adset");
         const adset = await withParentRetry(String(camp.id), () =>
-          createAdsetSelfHealing(`act_${binds.accountId}/adsets`, adsetPayload(campaign, name, String(camp.id), binds, localeIds)),
+          createAdsetSelfHealing(`act_${binds.accountId}/adsets`, adsetPayload(campaign, name, String(camp.id), binds, localeIds), chToken),
         );
         created.adset_id = String(adset.id);
 
@@ -496,6 +529,7 @@ export async function POST(req: Request) {
                   link,
                   ...(r.coverHash ? { coverHash: r.coverHash } : {}),
                 }),
+            chToken,
           );
           creativeIds.push(String(creative.id));
         }
@@ -506,7 +540,7 @@ export async function POST(req: Request) {
         for (let i = 0; i < creativeIds.length; i++) {
           const adName = creativeIds.length > 1 ? `${name} · ${i + 1}` : name;
           const ad = await withParentRetry(String(adset.id), () =>
-            fbPost(`act_${binds.accountId}/ads`, adPayload(adName, String(adset.id), creativeIds[i])),
+            fbPost(`act_${binds.accountId}/ads`, adPayload(adName, String(adset.id), creativeIds[i]), chToken),
           );
           // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
           if (!ad.id) throw new FbError("ad create returned no id", ad);
@@ -558,7 +592,7 @@ export async function POST(req: Request) {
         let pausedOk = false;
         if (disposition.pauseNeeded) {
           pausedOk = await Promise.race([
-            fbPost(String(created.campaign_id), { status: "PAUSED" }).then(
+            fbPost(String(created.campaign_id), { status: "PAUSED" }, chToken).then(
               () => true,
               () => false,
             ),
