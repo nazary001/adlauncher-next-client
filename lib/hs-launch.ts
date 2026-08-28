@@ -131,13 +131,14 @@ export function stripTokenMark(tail: string): string {
 
 /**
  * Split a name by the LION-validated grammar: the STRUCTURED prefix
- * `[DD/MM] (ACR) API[ (CLONE)] - (LABEL) - [CODES] - … - ` vs the free-text TAIL after it.
- * Pure split — no re-dating, no "(CLONE)" ensuring (the clone board layers those on top).
- * Null = the name doesn't follow the grammar (everything is tail).
+ * `[DD/MM] (ACR) API[ (CLONE)][ - JURO] - (LABEL) - [CODES] - … - ` vs the free-text TAIL after
+ * it (the optional `JURO` segment is what LION's jurar — and our token JURO rail — put between
+ * `API` and the redirect label). Pure split — no re-dating, no "(CLONE)" ensuring (the clone
+ * board layers those on top). Null = the name doesn't follow the grammar (everything is tail).
  */
 export function splitHsGrammar(name: string): { prefix: string; tail: string } | null {
   const m =
-    /^((?:\[\d{2}\/\d{2}\])\s*\([^)]*\)\s*API(?:\s*\(CLONE\))?\s*-\s*\([^)]*\)\s*(?:-\s*\[[^\]]*\]\s*)*-\s*)([\s\S]*)$/.exec(
+    /^((?:\[\d{2}\/\d{2}\])\s*\([^)]*\)\s*API(?:\s*\(CLONE\))?(?:\s*-\s*JURO)?\s*-\s*\([^)]*\)\s*(?:-\s*\[[^\]]*\]\s*)*-\s*)([\s\S]*)$/.exec(
       name,
     );
   return m ? { prefix: m[1], tail: m[2] } : null;

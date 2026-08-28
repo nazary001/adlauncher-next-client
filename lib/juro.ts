@@ -1,7 +1,8 @@
-// Pure helpers of the JURO clone rail (LION /jurar/ — new campaign from a source's page posts).
-// Wire facts probed live 2026-08-25: budget = cents; cap bid = cents; MIN_ROAS bid = goal ×100
-// int (0,9 → 90 → Meta floor 9000 — the API doc's "decimal 1.20" is wrong: 1.2 lands as floor
-// 100); the executor profile must LIST the source post's page; campaigns are BORN ACTIVE.
+// Pure helpers of the JURO clone rails (new campaign from a source's page posts) — shared by the
+// LION channel (/jurar/) and the FB Token channel (direct Graph build through our token pool).
+// LION wire facts probed live 2026-08-25: budget = cents; cap bid = cents; MIN_ROAS bid = goal
+// ×100 int (0,9 → 90 → Meta floor 9000 — the API doc's "decimal 1.20" is wrong: 1.2 lands as
+// floor 100); the executor profile must LIST the source post's page; campaigns are BORN ACTIVE.
 
 // No runtime imports on purpose: extensionless "./types" would break `node --test`'s type
 // stripping — this module stays leaf-level so tests/juro.test.ts can load it directly.
@@ -42,6 +43,73 @@ export function juroWireCountries(override: GeoOverride | null, sourceCountries:
     return override.countries.includes("WW") ? ["WORLD"] : override.countries;
   }
   return sourceCountries.filter(Boolean);
+}
+
+/**
+ * Guarantee the `API - JURO - ` marker on a name (or a grammar prefix) about to be born through
+ * a JURO rail. A "(CLONE)" is dropped (a JURO copy is a fresh campaign built from the posts, not
+ * a tree clone) and an already-marked segment is normalized in place — idempotent, so the board
+ * preview and the server belt can both run it. Names without the `API -` grammar zone get the
+ * marker prepended (nothing to splice into).
+ */
+export function juroEnsureMark(name: string): string {
+  const m = /\bAPI\s*(?:\(CLONE\)\s*)?-\s*(?:JURO\s*-\s*)?/.exec(name);
+  if (!m) return name ? `JURO - ${name}` : name;
+  return `${name.slice(0, m.index)}API - JURO - ${name.slice(m.index + m[0].length)}`;
+}
+
+/** Countries for the TOKEN (Graph) wire: the override wins verbatim ("WW" stays the board's
+ *  worldwide sentinel — the targeting builder resolves it), else the source's targeting-derived
+ *  geo. Empty = undecidable — the caller refuses the shot rather than guessing (same
+ *  no-inheritance rule as the LION wire's juroWireCountries). */
+export function juroTokenCountries(override: GeoOverride | null, sourceCountries: string[]): string[] {
+  if (override && override.countries.length > 0) return override.countries;
+  return sourceCountries.filter(Boolean);
+}
+
+/** Source geo as board-style codes from a GRAPH targeting object: explicit countries verbatim,
+ *  the worldwide country group → ["WW"]. Region/city-only targeting (or a non-worldwide group)
+ *  yields [] — jurar builds country-level geo only, so the caller asks for an override. */
+export function juroSourceGeo(targeting: Record<string, unknown>): string[] {
+  const g = ((targeting ?? {}).geo_locations ?? {}) as Record<string, unknown>;
+  const countries = Array.isArray(g.countries) ? g.countries.map(String).filter(Boolean) : [];
+  if (countries.length > 0) return countries;
+  const groups = Array.isArray(g.country_groups) ? g.country_groups.map(String) : [];
+  return groups.includes("worldwide") ? ["WW"] : [];
+}
+
+/** Source locale ids from a GRAPH targeting object (the field jurar-over-LION LOSES — probed
+ *  08-26: /jurar/ silently ignores `locales`; the token rail carries them natively). */
+export function juroSourceLocaleIds(targeting: Record<string, unknown>): number[] {
+  const raw = (targeting ?? {}).locales;
+  if (!Array.isArray(raw)) return [];
+  return raw.map((l) => Number(l)).filter((n) => Number.isFinite(n) && n > 0);
+}
+
+/**
+ * Fresh jurar-style targeting for the token rail — the same minimal shape LION's jurar births
+ * (country-level geo, ages 18–65, Advantage+ placements; deliberately NOT the source's verbatim
+ * targeting: audiences/exclusions are account-local and a geo test wants a clean slate), plus
+ * the locales the LION wire drops. WW mirrors the launcher's worldwide rule: the country group
+ * MINUS Taiwan+Singapore (owner rule 08-11 — without a verified advertiser Meta never delivers
+ * there, it just demands declarations).
+ */
+export function juroTokenTargeting(countries: string[], localeIds: number[]): Record<string, unknown> {
+  const t: Record<string, unknown> = { age_min: 18, age_max: 65 };
+  if (countries.includes("WW")) {
+    t.geo_locations = { location_types: ["home", "recent"], country_groups: ["worldwide"] };
+    t.excluded_geo_locations = { countries: ["TW", "SG"] };
+  } else {
+    t.geo_locations = { location_types: ["home", "recent"], countries };
+  }
+  if (localeIds.length) t.locales = localeIds;
+  return t;
+}
+
+/** A WW token-rail shot needs the TW/SG universal-ads declarations up front (same pair the
+ *  launcher and token-duplicate send; further regions self-heal in createAdsetSelfHealing). */
+export function juroTokenRegionalCategories(countries: string[]): string[] {
+  return countries.includes("WW") ? ["TAIWAN_UNIVERSAL", "SINGAPORE_UNIVERSAL"] : [];
 }
 
 /**
