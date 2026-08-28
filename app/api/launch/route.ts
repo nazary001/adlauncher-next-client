@@ -406,8 +406,9 @@ export async function POST(req: Request) {
 
   // Soc-born runs carry the fixed SOC marker in the name (server-side truth — an old/tampered
   // client may send an unmarked one), mirroring the HS token rail's ` TOKEN - ` convention.
+  // Alternate SYSTEM users (entry.system) are system-class signers, not соцы — no marker.
   const baseName = `${campaign.namePrefix}${campaign.name}`.trim();
-  const name = channel.kind === "soc" ? moEnsureSocMark(baseName) : baseName;
+  const name = channel.kind === "soc" && !channel.sys ? moEnsureSocMark(baseName) : baseName;
   // &fire=click follows the optimization — and min-ROAS ALWAYS optimizes purchase value, so the
   // funnel must fire Purchase on click regardless of what optimization the client sent (the UI
   // pins it, but the server is the truth: a stale/edited draft could still say "clicks", which
@@ -458,11 +459,15 @@ export async function POST(req: Request) {
         });
 
         // 1) reserve the gcm BEFORE building the link (guarantees no duplicate marker). The
-        // registry note records WHICH signer birthed the run — the name only says "SOC".
+        // registry note records WHICH signer birthed the run — the name only says "SOC" (соцы)
+        // or nothing (system-class signers).
         claim = await claimGcm(campaign.gcm, {
           campaign_name: name,
           landing: campaign.landing || null,
-          notes: channel.kind === "soc" ? `claimed via adlauncher launch (soc:${channel.name})` : "claimed via adlauncher launch",
+          notes:
+            channel.kind === "soc"
+              ? `claimed via adlauncher launch (${channel.sys ? "sys" : "soc"}:${channel.name})`
+              : "claimed via adlauncher launch",
         });
         const gcm = claim.gcm;
         // The link carries the campaign's chosen pixel (binds.pixelId, already validated) so the

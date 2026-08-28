@@ -81,12 +81,16 @@ export function LaunchRail({
   // The bay previews the name the launch will really create — the FB Token rail's fixed TOKEN
   // marker included (same effective-channel rule as the launch itself: picked AND provisioned).
   const nameChannel = hsChannel === "token" && hsTokenReady ? ("token" as const) : ("lion" as const);
+  /** The picked MO signer's registry row (undefined = system token / not provisioned). */
+  const moSocEntry = moSoc ? (moSocs ?? []).find((s) => s.name === moSoc) : undefined;
+  // SOC name marker rides соц-class picks only — alternate SYSTEM entries launch unmarked.
+  const moSocMarks = Boolean(moSoc) && !moSocEntry?.system;
   const nameOf = (c: Campaign) =>
     partner.lionLaunch
       ? c.name.trim()
         ? hsFullName(c, hsAcr ?? "", ddmm, nameChannel)
         : ""
-      : moSoc
+      : moSocMarks
         ? moEnsureSocMark(fullName(c))
         : fullName(c);
 
@@ -295,13 +299,15 @@ export function LaunchRail({
               </div>
               <p className="text-center text-[10px] leading-relaxed text-faint">
                 {moSoc
-                  ? `Soc token "${moSoc}" signs the tree · names carry the SOC marker`
+                  ? moSocEntry?.system
+                    ? `System token "${moSoc}" signs the tree`
+                    : `Soc token "${moSoc}" signs the tree · names carry the SOC marker`
                   : "System-user token signs the tree"}
               </p>
               {(() => {
                 // The picked soc's live verdict: FB's own error text turns a silently empty
                 // account picker into an actionable "this token needs re-issuing".
-                const err = moSoc ? (moSocs ?? []).find((s) => s.name === moSoc && !s.ok)?.error : "";
+                const err = moSocEntry && !moSocEntry.ok ? moSocEntry.error : "";
                 return err ? (
                   <p className="text-center text-[10px] leading-relaxed text-red-400">
                     Token dead — pickers stay empty and launches will fail: {err}

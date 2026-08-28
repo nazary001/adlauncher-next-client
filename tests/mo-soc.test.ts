@@ -23,14 +23,15 @@ test("grammar-less names get the marker prepended", () => {
 
 // ---- the soc channel registry (env-driven; parsed once at import) ----------------------------
 
-test("resolveMoChannel: system default, provisioned soc, unknown soc", async () => {
+test("resolveMoChannel: system default, provisioned soc, system-class entry, unknown soc", async () => {
   process.env.FB_MO_SOC_TOKENS = JSON.stringify([
     { name: "aleph", token: "EAAB-test" },
+    { name: "Spencermo", token: "EAAY-test", system: true }, // alternate system user
     { name: "bad name!", token: "x" }, // invalid label → dropped
     { name: "aleph", token: "dup" }, // duplicate → dropped
   ]);
   const { moSocNames, resolveMoChannel } = await import("../lib/mo-soc.ts");
-  assert.deepEqual(moSocNames(), ["aleph"]);
+  assert.deepEqual(moSocNames(), ["aleph", "Spencermo"]);
   assert.deepEqual(resolveMoChannel(undefined), { kind: "system" });
   assert.deepEqual(resolveMoChannel("system"), { kind: "system" });
   const soc = resolveMoChannel("soc:aleph");
@@ -38,7 +39,15 @@ test("resolveMoChannel: system default, provisioned soc, unknown soc", async () 
   if (soc?.kind === "soc") {
     assert.equal(soc.name, "aleph");
     assert.equal(soc.token, "EAAB-test");
+    assert.equal(soc.sys, false); // соц-class → launch route applies the SOC name marker
     assert.equal(soc.cat.cacheKey, "mo-soc-aleph");
+  }
+  // system:true rides through as sys — the launch route skips the SOC marker and notes `sys:`.
+  const sys = resolveMoChannel("soc:Spencermo");
+  assert.equal(sys?.kind, "soc");
+  if (sys?.kind === "soc") {
+    assert.equal(sys.sys, true);
+    assert.equal(sys.cat.cacheKey, "mo-soc-Spencermo");
   }
   // A soc this server does not carry resolves to null — the route then errors instead of
   // silently launching on the system token the buyer was routing around.

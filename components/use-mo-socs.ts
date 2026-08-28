@@ -4,8 +4,9 @@ import { useEffect, useState } from "react";
 
 /** One provisioned MO soc channel with its live token verdict from the server's `/me` probe.
  *  ok:false carries FB's own error text — the board shows it under the switch so a dead token
- *  reads as "re-issue this soc" instead of a silently empty account picker. */
-export type MoSocStatus = { name: string; ok: boolean; error?: string };
+ *  reads as "re-issue this soc" instead of a silently empty account picker. system:true marks
+ *  an alternate SYSTEM user (no SOC name marker on its launches — previews must match). */
+export type MoSocStatus = { name: string; ok: boolean; error?: string; system?: boolean };
 
 /**
  * Provisioned MO soc launch channels (FB_MO_SOC_TOKENS on the server) — powers the board's
@@ -21,7 +22,7 @@ export function useMoSocs(enabled: boolean): MoSocStatus[] | null {
     let alive = true;
     fetch("/api/mo-socs")
       .then((r) => r.json())
-      .then((d: { ok?: boolean; socs?: unknown[]; statuses?: { name?: unknown; ok?: unknown; error?: unknown }[] }) => {
+      .then((d: { ok?: boolean; socs?: unknown[]; statuses?: { name?: unknown; ok?: unknown; error?: unknown; system?: unknown }[] }) => {
         if (!alive) return;
         if (!d?.ok) return setSocs([]);
         // Prefer the health-carrying shape; a mid-deploy old server sends names only — treat
@@ -32,6 +33,7 @@ export function useMoSocs(enabled: boolean): MoSocStatus[] | null {
               name: String(s?.name ?? ""),
               ok: Boolean(s?.ok),
               ...(s?.error ? { error: String(s.error) } : {}),
+              ...(s?.system === true ? { system: true } : {}),
             })),
           );
         } else {

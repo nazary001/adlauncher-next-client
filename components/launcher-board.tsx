@@ -200,6 +200,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
    *  under the switch); silently snapping to the system token would defeat the routing. */
   const moSoc =
     partnerId === "in" && moChannel && (moSocs ?? []).some((s) => s.name === moChannel) ? moChannel : "";
+  /** SOC name marker rides only соц-class picks — an alternate SYSTEM entry (system:true)
+   *  launches unmarked, so its previews must be unmarked too (server is the truth either way). */
+  const moSocMarks = Boolean(moSoc) && !(moSocs ?? []).find((s) => s.name === moSoc)?.system;
 
   // Token fanpages for the per-card fanka picker, each with its live N/limit fill tag from the
   // hs-tools registry (AIF reads its own token's pages; its registry scope fills the badges the
@@ -483,7 +486,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
         mediaName: media.name,
         mediaKind: media.kind === "image" ? "image" : "video",
         ...(media.kind === "video" && media.cover ? { cover: media.cover } : {}),
-        name: moSoc ? moEnsureSocMark(fullName(c)) : fullName(c),
+        name: moSocMarks ? moEnsureSocMark(fullName(c)) : fullName(c),
         gcm: c.gcm,
         geo: geoSummary(c.countries),
         budget: c.budget,
@@ -776,8 +779,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
                 coversEnabled={partner.lionLaunch ? hsChannel === "token" && hs.tokenLaunch : true}
                 // FB Token rail picked → the card's account picker filters to token-visible ones.
                 hsTokenRail={partner.lionLaunch ? hsChannel === "token" && hs.tokenLaunch : false}
-                // Soc channel picked (MO) → the card's name preview carries the fixed SOC marker.
-                moSocRail={Boolean(moSoc)}
+                // Соц-class channel picked (MO) → the card's name preview carries the SOC marker
+                // (alternate SYSTEM entries launch unmarked — preview stays unmarked too).
+                moSocRail={moSocMarks}
                 onPatch={patch}
                 onToggleCollapse={toggleCollapse}
                 onDuplicate={duplicate}

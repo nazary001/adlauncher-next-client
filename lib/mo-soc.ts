@@ -5,18 +5,21 @@
 // restrictions can hit the system-user token (e.g. the 08-27 VD-C1 ADSET-CREATE wall) while
 // personal profiles keep passing — the soc channel launches as those profiles, no LION involved.
 //
-// Env: FB_MO_SOC_TOKENS = JSON array of { name, token } entries, e.g.
-//   [{"name":"aleph","token":"EAAB…"},{"name":"userforhs","token":"EAAB…"}]
+// Env: FB_MO_SOC_TOKENS = JSON array of { name, token, system? } entries, e.g.
+//   [{"name":"Spencermo","token":"EAAY…","system":true},{"name":"MO-1","token":"EAAB…"}]
 // `name` is the label shown on the board's channel switch (letters/digits/._- only, ≤24 chars);
-// the token is that соц's long-lived user access token (ads_management + business_management +
-// pages_show_list / pages_manage_ads). Removing an entry (or the whole env) kills the channel —
-// in-flight picks fail with a clean config error instead of silently falling back to the system
-// token (the wave was aimed at the soc; a silent fallback would launch it into the restriction
-// the buyer was routing around).
+// the token is that entry's long-lived access token (ads_management + business_management +
+// pages_show_list / pages_manage_ads). `system:true` marks an ALTERNATE SYSTEM USER (e.g. a
+// partner-BM system user that dodges a business-level ward on ours) rather than a personal соц:
+// same switch, same threading, but its launches carry NO "SOC - " name marker and the gcm
+// registry note says `sys:` — audits must not read system-born runs as соц-born. Removing an
+// entry (or the whole env) kills the channel — in-flight picks fail with a clean config error
+// instead of silently falling back to the default system token (the wave was aimed at this
+// signer; a silent fallback would launch it into the restriction the buyer was routing around).
 
 import type { TokenCatalog } from "./fb-graph";
 
-type SocEntry = { name: string; token: string };
+type SocEntry = { name: string; token: string; system: boolean };
 
 function parseSocs(): SocEntry[] {
   const raw = process.env.FB_MO_SOC_TOKENS ?? "";
@@ -29,10 +32,11 @@ function parseSocs(): SocEntry[] {
     for (const e of list) {
       const name = String((e as { name?: unknown } | null)?.name ?? "").trim();
       const token = String((e as { token?: unknown } | null)?.token ?? "").trim();
+      const system = (e as { system?: unknown } | null)?.system === true;
       // Names travel in URLs, cache keys and campaign-name-adjacent notes — keep them boring.
       if (!/^[\w.-]{1,24}$/.test(name) || !token || seen.has(name)) continue;
       seen.add(name);
-      out.push({ name, token });
+      out.push({ name, token, system });
     }
     return out;
   } catch {
@@ -88,21 +92,24 @@ async function probeSoc(e: SocEntry): Promise<ProbeResult> {
   return res;
 }
 
-export type SocStatus = { name: string; ok: boolean; error?: string };
+export type SocStatus = { name: string; ok: boolean; error?: string; system?: boolean };
 
 /** Every provisioned soc with its live token verdict (probed in parallel, 60s cache). */
 export async function moSocStatuses(): Promise<SocStatus[]> {
-  return Promise.all(SOCS.map(async (s) => ({ name: s.name, ...(await probeSoc(s)) })));
+  return Promise.all(
+    SOCS.map(async (s) => ({ name: s.name, ...(s.system ? { system: true } : {}), ...(await probeSoc(s)) })),
+  );
 }
 
 export type MoChannel =
   | { kind: "system" }
-  | { kind: "soc"; name: string; token: string; cat: TokenCatalog };
+  | { kind: "soc"; name: string; token: string; sys: boolean; cat: TokenCatalog };
 
 /**
  * Resolve the wire channel value ("" / "system" / "soc:<name>") to a launch channel.
  * null = the client named a soc this server doesn't carry (stale tab, mid-deploy env change) —
- * callers surface that as a config error rather than guessing a token.
+ * callers surface that as a config error rather than guessing a token. `sys` mirrors the
+ * entry's `system` flag (alternate system user: no SOC name marker, `sys:` registry note).
  */
 export function resolveMoChannel(raw: unknown): MoChannel | null {
   const v = String(raw ?? "").trim();
@@ -113,5 +120,5 @@ export function resolveMoChannel(raw: unknown): MoChannel | null {
   if (!e) return null;
   // Own cache identity per soc: its me/accounts + me/adaccounts catalogs must never bleed into
   // the system token's (same discipline as the AIF catalog in lib/fb-graph).
-  return { kind: "soc", name: e.name, token: e.token, cat: { token: e.token, cacheKey: `mo-soc-${e.name}` } };
+  return { kind: "soc", name: e.name, token: e.token, sys: e.system, cat: { token: e.token, cacheKey: `mo-soc-${e.name}` } };
 }
