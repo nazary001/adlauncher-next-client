@@ -128,6 +128,16 @@ const MKLEARN_LANDINGS: Landing[] = [
   { slug: "millions-of-packages-never-claimed", title: "Packages Never Claimed", lang: "EN", niche: "Auctions" },
   { slug: "confiscated-cars-sold-at-auction", title: "Confiscated Cars at Auction", lang: "EN", niche: "Auctions" },
   { slug: "strangest-finds-in-unclaimed-luggage", title: "Strangest Unclaimed Luggage Finds", lang: "EN", niche: "Auctions" },
+  { slug: "what-your-dreams-are-telling-you", title: "What Your Dreams May Be Telling You", lang: "EN", niche: "Self-Discovery" },
+  { slug: "significado-de-tus-suenos", title: "Significado de tus sueños", lang: "ES", niche: "Self-Discovery" },
+  { slug: "zodiac-sign-compatibility", title: "Zodiac Sign Compatibility", lang: "EN", niche: "Self-Discovery" },
+  { slug: "compatibilidad-de-signos", title: "Compatibilidad de signos", lang: "ES", niche: "Self-Discovery" },
+  { slug: "pick-a-tarot-card", title: "Pick a Tarot Card", lang: "EN", niche: "Self-Discovery" },
+  { slug: "elige-una-carta-de-tarot", title: "Elige una carta de tarot", lang: "ES", niche: "Self-Discovery" },
+  { slug: "sun-moon-rising-signs", title: "Sun, Moon & Rising Signs", lang: "EN", niche: "Self-Discovery" },
+  { slug: "sol-luna-y-ascendente", title: "Sol, Luna y ascendente", lang: "ES", niche: "Self-Discovery" },
+  { slug: "why-you-keep-seeing-11-11", title: "Why You Keep Seeing 11:11", lang: "EN", niche: "Self-Discovery" },
+  { slug: "por-que-ves-11-11", title: "Por qué ves 11:11", lang: "ES", niche: "Self-Discovery" },
 ];
 
 // Indians defaults: the token sees the ACTIVE GC-Magicoffers-BR-* accounts — the ACCOUNT is
