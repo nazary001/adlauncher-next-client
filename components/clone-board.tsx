@@ -14,7 +14,7 @@ import {
   loadSampleSources,
   makeCloneRow,
 } from "@/lib/clone";
-import { bidKind, limitMoney, limitMoneyCents, moneyLabel, normalizeRoasGoal, parseMoney } from "@/lib/types";
+import { bidKind, limitMoney, limitMoneyCents, moEnsureSocMark, moneyLabel, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { BID_STRATEGIES, OS_OPTIONS, countryName, geoSummary } from "@/lib/catalog";
 import { type PartnerId, partnerConfig } from "@/lib/partners";
 import { AutoTextarea, BidKindTag, Field, Select } from "./ui";
@@ -36,6 +36,8 @@ import { useAifTaskManager, useTaskManager } from "./task-manager";
 import { CloneTargetingModal } from "./clone-targeting-modal";
 import { CloneHighOfferModal } from "./clone-high-offer-modal";
 import { SearchSelect } from "./search-select";
+import { useMoSocs } from "./use-mo-socs";
+import { MO_CHANNEL_LS, MoSocPicker, defaultMoSoc } from "./mo-soc-picker";
 import { useFanpages } from "./use-fanpages";
 import { defaultPixelFor, pixelOptionsOf, useAdAccounts } from "./use-adaccounts";
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
@@ -174,12 +176,52 @@ function CloneInner({
 
   const partner = partnerConfig(partnerId);
   const aifMode = Boolean(partner.aifLaunch);
+  // MO clone signer — the same soc roster + persisted pick as the launcher (one signer drives
+  // every MO rail): the system token is RETIRED (owner ask 09-01 — Meta's ward kills its
+  // adset-creates), so the CATALOGS (fanpages/accounts/pixels) and the clone build itself all
+  // ride the picked soc's bearer. AIF keeps its own token — no signer concept there.
+  const moSocs = useMoSocs(!aifMode);
+  const [moChannel, setMoChannel] = useState<string>("");
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(MO_CHANNEL_LS);
+      // Safe setState-in-effect: runs once on mount (localStorage is unreadable during SSR).
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      if (v) setMoChannel(v);
+    } catch {
+      /* storage disabled — session-local pick only */
+    }
+  }, []);
+  const changeMoChannel = useCallback((v: string) => {
+    setMoChannel(v);
+    try {
+      localStorage.setItem(MO_CHANNEL_LS, v);
+    } catch {
+      /* storage disabled */
+    }
+  }, []);
+  // Once the roster lands, an empty/stale pick auto-settles on the default signer.
+  useEffect(() => {
+    if (aifMode || !moSocs || moSocs.length === 0) return;
+    if (moChannel && moSocs.some((s) => s.name === moChannel)) return;
+    // Safe setState-in-effect: converges in one pass (the pick lands in the roster).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    changeMoChannel(defaultMoSoc(moSocs));
+  }, [aifMode, moSocs, moChannel, changeMoChannel]);
+  /** The EFFECTIVE signer ("" = none yet — Duplicate gates on it): picked AND provisioned. */
+  const moSoc = !aifMode && moChannel && (moSocs ?? []).some((s) => s.name === moChannel) ? moChannel : "";
+  /** SOC name marker rides соц-class picks only — system-class entries (Spencermo) go unmarked. */
+  const moSocMarks = Boolean(moSoc) && !(moSocs ?? []).find((s) => s.name === moSoc)?.system;
+  const signerMissing = !aifMode && !moSoc;
   // Token fanpages for the batch fanka picker (with live N/limit fill tags from the hs-tools
   // registry; AIF's scope fills in the day the box syncs AIF pages — same as the launcher board).
+  // MO waits for the signer pick — there is no system catalog to fall back to any more.
   const fanpages = useFanpages(
-    Boolean(partner.fanpagesFromToken),
+    Boolean(partner.fanpagesFromToken) && (aifMode || Boolean(moSoc)),
     partner.pageAdLimit ?? 250,
-    aifMode ? { list: "/api/aif/fanpages", volume: "/api/aif/fanpages/volume" } : undefined,
+    aifMode
+      ? { list: "/api/aif/fanpages", volume: "/api/aif/fanpages/volume" }
+      : { list: `/api/fanpages?channel=soc:${encodeURIComponent(moSoc)}`, volume: "/api/fanpages/volume" },
   );
   const fanpageMissing = Boolean(partner.fanpagesFromToken) && !settings.pageId;
   // Token ad accounts for the destination pick. The destination is an EXPLICIT choice:
@@ -187,9 +229,9 @@ function CloneInner({
   // clone in its source campaign's own account, digits = a concrete target account (media gets
   // migrated there). No silent default — the buyer must say where the batch goes.
   const adAccounts = useAdAccounts(
-    Boolean(partner.accountsFromToken),
+    Boolean(partner.accountsFromToken) && (aifMode || Boolean(moSoc)),
     partner.preferredPixel,
-    aifMode ? "/api/aif/adaccounts" : undefined,
+    aifMode ? "/api/aif/adaccounts" : `/api/adaccounts?channel=soc:${encodeURIComponent(moSoc)}`,
   );
   const accountMissing = Boolean(partner.accountsFromToken) && !settings.accountId;
   const isTargetAccount = Boolean(settings.accountId) && settings.accountId !== SOURCE_ACCOUNT;
@@ -335,12 +377,14 @@ function CloneInner({
   /** Queue each clone (rows × copies) into the Task Manager, which builds them one at a time
    *  (ACTIVE since 08-11) with live stages / errors / retry — the same queue and pipeline as launches. */
   const duplicate = () => {
-    if (destinationMissing || acctBlocked || fankaOver || bidMissingCount > 0 || limits.staleBuild) return; // the button is disabled too — belt and suspenders
+    if (destinationMissing || acctBlocked || fankaOver || bidMissingCount > 0 || signerMissing || limits.staleBuild) return; // the button is disabled too — belt and suspenders
     const total = Math.max(1, Math.floor(settings.copies) || 1);
     let queued = 0;
     for (const r of rows) {
       for (let k = 1; k <= total; k++) {
-        const full = fullCloneName(r);
+        // Soc-class signers stamp the SOC marker into the name (server re-ensures it — this
+        // keeps the queue rows/previews honest); system-class signers (Spencermo) go unmarked.
+        const full = moSocMarks ? moEnsureSocMark(fullCloneName(r)) : fullCloneName(r);
         const name = total > 1 ? `${full} (${k})` : full;
         const edit: CloneEdit = {
           campaignId: r.source.campaignId,
@@ -366,7 +410,15 @@ function CloneInner({
               { accountId: settings.accountId, ...(aifMode ? {} : { pixelId: pixelStale ? "" : settings.pixelId }) }
             : {}),
         };
-        enqueueClone({ partnerId, edit, name, geo: geoSummary(r.countries), budget: r.budget });
+        enqueueClone({
+          partnerId,
+          edit,
+          // MO clones sign as the picked soc (the run route rejects signer-less MO batches).
+          ...(moSoc ? { channel: `soc:${moSoc}` } : {}),
+          name,
+          geo: geoSummary(r.countries),
+          budget: r.budget,
+        });
         queued++;
       }
     }
@@ -389,6 +441,15 @@ function CloneInner({
           {/* ---- Settings (left) ---- */}
           <section className="flex flex-col gap-4 lg:sticky lg:top-[88px]">
             <SectionHeading>Settings</SectionHeading>
+
+            {/* MO signer — the soc token that reads the catalogs below AND signs every clone
+                (the system token is retired). Shared pick with the launcher board. */}
+            {!aifMode ? (
+              <div className="flex flex-col gap-2">
+                <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Signer</span>
+                <MoSocPicker socs={moSocs} value={moChannel} onChange={changeMoChannel} />
+              </div>
+            ) : null}
 
             {/* destination — fanpage always picked; account+pixel optionally re-target the batch */}
             <div className="flex flex-col gap-2">
@@ -568,7 +629,7 @@ function CloneInner({
                 <button
                   type="button"
                   onClick={duplicate}
-                  disabled={destinationMissing || acctBlocked || fankaOver || bidMissingCount > 0 || limits.staleBuild}
+                  disabled={destinationMissing || acctBlocked || fankaOver || bidMissingCount > 0 || signerMissing || limits.staleBuild}
                   className={
                     "animate-pop-in flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-launch/50 " +
                     "bg-launch/15 text-[14px] font-semibold text-launch2 transition-all duration-150 hover:border-launch/70 " +
@@ -611,6 +672,13 @@ function CloneInner({
                     </>
                   ) : null}
                   . Trim copies or pick another account.
+                </div>
+              ) : null}
+
+              {previewed && rows.length > 0 && signerMissing ? (
+                <div className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11.5px] leading-relaxed text-warn">
+                  Duplicate is locked — pick a <span className="font-semibold">Signer</span> (the
+                  system token is retired; MO clones sign as a soc).
                 </div>
               ) : null}
 

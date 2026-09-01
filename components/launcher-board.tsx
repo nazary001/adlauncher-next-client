@@ -21,6 +21,7 @@ import { Header } from "./header";
 import { CampaignCard } from "./campaign-card";
 import { useFanpages } from "./use-fanpages";
 import { useMoSocs } from "./use-mo-socs";
+import { MO_CHANNEL_LS, defaultMoSoc } from "./mo-soc-picker";
 import { hsTokensAllDown, useHsTokenStatus } from "./hs-token-status";
 import { type AdAccountOption, defaultPixelFor, useAdAccounts } from "./use-adaccounts";
 import { type AcctLimits, acctIdKey, useAcctLimits } from "./use-acct-limit";
@@ -62,9 +63,8 @@ const GCM_LOW_WATER = 15;
  *  one rail, re-picking it every session would invite accidental LION shots mid-token-wave. */
 const HS_CHANNEL_LS = "adlauncher.hs.channel";
 
-/** The MO launch-signer pick (System token vs a soc) survives refreshes for the same reason:
- *  a wave routed around a system-token restriction must not silently snap back next session. */
-const MO_CHANNEL_LS = "adlauncher.mo.channel";
+// The MO launch-signer pick lives in mo-soc-picker (MO_CHANNEL_LS) — shared with the clone
+// board so one persisted pick drives every MO rail.
 
 /** gcm auto-claim (skipping registry-reserved codes) + single account/pixel/fanpage pinning. */
 function normalize(rows: Campaign[], partner: PartnerConfig, reserved: Set<string> | null): Campaign[] {
@@ -195,9 +195,18 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       /* storage disabled */
     }
   }, []);
-  /** The EFFECTIVE soc for this wave ("" = system token): picked AND provisioned server-side.
-   *  An UNHEALTHY soc stays effective — its pickers/launch error with FB's own reason (shown
-   *  under the switch); silently snapping to the system token would defeat the routing. */
+  // The system token is RETIRED (owner ask 09-01): once the roster lands, an empty/stale pick
+  // auto-settles on the default signer (system-class Spencermo when healthy, else first healthy).
+  useEffect(() => {
+    if (partnerId !== "in" || !moSocs || moSocs.length === 0) return;
+    if (moChannel && moSocs.some((s) => s.name === moChannel)) return;
+    // Safe setState-in-effect: converges in one pass (the pick lands in the roster).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    changeMoChannel(defaultMoSoc(moSocs));
+  }, [partnerId, moSocs, moChannel, changeMoChannel]);
+  /** The EFFECTIVE soc for this wave ("" = no valid signer yet — launches gate on it): picked
+   *  AND provisioned server-side. An UNHEALTHY soc stays effective — its pickers/launch error
+   *  with FB's own reason (shown under the picker); silent rerouting would defeat the routing. */
   const moSoc =
     partnerId === "in" && moChannel && (moSocs ?? []).some((s) => s.name === moChannel) ? moChannel : "";
   /** SOC name marker rides only соц-class picks — an alternate SYSTEM entry (system:true)
@@ -208,14 +217,14 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // hs-tools registry (AIF reads its own token's pages; its registry scope fills the badges the
   // day the box starts syncing AIF pages — empty until then). A soc channel reads the SOC's own
   // page catalog (its me/accounts) — the volume badges stay on the shared registry sweep.
+  // MO catalogs wait for the signer pick (no system token to read from any more) — the picker
+  // shows its loading hint for the auto-pick beat instead of flashing the retired catalog.
   const fanpages = useFanpages(
-    Boolean(partner.fanpagesFromToken),
+    Boolean(partner.fanpagesFromToken) && (Boolean(partner.aifLaunch) || Boolean(moSoc)),
     partner.pageAdLimit ?? 250,
     partner.aifLaunch
       ? { list: "/api/aif/fanpages", volume: "/api/aif/fanpages/volume" }
-      : moSoc
-        ? { list: `/api/fanpages?channel=soc:${encodeURIComponent(moSoc)}`, volume: "/api/fanpages/volume" }
-        : undefined,
+      : { list: `/api/fanpages?channel=soc:${encodeURIComponent(moSoc)}`, volume: "/api/fanpages/volume" },
   );
   // HS launch-token pool health — powers the "all tokens burned" banner (the server gate is the
   // enforcement; this is the courtesy warning before buyers build a wave into a 429).
@@ -224,13 +233,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // Token ad accounts (with their pixels) for the account/pixel pickers — read from the picked
   // signer's catalog (a soc may see a different account set than the system user).
   const adAccounts = useAdAccounts(
-    Boolean(partner.accountsFromToken),
+    Boolean(partner.accountsFromToken) && (Boolean(partner.aifLaunch) || Boolean(moSoc)),
     partner.preferredPixel,
-    partner.aifLaunch
-      ? "/api/aif/adaccounts"
-      : moSoc
-        ? `/api/adaccounts?channel=soc:${encodeURIComponent(moSoc)}`
-        : undefined,
+    partner.aifLaunch ? "/api/aif/adaccounts" : `/api/adaccounts?channel=soc:${encodeURIComponent(moSoc)}`,
   );
   // LION catalog (HS): profiles + ACR, per-profile accounts/pages/locales, per-account pixels.
   const hs = useHs(Boolean(partner.lionLaunch));
@@ -374,6 +379,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     // A tab older than the deployed build has outdated gates — launching is locked until reload
     // (the banner explains; the rail button is disabled too).
     if (limits.staleBuild) return;
+    // System token retired on MO: no wave fires without a provisioned signer (belt over the
+    // rail's disabled button; the server rejects channel-less MO launches too).
+    if (!partner.aifLaunch && partner.usesGcm && !moSoc) return;
     const opts = launchReadyOpts(partner);
     const launchable = campaigns.filter((c) => isLaunchable(c, opts));
     if (launchable.length === 0) return;

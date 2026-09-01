@@ -172,6 +172,19 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
+  // The system-user token is RETIRED on MO (owner ask 09-01: Meta's ward 2446325 kills its
+  // adset-creates — a system launch burns a gcm on an orphan shell). Every MO wave must name a
+  // provisioned soc signer; a stale tab that still sends none gets this instead of the burn.
+  if (channel.kind === "system" && partner.usesGcm) {
+    return NextResponse.json(
+      {
+        ok: false,
+        stage: "config",
+        error: "mo_system_channel_retired — the system token no longer signs MO launches; pick a soc signer on the board (reload the tab if you don't see the Signer menu)",
+      },
+      { status: 400 },
+    );
+  }
   /** Catalog identity of the signer — undefined = the shared MO system-token catalogs. */
   const cat = channel.kind === "soc" ? channel.cat : undefined;
   /** The bearer that signs EVERY Graph call of this launch (uploads, tree, failure pause). */

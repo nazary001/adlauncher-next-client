@@ -7,6 +7,7 @@ import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { type PartnerConfig, launchReadyOpts, markerPool } from "@/lib/partners";
 import type { HsLaunchChannel } from "./hs-task-manager";
 import type { MoSocStatus } from "./use-mo-socs";
+import { MoSocPicker } from "./mo-soc-picker";
 import { CheckIcon, EyeIcon, RocketIcon } from "./icons";
 import { useAcctLimits } from "./use-acct-limit";
 
@@ -85,6 +86,9 @@ export function LaunchRail({
   const moSocEntry = moSoc ? (moSocs ?? []).find((s) => s.name === moSoc) : undefined;
   // SOC name marker rides соц-class picks only — alternate SYSTEM entries launch unmarked.
   const moSocMarks = Boolean(moSoc) && !moSocEntry?.system;
+  // System token is RETIRED on MO — a wave can't fire without a provisioned signer pick (the
+  // boards auto-pick a default; this only bites while the roster loads or when it's empty).
+  const moSignerMissing = !partner.lionLaunch && partner.usesGcm && !moSoc;
   const nameOf = (c: Campaign) =>
     partner.lionLaunch
       ? c.name.trim()
@@ -252,68 +256,15 @@ export function LaunchRail({
               </p>
             </div>
           ) : null}
-          {/* MO launch signer: the system-user token (default) vs a personal soc token — same
-              direct-Graph tree, different bearer. Rendered only when at least one soc is
-              provisioned server-side (FB_MO_SOC_TOKENS). One pick for the whole wave. */}
-          {!partner.lionLaunch && partner.usesGcm && (moSocs?.length ?? 0) > 0 ? (
+          {/* MO launch signer — a provisioned soc token; the system-user token is RETIRED
+              (owner ask 09-01: Meta's ward kills its adset-creates, so it's gone from the
+              roster). One pick for the whole wave; the boards share the persisted pick. */}
+          {!partner.lionLaunch && partner.usesGcm ? (
             <div className="flex flex-col gap-1">
-              <div
-                className="grid overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5"
-                style={{ gridTemplateColumns: `repeat(${1 + (moSocs?.length ?? 0)}, minmax(0, 1fr))` }}
-              >
-                {[
-                  { key: "", label: "System token", dead: false, err: "" },
-                  ...(moSocs ?? []).map((s) => ({ key: s.name, label: s.name, dead: !s.ok, err: s.error ?? "" })),
-                ].map((opt) => {
-                  const active = moChannel === opt.key;
-                  return (
-                    <button
-                      key={opt.key || "system"}
-                      type="button"
-                      aria-pressed={active}
-                      title={
-                        opt.dead
-                          ? `Token dead — ${opt.err || "re-issue it"}`
-                          : opt.key
-                            ? `Launch as the "${opt.key}" soc token`
-                            : "Launch via the system-user token"
-                      }
-                      onClick={() => onMoChannel?.(opt.key)}
-                      className={
-                        "h-8 truncate rounded-[10px] px-1 text-[12px] font-semibold transition-all duration-150 " +
-                        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
-                        (active
-                          ? opt.dead
-                            ? "bg-red-500/15 text-red-300 shadow-[inset_0_0_0_1px_rgba(248,113,113,0.35)]"
-                            : "bg-accent/20 text-[#9db8ff] shadow-[inset_0_0_0_1px_rgba(122,150,255,0.35)]"
-                          : opt.dead
-                            ? "text-red-400/70 hover:text-red-300"
-                            : "text-dim hover:text-ink")
-                      }
-                    >
-                      {opt.dead ? "⚠ " : ""}
-                      {opt.label}
-                    </button>
-                  );
-                })}
-              </div>
-              <p className="text-center text-[10px] leading-relaxed text-faint">
-                {moSoc
-                  ? moSocEntry?.system
-                    ? `System token "${moSoc}" signs the tree`
-                    : `Soc token "${moSoc}" signs the tree · names carry the SOC marker`
-                  : "System-user token signs the tree"}
-              </p>
-              {(() => {
-                // The picked soc's live verdict: FB's own error text turns a silently empty
-                // account picker into an actionable "this token needs re-issuing".
-                const err = moSocEntry && !moSocEntry.ok ? moSocEntry.error : "";
-                return err ? (
-                  <p className="text-center text-[10px] leading-relaxed text-red-400">
-                    Token dead — pickers stay empty and launches will fail: {err}
-                  </p>
-                ) : null;
-              })()}
+              <span className="select-none text-[10px] font-medium uppercase tracking-[0.14em] text-faint">
+                Signer
+              </span>
+              <MoSocPicker socs={moSocs ?? null} value={moChannel} onChange={(v) => onMoChannel?.(v)} />
             </div>
           ) : null}
           <button
@@ -336,7 +287,7 @@ export function LaunchRail({
             <button
               type="button"
               onClick={onLaunch}
-              disabled={readyCount === 0 || gcmBlocked || limits.staleBuild || launching}
+              disabled={readyCount === 0 || gcmBlocked || moSignerMissing || limits.staleBuild || launching}
               className={
                 "animate-pop-in group flex h-11 w-full items-center justify-center gap-2 rounded-xl " +
                 "bg-gradient-to-b from-launch2 to-launch text-[13.5px] font-bold text-[#032e20] " +
@@ -360,6 +311,10 @@ export function LaunchRail({
           {limits.staleBuild ? (
             <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">
               A newer version is live — reload this tab to launch (its limit gates are outdated).
+            </p>
+          ) : moSignerMissing ? (
+            <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">
+              No signer picked — the system token is retired; pick a soc in the Signer menu above.
             </p>
           ) : gcmBlocked ? (
             <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">

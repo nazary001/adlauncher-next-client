@@ -133,6 +133,9 @@ type CloneInput = {
   kind: "clone";
   partnerId: PartnerId;
   edit: CloneEdit;
+  /** MO clone signer: "soc:<name>" — forwarded to /api/clone/run verbatim (the system token is
+   *  retired there; MO clones without a signer are rejected server-side). AIF sends none. */
+  channel?: string;
 };
 
 type TaskInput = LaunchInput | CloneInput;
@@ -164,6 +167,8 @@ export type EnqueueArgs = {
 export type CloneEnqueueArgs = {
   partnerId: PartnerId;
   edit: CloneEdit;
+  /** MO clone signer (see CloneInput.channel) — required for MO batches, absent for AIF. */
+  channel?: string;
   name: string;
   geo: string;
   budget: string;
@@ -777,7 +782,12 @@ function TaskManagerCore({
           const res = await fetch("/api/clone/run", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ partnerId: input.partnerId, edits: [input.edit], taskIds: [id] }),
+            body: JSON.stringify({
+              partnerId: input.partnerId,
+              edits: [input.edit],
+              taskIds: [id],
+              ...(input.channel ? { channel: input.channel } : {}),
+            }),
             signal: streamAbort.signal,
           });
           resStatus = res.status;
@@ -969,7 +979,12 @@ function TaskManagerCore({
       const queuedAt = Date.now();
       // No video upload — the clone reuses the source's video by id (server-side). gcm is assigned
       // by the run and filled in on completion.
-      inputs.current.set(id, { kind: "clone", partnerId: args.partnerId, edit: args.edit });
+      inputs.current.set(id, {
+        kind: "clone",
+        partnerId: args.partnerId,
+        edit: args.edit,
+        ...(args.channel ? { channel: args.channel } : {}),
+      });
       meta.current.set(id, {
         name: args.name,
         partner: args.partnerId,

@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { AIF_PIXEL, ROAS_PIXEL, partnerConfig, type PartnerId } from "@/lib/partners";
-import { bidAmountMissing, bidKind, normalizeRoasGoal, parseMoney } from "@/lib/types";
+import { resolveMoChannel } from "@/lib/mo-soc";
+import { bidAmountMissing, bidKind, moEnsureSocMark, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
 import {
   FbError,
@@ -107,10 +108,12 @@ export async function POST(req: Request) {
   let partnerId: PartnerId;
   let edits: CloneEdit[];
   let taskIds: (string | null)[] = [];
+  let channelRaw: unknown;
   try {
-    const j = (await req.json()) as { partnerId?: string; edits?: CloneEdit[]; taskIds?: unknown[] };
+    const j = (await req.json()) as { partnerId?: string; edits?: CloneEdit[]; taskIds?: unknown[]; channel?: string };
     partnerId = String(j.partnerId ?? "in") as PartnerId;
     edits = Array.isArray(j.edits) ? j.edits : [];
+    channelRaw = j.channel;
     // Task Manager rows aligned with `edits` by index. When present, per-clone progress + the
     // terminal state are ALSO written to Strapi server-side (see /api/launch) so every account's
     // drawer tracks the run live, surviving the launching browser.
@@ -142,13 +145,40 @@ export async function POST(req: Request) {
   if (aif && !aifTokenConfigured()) {
     return NextResponse.json({ ok: false, error: "no_aif_token" }, { status: 500 });
   }
-  const railToken = aif ? aifRawToken() : undefined;
-  const pageOk = (p: string) => (aif ? aifIsAdvertisablePage(p) : isAdvertisablePage(p));
-  const pageNameOf = (p: string) => (aif ? aifAdvertisablePageName(p) : advertisablePageName(p));
-  const acctOk = (a: string) => (aif ? aifIsTokenAccount(a) : isTokenAccount(a));
-  const pixelsOf = (a: string) => (aif ? aifAccountPixels(a) : accountPixels(a));
-  const acctNameOf = (a: string) => (aif ? aifAccountName(a) : tokenAccountName(a));
-  const post: typeof fbPost = (path, params) => (aif ? aifFbPost(path, params as Json) : fbPost(path, params));
+  // MO clone signer: the system-user token is RETIRED (owner ask 09-01 — Meta's ward 2446325
+  // kills its adset-creates; a system clone would burn a gcm on an orphan shell). Every MO batch
+  // must name a provisioned soc; its bearer signs EVERY Graph call (source read, media
+  // migration, tree build) and its catalogs validate the picked page/account/pixel. AIF keeps
+  // its own token — channel is ignored there.
+  const channel = aif ? null : resolveMoChannel(channelRaw);
+  if (!aif) {
+    if (!channel) {
+      return NextResponse.json(
+        { ok: false, error: "soc_channel_unknown — this soc is not provisioned on the server (FB_MO_SOC_TOKENS)" },
+        { status: 400 },
+      );
+    }
+    if (channel.kind === "system") {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "mo_system_channel_retired — the system token no longer signs MO clones; pick a soc signer on the board (reload the tab if you don't see the Signer menu)",
+        },
+        { status: 400 },
+      );
+    }
+  }
+  const soc = channel && channel.kind === "soc" ? channel : null;
+  /** Catalog identity of the signer (undefined = AIF's own catalog helpers below). */
+  const cat = soc?.cat;
+  const railToken = aif ? aifRawToken() : soc?.token;
+  const pageOk = (p: string) => (aif ? aifIsAdvertisablePage(p) : isAdvertisablePage(p, cat));
+  const pageNameOf = (p: string) => (aif ? aifAdvertisablePageName(p) : advertisablePageName(p, cat));
+  const acctOk = (a: string) => (aif ? aifIsTokenAccount(a) : isTokenAccount(a, cat));
+  const pixelsOf = (a: string) => (aif ? aifAccountPixels(a) : accountPixels(a, cat));
+  const acctNameOf = (a: string) => (aif ? aifAccountName(a) : tokenAccountName(a, cat));
+  const post: typeof fbPost = (path, params) =>
+    aif ? aifFbPost(path, params as Json) : fbPost(path, params, railToken);
   // Default: a clone is built in its SOURCE's own account (media is account-local) with the
   // source's pixel. The buyer MAY pick a target account+pixel instead (cross-account, media
   // migrated). The fanka is always the buyer's pick. Every picked id is validated here against
@@ -243,7 +273,10 @@ export async function POST(req: Request) {
       let failed = 0;
 
       for (let idx = 0; idx < edits.length; idx++) {
-        const edit = edits[idx];
+        // Soc-class signers stamp the SOC marker into the clone's name (server-side truth, same
+        // as /api/launch — an old/tampered client may send an unmarked name); system-class socs
+        // (Spencermo) create unmarked.
+        const edit = soc && !soc.sys ? { ...edits[idx], name: moEnsureSocMark(edits[idx].name) } : edits[idx];
         // Server-side mirror of this clone's Task Manager row (no-op when no task id was sent).
         // The partner rides on every write: a row this writer CREATES (client save lost) must
         // still land in the right drawer's scope — null matches no scope at all.
@@ -425,7 +458,11 @@ export async function POST(req: Request) {
             const c = await claimBrand("", { campaign_name: edit.name, notes: "claimed via adlauncher clone" });
             claim = { gcm: c.brand, documentId: c.documentId };
           } else {
-            claim = await claimGcm("", { campaign_name: edit.name, notes: "claimed via adlauncher clone" });
+            // The signer rides in the registry note (audits tell soc-born from sys-born runs).
+            claim = await claimGcm("", {
+              campaign_name: edit.name,
+              notes: `claimed via adlauncher clone${soc ? ` (${soc.sys ? "sys" : "soc"}:${soc.name})` : ""}`,
+            });
           }
           const gcm = claim.gcm;
 
