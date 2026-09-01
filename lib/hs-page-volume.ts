@@ -81,7 +81,7 @@ async function sweepAccountIds(token: string): Promise<string[]> {
 async function farmPageIds(): Promise<Set<string>> {
   if (farmPagesCache && Date.now() - farmPagesCache.at < COUNTS_TTL_MS) return farmPagesCache.ids;
   try {
-    const slug = (await lionProfiles()).find((s) => /farm/i.test(s));
+    const slug = (await lionProfiles()).find((p) => /farm/i.test(p.slug))?.slug;
     if (!slug) return new Set();
     const ids = new Set((await lionProfileData(slug)).pages.map((p) => String(p.id)));
     farmPagesCache = { at: Date.now(), ids };

@@ -5,7 +5,7 @@
 // link_data for static image ads (same asset, copy, title, CTA) — with only the gcm swapped in the
 // tracking link.
 
-import { type Campaign, makeCampaign } from "./types";
+import { type Campaign, bidKind, makeCampaign } from "./types";
 import type { CloneEdit } from "./clone";
 import { FbError, fbGet, fbPost } from "./fb-graph";
 import { adPayload, adsetPayload, campaignPayload, type LaunchBinds } from "./fb-launch";
@@ -308,12 +308,23 @@ export function swapPixel(link: string, pixelId: string): string {
   return link + (link.includes("?") ? "&" : "?") + `pixel=${pixelId}`;
 }
 
+/** The clone's effective bid strategy: the buyer's per-row switch wins (ROAS ↔ cap ↔ lowest —
+ *  owner ask 09-01), absent/empty inherits the source's. Shared by the route's validation and
+ *  cloneToCampaign so they can never disagree. */
+export function cloneBidStrategy(edit: Pick<CloneEdit, "bidStrategy">, src: Pick<SourceDetail, "bidStrategy">): string {
+  return String(edit.bidStrategy ?? "").trim() || src.bidStrategy;
+}
+
 /** A Campaign-shaped object from the clone edit + source, to reuse the launch payload builders. */
 export function cloneToCampaign(edit: CloneEdit, src: SourceDetail): Campaign {
   const c = makeCampaign(edit.campaignId, "", edit.name); // namePrefix "" → fullName === edit.name
   c.objective = src.objective;
-  c.optimization = src.optimizationGoal === "LINK_CLICKS" ? "clicks" : "conversions";
-  c.bidStrategy = src.bidStrategy;
+  // Min-ROAS optimizes purchase VALUE regardless of what the source optimized (the payload
+  // builders derive optimization_goal VALUE + pin PURCHASE from the strategy kind) — a click
+  // source switched to ROAS must not stay "clicks". Every other strategy keeps the source's.
+  c.bidStrategy = cloneBidStrategy(edit, src);
+  c.optimization =
+    bidKind(c.bidStrategy) === "roas" || src.optimizationGoal !== "LINK_CLICKS" ? "conversions" : "clicks";
   c.bidCap = edit.roasGoal; // becomes bid_amount only for cap strategies (see fb-launch bidAmountCents)
   c.conversionEvent = src.conversionEvent;
   c.budget = edit.budget;

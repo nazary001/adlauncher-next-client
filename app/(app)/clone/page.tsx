@@ -21,7 +21,7 @@ function parseIds(raw: string | string[] | undefined): string[] {
 export default async function ClonePage({
   searchParams,
 }: {
-  searchParams: Promise<{ ids?: string | string[]; partner?: string | string[] }>;
+  searchParams: Promise<{ ids?: string | string[]; partner?: string | string[]; mode?: string | string[] }>;
 }) {
   const jar = await cookies();
   const session = verifySession(jar.get(SESSION_COOKIE)?.value);
@@ -32,6 +32,11 @@ export default async function ClonePage({
   // Shared sanitizer: unknown AND in-development partners fall back to MO (a stale prod URL
   // must not open the board on a partner the switcher itself refuses).
   const partner: PartnerId = sanitizePartnerId(sp.partner);
+  // ?mode=juro|clone opens the HS board straight in that mode (external tools deep-link JURO
+  // the same way they deep-link the cloner); a present mode wins over the buyer's remembered
+  // localStorage pick. Absent/unknown → the board's own default/localStorage.
+  const rawMode = Array.isArray(sp.mode) ? sp.mode[0] : sp.mode;
+  const initialMode = rawMode === "juro" || rawMode === "clone" ? rawMode : undefined;
 
   return (
     <>
@@ -56,6 +61,7 @@ export default async function ClonePage({
           user={{ username: session.username, role: session.role ?? null, owner: isOwnerSession(session) }}
           partner={partner}
           initialIds={ids}
+          initialMode={initialMode}
         />
       ) : (
         // MO and AIF share the Graph clone board — the partner prop picks the rail (token,

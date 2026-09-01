@@ -34,6 +34,13 @@ export type HsCatalog = {
   /** Idempotent loaders — safe to call from card effects on every render. */
   ensureProfile: (slug: string) => void;
   ensurePixels: (slug: string, account: string) => void;
+  /** Fill meter of ONE fanpage id (any page — not just the picked profile's catalog): used/limit/
+   *  free per the /api/hs/page-volume feed, plus the registry's display name ("" = unnamed).
+   *  `approx` = the number is the LION-tally ESTIMATE (registry never read this page — render it
+   *  as "~N"), including the "~0" a tallied feed implies for a page absent from both sources.
+   *  null = unknown (feed not landed, or registry answered without a tally gap-fill); legacy mode
+   *  keeps its absent-=-0 contract. */
+  pageStats: (pageId: string) => { used: number; limit: number; free: number; name: string; approx: boolean } | null;
 };
 
 const EMPTY: HsCatalog = {
@@ -44,6 +51,7 @@ const EMPTY: HsCatalog = {
   pixelsFor: () => undefined,
   ensureProfile: () => {},
   ensurePixels: () => {},
+  pageStats: () => null,
 };
 
 // Meta's per-page ad limit the fill badge meters against (same convention as MO's picker).
@@ -70,8 +78,15 @@ export function useHs(enabled: boolean): HsCatalog {
   const [pageVolume, setPageVolume] = useState<{
     counts: Record<string, number>;
     limits: Record<string, number>;
-    /** hs-tools registry: a page absent from counts is UNKNOWN (untagged, pickable). Legacy
-     *  sweep: absent means 0 counted ads — the old "0/limit" contract. */
+    /** Registry display names per page id — names pages outside a profile's catalog. */
+    names: Record<string, string>;
+    /** Page ids whose count is the LION-tally ESTIMATE (registry never read them) → "~N". */
+    approx: Set<string>;
+    /** The tally gap-fill landed — a page absent from counts is then "~0" (nothing active
+     *  team-wide), not unknown. */
+    tallied: boolean;
+    /** hs-tools registry: a page absent from counts is UNKNOWN (untagged, pickable) unless
+     *  `tallied`. Legacy sweep: absent means 0 counted ads — the old "0/limit" contract. */
     mode: "registry" | "legacy";
   } | null>(null);
   // Fetch guards live in refs, NOT in the state maps: a state-updater runs whenever React gets to
@@ -96,14 +111,34 @@ export function useHs(enabled: boolean): HsCatalog {
         const d = (await r.json().catch(() => ({}))) as {
           ok?: boolean;
           acr?: string;
-          profiles?: string[];
+          profiles?: Array<string | { slug?: string; label?: string; name?: string }>;
           tokenLaunch?: boolean;
         };
         if (!alive) return;
         if (r.ok && d?.ok && Array.isArray(d.profiles)) {
           setAcr(typeof d.acr === "string" ? d.acr : "");
           setTokenLaunch(d.tokenLaunch === true);
-          setProfiles(d.profiles.map((slug) => ({ value: slug, label: slug })));
+          // value/label = the slug (every bind and wire uses it); LION's internal profile label
+          // ("globecoders-44") rides as meta — searchable AND shown in the closed input via
+          // metaWhenClosed — and pairs with the persona name in the two-line dropdown row.
+          // Tolerant of the old slugs-only answer shape (string rows).
+          setProfiles(
+            d.profiles
+              .map((p) => {
+                if (typeof p === "string") return { value: p, label: p } satisfies RichOption;
+                const slug = String(p.slug ?? "");
+                const label = String(p.label ?? "").trim();
+                const name = String(p.name ?? "").trim();
+                const sub = [label, name].filter(Boolean).join(" · ");
+                return {
+                  value: slug,
+                  label: slug,
+                  meta: label || undefined,
+                  subLabel: sub || undefined,
+                } satisfies RichOption;
+              })
+              .filter((o) => o.value),
+          );
           return;
         }
         throw new Error(`HTTP ${r.status}`);
@@ -137,6 +172,9 @@ export function useHs(enabled: boolean): HsCatalog {
           ok?: boolean;
           counts?: Record<string, number>;
           limits?: Record<string, number>;
+          names?: Record<string, string>;
+          approx?: string[];
+          tallied?: boolean;
           mode?: string;
         };
         if (!alive) return;
@@ -144,6 +182,9 @@ export function useHs(enabled: boolean): HsCatalog {
           setPageVolume({
             counts: d.counts,
             limits: d.limits ?? {},
+            names: d.names ?? {},
+            approx: new Set(d.approx ?? []),
+            tallied: d.tallied === true,
             mode: d.mode === "registry" ? "registry" : "legacy",
           });
           return;
@@ -273,13 +314,14 @@ export function useHs(enabled: boolean): HsCatalog {
   );
 
   // Same badge grammar as MO's fanpage picker (use-fanpages): right-aligned "N/limit", dim →
-  // warn ≥80% → danger ≥100%, with the page's REAL limit in registry mode. Registry mode: a page
-  // absent from the map is UNKNOWN (the box never read its meter) → untagged and pickable —
-  // "0/250" there would be an invitation onto numbers nobody has. Legacy sweep keeps its old
-  // contract: absent = 0 counted ads → tags "0/limit".
+  // warn ≥80% → danger ≥100%, with the page's REAL limit in registry mode. Registry pages the
+  // box never read fall back to the LION-tally estimate (feed's `approx` set / `tallied` flag)
+  // and wear a "~" prefix — including "~0" when the whole team runs nothing active there. Only a
+  // registry answer WITHOUT the tally leaves such pages untagged (unknown). Legacy sweep keeps
+  // its old contract: absent = 0 counted ads → tags "0/limit".
   const decorated = useMemo(() => {
     if (!pageVolume) return data;
-    const { counts, limits, mode } = pageVolume;
+    const { counts, limits, approx, tallied, mode } = pageVolume;
     const next = new Map<string, HsProfileData | null>();
     for (const [slug, d] of data) {
       next.set(
@@ -288,14 +330,17 @@ export function useHs(enabled: boolean): HsCatalog {
           ...d,
           pages: d.pages.map((p) => {
             const raw = counts[p.value];
-            const n = typeof raw === "number" ? raw : mode === "legacy" ? 0 : null;
+            const known = typeof raw === "number";
+            const n = known ? (raw as number) : mode === "legacy" ? 0 : tallied ? 0 : null;
             if (n === null) return p;
+            const isApprox = mode === "registry" && (known ? approx.has(p.value) : true);
             const lim = limits[p.value] ?? PAGE_AD_LIMIT;
             const ratio = lim > 0 ? n / lim : 0;
             const tagTone: RichOption["tagTone"] = ratio >= 1 ? "danger" : ratio >= 0.8 ? "warn" : "dim";
             // Full pages stay listed (the red count explains itself) but can't be picked — a
-            // launch would just burn against Meta's per-page ad limit.
-            return { ...p, tag: `${n}/${lim}`, tagTone, disabled: ratio >= 1 };
+            // launch would just burn against Meta's per-page ad limit. The tally overcounts
+            // (dead ads inside ACTIVE campaigns), so an approx-full page errs safe too.
+            return { ...p, tag: `${isApprox ? "~" : ""}${n}/${lim}`, tagTone, disabled: ratio >= 1 };
           }),
         },
       );
@@ -309,11 +354,33 @@ export function useHs(enabled: boolean): HsCatalog {
     [pixels],
   );
 
+  // Raw per-page meter for consumers outside the picker decoration (the clone board's wave gate,
+  // JURO's per-source fanka check) — same absent-page semantics as the badge grammar above.
+  const pageStats = useCallback(
+    (pageId: string): { used: number; limit: number; free: number; name: string; approx: boolean } | null => {
+      if (!pageVolume || !pageId) return null;
+      const { counts, limits, names, approx, tallied, mode } = pageVolume;
+      const raw = counts[pageId];
+      const known = typeof raw === "number";
+      const used = known ? (raw as number) : mode === "legacy" ? 0 : tallied ? 0 : null;
+      if (used === null) return null;
+      const limit = limits[pageId] ?? PAGE_AD_LIMIT;
+      return {
+        used,
+        limit,
+        free: Math.max(limit - used, 0),
+        name: names[pageId] ?? "",
+        approx: mode === "registry" && (known ? approx.has(pageId) : true),
+      };
+    },
+    [pageVolume],
+  );
+
   // Stable identity: a fresh object literal per render forced every memoized card taking `hs`
   // to re-render on ANY board render (review find 08-24) — the parts are all stable/memoized,
   // so the wrapper must be too.
   return useMemo(
-    () => (enabled ? { acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels } : EMPTY),
-    [enabled, acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels],
+    () => (enabled ? { acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels, pageStats } : EMPTY),
+    [enabled, acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels, pageStats],
   );
 }

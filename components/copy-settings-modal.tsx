@@ -79,7 +79,15 @@ const FIELDS: Field[] = [
   { key: "title", label: "Title", group: "Creative", preview: (c) => c.title || "—" },
   { key: "copy", label: "Primary text", group: "Creative", preview: (c) => c.copy || "—" },
   { key: "cta", label: "CTA", group: "Creative", preview: (c) => optLabel(CTAS, c.cta) },
-  { key: "redirectType", label: "Redirect type", group: "Creative", preview: (c) => optLabel(REDIRECT_TYPES, c.redirectType) },
+  // Redirect type is HS-only (drives the LION tail/link) — the other partners neither render nor
+  // use the field, so the modal must not offer to copy it there.
+  {
+    key: "redirectType",
+    label: "Redirect type",
+    group: "Creative",
+    when: (p) => Boolean(p.lionLaunch),
+    preview: (c) => optLabel(REDIRECT_TYPES, c.redirectType),
+  },
   {
     key: "headline",
     label: "Headline",

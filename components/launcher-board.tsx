@@ -524,7 +524,19 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
 
   function changePartner(id: PartnerId) {
     setPartnerId(id);
-    setCampaigns((cs) => normalize(cs, partnerConfig(id), reserved));
+    const cfg = partnerConfig(id);
+    // Re-baseline the redirect to the incoming partner's default (HS → HIGH ADX). Cards born on
+    // another partner carry makeCampaign's global META ADX from a board where the field never
+    // rendered — without this, switching MO → HS shows every card on a redirect nobody picked.
+    setCampaigns((cs) =>
+      normalize(
+        cfg.defaultRedirect
+          ? cs.map((c) => (c.redirectType === cfg.defaultRedirect ? c : { ...c, redirectType: cfg.defaultRedirect! }))
+          : cs,
+        cfg,
+        reserved,
+      ),
+    );
     setPreviewed(false);
     // Every drawer closes on a partner switch: the swapped-in tasks button could otherwise open a
     // second z-[80] panel on top of a still-open one (reachable keyboard-only — review find 08-17).
@@ -592,7 +604,6 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
         const v = src[k];
         patch[k] = Array.isArray(v) ? [...v] : v; // clone arrays (geo/locales/files)
       }
-      if (keys.includes("redirectType")) patch.paramMode = src.paramMode; // keep the pair consistent
       // objective ↔ conversionEvent are a pair — copying one without the other would leave a
       // target with an event invalid for its objective (Meta rejects the ad set). Copy both together.
       if (keys.includes("objective") || keys.includes("conversionEvent")) {

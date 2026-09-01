@@ -1,5 +1,6 @@
 import { NextResponse, after } from "next/server";
 import { bidKind, parseMoney } from "@/lib/types";
+import { SUPPORTED_BID_STRATEGIES } from "@/lib/fb-launch";
 import { hsEnsureTokenMark, hsNormalizedConstraints, hsWireBid } from "@/lib/hs-launch";
 import { reportPagesUsed } from "@/lib/hs-pages";
 import {
@@ -98,6 +99,9 @@ type TokenShot = {
   budgetRaw: string;
   bid: number | null;
   bidStrategy: string;
+  /** TARGET bid strategy (per-row ROAS ↔ cap ↔ lowest switch, owner ask 09-01) — this rail
+   *  rebuilds the ad set, so it can re-bid it. "" = inherit the source's strategy verbatim. */
+  bidStrategyOverride: string;
   name: string;
   geo: string;
   label: string;
@@ -135,6 +139,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       budget?: string;
       bid?: string;
       bidStrategy?: string;
+      bidStrategyOverride?: string;
       name?: string;
       geo?: string;
       label?: string;
@@ -176,12 +181,15 @@ export async function POST(req: Request): Promise<NextResponse> {
     }
     const override = parseGeoOverride(raw?.countries, raw?.locales);
     if (override && "error" in override) return bad(`targeting_override_${override.error}`);
+    const strategyOverride = String(raw?.bidStrategyOverride ?? "").trim();
+    if (strategyOverride && !SUPPORTED_BID_STRATEGIES.has(strategyOverride)) return bad("bid_strategy_invalid");
     shots.push({
       campaignId,
       budget,
       budgetRaw: String(raw?.budget ?? ""),
       bid,
       bidStrategy: String(raw?.bidStrategy ?? "").trim(),
+      bidStrategyOverride: strategyOverride,
       name: String(raw?.name ?? "").trim().slice(0, 200),
       geo: String(raw?.geo ?? "").slice(0, 40) || "inherited",
       label: String(raw?.label ?? "").trim().slice(0, 200),
@@ -415,27 +423,46 @@ async function pumpTokenBatch(
           throw new FbError(reason, { campaignId: s.campaignId });
         }
 
-        // Bid override in the buyer's HUMAN units → Meta-native adset fields, resolved by the
-        // SOURCE's strategy (same contract as the LION rail's hsWireBid scaling).
-        const kind = bidKind(tree.bidStrategy);
+        // The clone's EFFECTIVE strategy: the buyer's per-row switch wins (owner ask 09-01 —
+        // this rail rebuilds the ad set from scratch, so ROAS ↔ cap ↔ lowest are all
+        // reachable); "" inherits the source's verbatim. A typed bid is scaled by the EFFECTIVE
+        // strategy; with the strategy unchanged an empty bid inherits the source ad set's own
+        // fields, but a SWITCHED cap/ROAS clone has nothing to inherit (the source's bid means
+        // a different thing) — the row must type one.
+        const strategy = s.bidStrategyOverride || tree.bidStrategy;
+        const switched = strategy !== tree.bidStrategy;
+        const kind = bidKind(strategy);
+        if (switched && kind === "roas" && !((tree.adset.promoted_object ?? {}) as Json).pixel_id) {
+          const reason =
+            "source isn't conversion-optimized (no promoted pixel) — it can't switch to min-ROAS; pick cap/lowest instead";
+          familyFailed.set(s.campaignId, reason);
+          throw new FbError(reason, { campaignId: s.campaignId });
+        }
         let bidAmount: number | undefined;
         let bidConstraints: Json | undefined;
         if (s.bid != null) {
           // "graph": this rail writes bid_constraints straight to Meta — floor stays ×10000.
-          const wire = kind !== "none" && !(kind === "roas" && s.bid > 100) ? hsWireBid(s.bid, tree.bidStrategy, "graph") : null;
+          const wire = kind !== "none" && !(kind === "roas" && s.bid > 100) ? hsWireBid(s.bid, strategy, "graph") : null;
           if (wire == null) {
-            const reason = "bid not applicable/resolvable for this source — clear the Bid to inherit";
+            const reason =
+              kind === "none"
+                ? "the clone bids lowest-cost — clear the Bid on this row"
+                : "bid not applicable/resolvable for this clone — retype the Bid";
             familyFailed.set(s.campaignId, reason);
             throw new FbError(reason, { campaignId: s.campaignId });
           }
           if (kind === "roas") bidConstraints = { roas_average_floor: wire };
           else bidAmount = wire;
-        } else {
+        } else if (!switched) {
           // No override → inherit the source ad set's own bid, normalizing a percent/×10 ROAS
           // floor a pre-fix source may still carry (hsNormalizedConstraints) — a broken floor
           // must not propagate into the newborn clone.
           if (typeof tree.adset.bid_amount === "number") bidAmount = tree.adset.bid_amount as number;
           if (tree.adset.bid_constraints) bidConstraints = hsNormalizedConstraints(tree.adset.bid_constraints as Json);
+        } else if (kind !== "none") {
+          const reason = `strategy switched to ${strategy} — type a Bid on this row (the source's bid doesn't carry across strategies)`;
+          familyFailed.set(s.campaignId, reason);
+          throw new FbError(reason, { campaignId: s.campaignId });
         }
 
         // Cross-account: re-home EVERY reusable media in the target before any write (cached per
@@ -462,14 +489,15 @@ async function pumpTokenBatch(
         // fixed part.
         const name = hsEnsureTokenMark(s.name || `${tree.name} (copy)`);
 
-        // campaign — CBO with the buyer's budget, the source's objective/strategy, ACTIVE.
+        // campaign — CBO with the buyer's budget, the source's objective, the EFFECTIVE bid
+        // strategy (per-row switch or the source's), ACTIVE.
         const camp = await hsFbPost(`act_${binds.account}/campaigns`, {
           name,
           objective: tree.objective,
           status: "ACTIVE",
           special_ad_categories: tree.specialCategories,
           daily_budget: Math.round(s.budget * 100),
-          bid_strategy: tree.bidStrategy,
+          bid_strategy: strategy,
         });
         created.campaign_id = String(camp.id);
         await rowWrite(user, s.taskId, { status: "running", stage: "adset", campaign_id: created.campaign_id });
@@ -487,13 +515,29 @@ async function pumpTokenBatch(
           campaign_id: String(camp.id),
           status: "ACTIVE",
           billing_event: tree.adset.billing_event ?? "IMPRESSIONS",
-          optimization_goal: tree.adset.optimization_goal ?? "OFFSITE_CONVERSIONS",
+          // Min-ROAS optimizes purchase VALUE; a clone switched OFF roas maps the source's
+          // VALUE goal back to conversions. Unswitched clones keep the source's verbatim.
+          optimization_goal: switched
+            ? kind === "roas"
+              ? "VALUE"
+              : tree.adset.optimization_goal === "VALUE"
+                ? "OFFSITE_CONVERSIONS"
+                : (tree.adset.optimization_goal ?? "OFFSITE_CONVERSIONS")
+            : (tree.adset.optimization_goal ?? "OFFSITE_CONVERSIONS"),
           targeting,
           start_time: hsTokenStartTime(),
           dsa_beneficiary: binds.pageName,
           dsa_payor: binds.pageName,
         };
-        if (srcPromoted.pixel_id) adsetPayload.promoted_object = { ...srcPromoted, pixel_id: binds.pixel };
+        if (srcPromoted.pixel_id) {
+          adsetPayload.promoted_object = {
+            ...srcPromoted,
+            pixel_id: binds.pixel,
+            // A ROAS-switched clone value-optimizes PURCHASE regardless of the source's event
+            // (same pairing every launch rail ships for min-ROAS).
+            ...(switched && kind === "roas" ? { custom_event_type: "PURCHASE" } : {}),
+          };
+        }
         if (bidAmount != null) adsetPayload.bid_amount = bidAmount;
         if (bidConstraints) adsetPayload.bid_constraints = bidConstraints;
         // A WW override needs the TW/SG universal-ads declarations up front (further regions

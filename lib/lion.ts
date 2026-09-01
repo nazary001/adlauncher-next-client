@@ -1,6 +1,8 @@
 // Server-only client for the LION REST API (HS partner launches). One place holds the base URL,
 // the bearer token, the retry policy and the read caches — routes stay thin.
 
+import { juroStoryPages } from "./juro";
+
 const BASE = (process.env.LION_BASE || "https://lion.highstakes.tech").replace(/\/+$/, "");
 const TOKEN = process.env.LION_TOKEN ?? "";
 /** Media-buyer acronym bound to the token's LION user. Campaign names must carry it — LION
@@ -96,7 +98,7 @@ type CacheEntry<T> = { at: number; value: T };
 const TTL_MS = 10 * 60_000;
 
 // Module caches are per-instance (fine locally; on Vercel a cold start just re-fetches).
-const profilesCache: { entry?: CacheEntry<string[]> } = {};
+const profilesCache: { entry?: CacheEntry<LionProfile[]> } = {};
 const profileDataCache = new Map<string, CacheEntry<LionProfileData>>();
 const pixelsCache = new Map<string, CacheEntry<LionPixel[]>>();
 // De-dupe concurrent fetches of the same key (several cards ensure the same profile at once).
@@ -115,18 +117,31 @@ const fresh = <T>(e: CacheEntry<T> | undefined): T | undefined =>
 
 const str = (v: unknown): string => (v == null ? "" : String(v));
 
-/** Profile slugs the token can operate on. Display names are dropped (double-encoded cyrillic —
- *  slugs are the clean, stable identifier). */
-export async function lionProfiles(): Promise<string[]> {
+export type LionProfile = {
+  /** The stable identifier every LION wire takes ("glo-01-10") — binds validate against it. */
+  slug: string;
+  /** LION's internal profile label ("globecoders-44") — display material; "" on FARM/RENT. */
+  label: string;
+  /** The anti-detect persona name ("Allie Hoile") — display material; may be empty. */
+  name: string;
+};
+
+/** Profiles the token can operate on: the slug (identifier) plus LION's display fields (owner
+ *  ask 09-01 — the pickers show the internal "globecoders-NN" label next to the slug). Probed
+ *  09-01: names now arrive clean UTF-8 (the historical double-encoded-cyrillic issue is gone). */
+export async function lionProfiles(): Promise<LionProfile[]> {
   const cached = fresh(profilesCache.entry);
   if (cached) return cached;
   return dedupe("profiles", async () => {
     const body = (await lionGet("/api/facebook/profiles/list/")) as Record<string, unknown> | null;
     const raw = Array.isArray(body?.profiles) ? (body!.profiles as Record<string, unknown>[]) : [];
-    const slugs = raw.map((p) => str(p.slug)).filter(Boolean).sort();
-    if (slugs.length === 0) throw new LionError("LION returned no profiles", undefined, body);
-    profilesCache.entry = { at: Date.now(), value: slugs };
-    return slugs;
+    const rows = raw
+      .map((p) => ({ slug: str(p.slug), label: str(p.label).trim(), name: str(p.name).trim() }))
+      .filter((p) => p.slug)
+      .sort((a, b) => a.slug.localeCompare(b.slug));
+    if (rows.length === 0) throw new LionError("LION returned no profiles", undefined, body);
+    profilesCache.entry = { at: Date.now(), value: rows };
+    return rows;
   });
 }
 
@@ -533,6 +548,10 @@ export type LionSourceInfo = {
   bidStrategy: string;
   adsCount: number;
   countries: string[];
+  /** Fanpage(s) the source's ads live on, tallied per page from the ads' story ids (one JURO ad
+   *  is born per unique story, ON its page). [] = underivable (UNREADABLE / malformed stories) —
+   *  the board shows no fanka meter for the row and never blocks on it. */
+  pages: { pageId: string; ads: number }[];
 };
 
 /** Read source campaigns for the duplicator table: details/ (name, budget, adsets/ads) +
@@ -547,7 +566,11 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
     campaign_status?: string;
     bid_strategy?: string;
     campaign_budget?: number;
-    adsets?: Array<{ bid_amount?: number; adset_bid?: number; ads?: Array<Record<string, unknown>> }>;
+    adsets?: Array<{
+      bid_amount?: number;
+      adset_bid?: number;
+      ads?: Array<{ creative?: { object_story_id?: string } }>;
+    }>;
   };
   type TargetingRow = { campaign_id?: string | number; countries_code?: string[]; countries?: string[] };
   const [detailsBody, targetingBody] = await Promise.all([
@@ -567,10 +590,15 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
   const rows = campaignIds.map((cid) => {
     const d = byId.get(cid);
     if (!d) {
-      return { campaignId: cid, name: "", status: "UNREADABLE", budget: null, bid: null, bidStrategy: "", adsCount: 0, countries: geoById.get(cid) ?? [] };
+      return { campaignId: cid, name: "", status: "UNREADABLE", budget: null, bid: null, bidStrategy: "", adsCount: 0, countries: geoById.get(cid) ?? [], pages: [] as { pageId: string; ads: number }[] };
     }
     const adsets = Array.isArray(d.adsets) ? d.adsets : [];
+    const ads = adsets.flatMap((a) => (Array.isArray(a.ads) ? a.ads : []));
     const bidRaw = adsets[0]?.bid_amount ?? adsets[0]?.adset_bid;
+    // Same page derivation as lionJuroSources: unique stories → per-page tally (what a JURO copy
+    // lands per page — the board's fanka fill meter compares this against the registry's free).
+    const stories = [...new Set(ads.map((a) => String(a.creative?.object_story_id ?? "")).filter(Boolean))];
+    const pages = juroStoryPages(stories)?.map((p) => ({ pageId: p.pageId, ads: p.delta })) ?? [];
     return {
       campaignId: cid,
       name: String(d.campaign_name ?? ""),
@@ -578,8 +606,9 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
       budget: typeof d.campaign_budget === "number" ? d.campaign_budget : null,
       bid: typeof bidRaw === "number" ? bidRaw : null,
       bidStrategy: String(d.bid_strategy ?? ""),
-      adsCount: adsets.reduce((s, a) => s + (Array.isArray(a.ads) ? a.ads.length : 0), 0),
+      adsCount: ads.length,
       countries: geoById.get(cid) ?? [],
+      pages,
     };
   });
   // MIN_ROAS goals never appear in details/ — metrics' campaign_bid is the only read that has

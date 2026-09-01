@@ -16,7 +16,6 @@ import {
   OBJECTIVES,
   OPTIMIZATIONS,
   OS_OPTIONS,
-  PARAM_MODES,
   PLACEMENTS,
   PROFILES,
   REDIRECT_TYPES,
@@ -546,6 +545,8 @@ function CampaignCardBase({
                       options={hsMode ? (hs?.profiles ?? []) : PROFILES}
                       placeholder="Search profile"
                       emptyHint={hsMode ? (hs?.profiles ? "No LION profiles" : "Loading profiles…") : undefined}
+                      // Closed field reads "glo-01-10 · globecoders-44" (slug + LION's label).
+                      metaWhenClosed
                     />
                   </Field>
                 ) : null}
@@ -923,7 +924,10 @@ function CampaignCardBase({
                         options={CTAS}
                       />
                     </Field>
-                    {!aifMode ? (
+                    {/* Redirect type is an HS concept only (drives the LION tail/link — see
+                        hsLinkSegments); MO/AIF links ignore it entirely, so the field renders
+                        nowhere else (owner ask 09-01 — it used to show on MO doing nothing). */}
+                    {hsMode ? (
                       <Field label="Redirect type">
                         <Select
                           value={c.redirectType}
@@ -933,31 +937,6 @@ function CampaignCardBase({
                       </Field>
                     ) : null}
                   </div>
-                  {c.redirectType === "#ADX" && !hsMode && !aifMode ? (
-                    <div className="animate-pop-in">
-                      <Field label="Param mode">
-                        <Select
-                          value={c.paramMode}
-                          onChange={(e) => patch({ paramMode: e.target.value })}
-                          options={PARAM_MODES}
-                        />
-                      </Field>
-                    </div>
-                  ) : null}
-                  {c.redirectType === "HIGH ADX" && !hsMode && !aifMode ? (
-                    <button
-                      type="button"
-                      className={
-                        "animate-pop-in flex h-9 w-full items-center justify-center gap-2 rounded-lg " +
-                        "border border-warn/40 bg-warn/5 text-[12.5px] font-medium text-warn " +
-                        "transition-all duration-150 hover:bg-warn/10 active:scale-[0.99] " +
-                        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warn/40"
-                      }
-                    >
-                      <SlidersIcon className="h-3.5 w-3.5" />
-                      High offer config
-                    </button>
-                  ) : null}
                   {partner.usesGcm ? (
                     <>
                       <Field label="Landing">

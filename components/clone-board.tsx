@@ -14,12 +14,13 @@ import {
   loadSampleSources,
   makeCloneRow,
 } from "@/lib/clone";
-import { bidKind, limitMoney, limitMoneyCents, moneyLabel } from "@/lib/types";
-import { OS_OPTIONS, countryName, geoSummary } from "@/lib/catalog";
+import { bidKind, limitMoney, limitMoneyCents, moneyLabel, normalizeRoasGoal, parseMoney } from "@/lib/types";
+import { BID_STRATEGIES, OS_OPTIONS, countryName, geoSummary } from "@/lib/catalog";
 import { type PartnerId, partnerConfig } from "@/lib/partners";
 import { AutoTextarea, BidKindTag, Field, Select } from "./ui";
 import {
   AlertIcon,
+  ChevronDownIcon,
   CopyIcon,
   FilmIcon,
   GlobeIcon,
@@ -49,6 +50,21 @@ function todayDDMM(): string {
 const cellInput =
   "h-8 w-full rounded-md border border-line bg-surface2 px-2 text-[12px] font-mono tabular-nums text-ink " +
   "outline-none transition-colors duration-150 hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15";
+
+const cellSelect =
+  "h-8 w-full cursor-pointer appearance-none rounded-md border border-line bg-surface2 px-2 pr-6 text-[11.5px] text-ink " +
+  "outline-none transition-colors duration-150 hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15";
+
+/** A row's Bid value is REQUIRED by its picked strategy (cap $ / ROAS goal; the ambiguous 10–20
+ *  ROAS band counts as missing — every wire point refuses it). Mirrors the server's pre-claim
+ *  checks so the fire button blocks instead of burning markers on per-clone errors. */
+function rowBidMissing(r: CloneRow): boolean {
+  const kind = bidKind(r.bidStrategy);
+  if (kind === "none") return false;
+  const v = parseMoney(r.roasGoal);
+  if (v <= 0) return true;
+  return kind === "roas" && normalizeRoasGoal(v) == null;
+}
 
 /** Compact geo string for the Task Manager row (mirrors the launcher's geo summary). */
 function SectionHeading({ children, right }: { children: React.ReactNode; right?: React.ReactNode }) {
@@ -200,6 +216,22 @@ function CloneInner({
   // countdown instead.
   const limits = useAcctLimits();
   const cloneDemand = rows.length * Math.max(1, Math.floor(settings.copies) || 1);
+  // Fanka capacity: each clone ships ONE ad (campaign→adset→ad, clone-run) — the batch adds
+  // rows×copies ads to the ONE picked fanpage. Free slots come from the picker's own volume feed;
+  // unknown fill (numbers not landed / no registry data) = fail open, same as the badge grammar.
+  const pickedFanka = settings.pageId ? fanpages?.find((o) => o.value === settings.pageId) : undefined;
+  const fankaStats =
+    pickedFanka && pickedFanka.adCount != null && pickedFanka.adLimit != null
+      ? {
+          used: pickedFanka.adCount,
+          limit: pickedFanka.adLimit,
+          free: Math.max(pickedFanka.adLimit - pickedFanka.adCount, 0),
+        }
+      : null;
+  const fankaOver = fankaStats !== null && rows.length > 0 && cloneDemand > fankaStats.free;
+  // Rows whose picked strategy needs a Bid that isn't there (cap $ / ROAS goal / ambiguous ROAS
+  // band) — the fire button blocks on this instead of burning markers on per-clone 400s.
+  const bidMissingCount = rows.filter(rowBidMissing).length;
   const targetRemaining = isTargetAccount
     ? Math.max(0, limits.limit - limits.countFor(settings.accountId))
     : null;
@@ -303,7 +335,7 @@ function CloneInner({
   /** Queue each clone (rows × copies) into the Task Manager, which builds them one at a time
    *  (ACTIVE since 08-11) with live stages / errors / retry — the same queue and pipeline as launches. */
   const duplicate = () => {
-    if (destinationMissing || acctBlocked || limits.staleBuild) return; // the button is disabled too — belt and suspenders
+    if (destinationMissing || acctBlocked || fankaOver || bidMissingCount > 0 || limits.staleBuild) return; // the button is disabled too — belt and suspenders
     const total = Math.max(1, Math.floor(settings.copies) || 1);
     let queued = 0;
     for (const r of rows) {
@@ -314,7 +346,10 @@ function CloneInner({
           campaignId: r.source.campaignId,
           name,
           budget: r.budget,
-          roasGoal: r.roasGoal,
+          // The row's PICKED strategy (may differ from the source's — the server rebuilds the
+          // ad set around it); lowest-cost clones drop whatever bid value lingered in the field.
+          bidStrategy: r.bidStrategy,
+          roasGoal: bidKind(r.bidStrategy) === "none" ? "" : r.roasGoal,
           countries: r.countries,
           locales: r.locales,
           category: r.category,
@@ -375,6 +410,23 @@ function CloneInner({
                       metaWhenClosed
                       warn={fanpageMissing}
                     />
+                    {/* Live fill of the picked fanka vs what THIS batch adds (1 ad per clone) —
+                        red when it won't fit; Duplicate locks on the same flag. */}
+                    {fankaStats ? (
+                      <p
+                        className={
+                          "px-0.5 font-mono text-[10.5px] tabular-nums " +
+                          (fankaOver
+                            ? "font-semibold text-danger"
+                            : fankaStats.limit > 0 && fankaStats.used / fankaStats.limit >= 0.8
+                              ? "text-warn"
+                              : "text-faint")
+                        }
+                      >
+                        {fankaStats.used}/{fankaStats.limit} ads · {fankaStats.free} free
+                        {rows.length > 0 ? ` · batch adds ${cloneDemand}` : ""}
+                      </p>
+                    ) : null}
                   </div>
                 ) : null}
                 {partner.accountsFromToken ? (
@@ -516,7 +568,7 @@ function CloneInner({
                 <button
                   type="button"
                   onClick={duplicate}
-                  disabled={destinationMissing || acctBlocked || limits.staleBuild}
+                  disabled={destinationMissing || acctBlocked || fankaOver || bidMissingCount > 0 || limits.staleBuild}
                   className={
                     "animate-pop-in flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-launch/50 " +
                     "bg-launch/15 text-[14px] font-semibold text-launch2 transition-all duration-150 hover:border-launch/70 " +
@@ -559,6 +611,27 @@ function CloneInner({
                     </>
                   ) : null}
                   . Trim copies or pick another account.
+                </div>
+              ) : null}
+
+              {previewed && rows.length > 0 && bidMissingCount > 0 ? (
+                <div className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11.5px] leading-relaxed text-warn">
+                  <span className="font-semibold">{bidMissingCount}</span> row
+                  {bidMissingCount === 1 ? " needs" : "s need"} a Bid for{" "}
+                  {bidMissingCount === 1 ? "its" : "their"} picked strategy (amber field) — type the
+                  cap $ / ROAS goal or switch back.
+                </div>
+              ) : null}
+
+              {previewed && rows.length > 0 && !destinationMissing && fankaOver && fankaStats ? (
+                <div className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11.5px] leading-relaxed text-warn">
+                  Fanpage full — the batch adds <span className="font-semibold">{cloneDemand}</span>{" "}
+                  ads but this fanpage has only{" "}
+                  <span className="font-semibold">{fankaStats.free}</span> free (
+                  <span className="font-mono">
+                    {fankaStats.used}/{fankaStats.limit}
+                  </span>
+                  ). Trim copies or pick another fanpage.
                 </div>
               ) : null}
 
@@ -652,7 +725,7 @@ function CloneInner({
                       <th className="w-[58px] px-2 py-2.5 text-right">Orig $</th>
                       <th className="w-[96px] px-2 py-2.5 text-right">Orig bid</th>
                       <th className="w-[54px] px-2 py-2.5 text-center">Videos</th>
-                      <th className="w-[86px] border-l border-line px-2 py-2.5">Bid</th>
+                      <th className="w-[168px] border-l border-line px-2 py-2.5">Strategy · Bid</th>
                       <th className="w-[86px] px-2 py-2.5">Budget</th>
                       <th className="w-[112px] px-2 py-2.5">Config</th>
                       <th className="w-[44px] px-1 py-2.5" />
@@ -740,51 +813,96 @@ function CloneInner({
                             CloneEdit.roasGoal/budget → money()=0 → an ad set Meta rejects
                             (orphan + burnt gcm). */}
                         <td className="border-l border-line px-2 py-3.5">
-                          {/* Dual-purpose by the SOURCE's strategy (cloneToCampaign wires it as
-                              bidCap): a ROAS decimal on min-ROAS rows (blue R, clamp 100 like the
-                              launcher card), a $ cap on cap rows — the in-field marker mirrors
-                              the Orig-bid tag so the unit is readable where the buyer types. */}
-                          <div className="relative">
-                            {bidKind(r.source.bidStrategy) !== "none" ? (
-                              <span
+                          {/* The CLONE's strategy — switchable per row (ROAS ↔ cap ↔ lowest,
+                              owner ask 09-01; the token rail rebuilds the ad set, so any
+                              supported strategy is reachable). The bid field follows the PICKED
+                              strategy; a kind change clears the value (a $ cap is not a ROAS
+                              goal) and switching back to the source's kind restores its bid. */}
+                          <div className="flex flex-col gap-1.5">
+                            <div className="relative">
+                              <select
+                                value={r.bidStrategy}
+                                onChange={(e) => {
+                                  const bidStrategy = e.target.value;
+                                  const kind = bidKind(bidStrategy);
+                                  const roasGoal =
+                                    kind === bidKind(r.bidStrategy)
+                                      ? r.roasGoal
+                                      : kind === bidKind(r.source.bidStrategy)
+                                        ? r.source.originalRoas
+                                        : "";
+                                  patchRow(r.id, { bidStrategy, roasGoal });
+                                }}
+                                aria-label="Clone bid strategy"
+                                title={
+                                  r.bidStrategy !== r.source.bidStrategy
+                                    ? "Strategy switched — the clone launches with THIS strategy, not the source's"
+                                    : "The clone's bid strategy (the source's — switch it to re-bid the clone)"
+                                }
                                 className={
-                                  "pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[11px] " +
-                                  (bidKind(r.source.bidStrategy) === "roas"
-                                    ? "font-semibold text-[#9db8ff]"
-                                    : "text-faint")
+                                  cellSelect +
+                                  (r.bidStrategy !== r.source.bidStrategy
+                                    ? " border-accent/50 text-[#9db8ff]"
+                                    : "")
                                 }
                               >
-                                {bidKind(r.source.bidStrategy) === "roas" ? "R" : "$"}
-                              </span>
-                            ) : null}
-                            <input
-                              value={r.roasGoal}
-                              onChange={(e) =>
-                                patchRow(r.id, {
-                                  roasGoal: limitMoneyCents(
-                                    e.target.value,
-                                    bidKind(r.source.bidStrategy) === "roas" ? 100 : 1000,
-                                  ),
-                                })
-                              }
-                              inputMode="decimal"
-                              placeholder={
-                                bidKind(r.source.bidStrategy) === "roas"
-                                  ? "1,20"
-                                  : bidKind(r.source.bidStrategy) === "cap"
-                                    ? "0,50"
-                                    : "auto"
-                              }
-                              title={
-                                bidKind(r.source.bidStrategy) === "roas"
-                                  ? "ROAS decimal — 34 → 0,34 (34%)"
-                                  : bidKind(r.source.bidStrategy) === "cap"
-                                    ? "Bid cap in $ — digits fill cents, 34 → $0,34"
-                                    : "Source bids automatically (lowest cost)"
-                              }
-                              aria-label="Bid / ROAS goal"
-                              className={cellInput + (bidKind(r.source.bidStrategy) !== "none" ? " pl-5" : "")}
-                            />
+                                {BID_STRATEGIES.map((o) => (
+                                  <option key={o.value} value={o.value} className="bg-surface text-ink">
+                                    {o.label}
+                                  </option>
+                                ))}
+                              </select>
+                              <ChevronDownIcon className="pointer-events-none absolute right-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-faint" />
+                            </div>
+                            <div className="relative">
+                              {bidKind(r.bidStrategy) !== "none" ? (
+                                <span
+                                  className={
+                                    "pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[11px] " +
+                                    (bidKind(r.bidStrategy) === "roas"
+                                      ? "font-semibold text-[#9db8ff]"
+                                      : "text-faint")
+                                  }
+                                >
+                                  {bidKind(r.bidStrategy) === "roas" ? "R" : "$"}
+                                </span>
+                              ) : null}
+                              <input
+                                value={bidKind(r.bidStrategy) === "none" ? "" : r.roasGoal}
+                                onChange={(e) =>
+                                  patchRow(r.id, {
+                                    roasGoal: limitMoneyCents(
+                                      e.target.value,
+                                      bidKind(r.bidStrategy) === "roas" ? 100 : 1000,
+                                    ),
+                                  })
+                                }
+                                inputMode="decimal"
+                                disabled={bidKind(r.bidStrategy) === "none"}
+                                placeholder={
+                                  bidKind(r.bidStrategy) === "roas"
+                                    ? "1,20"
+                                    : bidKind(r.bidStrategy) === "cap"
+                                      ? "0,50"
+                                      : "auto"
+                                }
+                                title={
+                                  bidKind(r.bidStrategy) === "roas"
+                                    ? "ROAS decimal — 34 → 0,34 (34%)"
+                                    : bidKind(r.bidStrategy) === "cap"
+                                      ? "Bid cap in $ — digits fill cents, 34 → $0,34"
+                                      : "Lowest cost bids automatically"
+                                }
+                                aria-label="Bid / ROAS goal"
+                                className={
+                                  cellInput +
+                                  (bidKind(r.bidStrategy) !== "none" ? " pl-5" : " opacity-50") +
+                                  (rowBidMissing(r)
+                                    ? " border-warn/60 focus:border-warn focus:ring-warn/15"
+                                    : "")
+                                }
+                              />
+                            </div>
                           </div>
                         </td>
                         <td className="px-2 py-3.5">

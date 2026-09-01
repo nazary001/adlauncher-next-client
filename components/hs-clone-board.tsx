@@ -8,12 +8,12 @@ import { useHs } from "./use-hs";
 import { useHsTaskManager } from "./hs-task-manager";
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
 import { bidKind, limitMoney, limitMoneyCents, moneyLabel, parseMoney } from "@/lib/types";
-import { geoSummary } from "@/lib/catalog";
+import { BID_STRATEGIES, geoSummary } from "@/lib/catalog";
 import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { juroEnsureMark } from "@/lib/juro";
 import { relabelNameGeo } from "@/lib/targeting-override";
 import type { PartnerId } from "@/lib/partners";
-import { CopyIcon, EyeIcon, GlobeIcon, PlusIcon, TrashIcon } from "./icons";
+import { ChevronDownIcon, CopyIcon, EyeIcon, GlobeIcon, PlusIcon, TrashIcon } from "./icons";
 import { HsTargetingModal } from "./hs-targeting-modal";
 import { hsTokensAllDown, useHsTokenStatus } from "./hs-token-status";
 import type { SessionUser } from "./user-menu";
@@ -34,9 +34,16 @@ type Row = {
     bid: number | null;
     bidStrategy: string;
     adsCount: number;
+    /** Fanpage(s) the source's ads live on (per-page ad tally from the story ids) — where a JURO
+     *  copy lands its ads. [] = underivable → no fanka meter, never blocks. */
+    pages: { pageId: string; ads: number }[];
   } | null;
   loading: boolean;
   bid: string; // editable override; "" = inherit from source (safe default)
+  /** The row's PICKED bid strategy (seeded with the source's once facts land). On the FB Token
+   *  rails it may differ from the source's (ROAS ↔ cap ↔ lowest — owner ask 09-01, the rail
+   *  rebuilds the ad set); LION rails always ride the source's — the select locks there. */
+  bidStrategy: string;
   budget: string; // editable, display string → cents on the wire
   suffix: string;
   /** Targeting override (modal): geo codes (["WW"] = worldwide) — empty = inherit the source's. */
@@ -50,6 +57,11 @@ type Row = {
 const cellInput =
   "h-8 w-full rounded-md border border-line bg-surface2 px-2 text-[12px] font-mono tabular-nums text-ink " +
   "outline-none transition-colors duration-150 hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15";
+
+const cellSelect =
+  "h-8 w-full cursor-pointer appearance-none rounded-md border border-line bg-surface2 px-2 pr-6 text-[11.5px] text-ink " +
+  "outline-none transition-colors duration-150 hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 " +
+  "disabled:cursor-not-allowed disabled:opacity-50";
 
 /** Human display of a source's OWN bid, formatted by how it bids (BidKindTag names the how):
  *  min-ROAS goal = plain decimal ("0,34" = 34%), cap = "$0,34", lowest = "auto" (no bid at all).
@@ -110,6 +122,7 @@ const freshRow = (campaignId: string, n: number): Row => ({
   info: null,
   loading: false,
   bid: "",
+  bidStrategy: "", // seeded with the source's strategy once the LION facts land
   budget: "10",
   suffix: "", // becomes the source's old TAIL once LION answers — an editable replacement
   countries: [],
@@ -139,11 +152,14 @@ export function HsCloneBoard({
   user,
   partner,
   initialIds = [],
+  initialMode,
 }: {
   user?: SessionUser;
   partner: PartnerId;
   /** Source campaign ids handed over in the link (?ids=…) — one prefilled row each. */
   initialIds?: string[];
+  /** Board mode forced by the link (?mode=juro) — wins over the localStorage pick. */
+  initialMode?: "clone" | "juro";
 }) {
   const hs = useHs(true);
   const { setOpen } = useHsTaskManager();
@@ -160,7 +176,7 @@ export function HsCloneBoard({
   // ask 08-26): the cloner pair fires /api/hs/duplicate | /api/hs/token-duplicate, the JURO pair
   // /api/hs/jurar | /api/hs/token-jurar. All picks survive refreshes; the token options unlock
   // only once the server says the rail is provisioned.
-  const [mode, setMode] = useState<"clone" | "juro">("clone");
+  const [mode, setMode] = useState<"clone" | "juro">(initialMode ?? "clone");
   const [dupChannel, setDupChannel] = useState<"lion" | "token">("lion");
   const [juroChannel, setJuroChannel] = useState<"lion" | "token">("lion");
   useEffect(() => {
@@ -169,16 +185,17 @@ export function HsCloneBoard({
       const v = localStorage.getItem("adlauncher.hs.dupchannel");
       const j = localStorage.getItem("adlauncher.hs.jurochannel");
       // Safe setState-in-effect: runs once on mount (localStorage is unreadable during SSR).
+      // A link-forced mode (?mode=juro) wins — the remembered pick must not override it.
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (m === "juro" || m === "clone") setMode(m);
+      if (!initialMode && (m === "juro" || m === "clone")) setMode(m);
       // pre-split storage carried the mode inside the channel key ("juro") — map it forward
-      else if (v === "juro") setMode("juro");
+      else if (!initialMode && v === "juro") setMode("juro");
       if (v === "token" || v === "lion") setDupChannel(v);
       if (j === "token" || j === "lion") setJuroChannel(j);
     } catch {
       /* storage disabled — session-local pick only */
     }
-  }, []);
+  }, [initialMode]);
   const changeMode = (m: "clone" | "juro") => {
     setMode(m);
     setPreviewed(false);
@@ -235,6 +252,12 @@ export function HsCloneBoard({
         : "lion";
   /** Both FB-Token channels ride the same token pool — one flag for every pool-dependent gate. */
   const tokenRail = effDupChannel === "token" || effDupChannel === "juro-token";
+  /** The row's EFFECTIVE bid strategy: on the FB Token rails the row's pick wins (those rails
+   *  rebuild the ad set — ROAS ↔ cap ↔ lowest all reachable, owner ask 09-01); LION rails
+   *  always ride the source's (LION inherits, it can't re-bid — the select locks there). */
+  const rowStrategy = (r: Row): string => (tokenRail && r.bidStrategy) || r.info?.bidStrategy || "";
+  const rowSwitched = (r: Row): boolean =>
+    tokenRail && r.info !== null && Boolean(r.bidStrategy) && r.bidStrategy !== r.info.bidStrategy;
   // JURO relaunches the source's page POSTS — the ads live on the source post's fanpage, so
   // there is no page bind at all on either channel (LION checks the executor profile's page
   // catalog; the token rail checks our token's own page access — both server-side).
@@ -312,6 +335,7 @@ export function HsCloneBoard({
               bid: number | null;
               bidStrategy: string;
               adsCount: number;
+              pages?: Array<{ pageId: string; ads: number }>;
             }>;
           };
           const byId = new Map((d.sources ?? []).map((s) => [s.campaignId, s]));
@@ -330,12 +354,15 @@ export function HsCloneBoard({
                   bid: s.bid,
                   bidStrategy: s.bidStrategy,
                   adsCount: s.adsCount,
+                  pages: Array.isArray(s.pages) ? s.pages : [],
                 },
                 // Prefill the editable bid with the source's own (LION-UI does the same); the
                 // buyer clearing it back to "" means "inherit". Two-decimal comma format on
                 // purpose — the field is cash-register (digits fill cents), and "1,2" would
                 // re-read as 0,12 there; "1,20" is the stable spelling.
                 bid: r.bid || (s.bid != null ? s.bid.toFixed(2).replace(".", ",") : ""),
+                // Seed the strategy pick with the source's (the select is locked until facts land).
+                bidStrategy: r.bidStrategy || s.bidStrategy,
                 // Prefill the editable TAIL with the source's old one + the owner's name.
                 suffix: r.suffix || withOwner(splitLionName(s.name, todaySaoPauloDDMM()).tail, user?.username ?? ""),
               };
@@ -361,6 +388,59 @@ export function HsCloneBoard({
   const acctRemaining = account ? Math.max(0, limits.limit - limits.countFor(account)) : null;
   const acctOver = acctRemaining !== null && totalClones > acctRemaining;
   const acctResetAt = account ? limits.resetAtFor(account) : null;
+
+  // ---- fanka capacity (Meta's per-page ad limit, /api/hs/page-volume meter) -------------------
+  // Cloner: every clone rebuilds the source's ads on the ONE bound page — the whole wave must fit
+  // its free slots. Unloaded rows count 0 (best-effort lower bound); readable sources count at
+  // least 1 ad (the duplicate rails ledger the same floor). Unknown meter = fail open, exactly
+  // like the pickers (never block on numbers nobody has read).
+  const boundPageStats = needsPage && page ? hs.pageStats(page) : null;
+  const pageAdsDemand =
+    validRows.reduce(
+      (s, r) => s + (r.info && r.info.status !== "UNREADABLE" ? Math.max(r.info.adsCount, 1) : 0),
+      0,
+    ) * copiesN;
+  const pageOver = boundPageStats !== null && pageAdsDemand > boundPageStats.free;
+  // JURO: ads land on each source's OWN page(s) — demand is summed PER PAGE across the whole
+  // wave (two rows on one fanka charge it together), and every page must fit its free slots.
+  const juroPageDemand = new Map<string, number>();
+  if (mode === "juro") {
+    for (const r of validRows) {
+      for (const p of r.info?.pages ?? []) {
+        juroPageDemand.set(p.pageId, (juroPageDemand.get(p.pageId) ?? 0) + p.ads * copiesN);
+      }
+    }
+  }
+  const juroPageOver = (pageId: string): boolean => {
+    const st = hs.pageStats(pageId);
+    return st !== null && (juroPageDemand.get(pageId) ?? 0) > st.free;
+  };
+  const juroBlockedCount =
+    mode === "juro" ? validRows.filter((r) => (r.info?.pages ?? []).some((p) => juroPageOver(p.pageId))).length : 0;
+  // Sidebar fanka meter for JURO (owner ask 09-01, narrowed same day): ONLY the fanka(s) the
+  // JURO copies actually land on — the source pages of the added rows — each with its live fill
+  // and the wave's summed demand (+N, the rows' numbers aggregated where the buyer tunes
+  // copies). Names resolve like the row cell: profile catalog → registry → bare id.
+  const juroFankaRows =
+    mode === "juro"
+      ? [...juroPageDemand.entries()].map(([pageId, need]) => {
+          const st = hs.pageStats(pageId);
+          return {
+            pageId,
+            name: data?.pages.find((o) => o.value === pageId)?.label || st?.name || pageId,
+            need,
+            st,
+            over: st !== null && need > st.free,
+          };
+        })
+      : [];
+  /** The active mode's fanka verdict — one flag for the fire guard and the button. */
+  const fankaOver = mode === "juro" ? juroBlockedCount > 0 : pageOver;
+  // Token rails: a row SWITCHED to cap/ROAS must type a Bid (nothing inherits across strategies)
+  // — the fire button blocks here instead of the wave dying per shot in the drawer.
+  const strategyBidMissing = tokenRail
+    ? validRows.filter((r) => rowSwitched(r) && bidKind(r.bidStrategy) !== "none" && !r.bid.trim()).length
+    : 0;
 
   // The server pump takes the whole wave in ONE call and paces/polls/activates it after the
   // response (fire-and-forget, owner ask 08-14) — its shot cap must fit the pump's time budget.
@@ -392,7 +472,7 @@ export function HsCloneBoard({
   }, [accountHidden]);
 
   async function duplicateAll() {
-    if (!bindsReady || validRows.length === 0 || firing || acctOver || limits.staleBuild) return;
+    if (!bindsReady || validRows.length === 0 || firing || acctOver || fankaOver || strategyBidMissing > 0 || limits.staleBuild) return;
     // Token-rail wave while the whole pool is burned → honest local stop (the server gate would
     // refuse it with the same message anyway). Geo-override LION waves need a live token too —
     // LION JURO doesn't: its geo/locales ride natively in the jurar wire, no Graph patch involved.
@@ -448,6 +528,9 @@ export function HsCloneBoard({
         // Fallback for the server's bid scaling (its own details/ re-read wins) — the bid
         // rides in HUMAN units and is scaled to LION's Meta-native wire unit server-side.
         ...(r.info?.bidStrategy ? { bidStrategy: r.info.bidStrategy } : {}),
+        // FB Token rails only: the row's SWITCHED strategy — those rails rebuild the ad set
+        // around it (LION rails inherit the source's and never see this field).
+        ...(rowSwitched(r) ? { bidStrategyOverride: r.bidStrategy } : {}),
         geo,
         // LION JURO: LION builds the name itself (`… API - JURO - …`) — only the buyer's tail
         // rides as name_suffix. Token JURO: WE own the name — the JURO-marked prefix + the TOKEN
@@ -542,6 +625,8 @@ export function HsCloneBoard({
                   options={hs.profiles ?? []}
                   placeholder="Search profile"
                   emptyHint={hs.profiles?.length ? "No matches" : "Loading profiles…"}
+                  // Closed field reads "glo-01-10 · globecoders-44" (slug + LION's label).
+                  metaWhenClosed
                 />
               </Field>
               <Field label="Account">
@@ -562,7 +647,24 @@ export function HsCloneBoard({
                 />
               </Field>
               {needsPage ? (
-                <Field label="Page">
+                <Field
+                  label="Page"
+                  // Live fanka meter for the picked page: fill + free slots vs what THIS wave
+                  // adds. Turns into the blocking error when the wave doesn't fit (the fire
+                  // button locks on the same flag). Unknown meter → no line, no gate; "~" marks
+                  // the LION-tally estimate (registry never read this page).
+                  hint={
+                    page && boundPageStats && !pageOver
+                      ? `${boundPageStats.approx ? "~" : ""}${boundPageStats.used}/${boundPageStats.limit} ads on this page · ${boundPageStats.approx ? "~" : ""}${boundPageStats.free} free` +
+                        (pageAdsDemand > 0 ? ` · wave adds ${pageAdsDemand}` : "")
+                      : undefined
+                  }
+                  error={
+                    page && boundPageStats && pageOver
+                      ? `Won't fit — the wave adds ${pageAdsDemand} ads, only ${boundPageStats.approx ? "~" : ""}${boundPageStats.free} free here (${boundPageStats.approx ? "~" : ""}${boundPageStats.used}/${boundPageStats.limit}). Trim copies/rows or pick another page.`
+                      : undefined
+                  }
+                >
                   <SearchSelect
                     value={page}
                     onChange={(v) => {
@@ -576,13 +678,57 @@ export function HsCloneBoard({
                 </Field>
               ) : (
                 <Field label="Page">
-                  <p className="rounded-lg border border-dashed border-line bg-surface2/50 px-3 py-2 text-[11px] leading-relaxed text-faint">
-                    JURO reuses the source&apos;s page posts — ads land on the source post&apos;s own
-                    fanpage.{" "}
-                    {effDupChannel === "juro-token"
-                      ? "Our FB token must be able to use that page (checked per shot)."
-                      : "The picked profile must carry that page (checked per shot)."}
-                  </p>
+                  <div className="flex flex-col gap-1.5">
+                    <p className="rounded-lg border border-dashed border-line bg-surface2/50 px-3 py-2 text-[11px] leading-relaxed text-faint">
+                      JURO reuses the source&apos;s page posts — ads land on the source post&apos;s
+                      own fanpage.{" "}
+                      {effDupChannel === "juro-token"
+                        ? "Our FB token must be able to use that page (checked per shot)."
+                        : "The picked profile must carry that page (checked per shot)."}
+                    </p>
+                    {/* ONLY the fanka(s) this wave's JURO copies land on (the source pages),
+                        each with live fill and +N = what the wave adds there — red where it
+                        won't fit; the fire button locks on the same check. */}
+                    {juroFankaRows.length > 0 ? (
+                      <div className="flex max-h-44 flex-col gap-1 overflow-y-auto rounded-lg border border-line bg-surface2/50 px-3 py-2">
+                        {juroFankaRows.map((p) => (
+                          <div key={p.pageId} className="flex items-center justify-between gap-2">
+                            <span className="truncate text-[11px] text-dim" title={`${p.name} · ${p.pageId}`}>
+                              {p.name}
+                            </span>
+                            {p.st ? (
+                              <span
+                                className={
+                                  "shrink-0 font-mono text-[10.5px] tabular-nums " +
+                                  (p.over
+                                    ? "font-semibold text-danger"
+                                    : p.st.limit > 0 && p.st.used / p.st.limit >= 0.8
+                                      ? "text-warn"
+                                      : "text-faint")
+                                }
+                                title={
+                                  `${p.st.approx ? "~" : ""}${p.st.used} of ${p.st.limit} ad slots used — ` +
+                                  `${p.st.approx ? "~" : ""}${p.st.free} free` +
+                                  (p.need > 0 ? ` · this wave adds ${p.need}` : "")
+                                }
+                              >
+                                {p.st.approx ? "~" : ""}
+                                {p.st.used}/{p.st.limit} · free {p.st.free}
+                                {p.need > 0 ? ` · +${p.need}` : ""}
+                              </span>
+                            ) : (
+                              <span className="shrink-0 font-mono text-[10.5px] text-faint">fill unknown</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="px-0.5 text-[11px] leading-snug text-faint">
+                        Add source campaigns — the fanka their JURO copies land on shows here
+                        with its free slots.
+                      </p>
+                    )}
+                  </div>
                 </Field>
               )}
               <Field label="Pixel">
@@ -722,7 +868,7 @@ export function HsCloneBoard({
                 <button
                   type="button"
                   onClick={() => void duplicateAll()}
-                  disabled={!bindsReady || validRows.length === 0 || firing || acctOver || limits.staleBuild}
+                  disabled={!bindsReady || validRows.length === 0 || firing || acctOver || fankaOver || strategyBidMissing > 0 || limits.staleBuild}
                   className={
                     "animate-pop-in flex h-11 w-full items-center justify-center gap-2 rounded-xl " +
                     "bg-gradient-to-b from-launch2 to-launch text-[13.5px] font-bold text-[#032e20] " +
@@ -746,6 +892,31 @@ export function HsCloneBoard({
                   account&apos;s 30-min window
                   {acctResetAt ? ` · resets in ${fmtCountdown(acctResetAt, limits.skew)}` : ""}.
                   Trim copies/rows or pick another account.
+                </p>
+              ) : null}
+              {mode !== "juro" && pageOver && boundPageStats ? (
+                <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
+                  Fanpage full — the wave adds {pageAdsDemand} ads but this page has only{" "}
+                  {boundPageStats.approx ? "~" : ""}
+                  {boundPageStats.free} free slot{boundPageStats.free === 1 ? "" : "s"} (
+                  {boundPageStats.approx ? "~" : ""}
+                  {boundPageStats.used}/{boundPageStats.limit}). Trim copies/rows or pick another
+                  page.
+                </p>
+              ) : null}
+              {mode === "juro" && juroBlockedCount > 0 ? (
+                <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
+                  {juroBlockedCount} source{juroBlockedCount === 1 ? "" : "s"} won&apos;t fit{" "}
+                  {juroBlockedCount === 1 ? "its" : "their"} own fanpage (JURO lands the ads
+                  there) — see the red meters in the Source page column. Lower copies or remove
+                  those rows.
+                </p>
+              ) : null}
+              {strategyBidMissing > 0 ? (
+                <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
+                  {strategyBidMissing} row{strategyBidMissing === 1 ? " has" : "s have"} a switched
+                  strategy without a Bid — type the cap $ / ROAS goal (the source&apos;s bid
+                  doesn&apos;t carry across strategies).
                 </p>
               ) : null}
               <p className="text-center text-[10.5px] leading-relaxed text-faint">
@@ -777,16 +948,17 @@ export function HsCloneBoard({
             </div>
 
             <div className="overflow-x-auto rounded-2xl border border-line bg-surface">
-              <table className="w-full min-w-[960px] text-left">
+              <table className="w-full min-w-[1080px] text-left">
                 <thead>
                   <tr className="border-b border-line text-[10px] font-semibold uppercase tracking-[0.14em] text-faint">
                     <th className="px-3 py-2 font-semibold">#</th>
                     <th className="px-2 py-2 font-semibold">Name (fixed) + suffix</th>
                     <th className="px-2 py-2 font-semibold">Countries</th>
+                    <th className="px-2 py-2 font-semibold">Source page</th>
                     <th className="px-2 py-2 text-right font-semibold">Orig budget</th>
                     <th className="px-2 py-2 text-right font-semibold">Orig bid</th>
                     <th className="px-2 py-2 text-center font-semibold">Ads</th>
-                    <th className="px-2 py-2 font-semibold">Bid</th>
+                    <th className="px-2 py-2 font-semibold">Strategy · Bid</th>
                     <th className="px-2 py-2 font-semibold">Budget $</th>
                     <th className="px-2 py-2 font-semibold">Status</th>
                     <th className="px-2 py-2" />
@@ -871,6 +1043,59 @@ export function HsCloneBoard({
                           </button>
                         </div>
                       </td>
+                      {/* Source fanka(s) + live fill meter. In JURO mode the copies LAND here, so
+                          each page also shows what this row's wave needs — red when it won't fit
+                          (the fire button locks on the same check). Cloner mode: info only (the
+                          clones go to the bound Page in Settings, metered there). */}
+                      <td className="max-w-[170px] px-2 py-3 text-[11px]">
+                        {r.info && r.info.pages.length > 0 ? (
+                          <div className="flex flex-col gap-1">
+                            {r.info.pages.map((p) => {
+                              const st = hs.pageStats(p.pageId);
+                              const name =
+                                data?.pages.find((o) => o.value === p.pageId)?.label || st?.name || undefined;
+                              // JURO charges the page with the WHOLE wave's ads on it (all rows).
+                              const need = juroPageDemand.get(p.pageId) ?? p.ads * copiesN;
+                              const over = mode === "juro" && juroPageOver(p.pageId);
+                              return (
+                                <div key={p.pageId} className="flex flex-col">
+                                  <span
+                                    className="truncate text-dim"
+                                    title={`${name ? `${name} · ` : ""}${p.pageId}`}
+                                  >
+                                    {name ?? p.pageId}
+                                  </span>
+                                  {st ? (
+                                    <span
+                                      className={
+                                        "font-mono text-[10.5px] tabular-nums " +
+                                        (over
+                                          ? "font-semibold text-danger"
+                                          : st.limit > 0 && st.used / st.limit >= 0.8
+                                            ? "text-warn"
+                                            : "text-faint")
+                                      }
+                                      title={
+                                        `${st.approx ? "~" : ""}${st.used} ads running or in review of ${st.limit} — ` +
+                                        `${st.approx ? "~" : ""}${st.free} free` +
+                                        (st.approx ? " (LION-tally estimate — the registry hasn't read this page)" : "")
+                                      }
+                                    >
+                                      {st.approx ? "~" : ""}
+                                      {st.used}/{st.limit}
+                                      {over ? ` · needs ${need}, free ${st.free}` : ` · free ${st.free}`}
+                                    </span>
+                                  ) : (
+                                    <span className="font-mono text-[10.5px] text-faint">fill unknown</span>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <span className="text-faint">—</span>
+                        )}
+                      </td>
                       <td className="px-2 py-3 text-right font-mono text-[11.5px] tabular-nums text-dim">
                         {r.info?.budget != null ? `$${moneyLabel(r.info.budget)}` : "—"}
                       </td>
@@ -887,53 +1112,118 @@ export function HsCloneBoard({
                       <td className="px-2 py-3 text-center font-mono text-[11.5px] text-dim">
                         {r.info ? r.info.adsCount : "—"}
                       </td>
-                      <td className="w-[110px] px-2 py-2.5">
-                        {/* The same field means a ROAS decimal on a min-ROAS row and $ on a cap
-                            row — the in-field marker (blue R / faint $) keeps the unit readable
-                            right where the buyer types, matching the row's BidKindTag. */}
-                        <div className="relative">
-                          {r.info && bidKind(r.info.bidStrategy) !== "none" ? (
-                            <span
-                              className={
-                                "pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[11px] " +
-                                (bidKind(r.info.bidStrategy) === "roas"
-                                  ? "font-semibold text-[#9db8ff]"
-                                  : "text-faint")
+                      <td className="w-[168px] px-2 py-2.5">
+                        {/* The CLONE's strategy — switchable per row on the FB Token rails only
+                            (they rebuild the ad set; LION inherits the source's, so the select
+                            locks there). The bid field below follows the EFFECTIVE strategy:
+                            ROAS decimal (blue R) / cap $ / nothing on lowest. A kind change
+                            clears the typed bid (a $ cap is not a ROAS goal); switching back to
+                            the source's kind re-prefils its own bid. */}
+                        <div className="flex flex-col gap-1.5">
+                          <div className="relative">
+                            <select
+                              value={rowStrategy(r) || ""}
+                              onChange={(e) => {
+                                const bidStrategy = e.target.value;
+                                const kind = bidKind(bidStrategy);
+                                const srcKind = bidKind(r.info?.bidStrategy ?? "");
+                                const bid =
+                                  kind === bidKind(rowStrategy(r))
+                                    ? r.bid
+                                    : kind === srcKind && r.info?.bid != null
+                                      ? r.info.bid.toFixed(2).replace(".", ",")
+                                      : "";
+                                patchRow(r.id, { bidStrategy, bid });
+                              }}
+                              disabled={!tokenRail || !r.info || r.info.status === "UNREADABLE"}
+                              aria-label="Clone bid strategy"
+                              title={
+                                !tokenRail
+                                  ? "Strategy change needs the FB Token rail — LION builds inherit the source's strategy"
+                                  : rowSwitched(r)
+                                    ? "Strategy switched — the clone launches with THIS strategy, not the source's"
+                                    : "The clone's bid strategy (the source's — switch it to re-bid the clone)"
                               }
+                              className={cellSelect + (rowSwitched(r) ? " border-accent/50 text-[#9db8ff]" : "")}
                             >
-                              {bidKind(r.info.bidStrategy) === "roas" ? "R" : "$"}
-                            </span>
-                          ) : null}
-                          <input
-                            value={r.bid}
-                            // Cash-register entry, SAME as the launcher's bid/ROAS field: typed
-                            // digits fill hundredths from the right (34 → 0,34 · 120 → 1,20), so a
-                            // missed comma can never inflate a bid 100×. HUMAN units, like LION's
-                            // reads prefill them: ROAS decimal for MIN_ROAS sources, $ for cap —
-                            // the duplicate route scales to Meta-native wire units by the SOURCE's
-                            // strategy. Empty inherits the source's own bid.
-                            onChange={(e) =>
-                              patchRow(r.id, {
-                                bid: limitMoneyCents(
-                                  e.target.value,
-                                  bidKind(r.info?.bidStrategy ?? "") === "roas" ? 100 : 1000,
-                                ),
-                              })
-                            }
-                            placeholder={
-                              bidKind(r.info?.bidStrategy ?? "") === "roas" ? "inherits ROAS goal" : "inherit"
-                            }
-                            title={
-                              bidKind(r.info?.bidStrategy ?? "") === "roas"
-                                ? "ROAS decimal — 34 → 0,34 (34%) · empty = inherit the source's goal"
-                                : bidKind(r.info?.bidStrategy ?? "") === "cap"
-                                  ? "Bid cap in $ — digits fill cents, 34 → $0,34 · empty = inherit the source's cap"
-                                  : "Digits fill cents — 34 → 0,34 · 120 → 1,20"
-                            }
-                            inputMode="decimal"
-                            aria-label="Bid / ROAS goal"
-                            className={cellInput + (r.info && bidKind(r.info.bidStrategy) !== "none" ? " pl-5" : "")}
-                          />
+                              {/* An exotic source strategy stays visible (and pickable back) even
+                                  though it's not in the shared list. */}
+                              {rowStrategy(r) && !BID_STRATEGIES.some((o) => o.value === rowStrategy(r)) ? (
+                                <option value={rowStrategy(r)} className="bg-surface text-ink">
+                                  {rowStrategy(r)}
+                                </option>
+                              ) : null}
+                              {!rowStrategy(r) ? (
+                                <option value="" className="bg-surface text-ink">
+                                  …
+                                </option>
+                              ) : null}
+                              {BID_STRATEGIES.map((o) => (
+                                <option key={o.value} value={o.value} className="bg-surface text-ink">
+                                  {o.label}
+                                </option>
+                              ))}
+                            </select>
+                            <ChevronDownIcon className="pointer-events-none absolute right-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-faint" />
+                          </div>
+                          <div className="relative">
+                            {bidKind(rowStrategy(r)) !== "none" ? (
+                              <span
+                                className={
+                                  "pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[11px] " +
+                                  (bidKind(rowStrategy(r)) === "roas"
+                                    ? "font-semibold text-[#9db8ff]"
+                                    : "text-faint")
+                                }
+                              >
+                                {bidKind(rowStrategy(r)) === "roas" ? "R" : "$"}
+                              </span>
+                            ) : null}
+                            <input
+                              value={r.bid}
+                              // Cash-register entry, SAME as the launcher's bid/ROAS field: typed
+                              // digits fill hundredths from the right (34 → 0,34 · 120 → 1,20), so
+                              // a missed comma can never inflate a bid 100×. HUMAN units — the
+                              // routes scale to Meta-native wire units by the EFFECTIVE strategy.
+                              // Empty inherits the source's own bid (same strategy only).
+                              onChange={(e) =>
+                                patchRow(r.id, {
+                                  bid: limitMoneyCents(
+                                    e.target.value,
+                                    bidKind(rowStrategy(r)) === "roas" ? 100 : 1000,
+                                  ),
+                                })
+                              }
+                              disabled={Boolean(r.info) && bidKind(rowStrategy(r)) === "none"}
+                              placeholder={
+                                rowSwitched(r) && bidKind(rowStrategy(r)) !== "none"
+                                  ? "required"
+                                  : bidKind(rowStrategy(r)) === "roas"
+                                    ? "inherits ROAS goal"
+                                    : bidKind(rowStrategy(r)) === "none" && r.info
+                                      ? "auto"
+                                      : "inherit"
+                              }
+                              title={
+                                bidKind(rowStrategy(r)) === "roas"
+                                  ? "ROAS decimal — 34 → 0,34 (34%)" +
+                                    (rowSwitched(r) ? " · required for the switched strategy" : " · empty = inherit the source's goal")
+                                  : bidKind(rowStrategy(r)) === "cap"
+                                    ? "Bid cap in $ — digits fill cents, 34 → $0,34" +
+                                      (rowSwitched(r) ? " · required for the switched strategy" : " · empty = inherit the source's cap")
+                                    : "Lowest cost bids automatically"
+                              }
+                              inputMode="decimal"
+                              aria-label="Bid / ROAS goal"
+                              className={
+                                cellInput +
+                                (bidKind(rowStrategy(r)) !== "none" ? " pl-5" : "") +
+                                (rowSwitched(r) && bidKind(rowStrategy(r)) !== "none" && !r.bid.trim()
+                                  ? " border-warn/60 focus:border-warn focus:ring-warn/15"
+                                  : "")
+                              }
+                            />
+                          </div>
                         </div>
                       </td>
                       <td className="w-[100px] px-2 py-2.5">
@@ -1021,11 +1311,19 @@ export function HsCloneBoard({
                           : `#${r.campaignId}`}
                       </span>{" "}
                       → {copiesN} cop{copiesN === 1 ? "y" : "ies"} @ ${moneyLabel(r.budget)}/day
+                      {rowSwitched(r) ? (
+                        <span className="text-[#9db8ff]">
+                          {" "}
+                          · strategy → {BID_STRATEGIES.find((o) => o.value === r.bidStrategy)?.label ?? r.bidStrategy}
+                        </span>
+                      ) : null}
                       {r.bid.trim()
-                        ? bidKind(r.info?.bidStrategy ?? "") === "roas"
+                        ? bidKind(rowStrategy(r)) === "roas"
                           ? ` · ROAS ${r.bid}`
-                          : ` · bid ${bidKind(r.info?.bidStrategy ?? "") === "cap" ? "$" : ""}${r.bid}`
-                        : " · bid inherited"}
+                          : ` · bid ${bidKind(rowStrategy(r)) === "cap" ? "$" : ""}${r.bid}`
+                        : bidKind(rowStrategy(r)) === "none"
+                          ? " · lowest cost"
+                          : " · bid inherited"}
                       {r.countries.length > 0 ? (
                         <span className="text-[#9db8ff]"> · geo → {overrideGeoLabel(r.countries)}</span>
                       ) : null}

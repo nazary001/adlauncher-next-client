@@ -3,8 +3,9 @@
 import { useEffect, useState } from "react";
 import type { RichOption } from "@/lib/catalog";
 
-/** A fanka picker option: RichOption for the SearchSelect + the raw ad count for badges. */
-export type FanpageOption = RichOption & { adCount: number | null };
+/** A fanka picker option: RichOption for the SearchSelect + the raw ad count / limit numbers so
+ *  boards can compute free slots (the tag string is display-only). null = fill unknown. */
+export type FanpageOption = RichOption & { adCount: number | null; adLimit: number | null };
 
 // Counts converge server-side (the sweep self-heals its rate-limited holes every ~60s), so the
 // client re-asks until every page has a number — a few patient polls, not a hot loop.
@@ -77,7 +78,7 @@ export function useFanpages(
                     const ratio = lim > 0 ? n / lim : 0;
                     const tagTone: FanpageOption["tagTone"] =
                       ratio >= 1 ? "danger" : ratio >= 0.8 ? "warn" : "dim";
-                    return { ...o, adCount: n, tag: `${n}/${lim}`, tagTone };
+                    return { ...o, adCount: n, adLimit: lim, tag: `${n}/${lim}`, tagTone };
                   }),
                 }
               : prev,
@@ -107,7 +108,7 @@ export function useFanpages(
           ids = d.pages.map((p) => p.id);
           setState({
             key,
-            list: d.pages.map((p) => ({ value: p.id, label: p.name, meta: p.id, adCount: null })),
+            list: d.pages.map((p) => ({ value: p.id, label: p.name, meta: p.id, adCount: null, adLimit: null })),
           });
         } else if (r.ok) {
           setState({ key, list: [] }); // genuine empty / no-token answer

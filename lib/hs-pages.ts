@@ -30,6 +30,9 @@ export type PageStats = {
   restricted: boolean;
   /** Registry page state (ok / limited / no_access / …) — display material only. */
   state: string;
+  /** Page display name as the registry knows it ("" = registry row carries none) — lets boards
+   *  name pages outside the picked profile's catalog (JURO source pages). */
+  name: string;
 };
 
 const CALL_TIMEOUT_MS = 15_000;
@@ -70,6 +73,7 @@ export async function hsToolsPageStats(partner: PartnerId): Promise<Record<strin
     const body = await registryGet(partner, "/fb/api/v1/pages");
     type Row = {
       page_id?: string;
+      name?: string | null;
       has_data?: boolean;
       limit?: number | null;
       used?: number | null;
@@ -87,6 +91,7 @@ export async function hsToolsPageStats(partner: PartnerId): Promise<Record<strin
         free: typeof r.free === "number" ? r.free : Math.max(r.limit - r.used, 0),
         restricted: r.restricted === true,
         state: String(r.state ?? ""),
+        name: String(r.name ?? ""),
       };
     }
     statsCache.set(partner, { at: Date.now(), stats });

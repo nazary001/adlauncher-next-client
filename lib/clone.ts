@@ -56,7 +56,10 @@ export type CloneRow = {
   category: string;
   placement: string;
   ageMin: string;
-  roasGoal: string; // the "Bid" column — ROAS decimal or $ cap, by the SOURCE's bid strategy
+  /** The CLONE's bid strategy (editable — owner ask 09-01: a clone may switch ROAS ↔ cap ↔
+   *  lowest). Born as the source's; the Bid column's meaning follows THIS, not the source's. */
+  bidStrategy: string;
+  roasGoal: string; // the "Bid" column — ROAS decimal or $ cap, by the ROW's bid strategy
   budget: string; // target daily budget, display string
   redirectType: string;
   highOffer: HighOfferConfig;
@@ -69,6 +72,9 @@ export type CloneEdit = {
   name: string;
   budget: string;
   roasGoal: string;
+  /** The clone's TARGET bid strategy (may differ from the source's — ROAS ↔ cap ↔ lowest).
+   *  Empty/absent = inherit the source's; the server validates against the supported set. */
+  bidStrategy?: string;
   countries: string[];
   locales: string[];
   category: string;
@@ -176,6 +182,7 @@ export function makeCloneRow(
     category: source.category,
     placement: source.placement,
     ageMin: source.ageMin,
+    bidStrategy: source.bidStrategy,
     roasGoal: source.originalRoas,
     budget: source.originalBudget,
     redirectType: source.redirectType,
@@ -192,7 +199,7 @@ export type ClonePreviewItem = {
   name: string;
   budget: string;
   roasGoal: string;
-  /** The SOURCE's bid strategy — the preview labels the bid by its kind (ROAS / $ cap / auto). */
+  /** The CLONE's bid strategy (the row's pick) — the preview labels the bid by its kind. */
   bidStrategy: string;
   countries: string[];
 };
@@ -213,7 +220,7 @@ export function flattenPreview(rows: CloneRow[], copies: number): ClonePreviewIt
         name: total > 1 ? `${fullCloneName(r)} (${k})` : fullCloneName(r),
         budget: r.budget,
         roasGoal: r.roasGoal,
-        bidStrategy: r.source.bidStrategy,
+        bidStrategy: r.bidStrategy || r.source.bidStrategy,
         countries: r.countries,
       });
     }

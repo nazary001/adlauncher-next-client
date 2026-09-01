@@ -28,7 +28,7 @@ import {
   hsTokenGate,
   hsTokenStartTime,
 } from "@/lib/hs-token-launch";
-import { adPayload } from "@/lib/fb-launch";
+import { SUPPORTED_BID_STRATEGIES, adPayload } from "@/lib/fb-launch";
 import { launchFailureDisposition, partialFailureNote } from "@/lib/launch-guards";
 import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import { LionError, lionAccountPixels, lionConfigured, lionProfileData } from "@/lib/lion";
@@ -100,6 +100,9 @@ type TokenJuroShot = {
   budget: number;
   budgetRaw: string;
   bid: number | null;
+  /** TARGET bid strategy (per-row ROAS ↔ cap ↔ lowest switch, owner ask 09-01) — this rail
+   *  builds a fresh ad set, so it can re-bid it. "" = ride the source's strategy. */
+  bidStrategyOverride: string;
   /** Full campaign name built by the board (grammar prefix + JURO + TOKEN + tail); the pump
    *  re-ensures both markers server-side — client names are never the truth. */
   name: string;
@@ -137,8 +140,10 @@ export async function POST(req: Request): Promise<NextResponse> {
       campaignId?: string;
       budget?: string;
       /** Optional bid override in HUMAN units (ROAS goal decimal / cap $) — scaled to Meta-native
-       *  adset fields by the SOURCE's strategy in the pump (empty = inherit the source's bid). */
+       *  adset fields by the EFFECTIVE strategy in the pump (empty = inherit the source's bid). */
       bid?: string;
+      /** Optional TARGET bid strategy (ROAS ↔ cap ↔ lowest) — empty rides the source's. */
+      bidStrategyOverride?: string;
       name?: string;
       geo?: string;
       label?: string;
@@ -178,11 +183,14 @@ export async function POST(req: Request): Promise<NextResponse> {
     }
     const override = parseGeoOverride(raw?.countries, raw?.locales);
     if (override && "error" in override) return bad(`targeting_override_${override.error}`);
+    const strategyOverride = String(raw?.bidStrategyOverride ?? "").trim();
+    if (strategyOverride && !SUPPORTED_BID_STRATEGIES.has(strategyOverride)) return bad("bid_strategy_invalid");
     shots.push({
       campaignId,
       budget,
       budgetRaw: String(raw?.budget ?? ""),
       bid,
+      bidStrategyOverride: strategyOverride,
       name: String(raw?.name ?? "").trim().slice(0, 200),
       geo: String(raw?.geo ?? "").slice(0, 40) || "inherited",
       label: String(raw?.label ?? "").trim().slice(0, 200),
@@ -368,6 +376,8 @@ function resolveShotWire(
       pages: { pageId: string; delta: number }[];
       countries: string[];
       localeIds: number[];
+      /** The copy's EFFECTIVE bid strategy (per-row switch or the source's). */
+      strategy: string;
       bidAmount?: number;
       bidConstraints?: Json;
       roas: boolean;
@@ -381,23 +391,30 @@ function resolveShotWire(
   if (countries.length === 0) {
     return "source geo unreadable — set a Targeting override on this row";
   }
-  const kind = bidKind(tree.bidStrategy);
+  // The copy's EFFECTIVE strategy: the buyer's per-row switch wins (owner ask 09-01 — this rail
+  // builds a fresh ad set, so ROAS ↔ cap ↔ lowest are all reachable); "" rides the source's.
+  const strategy = s.bidStrategyOverride || tree.bidStrategy;
+  const switched = strategy !== tree.bidStrategy;
+  const kind = bidKind(strategy);
   let bidAmount: number | undefined;
   let bidConstraints: Json | undefined;
   if (s.bid != null) {
     if (kind === "none") {
-      // Same honesty rule as the other clone rails: a bid on a lowest-cost source would be
+      // Same honesty rule as the other clone rails: a bid on a lowest-cost copy would be
       // silently meaningless — refuse instead of pretending it applied.
-      return "source bids lowest-cost (no cap) — clear the Bid on this row";
+      return "the copy bids lowest-cost (no cap) — clear the Bid on this row";
     }
-    const wire = kind === "roas" && s.bid > 100 ? null : hsWireBid(s.bid, tree.bidStrategy, "graph");
+    const wire = kind === "roas" && s.bid > 100 ? null : hsWireBid(s.bid, strategy, "graph");
     if (wire == null) {
       return kind === "roas"
         ? "roas goal ambiguous — type the decimal goal (0,30 = 30%)"
-        : "bid not resolvable for this source — clear the Bid to use the source's";
+        : "bid not resolvable — retype the Bid on this row";
     }
     if (kind === "roas") bidConstraints = { roas_average_floor: wire };
     else bidAmount = wire;
+  } else if (switched && kind !== "none") {
+    // A switched cap/ROAS copy has nothing to inherit — the source's bid means a different thing.
+    return `strategy switched to ${strategy} — type a Bid on this row (the source's bid doesn't carry across strategies)`;
   } else if (kind !== "none") {
     // No override → inherit the source ad set's own bid. The new campaign RIDES the source's
     // strategy, so a cap/ROAS source NEEDS the value — an unreadable one would birth a campaign
@@ -413,10 +430,11 @@ function resolveShotWire(
     countries,
     localeIds:
       s.override && s.override.localeIds.length > 0 ? s.override.localeIds : juroSourceLocaleIds(targeting),
+    strategy,
     bidAmount,
     bidConstraints,
     roas: kind === "roas",
-    conversionEvent: juroConversionEvent(tree.bidStrategy),
+    conversionEvent: juroConversionEvent(strategy),
   };
 }
 
@@ -555,14 +573,15 @@ async function pumpTokenJuro(
           }
         }
 
-        // campaign — CBO with the buyer's budget, the source's objective/strategy, ACTIVE.
+        // campaign — CBO with the buyer's budget, the source's objective, the EFFECTIVE bid
+        // strategy (per-row switch or the source's), ACTIVE.
         const camp = await hsFbPost(`act_${binds.account}/campaigns`, {
           name,
           objective: tree.objective,
           status: "ACTIVE",
           special_ad_categories: tree.specialCategories,
           daily_budget: Math.round(s.budget * 100),
-          bid_strategy: tree.bidStrategy,
+          bid_strategy: wire.strategy,
         });
         created.campaign_id = String(camp.id);
         await rowWrite(user, s.taskId, { status: "running", stage: "adset", campaign_id: created.campaign_id });

@@ -38,6 +38,7 @@ import {
   adPayload,
   adsetPayload,
   campaignPayload,
+  cloneBidStrategy,
   cloneCreativePayload,
   cloneToCampaign,
   fetchSourceDetail,
@@ -121,6 +122,14 @@ export async function POST(req: Request) {
   }
   if (edits.length === 0) return NextResponse.json({ ok: false, error: "no_clones" }, { status: 400 });
   if (edits.length > 200) return NextResponse.json({ ok: false, error: "too_many", max: 200 }, { status: 400 });
+  // Target bid strategies (per-row ROAS ↔ cap ↔ lowest switch, owner ask 09-01): only the
+  // supported set may reach the payload builders — garbage 400s the batch up front, not mid-run.
+  for (const e of edits) {
+    const bs = String(e.bidStrategy ?? "").trim();
+    if (bs && !SUPPORTED_BID_STRATEGIES.has(bs)) {
+      return NextResponse.json({ ok: false, error: `bid_strategy_invalid — ${bs}` }, { status: 400 });
+    }
+  }
 
   const partner = partnerConfig(partnerId);
   if (!partner.fanpagesFromToken) {
@@ -274,16 +283,21 @@ export async function POST(req: Request) {
             throw new FbError(`source account act_${src.accountId} is not available to the launch token`, { campaignId: edit.campaignId });
           }
           const binds = resolveCloneBinds(edit, src);
+          // The clone's EFFECTIVE strategy (per-row switch wins, else the source's) — resolved
+          // once here so the pixel derivations below and cloneToCampaign can never disagree.
+          const targetStrategy = cloneBidStrategy(edit, src);
           // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted
           // POST — and for a same-account clone whose SOURCE lives in someone else's account.
           if (!(await accountAllowedFor(session, binds.accountId))) {
             throw new FbError(ACCOUNT_NOT_ASSIGNED_MSG, { campaignId: edit.campaignId }, 403);
           }
-          // AIF pixel policy is DERIVED, never picked (parity with /api/aif/launch): a conversion
-          // source pins the postback pixel — shared to every AIF cabinet — and click sources stay
-          // pixel-less. The RW link carries no &pixel= param, so only the adset needs it.
+          // AIF pixel policy is DERIVED, never picked (parity with /api/aif/launch): the pixel
+          // follows the OPTIMIZATION — conversion sources AND any clone switched to min-ROAS pin
+          // the postback pixel (shared to every AIF cabinet); click clones stay pixel-less. The
+          // RW link carries no &pixel= param, so only the adset needs it.
           if (aif) {
-            binds.pixelId = /^\d{10,20}$/.test(src.pixelId) ? AIF_PIXEL.id : "";
+            binds.pixelId =
+              bidKind(targetStrategy) === "roas" || /^\d{10,20}$/.test(src.pixelId) ? AIF_PIXEL.id : "";
             // Validate on EVERY account, same-account clones included: the swap to AIF_PIXEL
             // replaces whatever the source promoted, and a cabinet the shared pixel never
             // reached would otherwise orphan the campaign only at adset-create time — after the
@@ -301,7 +315,13 @@ export async function POST(req: Request) {
           // A conversion-optimized source cloned into ANOTHER account must carry a pixel of that
           // account (the source's pixel isn't valid there) — the adset's promoted_object and the
           // funnel's &pixel= both need it. Click sources (no source pixel) pass pixel-less.
-          if (binds.cross && /^\d{10,20}$/.test(src.pixelId) && !binds.pixelId) {
+          // MO min-ROAS targets are exempt: their pixel is PINNED to the value pixel below.
+          if (
+            binds.cross &&
+            /^\d{10,20}$/.test(src.pixelId) &&
+            !binds.pixelId &&
+            !(!aif && bidKind(targetStrategy) === "roas")
+          ) {
             throw new FbError(
               "pixel_required — the source optimizes for a pixel; pick a pixel of the target account",
               { campaignId: edit.campaignId },
@@ -322,10 +342,10 @@ export async function POST(req: Request) {
           // burning a code or leaving an orphaned PAUSED campaign.
           const campaign = cloneToCampaign(edit, src);
           if (!SUPPORTED_BID_STRATEGIES.has(campaign.bidStrategy)) {
-            throw new FbError(`source bid strategy ${campaign.bidStrategy} can't be cloned — recreate it manually`, { campaignId: edit.campaignId });
+            throw new FbError(`source bid strategy ${campaign.bidStrategy} can't be cloned — recreate it manually (or switch the row's strategy)`, { campaignId: edit.campaignId });
           }
           if (bidAmountMissing(campaign)) {
-            throw new FbError("source uses a bid cap but no ROAS goal was set on the clone row", { campaignId: edit.campaignId });
+            throw new FbError("the clone's bid strategy needs a Bid on the row (cap $ / ROAS goal)", { campaignId: edit.campaignId });
           }
           // Mirror the launch routes: a min-ROAS goal above 100 (10 000%) is a typo, not a bid,
           // and the ambiguous 10–20 band is refused rather than guessed (normalizeRoasGoal) —
@@ -348,13 +368,19 @@ export async function POST(req: Request) {
               { campaignId: edit.campaignId },
             );
           }
-          // Owner rule (2026-08-11): MO min-ROAS clones may only optimize on the partner's value
-          // pixel — same gate as /api/launch, before any claim/write.
+          // Owner rule (2026-08-11): MO min-ROAS optimizes ONLY on the partner's value pixel.
+          // PIN it (launcher-card parity — same-account clones have no pixel picker, and a row
+          // switched to ROAS needs it regardless of what the source promoted) after verifying the
+          // build account carries the shared pixel; the link rewrite below then fires it too.
           if (!aif && bidKind(campaign.bidStrategy) === "roas" && editBinds.pixelId !== ROAS_PIXEL.id) {
-            throw new FbError(
-              `min-ROAS clones run only on ${ROAS_PIXEL.name} (${ROAS_PIXEL.id}) — pick it as the pixel`,
-              { campaignId: edit.campaignId },
-            );
+            const pixels = await pixelsOf(binds.accountId);
+            if (!pixels.some((p) => p.id === ROAS_PIXEL.id)) {
+              throw new FbError(
+                `pixel_not_on_account — min-ROAS clones run only on ${ROAS_PIXEL.name} (${ROAS_PIXEL.id}); share it to act_${binds.accountId} in Business Manager first`,
+                { campaignId: edit.campaignId },
+              );
+            }
+            editBinds.pixelId = ROAS_PIXEL.id;
           }
           if (campaign.countries.length === 0) {
             throw new FbError("source has no country targeting to clone — set a geo on the clone row", { campaignId: edit.campaignId });

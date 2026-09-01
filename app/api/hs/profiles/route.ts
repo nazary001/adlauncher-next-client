@@ -8,10 +8,10 @@ export const runtime = "nodejs";
 // never idle a long serverless window (the client gives up at 20s).
 export const maxDuration = 60;
 
-/** LION profiles the token can launch on, plus the token's ACR (the card needs it for the live
- *  campaign-name prefix). Slugs only — profile display names arrive double-encoded from LION.
- *  `tokenLaunch` tells the board whether the FB Token rail is provisioned server-side — the
- *  channel switch renders disabled without it. */
+/** LION profiles the token can launch on — {slug, label, name} rows (the pickers show LION's
+ *  internal "globecoders-NN" label + persona next to the slug) — plus the token's ACR (the card
+ *  needs it for the live campaign-name prefix). `tokenLaunch` tells the board whether the FB
+ *  Token rail is provisioned server-side — the channel switch renders disabled without it. */
 export async function GET(req: Request): Promise<NextResponse> {
   if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
