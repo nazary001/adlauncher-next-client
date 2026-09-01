@@ -5,6 +5,16 @@ import { sessionFromCookieHeader } from "@/lib/session";
 
 export const runtime = "nodejs";
 
+/** The ONLY fankas MO launches/clones may pick right now (owner ask 09-01): the token's other
+ *  pages are advertising-restricted or reserved — hiding them here trims every MO picker at the
+ *  source (launcher + clone board share this route). Empty the set to lift the allowlist. */
+const MO_PAGE_ALLOWLIST = new Set([
+  "108537119019318", // Vinn Kora
+  "115090404871945", // Victoria Martin
+  "115569628163613", // Andrea Smith
+  "156589310871497", // Len Lei
+]);
+
 /**
  * GET /api/fanpages[?channel=soc:<name>]
  *
@@ -32,7 +42,8 @@ export async function GET(req: Request) {
   }
   try {
     const pages = await advertisablePages(channel.kind === "soc" ? channel.cat : undefined);
-    return NextResponse.json({ ok: true, pages });
+    const allowed = MO_PAGE_ALLOWLIST.size ? pages.filter((p) => MO_PAGE_ALLOWLIST.has(String(p.id))) : pages;
+    return NextResponse.json({ ok: true, pages: allowed });
   } catch (e) {
     const err = e as FbError;
     return NextResponse.json(
