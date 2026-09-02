@@ -110,9 +110,10 @@ function fillAccountDefaults(
     const pixels = adAccounts.find((a) => a.value === account)?.pixels ?? [];
     // Min-ROAS cards are pinned to the value pixel — never re-fill them, even if this account's
     // list misses it (the launch route's pixel_not_on_account then names the real problem
-    // instead of a silent swap ping-ponging with the card's pin effect). AIF pixels are derived
-    // from the optimization (applyPartnerLocks), never filled from the account's list.
-    if (!partner.aifLaunch && bidKind(c.bidStrategy) !== "roas" && (!pixel || !pixels.some((p) => p.id === pixel))) {
+    // instead of a silent swap ping-ponging with the card's pin effect). AIF fills like MO
+    // since 09-02 (pixel is a pick, owner ask): empty/foreign picks converge to the cabinet's
+    // own pixel.
+    if (bidKind(c.bidStrategy) !== "roas" && (!pixel || !pixels.some((p) => p.id === pixel))) {
       pixel = defaultPixelFor(adAccounts, account, partner.preferredPixel);
     }
     if (account === c.account && pixel === c.pixel) return c;

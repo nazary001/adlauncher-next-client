@@ -16,6 +16,7 @@ import { FbError, withFbBudget, withParentRetry } from "@/lib/fb-graph";
 import { fetchValidatedImage } from "@/lib/fb-media";
 import {
   aifAccountName,
+  aifAccountPixels,
   aifAdvertisablePageName,
   aifCreateAdset,
   aifDerivedPixel,
@@ -85,10 +86,10 @@ async function resolveLocales(names: string[]): Promise<number[]> {
  * for stage (same NDJSON events, same Task Manager pipeline), with the rail's own pieces:
  * the tree is built on the AIF token, the marker comes from the BRAND registry (aif-maps,
  * test01..test700), the ad link is the partner's RW page with the destination slug, and the
- * pixel is derived server-side — conversions carry the picked account's own postback pixel,
- * pulled LIVE via the token (aifDerivedPixel, no hardcoded id) + Purchase; clicks carry no
- * pixel at all. Min-ROAS (enabled 2026-08-21) is a conversion launch on that same derived
- * pixel — fb-launch pins goal VALUE + the ×10000 roas_average_floor, recipe identical to MO's.
+ * pixel is the buyer's PICK from the account's own token-catalog list (a choice since 09-02,
+ * validated here; an empty pick auto-derives the cabinet's pixel — aifDerivedPixel, no
+ * hardcoded id) + Purchase; clicks carry no pixel at all. Min-ROAS sits behind
+ * AIF_ROAS_LOCKED until the pixel earns purchase-value history (Meta sub 2446368).
  */
 export async function POST(req: Request) {
   // Proxy-gated, but self-checks the session too (parity with /api/launch).
@@ -147,15 +148,15 @@ export async function POST(req: Request) {
   // so it derives the postback pixel like any conversion launch, no matter what optimization a
   // stale/edited draft sent — the UI pins it, but the server is the truth (mirror of /api/launch).
   const conversions = campaign.optimization === "conversions" || bidKind(campaign.bidStrategy) === "roas";
-  // The account and fanka are the buyer's PICKS, validated against the AIF token's own data; the
-  // pixel is never picked — it's derived from the optimization right here (server is the truth).
+  // The account, fanka and pixel are the buyer's PICKS, validated against the AIF token's own
+  // data below (the pixel only binds on conversion launches; empty → auto-derived).
   const pickedAccount = String(campaign.account ?? "").trim().replace(/^act_/, "");
   const pickedPage = String(campaign.page ?? "").trim();
   const binds: LaunchBinds = {
     accountId: pickedAccount,
     pageId: pickedPage,
     pageName: "", // resolved below, once the picked page passes validation
-    pixelId: "", // conversions derive it below, from the token's own account data
+    pixelId: "", // conversions bind the validated pick below (or the auto-derived fallback)
   };
   // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST.
   if (!(await accountAllowedFor(session, pickedAccount))) {
@@ -189,13 +190,32 @@ export async function POST(req: Request) {
     }
     // DSA beneficiary/payor for EU-reaching ad sets — same rule as MO (live failure 2026-08-10).
     binds.pageName = await aifAdvertisablePageName(pickedPage);
-    // Conversion launches optimize on the account's own postback pixel, derived LIVE from the
-    // token's data (aifDerivedPixel — no hardcoded id, owner ask 2026-09-02). An account with
-    // no derivable pixel throws a 400-shaped FbError naming the BM remedy — refused here,
-    // BEFORE anything is claimed, else Meta rejects the ad set AFTER the campaign exists
-    // (orphan + burnt brand).
+    // Conversion launches carry the buyer's PICKED pixel (a choice since 09-02, owner ask),
+    // validated against the account's own token-catalog list — a pixel the cabinet doesn't
+    // carry would only be refused by Meta at adset-create, AFTER the campaign exists (orphan +
+    // burnt brand). An empty pick (legacy drafts, queued tasks) auto-derives the cabinet's own
+    // pixel (aifDerivedPixel — throws the 400-shaped BM remedy when none is derivable).
     if (conversions) {
-      binds.pixelId = (await aifDerivedPixel(pickedAccount)).id;
+      const picked = String(campaign.pixel ?? "").trim();
+      if (picked) {
+        if (!/^\d{10,20}$/.test(picked)) {
+          return NextResponse.json({ ok: false, stage: "config", error: "pixel_invalid — bad pixel id" }, { status: 400 });
+        }
+        const pixels = await aifAccountPixels(pickedAccount);
+        if (!pixels.some((p) => p.id === picked)) {
+          return NextResponse.json(
+            {
+              ok: false,
+              stage: "config",
+              error: `pixel_not_on_account — share pixel ${picked} to this ad account in Business Manager first (or pick one of the account's own pixels)`,
+            },
+            { status: 400 },
+          );
+        }
+        binds.pixelId = picked;
+      } else {
+        binds.pixelId = (await aifDerivedPixel(pickedAccount)).id;
+      }
     }
   } catch (e) {
     const err = e as FbError;

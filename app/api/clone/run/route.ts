@@ -335,19 +335,18 @@ export async function POST(req: Request) {
           if (!(await accountAllowedFor(session, binds.accountId))) {
             throw new FbError(ACCOUNT_NOT_ASSIGNED_MSG, { campaignId: edit.campaignId }, 403);
           }
-          // AIF pixel policy is DERIVED, never picked (parity with /api/aif/launch): the pixel
-          // follows the OPTIMIZATION — conversion sources AND any clone switched to min-ROAS
-          // carry the BUILD account's own postback pixel, pulled LIVE via the token
-          // (aifDerivedPixel — no hardcoded id, owner ask 2026-09-02); click clones stay
-          // pixel-less. The RW link carries no &pixel= param, so only the adset needs it.
-          // Derived on EVERY account, same-account clones included: the derivation replaces
-          // whatever the source promoted, and a cabinet with no derivable pixel throws the BM
-          // remedy here — BEFORE the brand marker is burned, not at adset-create time
-          // (review find 08-24).
+          // AIF pixel (parity with /api/aif/launch, a choice since 09-02): conversion sources
+          // AND any clone switched to min-ROAS carry a pixel of the BUILD account — the buyer's
+          // target pick or the source's own promoted pixel when the resolver kept one (both
+          // validated against the account: picks in the targets pre-flight above, the source's
+          // by construction), else the cabinet's own pixel auto-derives LIVE via the token
+          // (aifDerivedPixel — no hardcoded id; throws the BM remedy BEFORE the brand marker is
+          // burned, not at adset-create time — review find 08-24). Click clones stay pixel-less
+          // (the RW link carries no &pixel= param, so only the adset would need it).
           if (aif) {
             binds.pixelId =
               bidKind(targetStrategy) === "roas" || /^\d{10,20}$/.test(src.pixelId)
-                ? (await aifDerivedPixel(binds.accountId)).id
+                ? binds.pixelId || (await aifDerivedPixel(binds.accountId)).id
                 : "";
           }
           // A conversion-optimized source cloned into ANOTHER account must carry a pixel of that

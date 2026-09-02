@@ -25,7 +25,7 @@ import {
   pixelsFor,
 } from "@/lib/catalog";
 import { hsFinalLink, hsLinkSegments, hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
-import { AIF_ROAS_LOCKED, type LinkRole, type PartnerConfig, ROAS_PIXEL, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
+import { AIF_ROAS_LOCKED, type LinkRole, type PartnerConfig, ROAS_PIXEL, fullLandingUrl, landingUrlSegments, launchReadyOpts } from "@/lib/partners";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
 import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-adaccounts";
@@ -381,10 +381,10 @@ function CampaignCardBase({
     tagTone: l.lang === "ES" ? ("ok" as const) : ("dim" as const),
   }));
   const conversions = c.optimization === "conversions";
-  // AIF: the conversion pixel of the picked account, derived from the token's catalog (same rule
-  // the server re-applies at launch — aifDerivedPixel). Display only; null while the account is
-  // unpicked, the catalog is loading, or the account carries no derivable pixel.
-  const aifPixel = aifMode && conversions ? pickAifPixel(pixelOptionsOf(adAccounts ?? null, c.account)) : null;
+  // AIF: the picked account's own pixel list from the token catalog — feeds the pixel PICKER
+  // (a choice since 09-02, owner ask; the board auto-fills the cabinet's pixel, an empty pick
+  // still auto-derives server-side). Empty while the account is unpicked / catalog loading.
+  const aifPixels = aifMode ? pixelOptionsOf(adAccounts ?? null, c.account) : [];
   // HS derives its link from the pasted base + tracking tail + picked pixel; MO from the landing
   // catalog. Either way this string is exactly what launches (and what Copy copies).
   const derivedLink = hsMode
@@ -687,11 +687,13 @@ function CampaignCardBase({
                         ? "Pick a pixel"
                         : undefined
                       : aifMode
-                        ? // Conversions on an account whose loaded catalog row derives NO pixel
+                        ? // Conversions on an account whose loaded catalog row carries NO pixel
                           // would only fail at launch — name the BM remedy right on the field.
-                          conversions && c.account && adAccounts?.some((a) => a.value === c.account) && !aifPixel
+                          conversions && c.account && adAccounts?.some((a) => a.value === c.account) && aifPixels.length === 0
                           ? "no pixel on this account — share the AIF pixel in BM or switch to Clicks"
-                          : undefined
+                          : conversions && c.account && aifPixels.length > 0 && !c.pixel
+                            ? "Pick a pixel"
+                            : undefined
                         : !aifMode && partner.accountsFromToken && kind === "roas" && c.pixel !== ROAS_PIXEL.id
                           ? `min ROAS runs only on ${ROAS_PIXEL.name}`
                           : !aifMode && partner.accountsFromToken && c.account && !c.pixel
@@ -700,23 +702,23 @@ function CampaignCardBase({
                   }
                 >
                   {aifMode ? (
-                    // The pixel is never picked on this rail: conversions run ONLY on the picked
-                    // account's own postback pixel (where the CAPI forwarder lands Purchases),
-                    // derived from the token's catalog; clicks carry no pixel at all — both
-                    // server-enforced, shown here as locked truth.
+                    // Pixel is a CHOICE on this rail (owner ask 09-02): conversions pick from
+                    // the cabinet's own token-catalog pixels — the board auto-fills the
+                    // account's pixel, and an empty pick still auto-derives server-side.
+                    // Clicks carry no pixel at all (the postback→CAPI side needs none).
                     conversions ? (
-                      <LockedField
-                        value={
-                          aifPixel
-                            ? `${aifPixel.name} · ${aifPixel.id}`
-                            : !c.account
-                              ? "Pick an account first"
-                              : adAccounts
-                                ? "No pixel on this account"
-                                : "Loading pixels…"
+                      <SearchSelect
+                        value={c.pixel}
+                        onChange={(v) => patch({ pixel: v })}
+                        options={aifPixels.map((p) => ({ value: p.id, label: p.name, meta: p.id }))}
+                        placeholder="Search pixel"
+                        emptyHint={
+                          !c.account
+                            ? "Pick an account first"
+                            : adAccounts
+                              ? "No pixels on this account"
+                              : "Loading pixels…"
                         }
-                        hint="from token"
-                        mono={Boolean(aifPixel)}
                       />
                     ) : (
                       <LockedField value="No pixel — click optimization" hint="auto" />

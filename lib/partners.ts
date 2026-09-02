@@ -60,9 +60,10 @@ export type PartnerConfig = {
   /** Airfind Rewarded Web (AIF): MO-style direct Graph launch on the AIF token, but the ad link
    *  is the partner's RW page (destination = a free-typed article slug) carrying a brand marker
    *  from the test01..test700 pool (the revenue key — one brand per campaign, own registry).
-   *  Conversions arrive via the postback→CAPI forwarder into the AIF pixel, so conversion
-   *  launches pin that pixel + Purchase; min-ROAS rides the SAME derived pixel (enabled
-   *  2026-08-21 — floors only bite once the forwarder sends real purchase values). */
+   *  Conversions arrive via the postback→CAPI forwarder into the AIF pixel; the launch pixel is
+   *  the buyer's PICK from the cabinet's own token-catalog list (09-02; empty pick auto-derives
+   *  server-side) + Purchase. Min-ROAS sits behind AIF_ROAS_LOCKED until the pixel earns
+   *  purchase-value history. */
   aifLaunch?: boolean;
   /** Not built out yet → the switcher renders this partner disabled ("in development"). */
   inDevelopment?: boolean;
@@ -174,14 +175,15 @@ export const AIF_CLIENT_ID = "52105";
  *  fresh validate_only probe passes — the MO playbook: value injection → VO probe → flip. */
 export const AIF_ROAS_LOCKED = true;
 
-/** Derive the AIF conversion pixel from an ACCOUNT'S OWN pixel list (pulled via the AIF token —
- *  owner ask 2026-09-02: no hardcoded pixel id anywhere; the id and even the pixel's name have
- *  already drifted once). Every AIF cabinet carries exactly the one postback pixel the CAPI
- *  forwarder lands Purchases on; should extras ever get shared, a unique AIF-named one still
- *  wins. null = underivable (no pixels, or several with no single AIF name) — conversion
- *  launches must refuse rather than guess where Purchase optimization lands. Pure and shared:
- *  the card derives its display from the picker catalog, the server re-derives from the same
- *  token data at launch (lib/aif-launch aifDerivedPixel — the truth). */
+/** The AUTO-DEFAULT for an AIF conversion pixel when the buyer made no pick (legacy drafts,
+ *  queued tasks born before the picker) — chosen from the ACCOUNT'S OWN pixel list, pulled via
+ *  the AIF token (owner ask 2026-09-02: no hardcoded pixel id anywhere; the id and even the
+ *  pixel's name have already drifted once). Every AIF cabinet carries exactly the one postback
+ *  pixel the CAPI forwarder lands Purchases on; should extras ever get shared, a unique
+ *  AIF-named one still wins. null = underivable (no pixels, or several with no single AIF
+ *  name) — an unpicked conversion launch must refuse rather than guess where Purchase
+ *  optimization lands. Explicit picks skip this entirely (validated against the same list in
+ *  lib/aif-launch aifDerivedPixel's callers). */
 export function pickAifPixel(pixels: Bound[]): Bound | null {
   if (pixels.length === 1) return pixels[0];
   const aifNamed = pixels.filter((p) => /aif/i.test(p.name));
@@ -334,8 +336,9 @@ export function launchReadyOpts(p: PartnerConfig): {
     profile: p.usesProfile,
     page: Boolean(p.fanpagesFromToken) || Boolean(p.lionLaunch),
     account: Boolean(p.accountsFromToken) || Boolean(p.lionLaunch),
-    // AIF's pixel is DERIVED (conversions → pinned AIF pixel, clicks → none), never picked —
-    // requiring it would dead-lock click cards whose pixel is legitimately empty.
+    // AIF's pixel is a pick with a server-side auto-derive fallback (empty pick → the
+    // cabinet's own pixel), and click cards legitimately carry none — requiring it here would
+    // dead-lock them, so readiness never gates on it for AIF.
     pixel: (Boolean(p.accountsFromToken) && !p.aifLaunch) || Boolean(p.lionLaunch),
     // Marker-pool partners (MO gcm / AIF brand) need a claimed code before the card counts as
     // ready — a card whose code hasn't loaded (registry unreachable / pre-load window) must not
@@ -428,10 +431,10 @@ export function fullLandingUrl(
 }
 
 /** Pin account/pixel/fanpage to the partner's single bound values (Indians), and keep AIF cards
- *  on their derived invariants: the pixel is derived server-side from the token's account data
- *  at launch (never stored on the card), the objective/event are pinned to SALES/Purchase (the
- *  only event the CAPI forwarder ever sends), and min-ROAS pins conversions (purchase-value
- *  optimization — same recipe as MO, enabled 2026-08-21).
+ *  on their invariants: objective/event pinned to SALES/Purchase (the only event the CAPI
+ *  forwarder ever sends), roas drafts snapped to lowest-cost while AIF_ROAS_LOCKED stands. The
+ *  AIF pixel is the buyer's pick (fillAccountDefaults auto-fills the cabinet's own) — locks
+ *  leave it alone.
  *  Pure and idempotent; covers fresh, duplicated, copy-to-all'ed and restored cards alike. */
 export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[] {
   const acct = p.lockedAccount?.name;
@@ -452,9 +455,9 @@ export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[
       const roas = bidKind(r.bidStrategy) === "roas";
       if (roas && AIF_ROAS_LOCKED) patch.bidStrategy = "LOWEST_COST_WITHOUT_CAP";
       else if (roas && r.optimization !== "conversions") patch.optimization = "conversions";
-      // The pixel is DERIVED server-side from the token's account data at launch — never stored
-      // on the card. Clearing converges old drafts that carried the once-hardcoded id.
-      if (r.pixel !== "") patch.pixel = "";
+      // The pixel is the buyer's PICK from the account's own token-catalog list (owner ask
+      // 09-02) — the board fills/converges it via fillAccountDefaults, never the locks; an
+      // empty pick still auto-derives server-side at launch.
       if (r.objective !== "OUTCOME_SALES") patch.objective = "OUTCOME_SALES";
       if (r.conversionEvent !== "PURCHASE") patch.conversionEvent = "PURCHASE";
     }
