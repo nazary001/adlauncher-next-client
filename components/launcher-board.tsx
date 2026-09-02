@@ -14,6 +14,7 @@ import {
   launchReadyOpts,
   namePrefixFor,
   partnerConfig,
+  pickAifPixel,
 } from "@/lib/partners";
 import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { makeGate } from "@/lib/launch-guards";
@@ -112,9 +113,12 @@ function fillAccountDefaults(
     // list misses it (the launch route's pixel_not_on_account then names the real problem
     // instead of a silent swap ping-ponging with the card's pin effect). AIF fills like MO
     // since 09-02 (pixel is a pick, owner ask): empty/foreign picks converge to the cabinet's
-    // own pixel.
+    // own AIF-named pixel (pickAifPixel — "first pixel" would grab whichever the catalog lists
+    // first once the value pixel is shared alongside).
     if (bidKind(c.bidStrategy) !== "roas" && (!pixel || !pixels.some((p) => p.id === pixel))) {
-      pixel = defaultPixelFor(adAccounts, account, partner.preferredPixel);
+      pixel = partner.aifLaunch
+        ? (pickAifPixel(pixels)?.id ?? "")
+        : defaultPixelFor(adAccounts, account, partner.preferredPixel);
     }
     if (account === c.account && pixel === c.pixel) return c;
     changed = true;

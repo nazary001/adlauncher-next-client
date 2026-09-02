@@ -60,10 +60,11 @@ export type PartnerConfig = {
   /** Airfind Rewarded Web (AIF): MO-style direct Graph launch on the AIF token, but the ad link
    *  is the partner's RW page (destination = a free-typed article slug) carrying a brand marker
    *  from the test01..test700 pool (the revenue key — one brand per campaign, own registry).
-   *  Conversions arrive via the postback→CAPI forwarder into the AIF pixel; the launch pixel is
-   *  the buyer's PICK from the cabinet's own token-catalog list (09-02; empty pick auto-derives
-   *  server-side) + Purchase. Min-ROAS sits behind AIF_ROAS_LOCKED until the pixel earns
-   *  purchase-value history. */
+   *  Conversions arrive via the postback→CAPI forwarder, which routes each Purchase into the
+   *  pixel named by the link's echoed &pixel= param (default: the AIF postback pixel); the
+   *  launch pixel is the buyer's PICK from the cabinet's own token-catalog list (09-02; empty
+   *  pick auto-derives server-side) + Purchase. Min-ROAS pins ROAS_PIXEL (VD-C1-HS-1, the value
+   *  pixel — same rule as MO; requires the BM share to the cabinet). */
   aifLaunch?: boolean;
   /** Not built out yet → the switcher renders this partner disabled ("in development"). */
   inDevelopment?: boolean;
@@ -152,9 +153,12 @@ const MO_DEFAULT_PIXEL: Bound = { id: "3075610185982313", name: "GC for MO Pixel
 
 /** The ONLY pixel min-ROAS launches may optimize on (owner rule 2026-08-11): the partner's HS
  *  value pixel — real purchase-value history, shared to every MO account and live-probed
- *  VO-eligible on 08-11. Everything else (never-fired GC-for-MO, FARM-1) is rejected for ROAS
- *  even where technically eligible. Enforced in the card (pin + readiness), /api/launch and
- *  /api/clone/run. */
+ *  VO-eligible on 08-11. Everything else (never-fired GC-for-MO, FARM-1, the value-less AIF
+ *  postback pixel — Meta sub 2446368) is rejected for ROAS even where technically eligible.
+ *  Since 09-02 the SAME rule covers the AIF rail (owner ask: integrate VD-C1-HS-1 there too):
+ *  AIF roas pins this pixel, and the launch validates it is shared to the picked cabinet — the
+ *  400 remedy names the BM share until the VD-C1 admin performs it. Enforced in the card
+ *  (pin + readiness), /api/launch, /api/aif/launch and /api/clone/run. */
 export const ROAS_PIXEL: Bound = { id: "4367956310124642", name: "VD-C1-HS-1" };
 
 // ---- AIF (Airfind "Google Rewarded Web") ----------------------------------------------------
@@ -165,16 +169,6 @@ export const ROAS_PIXEL: Bound = { id: "4367956310124642", name: "VD-C1-HS-1" };
 // feeds the partner's click-spam report. FB appends fbclid itself.
 export const AIF_RW_BASE = "https://content.honeyandhues.com/rewarded";
 export const AIF_CLIENT_ID = "52105";
-/** Min-ROAS on the AIF rail is LOCKED at Meta's eligibility gate (re-probed 2026-09-02 via a
- *  validate_only ad set: sub 2446368 «pixel doesn't meet value-optimization requirements») —
- *  the postback pixel's CAPI Purchases still carry no value history, so a VALUE ad set cannot
- *  be born: every roas launch since 08-21 orphaned its ACTIVE campaign and burnt a brand
- *  (3 orphans on 08-25 alone). Enforced in the card + clone rows (option disabled, drafts
- *  snapped back to lowest-cost) and 400-rejected by /api/aif/launch + /api/clone/run BEFORE
- *  anything is claimed. Flip to false (one line) once pb_capi sends real purchase values and a
- *  fresh validate_only probe passes — the MO playbook: value injection → VO probe → flip. */
-export const AIF_ROAS_LOCKED = true;
-
 /** The AUTO-DEFAULT for an AIF conversion pixel when the buyer made no pick (legacy drafts,
  *  queued tasks born before the picker) — chosen from the ACCOUNT'S OWN pixel list, pulled via
  *  the AIF token (owner ask 2026-09-02: no hardcoded pixel id anywhere; the id and even the
@@ -347,10 +341,10 @@ export function launchReadyOpts(p: PartnerConfig): {
     // LION builds ads from the typed destination link + title/copy — all hard-required by create/.
     link: Boolean(p.lionLaunch),
     adText: Boolean(p.lionLaunch),
-    // Min-ROAS pins the partner's value pixel: MO → VD-C1-HS-1. AIF's pixel is DERIVED from the
-    // token's account data at launch (aifDerivedPixel) — no id to pin here; LION partners
-    // validate pixels their own way.
-    roasPixel: p.accountsFromToken && !p.aifLaunch ? ROAS_PIXEL.id : "",
+    // Min-ROAS pins the partner's value pixel VD-C1-HS-1 — MO since 08-11, AIF since 09-02
+    // (the value-less AIF postback pixel cannot VALUE-optimize, Meta sub 2446368); LION
+    // partners validate pixels their own way.
+    roasPixel: p.accountsFromToken ? ROAS_PIXEL.id : "",
   };
 }
 
@@ -393,10 +387,12 @@ export function landingUrlSegments(
   if (!slug) return [];
   // AIF: the partner's RW page with the doc's exact params — destination slug, our clientId, the
   // brand marker (revenue key, rides the shared `gcm` slot) and the campaign.id macro the page
-  // echoes into the postback. No fire/pixel params: the conversion side lives in the postback→
-  // CAPI forwarder, not on the landing.
+  // echoes into the postback. The RW page echoes EVERY query param into the postback, so the
+  // campaign's pixel rides along too (09-02): the postback→CAPI forwarder routes the Purchase
+  // into that pixel (absent/unknown → its default, the AIF postback pixel). No fire param — the
+  // conversion side lives entirely in the forwarder, not on the landing.
   if (p.aifLaunch) {
-    return [
+    const segs: LinkSegment[] = [
       { text: `${p.landingBase}?destination=`, role: "base" },
       { text: slug, role: "slug" },
       { text: `&clientId=${AIF_CLIENT_ID}`, role: "params" },
@@ -404,6 +400,8 @@ export function landingUrlSegments(
       { text: gcm, role: "gcm" },
       { text: "&ppid={{campaign.id}}", role: "params" },
     ];
+    if (isPixelId(pixel)) segs.push({ text: `&pixel=${pixel}`, role: "pixel" });
+    return segs;
   }
   const medium = p.nameTier ? `&utm_medium=${p.nameTier}` : "";
   const segs: LinkSegment[] = [
@@ -449,14 +447,12 @@ export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[
     if (fan && r.page !== fan) patch.page = fan;
     if (p.aifLaunch) {
       // Min-ROAS always optimizes purchase VALUE — the optimization pins to conversions (the
-      // card disables the select; this converges restored/copied drafts too). While the rail's
-      // roas lock stands (Meta VO eligibility — see AIF_ROAS_LOCKED) a roas draft snaps back to
-      // lowest-cost instead: it could never launch, only orphan a campaign + burn a brand.
+      // card disables the select; this converges restored/copied drafts too); the value pixel
+      // pin itself rides the card's roasPixelDrift effect, exactly like MO.
       const roas = bidKind(r.bidStrategy) === "roas";
-      if (roas && AIF_ROAS_LOCKED) patch.bidStrategy = "LOWEST_COST_WITHOUT_CAP";
-      else if (roas && r.optimization !== "conversions") patch.optimization = "conversions";
-      // The pixel is the buyer's PICK from the account's own token-catalog list (owner ask
-      // 09-02) — the board fills/converges it via fillAccountDefaults, never the locks; an
+      if (roas && r.optimization !== "conversions") patch.optimization = "conversions";
+      // The non-roas pixel is the buyer's PICK from the account's own token-catalog list (owner
+      // ask 09-02) — the board fills/converges it via fillAccountDefaults, never the locks; an
       // empty pick still auto-derives server-side at launch.
       if (r.objective !== "OUTCOME_SALES") patch.objective = "OUTCOME_SALES";
       if (r.conversionEvent !== "PURCHASE") patch.conversionEvent = "PURCHASE";

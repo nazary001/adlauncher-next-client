@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { AIF_ROAS_LOCKED, ROAS_PIXEL, partnerConfig, type PartnerId } from "@/lib/partners";
+import { ROAS_PIXEL, partnerConfig, type PartnerId } from "@/lib/partners";
 import { resolveMoChannel } from "@/lib/mo-soc";
 import { bidAmountMissing, bidKind, moEnsureSocMark, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
@@ -48,6 +48,7 @@ import {
   resolveCloneBinds,
   resolveLocales,
   swapBrand,
+  swapPixel,
 } from "@/lib/clone-run";
 
 export const runtime = "nodejs";
@@ -320,34 +321,27 @@ export async function POST(req: Request) {
           // The clone's EFFECTIVE strategy (per-row switch wins, else the source's) — resolved
           // once here so the pixel derivations below and cloneToCampaign can never disagree.
           const targetStrategy = cloneBidStrategy(edit, src);
-          // AIF: min-ROAS is locked at Meta's VO-eligibility gate (AIF_ROAS_LOCKED, sub 2446368
-          // re-probed 2026-09-02) — a roas clone would orphan its campaign + burn a brand at
-          // adset-create. Refused per-row here, before any claim/write; the row's fix is the
-          // strategy switch (cap/lowest).
-          if (aif && AIF_ROAS_LOCKED && bidKind(targetStrategy) === "roas") {
-            throw new FbError(
-              "roas_unavailable — the AIF pixel has no purchase-value history yet (Meta VO eligibility); switch the row to bid cap or lowest cost",
-              { campaignId: edit.campaignId },
-            );
-          }
           // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted
           // POST — and for a same-account clone whose SOURCE lives in someone else's account.
           if (!(await accountAllowedFor(session, binds.accountId))) {
             throw new FbError(ACCOUNT_NOT_ASSIGNED_MSG, { campaignId: edit.campaignId }, 403);
           }
           // AIF pixel (parity with /api/aif/launch, a choice since 09-02): conversion sources
-          // AND any clone switched to min-ROAS carry a pixel of the BUILD account — the buyer's
-          // target pick or the source's own promoted pixel when the resolver kept one (both
-          // validated against the account: picks in the targets pre-flight above, the source's
-          // by construction), else the cabinet's own pixel auto-derives LIVE via the token
-          // (aifDerivedPixel — no hardcoded id; throws the BM remedy BEFORE the brand marker is
-          // burned, not at adset-create time — review find 08-24). Click clones stay pixel-less
-          // (the RW link carries no &pixel= param, so only the adset would need it).
+          // carry a pixel of the BUILD account — the buyer's target pick or the source's own
+          // promoted pixel when the resolver kept one (both validated against the account:
+          // picks in the targets pre-flight above, the source's by construction), else the
+          // cabinet's own pixel auto-derives LIVE via the token (aifDerivedPixel — no hardcoded
+          // id; throws the BM remedy BEFORE the brand marker is burned, not at adset-create
+          // time — review find 08-24). Min-ROAS targets skip the derive: the shared value-pixel
+          // pin below (MO+AIF alike) sets and validates ROAS_PIXEL. Click clones stay
+          // pixel-less; the link rewrite mirrors whatever the adset promotes.
           if (aif) {
             binds.pixelId =
-              bidKind(targetStrategy) === "roas" || /^\d{10,20}$/.test(src.pixelId)
-                ? binds.pixelId || (await aifDerivedPixel(binds.accountId)).id
-                : "";
+              bidKind(targetStrategy) === "roas"
+                ? binds.pixelId
+                : /^\d{10,20}$/.test(src.pixelId)
+                  ? binds.pixelId || (await aifDerivedPixel(binds.accountId)).id
+                  : "";
           }
           // A conversion-optimized source cloned into ANOTHER account must carry a pixel of that
           // account (the source's pixel isn't valid there) — the adset's promoted_object and the
@@ -396,20 +390,12 @@ export async function POST(req: Request) {
               throw new FbError("roas_goal_ambiguous — type the decimal goal (0,30 = 30%) on the clone row", { campaignId: edit.campaignId });
             }
           }
-          // AIF min-ROAS rides the derived postback pixel — a roas source that somehow carries no
-          // promoted pixel has nothing to value-optimize on; refuse before any claim/write (Meta
-          // would only reject the VALUE ad set after the campaign exists — orphan + burnt brand).
-          if (aif && bidKind(campaign.bidStrategy) === "roas" && !editBinds.pixelId) {
-            throw new FbError(
-              "roas_pixel_missing — the source has no promoted pixel; a min-ROAS clone can't value-optimize",
-              { campaignId: edit.campaignId },
-            );
-          }
-          // Owner rule (2026-08-11): MO min-ROAS optimizes ONLY on the partner's value pixel.
-          // PIN it (launcher-card parity — same-account clones have no pixel picker, and a row
-          // switched to ROAS needs it regardless of what the source promoted) after verifying the
-          // build account carries the shared pixel; the link rewrite below then fires it too.
-          if (!aif && bidKind(campaign.bidStrategy) === "roas" && editBinds.pixelId !== ROAS_PIXEL.id) {
+          // Owner rule (2026-08-11, AIF since 09-02): min-ROAS optimizes ONLY on the partner's
+          // value pixel VD-C1-HS-1. PIN it (launcher-card parity — same-account clones have no
+          // pixel picker, and a row switched to ROAS needs it regardless of what the source
+          // promoted) after verifying the build account carries the shared pixel; the link
+          // rewrite below then fires it too.
+          if (bidKind(campaign.bidStrategy) === "roas" && editBinds.pixelId !== ROAS_PIXEL.id) {
             const pixels = await pixelsOf(binds.accountId);
             if (!pixels.some((p) => p.id === ROAS_PIXEL.id)) {
               throw new FbError(
@@ -495,8 +481,10 @@ export async function POST(req: Request) {
               cloneMedia,
               gcm,
               editBinds.pixelId,
-              // AIF RW links carry the brand marker only — no pixel param exists on that rail.
-              aif ? (l: string) => swapBrand(l, gcm) : undefined,
+              // AIF RW links: brand marker + the promoted pixel (09-02 — the RW page echoes it
+              // into the postback, the CAPI forwarder routes the Purchase by it; swapPixel
+              // no-ops for pixel-less click clones, leaving legacy links untouched).
+              aif ? (l: string) => swapPixel(swapBrand(l, gcm), editBinds.pixelId) : undefined,
             ),
           );
           created.creative_id = String(creative.id);

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { type Campaign, bidAmountMissing, bidKind, normalizeRoasGoal, parseMoney } from "@/lib/types";
-import { AIF_ROAS_LOCKED, type PartnerId, fullLandingUrl, partnerConfig } from "@/lib/partners";
+import { ROAS_PIXEL, type PartnerId, fullLandingUrl, partnerConfig } from "@/lib/partners";
 import {
   type LaunchBinds,
   SUPPORTED_BID_STRATEGIES,
@@ -88,8 +88,10 @@ async function resolveLocales(names: string[]): Promise<number[]> {
  * test01..test700), the ad link is the partner's RW page with the destination slug, and the
  * pixel is the buyer's PICK from the account's own token-catalog list (a choice since 09-02,
  * validated here; an empty pick auto-derives the cabinet's pixel — aifDerivedPixel, no
- * hardcoded id) + Purchase; clicks carry no pixel at all. Min-ROAS sits behind
- * AIF_ROAS_LOCKED until the pixel earns purchase-value history (Meta sub 2446368).
+ * hardcoded id) + Purchase, and rides the RW link's &pixel= param so the postback→CAPI
+ * forwarder lands the Purchase on the same pixel; clicks carry no pixel at all. Min-ROAS pins
+ * the value pixel VD-C1-HS-1 (MO-parity, 09-02) — the AIF postback pixel fails Meta's VO gate
+ * (sub 2446368) — and requires it shared to the cabinet in BM.
  */
 export async function POST(req: Request) {
   // Proxy-gated, but self-checks the session too (parity with /api/launch).
@@ -129,21 +131,6 @@ export async function POST(req: Request) {
   }
 
   const partner = partnerConfig("us" as PartnerId);
-  // Min-ROAS is LOCKED on this rail while Meta's VO-eligibility gate stands (AIF_ROAS_LOCKED,
-  // re-probed 2026-09-02: sub 2446368 — the postback pixel has no purchase-value history). A
-  // roas launch would create the campaign and then have its VALUE ad set refused → ACTIVE
-  // orphan + burnt brand (exactly the 08-25 trio). Refused HERE, before anything is claimed.
-  if (AIF_ROAS_LOCKED && bidKind(campaign.bidStrategy) === "roas") {
-    return NextResponse.json(
-      {
-        ok: false,
-        stage: "config",
-        error:
-          "roas_unavailable — the AIF pixel has no purchase-value history yet (Meta VO eligibility, sub 2446368); launch Conversions until the postback CAPI values accrue",
-      },
-      { status: 400 },
-    );
-  }
   // Min-ROAS ALWAYS optimizes purchase value (goal VALUE, event Purchase — fb-launch pins both),
   // so it derives the postback pixel like any conversion launch, no matter what optimization a
   // stale/edited draft sent — the UI pins it, but the server is the truth (mirror of /api/launch).
@@ -193,10 +180,13 @@ export async function POST(req: Request) {
     // Conversion launches carry the buyer's PICKED pixel (a choice since 09-02, owner ask),
     // validated against the account's own token-catalog list — a pixel the cabinet doesn't
     // carry would only be refused by Meta at adset-create, AFTER the campaign exists (orphan +
-    // burnt brand). An empty pick (legacy drafts, queued tasks) auto-derives the cabinet's own
-    // pixel (aifDerivedPixel — throws the 400-shaped BM remedy when none is derivable).
+    // burnt brand). Min-ROAS pins the value pixel VD-C1-HS-1 no matter what the draft sent
+    // (MO-parity — the only VO-eligible pixel; the AIF postback pixel fails Meta's gate, sub
+    // 2446368) and requires it SHARED to the cabinet. An empty non-roas pick (legacy drafts,
+    // queued tasks) auto-derives the cabinet's own pixel (aifDerivedPixel — throws the
+    // 400-shaped BM remedy when none is derivable).
     if (conversions) {
-      const picked = String(campaign.pixel ?? "").trim();
+      const picked = bidKind(campaign.bidStrategy) === "roas" ? ROAS_PIXEL.id : String(campaign.pixel ?? "").trim();
       if (picked) {
         if (!/^\d{10,20}$/.test(picked)) {
           return NextResponse.json({ ok: false, stage: "config", error: "pixel_invalid — bad pixel id" }, { status: 400 });
@@ -207,7 +197,10 @@ export async function POST(req: Request) {
             {
               ok: false,
               stage: "config",
-              error: `pixel_not_on_account — share pixel ${picked} to this ad account in Business Manager first (or pick one of the account's own pixels)`,
+              error:
+                picked === ROAS_PIXEL.id
+                  ? `pixel_not_on_account — min-ROAS runs only on ${ROAS_PIXEL.name} (${ROAS_PIXEL.id}); share it to this ad account in Business Manager first`
+                  : `pixel_not_on_account — share pixel ${picked} to this ad account in Business Manager first (or pick one of the account's own pixels)`,
             },
             { status: 400 },
           );
@@ -373,7 +366,9 @@ export async function POST(req: Request) {
           notes: "claimed via adlauncher launch",
         });
         const brand = claim.brand;
-        const link = fullLandingUrl(partner, slug, brand, conversions);
+        // The pixel rides the RW link (echoed into the postback) so the CAPI forwarder lands
+        // the Purchase on the SAME pixel the ad set optimizes for; clicks carry none.
+        const link = fullLandingUrl(partner, slug, brand, conversions, binds.pixelId);
         if (!link) throw new FbError("no destination — cannot build the RW link", {});
 
         // 2) register the creative on the AIF account (video: FB pulls from the Blob URL, then

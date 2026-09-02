@@ -16,7 +16,7 @@ import {
 } from "@/lib/clone";
 import { bidKind, limitMoney, limitMoneyCents, moEnsureSocMark, moneyLabel, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { BID_STRATEGIES, OS_OPTIONS, countryName, geoSummary } from "@/lib/catalog";
-import { AIF_ROAS_LOCKED, type PartnerId, partnerConfig } from "@/lib/partners";
+import { type PartnerId, partnerConfig, pickAifPixel } from "@/lib/partners";
 import { AutoTextarea, BidKindTag, Field, Select } from "./ui";
 import {
   AlertIcon,
@@ -530,10 +530,14 @@ function CloneInner({
                             accountId: v,
                             // Auto-pick the target's pixel (FARM-1 when it carries it) the same way
                             // a fresh launch card does; no pixel in source mode / when cleared.
-                            // AIF auto-picks its cabinet's own pixel the same way (09-02).
+                            // AIF prefers its cabinet's own AIF-named pixel (pickAifPixel, 09-02) —
+                            // "first pixel" would grab whichever the catalog lists first once the
+                            // value pixel is shared alongside.
                             pixelId:
                               v && v !== SOURCE_ACCOUNT
-                                ? defaultPixelFor(adAccounts, v, partner.preferredPixel)
+                                ? aifMode
+                                  ? (pickAifPixel(pixelOptionsOf(adAccounts, v))?.id ?? "")
+                                  : defaultPixelFor(adAccounts, v, partner.preferredPixel)
                                 : "",
                           })
                         }
@@ -956,17 +960,8 @@ function CloneInner({
                                     : "")
                                 }
                               >
-                                {/* AIF: min-ROAS is locked at Meta's VO-eligibility gate
-                                    (AIF_ROAS_LOCKED) — disabled, not hidden, so a roas SOURCE
-                                    still shows its true strategy; the server 400s the row until
-                                    it's switched to cap/lowest. */}
                                 {BID_STRATEGIES.map((o) => (
-                                  <option
-                                    key={o.value}
-                                    value={o.value}
-                                    disabled={aifMode && AIF_ROAS_LOCKED && bidKind(o.value) === "roas"}
-                                    className="bg-surface text-ink"
-                                  >
+                                  <option key={o.value} value={o.value} className="bg-surface text-ink">
                                     {o.label}
                                   </option>
                                 ))}
