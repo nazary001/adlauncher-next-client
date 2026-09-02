@@ -68,7 +68,7 @@ function rowBidMissing(r: CloneRow): boolean {
   return kind === "roas" && normalizeRoasGoal(v) == null;
 }
 
-/** Compact geo string for the Task Manager row (mirrors the launcher's geo summary). */
+/** Column heading with the underline rule + an optional right-aligned count chip. */
 function SectionHeading({ children, right }: { children: React.ReactNode; right?: React.ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-2 border-b border-line pb-2">
@@ -173,6 +173,13 @@ function CloneInner({
   };
   const nextRowId = useRef(1);
   const queuedTimer = useRef<number | null>(null);
+  // The "N queued" toast timer must not fire into an unmounted board (partner switches navigate away).
+  useEffect(
+    () => () => {
+      if (queuedTimer.current) window.clearTimeout(queuedTimer.current);
+    },
+    [],
+  );
 
   const partner = partnerConfig(partnerId);
   const aifMode = Boolean(partner.aifLaunch);
@@ -223,7 +230,16 @@ function CloneInner({
       ? { list: "/api/aif/fanpages", volume: "/api/aif/fanpages/volume" }
       : { list: `/api/fanpages?channel=soc:${encodeURIComponent(moSoc)}`, volume: "/api/fanpages/volume" },
   );
-  const fanpageMissing = Boolean(partner.fanpagesFromToken) && !settings.pageId;
+  // A signer switch swaps the WHOLE catalog (each soc sees its own pages/accounts) but the
+  // picked ids survive in state — a pick absent from the freshly LOADED list would fire a bind
+  // the new signer can't use (per-clone server errors). Same derived-staleness idiom as
+  // pixelStale below: a mid-load list (null) never flags a legit pick.
+  const pageStale =
+    Boolean(partner.fanpagesFromToken) &&
+    Boolean(settings.pageId) &&
+    fanpages !== null &&
+    !fanpages.some((o) => o.value === settings.pageId);
+  const fanpageMissing = Boolean(partner.fanpagesFromToken) && (!settings.pageId || pageStale);
   // Token ad accounts for the destination pick. The destination is an EXPLICIT choice:
   // "" = nothing chosen yet (Duplicate stays locked), SOURCE_ACCOUNT = consciously keep each
   // clone in its source campaign's own account, digits = a concrete target account (media gets
@@ -233,8 +249,15 @@ function CloneInner({
     partner.preferredPixel,
     aifMode ? "/api/aif/adaccounts" : `/api/adaccounts?channel=soc:${encodeURIComponent(moSoc)}`,
   );
-  const accountMissing = Boolean(partner.accountsFromToken) && !settings.accountId;
   const isTargetAccount = Boolean(settings.accountId) && settings.accountId !== SOURCE_ACCOUNT;
+  // Same staleness rule for a concrete target account (SOURCE_ACCOUNT is a sentinel — never
+  // stale): picked under one signer, absent from the other's loaded catalog → re-pick.
+  const accountStale =
+    Boolean(partner.accountsFromToken) &&
+    isTargetAccount &&
+    adAccounts !== null &&
+    !adAccounts.some((a) => a.value === settings.accountId);
+  const accountMissing = Boolean(partner.accountsFromToken) && (!settings.accountId || accountStale);
   const targetPixels = isTargetAccount ? pixelOptionsOf(adAccounts, settings.accountId) : [];
   // A concrete target account needs a pixel of that account: conversion sources can't carry
   // their own pixel across (it lives on the source's account) — the server enforces this too.
@@ -437,9 +460,11 @@ function CloneInner({
     <>
       <Header partner={partnerId} onPartnerChange={changePartner} user={user} />
       <main className="flex-1">
-        <div className="mx-auto grid w-full max-w-[1440px] items-start gap-6 px-4 pb-24 pt-6 sm:px-6 lg:grid-cols-[300px_minmax(0,1fr)]">
-          {/* ---- Settings (left) ---- */}
-          <section className="flex flex-col gap-4 lg:sticky lg:top-[88px]">
+        <div className="mx-auto grid w-full max-w-[1440px] items-start gap-5 px-4 pb-24 pt-6 sm:px-5 lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[300px_minmax(0,1fr)] xl:gap-6 xl:px-6">
+          {/* ---- Settings (left) ----
+               Sticky AND internally scrollable: on short screens the column outgrows the viewport
+               — without its own scroll the Duplicate button pins out of reach. */}
+          <section className="flex min-w-0 flex-col gap-4 lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto lg:overscroll-contain">
             <SectionHeading>Settings</SectionHeading>
 
             {/* MO signer — the soc token that reads the catalogs below AND signs every clone
@@ -460,7 +485,7 @@ function CloneInner({
                     <span
                       className={`text-[10px] font-medium uppercase tracking-[0.14em] ${fanpageMissing ? "text-warn" : "text-faint"}`}
                     >
-                      Fanpage{fanpageMissing ? " — required" : ""}
+                      Fanpage{pageStale ? " — re-pick (not on this signer)" : fanpageMissing ? " — required" : ""}
                     </span>
                     <SearchSelect
                       value={settings.pageId}
@@ -496,7 +521,7 @@ function CloneInner({
                       <span
                         className={`text-[10px] font-medium uppercase tracking-[0.14em] ${accountMissing ? "text-warn" : "text-faint"}`}
                       >
-                        Account{accountMissing ? " — required" : ""}
+                        Account{accountStale ? " — re-pick (not on this signer)" : accountMissing ? " — required" : ""}
                       </span>
                       <SearchSelect
                         value={settings.accountId}
@@ -783,20 +808,21 @@ function CloneInner({
                 </button>
               </div>
             ) : (
+              // table-fixed + one flexible Name column — no 900px floor, so the board fits a
+              // 1024px viewport scroll-free. The read-only source facts (orig $/bid/videos) fold
+              // into ONE stacked column and hide below xl; the redirect config chip lives in the
+              // name cell. The min-w only guards true mobile (wrapper scrolls there).
               <div className="overflow-x-auto rounded-2xl border border-line">
-                <table className="w-full min-w-[900px] table-fixed border-collapse text-left">
+                <table className="w-full min-w-[620px] table-fixed border-collapse text-left">
                   <thead>
-                    <tr className="border-b border-line bg-surface2/40 text-[9.5px] font-semibold uppercase tracking-[0.05em] text-faint">
-                      <th className="w-[30px] px-1.5 py-2.5 text-center">#</th>
+                    <tr className="border-b border-line bg-surface2/40 text-[10px] font-semibold uppercase tracking-[0.1em] text-faint">
+                      <th className="w-[34px] px-1.5 py-2.5 text-center">#</th>
                       <th className="px-3 py-2.5">Campaign name</th>
-                      <th className="w-[110px] px-2 py-2.5">Geo</th>
-                      <th className="w-[58px] px-2 py-2.5 text-right">Orig $</th>
-                      <th className="w-[96px] px-2 py-2.5 text-right">Orig bid</th>
-                      <th className="w-[54px] px-2 py-2.5 text-center">Videos</th>
-                      <th className="w-[168px] border-l border-line px-2 py-2.5">Strategy · Bid</th>
-                      <th className="w-[86px] px-2 py-2.5">Budget</th>
-                      <th className="w-[112px] px-2 py-2.5">Config</th>
-                      <th className="w-[44px] px-1 py-2.5" />
+                      <th className="w-[122px] px-2 py-2.5">Geo</th>
+                      <th className="hidden w-[110px] px-2 py-2.5 xl:table-cell">Source $ · bid</th>
+                      <th className="w-[150px] border-l border-line px-2 py-2.5">Strategy · Bid</th>
+                      <th className="w-[88px] px-2 py-2.5">Budget</th>
+                      <th className="w-[40px] px-1 py-2.5" />
                     </tr>
                   </thead>
                   <tbody>
@@ -827,10 +853,32 @@ function CloneInner({
                             ariaLabel="Campaign name (editable part)"
                             className="block w-full resize-none overflow-hidden rounded-lg border border-line bg-surface2 px-2.5 py-2 text-[12.5px] leading-relaxed text-ink outline-none transition-colors duration-150 hover:border-line2 focus:border-accent/60 focus:bg-surface2/80 focus:ring-2 focus:ring-accent/15"
                           />
-                          <div className="mt-1.5">
+                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                             <span className="inline-flex items-center rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-[10px] text-faint">
                               #{r.source.campaignId}
                             </span>
+                            {/* Redirect config rides with the name (was its own 112px column):
+                                HIGH ADX opens the High Offer modal, the rest is a passive tag. */}
+                            {r.redirectType === "HIGH ADX" ? (
+                              <button
+                                type="button"
+                                onClick={() => setHighOfferRowId(r.id)}
+                                className={
+                                  "inline-flex items-center gap-1.5 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors " +
+                                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warn/40 " +
+                                  (r.highOffer.enabled
+                                    ? "border-warn/50 bg-warn/15 text-warn"
+                                    : "border-warn/40 bg-warn/5 text-warn hover:bg-warn/10")
+                                }
+                              >
+                                <SlidersIcon className="h-3 w-3" />
+                                High Offer
+                              </button>
+                            ) : (
+                              <span className="inline-flex rounded border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[10px] text-faint">
+                                {r.redirectType}
+                              </span>
+                            )}
                           </div>
                         </td>
 
@@ -849,31 +897,29 @@ function CloneInner({
                           </div>
                         </td>
 
-                        {/* original values (read-only) */}
-                        <td className="px-2 py-3.5 text-right">
-                          <span className="flex h-8 items-center justify-end font-mono text-[12px] text-faint">
-                            ${moneyLabel(r.source.originalBudget)}
-                          </span>
-                        </td>
-                        <td className="px-2 py-3.5 text-right">
-                          {/* The source's OWN bid, marked by HOW it bids: blue ROAS tag + the goal
-                              decimal, amber CAP tag + $, or "auto" for lowest cost. */}
-                          <span className="flex h-8 flex-wrap items-center justify-end gap-1 font-mono text-[12px] text-faint">
-                            <BidKindTag strategy={r.source.bidStrategy} />
-                            {bidKind(r.source.bidStrategy) === "none"
-                              ? r.source.bidStrategy === "LOWEST_COST_WITHOUT_CAP"
-                                ? "auto"
-                                : r.source.originalRoas || "—"
-                              : r.source.originalRoas
-                                ? `${bidKind(r.source.bidStrategy) === "cap" ? "$" : ""}${r.source.originalRoas}`
-                                : "—"}
-                          </span>
-                        </td>
-                        <td className="px-2 py-3.5 text-center">
-                          <span className="flex h-8 items-center justify-center gap-1 font-mono text-[12px] text-dim">
-                            <FilmIcon className="h-3.5 w-3.5 text-faint" />
-                            {r.source.creatives.length}
-                          </span>
+                        {/* Source facts, one stacked read-only cell (was three columns): budget +
+                            creative count on top, the bid — marked by HOW it bids (blue ROAS tag /
+                            amber CAP tag / "auto") — under. Hidden below xl; the Preview repeats
+                            the numbers that matter for the fire. */}
+                        <td className="hidden px-2 py-3 xl:table-cell">
+                          <div className="flex flex-col gap-1 font-mono text-[11px] tabular-nums text-faint">
+                            <span className="flex items-center gap-1">
+                              <span>${moneyLabel(r.source.originalBudget)}</span>
+                              <span className="text-dim">·</span>
+                              <FilmIcon className="h-3 w-3" />
+                              <span>{r.source.creatives.length}</span>
+                            </span>
+                            <span className="flex flex-wrap items-center gap-1">
+                              <BidKindTag strategy={r.source.bidStrategy} />
+                              {bidKind(r.source.bidStrategy) === "none"
+                                ? r.source.bidStrategy === "LOWEST_COST_WITHOUT_CAP"
+                                  ? "auto"
+                                  : r.source.originalRoas || "—"
+                                : r.source.originalRoas
+                                  ? `${bidKind(r.source.bidStrategy) === "cap" ? "$" : ""}${r.source.originalRoas}`
+                                  : "—"}
+                            </span>
+                          </div>
                         </td>
 
                         {/* clone settings (editable) — money-sanitized like the launcher's fields
@@ -988,32 +1034,6 @@ function CloneInner({
                           </div>
                         </td>
 
-                        {/* config */}
-                        <td className="px-2 py-3.5">
-                          <div className="flex h-8 items-center">
-                            {r.redirectType === "HIGH ADX" ? (
-                              <button
-                                type="button"
-                                onClick={() => setHighOfferRowId(r.id)}
-                                className={
-                                  "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors " +
-                                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warn/40 " +
-                                  (r.highOffer.enabled
-                                    ? "border-warn/50 bg-warn/15 text-warn"
-                                    : "border-warn/40 bg-warn/5 text-warn hover:bg-warn/10")
-                                }
-                              >
-                                <SlidersIcon className="h-3 w-3" />
-                                High Offer
-                              </button>
-                            ) : (
-                              <span className="inline-flex rounded-md border border-line bg-surface2 px-2 py-1 font-mono text-[10.5px] text-faint">
-                                {r.redirectType}
-                              </span>
-                            )}
-                          </div>
-                        </td>
-
                         {/* remove */}
                         <td className="px-1 py-3.5">
                           <div className="flex h-8 items-center justify-center">
@@ -1050,9 +1070,9 @@ function CloneInner({
                   {preview.map((p) => (
                     <div
                       key={p.key}
-                      className="flex items-center gap-3 rounded-lg border border-line bg-surface2/40 px-3 py-2"
+                      className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-surface2/40 px-3 py-2"
                     >
-                      <span className="min-w-0 flex-1 truncate text-[12px] text-ink" title={p.name}>
+                      <span className="min-w-0 flex-[1_1_220px] truncate text-[12px] text-ink" title={p.name}>
                         {p.name}
                       </span>
                       <GeoChips codes={p.countries} />

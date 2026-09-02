@@ -13,7 +13,7 @@ import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from
 import { juroEnsureMark } from "@/lib/juro";
 import { relabelNameGeo } from "@/lib/targeting-override";
 import type { PartnerId } from "@/lib/partners";
-import { ChevronDownIcon, CopyIcon, EyeIcon, GlobeIcon, PlusIcon, TrashIcon } from "./icons";
+import { ChevronDownIcon, CopyIcon, EyeIcon, GlobeIcon, PlusIcon, RetryIcon, TrashIcon } from "./icons";
 import { HsTargetingModal } from "./hs-targeting-modal";
 import { hsTokensAllDown, useHsTokenStatus } from "./hs-token-status";
 import type { SessionUser } from "./user-menu";
@@ -50,6 +50,10 @@ type Row = {
   countries: string[];
   /** Targeting override: FB locale ids from the picked profile — empty = inherit the source's. */
   locales: string[];
+  /** The LION facts read failed (network / HTTP) — the row offers a manual Retry instead of the
+   *  fetch effect hammering a dead LION every debounce tick. The row can still fire "blind"
+   *  (the duplicate weapon re-reads the source itself). */
+  failed?: boolean;
   state: "idle" | "sending" | "ok" | "error";
   msg?: string;
 };
@@ -121,6 +125,7 @@ const freshRow = (campaignId: string, n: number): Row => ({
   campaignId,
   info: null,
   loading: false,
+  failed: false,
   bid: "",
   bidStrategy: "", // seeded with the source's strategy once the LION facts land
   budget: "10",
@@ -171,6 +176,9 @@ export function HsCloneBoard({
   const [copies, setCopies] = useState("1");
   const [previewed, setPreviewed] = useState(false);
   const [firing, setFiring] = useState(false);
+  // Pre-fire refusal (token pool down / wave over the per-fire cap) — an inline warn box under
+  // the fire button instead of a blocking alert() dialog. Cleared on the next preview/gate pass.
+  const [fireNote, setFireNote] = useState<string | null>(null);
   // Board mode: the CLONER (duplicate an existing tree) vs JURO (new campaign from the source's
   // page POSTS — no page bind). Each mode carries its own LION-vs-FB-token channel pair (owner
   // ask 08-26): the cloner pair fires /api/hs/duplicate | /api/hs/token-duplicate, the JURO pair
@@ -199,6 +207,7 @@ export function HsCloneBoard({
   const changeMode = (m: "clone" | "juro") => {
     setMode(m);
     setPreviewed(false);
+    setFireNote(null);
     try {
       localStorage.setItem("adlauncher.hs.mode", m);
     } catch {
@@ -208,6 +217,7 @@ export function HsCloneBoard({
   const changeDupChannel = (ch: "lion" | "token") => {
     setDupChannel(ch);
     setPreviewed(false);
+    setFireNote(null);
     try {
       localStorage.setItem("adlauncher.hs.dupchannel", ch);
     } catch {
@@ -217,6 +227,7 @@ export function HsCloneBoard({
   const changeJuroChannel = (ch: "lion" | "token") => {
     setJuroChannel(ch);
     setPreviewed(false);
+    setFireNote(null);
     try {
       localStorage.setItem("adlauncher.hs.jurochannel", ch);
     } catch {
@@ -307,6 +318,13 @@ export function HsCloneBoard({
     setRows((rs) => rs.filter((r) => r.id !== id));
     setPreviewed(false);
   };
+  /** Re-arm one failed LION read: free the fetch claim and clear the flag — the sources effect
+   *  sees a !info/!loading/unclaimed row again and refetches it (event-handler-driven, so a dead
+   *  LION is only re-asked when the buyer asks). */
+  const retrySource = (r: Row) => {
+    fetchedRef.current.delete(r.campaignId.trim());
+    patchRow(r.id, { failed: false });
+  };
 
   // ---- source facts from LION (details + targeting), batched + debounced ----
   const fetchedRef = useRef(new Set<string>());
@@ -338,14 +356,17 @@ export function HsCloneBoard({
               pages?: Array<{ pageId: string; ads: number }>;
             }>;
           };
+          if (!res.ok || !d?.ok) throw new Error(`HTTP ${res.status}`);
           const byId = new Map((d.sources ?? []).map((s) => [s.campaignId, s]));
           setRows((rs) =>
             rs.map((r) => {
               const s = byId.get(r.campaignId.trim());
-              if (!s) return ids.includes(r.campaignId.trim()) ? { ...r, loading: false } : r;
+              // Answered without this id — same manual-Retry path as a failed call (no auto-loop).
+              if (!s) return ids.includes(r.campaignId.trim()) ? { ...r, loading: false, failed: true } : r;
               return {
                 ...r,
                 loading: false,
+                failed: false,
                 info: {
                   name: s.name,
                   status: s.status,
@@ -369,8 +390,12 @@ export function HsCloneBoard({
             }),
           );
         } catch {
-          ids.forEach((id) => fetchedRef.current.delete(id)); // retry on next edit
-          setRows((rs) => rs.map((r) => (ids.includes(r.campaignId.trim()) ? { ...r, loading: false } : r)));
+          // Failed ids KEEP their fetchedRef claim: deleting it here re-armed the effect on the
+          // very rows-change this setState causes → an endless 500ms fetch loop against a dead
+          // LION. The row shows "read failed" + a Retry button instead (retrySource re-arms).
+          setRows((rs) =>
+            rs.map((r) => (ids.includes(r.campaignId.trim()) ? { ...r, loading: false, failed: true } : r)),
+          );
         }
       })();
     }, 500);
@@ -379,8 +404,24 @@ export function HsCloneBoard({
 
   const bindsReady = Boolean(profile && account && (page || !needsPage) && effectivePixel);
   const copiesN = Math.min(MAX_COPIES, Math.max(1, Math.round(Number(copies) || 1)));
-  const validRows = rows.filter((r) => /^\d{5,}$/.test(r.campaignId.trim()) && parseMoney(r.budget) >= 1);
+  // Fireable rows only: a real id, a ≥$1 budget AND not UNREADABLE — an unreadable source's
+  // duplicate dies the same way (LION can't read it), so firing it only burns wave slots and the
+  // account's 30-min window. Every wave number (totalClones, acct gate, fanka demand) counts the
+  // SAME set; excluded rows are flagged in the table instead of silently diverging.
+  const validRows = rows.filter(
+    (r) =>
+      /^\d{5,}$/.test(r.campaignId.trim()) &&
+      parseMoney(r.budget) >= 1 &&
+      r.info?.status !== "UNREADABLE",
+  );
   const unreadable = rows.filter((r) => r.info?.status === "UNREADABLE").length;
+  /** Rows skipped ONLY for their sub-$1 budget (amber field + chip — otherwise they vanish silently). */
+  const lowBudgetCount = rows.filter(
+    (r) =>
+      /^\d{5,}$/.test(r.campaignId.trim()) &&
+      r.info?.status !== "UNREADABLE" &&
+      parseMoney(r.budget) < 1,
+  ).length;
   const totalClones = validRows.length * copiesN;
   // Account launch limit (5 campaigns / 30 min): the wave binds ONE account, so an over-capacity
   // fire is blocked here with the countdown (the server precheck would 429 it anyway).
@@ -481,7 +522,7 @@ export function HsCloneBoard({
       (tokenRail ||
         (effDupChannel === "lion" && validRows.some((r) => r.countries.length > 0 || r.locales.length > 0)))
     ) {
-      alert(
+      setFireNote(
         "All FB launch tokens are rate-limited right now — " +
           (tokenRail
             ? "the FB Token rail is blocked until a cooldown lifts. Fire on the LION API rail or wait (see the Tokens widget)."
@@ -491,12 +532,13 @@ export function HsCloneBoard({
     }
     const cap = tokenRail ? MAX_TOKEN_SHOTS_PER_FIRE : MAX_SHOTS_PER_FIRE;
     if (totalClones > cap) {
-      alert(
+      setFireNote(
         `That's ${totalClones} clones — the ${tokenRail ? "FB Token rail builds" : "server fires"} at most ${cap} per wave. ` +
           "Lower the copies or remove some rows and fire in waves.",
       );
       return;
     }
+    setFireNote(null);
     setFiring(true);
     // ONE batch POST: the server stamps every row into the shared store, answers immediately and
     // keeps working in the background — jittered single-copy submits, status polling and clone
@@ -611,13 +653,112 @@ export function HsCloneBoard({
     <>
       <Header partner={partner} onPartnerChange={changePartner} user={user} />
       <main className="flex-1">
-        <div className="mx-auto grid w-full max-w-[1440px] items-start gap-6 px-4 pb-24 pt-6 sm:px-6 lg:grid-cols-[300px_minmax(0,1fr)]">
-          {/* ---- Settings (LION-duplicator structure: binds + copies + preview→duplicate) ---- */}
-          <aside className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-20">
+        <div className="mx-auto grid w-full max-w-[1440px] items-start gap-5 px-4 pb-24 pt-6 sm:px-5 lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[300px_minmax(0,1fr)] xl:gap-6 xl:px-6">
+          {/* ---- Settings (LION-duplicator structure: binds + copies + preview→duplicate) ----
+               Sticky AND internally scrollable: on short screens (768p laptops) the card is
+               taller than the viewport — without its own scroll the bottom (fire button!) would
+               be pinned out of reach. */}
+          <aside className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto lg:overscroll-contain">
             <div className="flex flex-col gap-3 rounded-2xl border border-line bg-surface p-4">
               <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-faint">
                 Settings
               </span>
+
+              {/* board mode (cloner vs JURO), then the mode's own LION-vs-FB-token channel pair —
+                  FIRST in the card: the mode decides which binds below even exist (JURO has no
+                  Page), so picking it after the binds re-shuffled the form under the pointer.
+                  Both token chips ride the launcher's provisioning/cooldown gates (one pool). */}
+              <div className="flex flex-col gap-1">
+                <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
+                  {(
+                    [
+                      { key: "clone" as const, label: "Cloner" },
+                      { key: "juro" as const, label: "JURO" },
+                    ]
+                  ).map((opt) => {
+                    const active = mode === opt.key;
+                    return (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        aria-pressed={active}
+                        onClick={() => changeMode(opt.key)}
+                        className={
+                          "h-8 rounded-[10px] text-[12px] font-semibold transition-all duration-150 " +
+                          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
+                          (active
+                            ? "bg-accent/20 text-[#9db8ff] shadow-[inset_0_0_0_1px_rgba(122,150,255,0.35)]"
+                            : "text-dim hover:text-ink")
+                        }
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
+                  {[
+                    { key: "lion" as const, label: "LION API", ready: true, down: false, hint: undefined as string | undefined },
+                    {
+                      key: "token" as const,
+                      label: "FB Token",
+                      ready: hs.tokenLaunch,
+                      down: tokensDown,
+                      hint: hs.tokenLaunch
+                        ? tokensDown
+                          ? "All FB launch tokens are rate-limited — the rail re-opens after a cooldown (see the Tokens widget)"
+                          : undefined
+                        : "FB token not configured on the server (FB_HS_LAUNCH_TOKEN)",
+                    },
+                  ].map((opt) => {
+                    const active = (mode === "juro" ? juroChannel : dupChannel) === opt.key;
+                    return (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        disabled={!opt.ready}
+                        aria-pressed={active}
+                        title={opt.hint}
+                        onClick={() => {
+                          if (mode === "juro") changeJuroChannel(opt.key);
+                          else changeDupChannel(opt.key);
+                        }}
+                        className={
+                          "h-8 rounded-[10px] text-[12px] font-semibold transition-all duration-150 " +
+                          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
+                          (active
+                            ? opt.down
+                              ? "bg-danger/15 text-danger shadow-[inset_0_0_0_1px_rgba(255,107,107,0.35)]"
+                              : "bg-accent/20 text-[#9db8ff] shadow-[inset_0_0_0_1px_rgba(122,150,255,0.35)]"
+                            : opt.down
+                              ? "text-danger/70 hover:text-danger"
+                              : "text-dim hover:text-ink") +
+                          (opt.ready ? "" : " cursor-not-allowed opacity-40")
+                        }
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p
+                  className={
+                    "text-center text-[10px] leading-relaxed " +
+                    (tokenRail && tokensDown ? "font-medium text-danger" : "text-faint")
+                  }
+                >
+                  {tokenRail && tokensDown
+                    ? "All FB launch tokens are rate-limited — this rail is blocked until a cooldown lifts; fire on LION API or wait"
+                    : effDupChannel === "token"
+                      ? `Our FB token rebuilds each tree · starts +30 min · max ${MAX_TOKEN_SHOTS_PER_FIRE}/wave`
+                      : effDupChannel === "juro-token"
+                        ? `Our FB token relaunches the posts (social proof kept) · source languages preserved · starts +30 min · max ${MAX_TOKEN_SHOTS_PER_FIRE}/wave`
+                        : effDupChannel === "juro"
+                          ? "New campaign from the source's page posts (social proof kept) · geo/languages editable per row · born ACTIVE"
+                          : "LION's clone weapon builds on the weapon side"}
+                </p>
+              </div>
+
               <Field label="Profile">
                 <SearchSelect
                   value={profile}
@@ -743,12 +884,18 @@ export function HsCloneBoard({
                   emptyHint={!account ? "Pick an account first" : pixels ? "No pixels on this account" : "Loading…"}
                 />
               </Field>
-              <Field label="Number of copies" hint="per source campaign">
+              <Field label="Number of copies" hint={`per source campaign · max ${MAX_COPIES}`}>
                 <input
                   value={copies}
                   onChange={(e) => {
-                    setCopies(e.target.value.replace(/\D/g, "").slice(0, 2));
+                    // Clamp AT the field: the wave already fires with copiesN (≤ MAX_COPIES), so a
+                    // field reading "99" while the button says "Duplicate 20" lied to the buyer.
+                    const raw = e.target.value.replace(/\D/g, "").slice(0, 2);
+                    setCopies(raw !== "" && Number(raw) > MAX_COPIES ? String(MAX_COPIES) : raw);
                     setPreviewed(false);
+                  }}
+                  onBlur={() => {
+                    if (copies === "" || Number(copies) < 1) setCopies("1");
                   }}
                   inputMode="numeric"
                   aria-label="Number of copies"
@@ -756,102 +903,12 @@ export function HsCloneBoard({
                 />
               </Field>
 
-              {/* board mode (cloner vs JURO), then the mode's own LION-vs-FB-token channel pair.
-                  Both token chips ride the launcher's provisioning/cooldown gates (one pool). */}
-              <div className="mt-1 flex flex-col gap-1">
-                <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
-                  {(
-                    [
-                      { key: "clone" as const, label: "Cloner" },
-                      { key: "juro" as const, label: "JURO" },
-                    ]
-                  ).map((opt) => {
-                    const active = mode === opt.key;
-                    return (
-                      <button
-                        key={opt.key}
-                        type="button"
-                        aria-pressed={active}
-                        onClick={() => changeMode(opt.key)}
-                        className={
-                          "h-8 rounded-[10px] text-[12px] font-semibold transition-all duration-150 " +
-                          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
-                          (active
-                            ? "bg-accent/20 text-[#9db8ff] shadow-[inset_0_0_0_1px_rgba(122,150,255,0.35)]"
-                            : "text-dim hover:text-ink")
-                        }
-                      >
-                        {opt.label}
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
-                  {[
-                    { key: "lion" as const, label: "LION API", ready: true, down: false, hint: undefined as string | undefined },
-                    {
-                      key: "token" as const,
-                      label: "FB Token",
-                      ready: hs.tokenLaunch,
-                      down: tokensDown,
-                      hint: hs.tokenLaunch
-                        ? tokensDown
-                          ? "All FB launch tokens are rate-limited — the rail re-opens after a cooldown (see the Tokens widget)"
-                          : undefined
-                        : "FB token not configured on the server (FB_HS_LAUNCH_TOKEN)",
-                    },
-                  ].map((opt) => {
-                    const active = (mode === "juro" ? juroChannel : dupChannel) === opt.key;
-                    return (
-                      <button
-                        key={opt.key}
-                        type="button"
-                        disabled={!opt.ready}
-                        aria-pressed={active}
-                        title={opt.hint}
-                        onClick={() => {
-                          if (mode === "juro") changeJuroChannel(opt.key);
-                          else changeDupChannel(opt.key);
-                        }}
-                        className={
-                          "h-8 rounded-[10px] text-[12px] font-semibold transition-all duration-150 " +
-                          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
-                          (active
-                            ? opt.down
-                              ? "bg-danger/15 text-danger shadow-[inset_0_0_0_1px_rgba(255,107,107,0.35)]"
-                              : "bg-accent/20 text-[#9db8ff] shadow-[inset_0_0_0_1px_rgba(122,150,255,0.35)]"
-                            : opt.down
-                              ? "text-danger/70 hover:text-danger"
-                              : "text-dim hover:text-ink") +
-                          (opt.ready ? "" : " cursor-not-allowed opacity-40")
-                        }
-                      >
-                        {opt.label}
-                      </button>
-                    );
-                  })}
-                </div>
-                <p
-                  className={
-                    "text-center text-[10px] leading-relaxed " +
-                    (tokenRail && tokensDown ? "font-medium text-danger" : "text-faint")
-                  }
-                >
-                  {tokenRail && tokensDown
-                    ? "All FB launch tokens are rate-limited — this rail is blocked until a cooldown lifts; fire on LION API or wait"
-                    : effDupChannel === "token"
-                      ? `Our FB token rebuilds each tree · starts +30 min · max ${MAX_TOKEN_SHOTS_PER_FIRE}/wave`
-                      : effDupChannel === "juro-token"
-                        ? `Our FB token relaunches the posts (social proof kept) · source languages preserved · starts +30 min · max ${MAX_TOKEN_SHOTS_PER_FIRE}/wave`
-                        : effDupChannel === "juro"
-                          ? "New campaign from the source's page posts (social proof kept) · geo/languages editable per row · born ACTIVE"
-                          : "LION's clone weapon builds on the weapon side"}
-                </p>
-              </div>
-
               <button
                 type="button"
-                onClick={() => setPreviewed(true)}
+                onClick={() => {
+                  setPreviewed(true);
+                  setFireNote(null);
+                }}
                 disabled={!bindsReady || validRows.length === 0}
                 className={
                   "mt-1 flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-accent/40 " +
@@ -885,6 +942,11 @@ export function HsCloneBoard({
                       ? `JURO ${totalClones} cop${totalClones === 1 ? "y" : "ies"}`
                       : `Duplicate ${totalClones} clone${totalClones === 1 ? "" : "s"}`}
                 </button>
+              ) : null}
+              {fireNote ? (
+                <div className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11px] leading-relaxed text-warn">
+                  {fireNote}
+                </div>
               ) : null}
               {bindsReady && acctOver ? (
                 <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
@@ -935,40 +997,57 @@ export function HsCloneBoard({
 
           {/* ---- Selected campaigns ---- */}
           <section className="flex min-w-0 flex-col gap-4">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-sm font-semibold text-ink">Selected campaigns</h1>
               <span className="rounded-md border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[11px] text-dim">
                 {validRows.length}
               </span>
               {unreadable > 0 ? (
                 <span className="rounded-md border border-danger/30 bg-danger/10 px-1.5 py-0.5 text-[10.5px] text-danger">
-                  {unreadable} unreadable — their duplicates would fail too
+                  {unreadable} unreadable — excluded (their duplicates would fail too)
+                </span>
+              ) : null}
+              {lowBudgetCount > 0 ? (
+                <span className="rounded-md border border-warn/40 bg-warn/10 px-1.5 py-0.5 text-[10.5px] text-warn">
+                  {lowBudgetCount} below $1/day — won&apos;t fire (amber Budget field)
                 </span>
               ) : null}
             </div>
 
+            {/* table-fixed + one flexible Name column: fixed columns take their widths, the name
+                absorbs the rest — no 1080px floor, so the board fits a 1024px viewport with zero
+                horizontal scroll. Informational columns (source page / source facts) hide below
+                xl (the sidebar meters and the Preview carry the same numbers); the min-w only
+                guards true mobile, where the wrapper scrolls as the last resort. */}
             <div className="overflow-x-auto rounded-2xl border border-line bg-surface">
-              <table className="w-full min-w-[1080px] text-left">
+              <table className="w-full min-w-[620px] table-fixed text-left">
                 <thead>
-                  <tr className="border-b border-line text-[10px] font-semibold uppercase tracking-[0.14em] text-faint">
-                    <th className="px-3 py-2 font-semibold">#</th>
-                    <th className="px-2 py-2 font-semibold">Name (fixed) + suffix</th>
-                    <th className="px-2 py-2 font-semibold">Countries</th>
-                    <th className="px-2 py-2 font-semibold">Source page</th>
-                    <th className="px-2 py-2 text-right font-semibold">Orig budget</th>
-                    <th className="px-2 py-2 text-right font-semibold">Orig bid</th>
-                    <th className="px-2 py-2 text-center font-semibold">Ads</th>
-                    <th className="px-2 py-2 font-semibold">Strategy · Bid</th>
-                    <th className="px-2 py-2 font-semibold">Budget $</th>
-                    <th className="px-2 py-2 font-semibold">Status</th>
-                    <th className="px-2 py-2" />
+                  <tr className="border-b border-line text-[10px] font-semibold uppercase tracking-[0.1em] text-faint">
+                    <th className="w-[34px] px-2 py-2 font-semibold">#</th>
+                    <th className="px-2 py-2 font-semibold">Name (fixed) + suffix · status</th>
+                    <th className="w-[122px] px-2 py-2 font-semibold">Countries</th>
+                    <th className="hidden w-[142px] px-2 py-2 font-semibold xl:table-cell">Source page</th>
+                    <th className="hidden w-[110px] px-2 py-2 font-semibold xl:table-cell">Source $ · bid</th>
+                    <th className="w-[150px] px-2 py-2 font-semibold">Strategy · Bid</th>
+                    <th className="w-[88px] px-2 py-2 font-semibold">Budget $</th>
+                    <th className="w-[36px] px-1 py-2" />
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((r, i) => (
-                    <tr key={r.id} className="border-b border-line/60 align-top last:border-b-0">
-                      <td className="px-3 py-3 font-mono text-[11px] text-faint">{String(i + 1).padStart(2, "0")}</td>
-                      <td className="min-w-[320px] px-2 py-2.5">
+                  {rows.map((r, i) => {
+                    const unreadableRow = r.info?.status === "UNREADABLE";
+                    const lowBudget =
+                      /^\d{5,}$/.test(r.campaignId.trim()) && !unreadableRow && parseMoney(r.budget) < 1;
+                    return (
+                    <tr
+                      key={r.id}
+                      className={
+                        "border-b border-line/60 align-top last:border-b-0" +
+                        (unreadableRow ? " opacity-60" : "")
+                      }
+                    >
+                      <td className="px-2 py-3 font-mono text-[11px] text-faint">{String(i + 1).padStart(2, "0")}</td>
+                      <td className="px-2 py-2.5">
                         {/* Like the launcher's name field: the LION-rebuilt part is FIXED (muted),
                             only the trailing suffix is the buyer's to edit. */}
                         <div className="rounded-md border border-line bg-surface2 px-2.5 py-1.5">
@@ -977,7 +1056,9 @@ export function HsCloneBoard({
                             {r.loading ? (
                               "Loading from LION…"
                             ) : r.info?.status === "UNREADABLE" ? (
-                              <span className="text-danger">LION can’t read this campaign</span>
+                              <span className="text-danger">LION can’t read this campaign — excluded from the wave</span>
+                            ) : !r.info && r.failed ? (
+                              <span className="text-danger">LION read failed</span>
                             ) : r.info?.name ? (
                               // Fixed part = grammar prefix + the FIRE channel's marker (token →
                               // TOKEN, live-toggles with the rail switch; source markers were
@@ -1010,6 +1091,34 @@ export function HsCloneBoard({
                             singleLine
                             className="mt-1.5 block w-full resize-none overflow-hidden rounded border border-line bg-surface px-2 py-1 text-[12px] leading-snug text-ink outline-none transition-colors hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
                           />
+                          {!r.info && r.failed && !r.loading ? (
+                            // Manual re-ask (the effect no longer auto-loops a dead LION). The row
+                            // can still fire blind — the duplicate weapon re-reads the source.
+                            <button
+                              type="button"
+                              onClick={() => retrySource(r)}
+                              className="mt-1.5 inline-flex items-center gap-1.5 rounded-md border border-line bg-surface px-2 py-1 text-[11px] font-medium text-dim transition-colors hover:border-accent/50 hover:text-[#9db8ff] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                            >
+                              <RetryIcon className="h-3 w-3" />
+                              Retry read
+                            </button>
+                          ) : null}
+                          {r.state !== "idle" ? (
+                            // Wave status lives UNDER the name (was its own truncated 180px column):
+                            // full-width, wraps — a real FB/LION error is readable, not hover-only.
+                            <p
+                              className={
+                                "mt-1.5 break-words font-mono text-[10.5px] leading-snug " +
+                                (r.state === "error"
+                                  ? "text-danger"
+                                  : r.state === "ok"
+                                    ? "text-launch2"
+                                    : "text-[#9db8ff]")
+                              }
+                            >
+                              {r.state === "sending" ? "Submitting…" : (r.msg ?? "—")}
+                            </p>
+                          ) : null}
                         </div>
                       </td>
                       <td className="px-2 py-3 text-[11.5px]">
@@ -1047,7 +1156,7 @@ export function HsCloneBoard({
                           each page also shows what this row's wave needs — red when it won't fit
                           (the fire button locks on the same check). Cloner mode: info only (the
                           clones go to the bound Page in Settings, metered there). */}
-                      <td className="max-w-[170px] px-2 py-3 text-[11px]">
+                      <td className="hidden px-2 py-3 text-[11px] xl:table-cell">
                         {r.info && r.info.pages.length > 0 ? (
                           <div className="flex flex-col gap-1">
                             {r.info.pages.map((p) => {
@@ -1096,23 +1205,25 @@ export function HsCloneBoard({
                           <span className="text-faint">—</span>
                         )}
                       </td>
-                      <td className="px-2 py-3 text-right font-mono text-[11.5px] tabular-nums text-dim">
-                        {r.info?.budget != null ? `$${moneyLabel(r.info.budget)}` : "—"}
-                      </td>
-                      <td className="px-2 py-3 text-right font-mono text-[11.5px] tabular-nums text-dim">
+                      {/* Source facts, one stacked cell (was three columns): budget + ads count on
+                          top, the bid (kind-tagged) under — the same numbers in a third the width. */}
+                      <td className="hidden px-2 py-3 xl:table-cell">
                         {r.info ? (
-                          <span className="inline-flex flex-wrap items-center justify-end gap-1">
-                            <BidKindTag strategy={r.info.bidStrategy} />
-                            <span>{origBidLabel(r.info)}</span>
-                          </span>
+                          <div className="flex flex-col gap-1 font-mono text-[11px] tabular-nums text-dim">
+                            <span className="truncate">
+                              {r.info.budget != null ? `$${moneyLabel(r.info.budget)}` : "—"}
+                              <span className="text-faint"> · {r.info.adsCount} ads</span>
+                            </span>
+                            <span className="inline-flex flex-wrap items-center gap-1">
+                              <BidKindTag strategy={r.info.bidStrategy} />
+                              <span>{origBidLabel(r.info)}</span>
+                            </span>
+                          </div>
                         ) : (
-                          "—"
+                          <span className="font-mono text-[11px] text-faint">—</span>
                         )}
                       </td>
-                      <td className="px-2 py-3 text-center font-mono text-[11.5px] text-dim">
-                        {r.info ? r.info.adsCount : "—"}
-                      </td>
-                      <td className="w-[168px] px-2 py-2.5">
+                      <td className="px-2 py-2.5">
                         {/* The CLONE's strategy — switchable per row on the FB Token rails only
                             (they rebuild the ad set; LION inherits the source's, so the select
                             locks there). The bid field below follows the EFFECTIVE strategy:
@@ -1194,7 +1305,7 @@ export function HsCloneBoard({
                                   ),
                                 })
                               }
-                              disabled={Boolean(r.info) && bidKind(rowStrategy(r)) === "none"}
+                              disabled={unreadableRow || (Boolean(r.info) && bidKind(rowStrategy(r)) === "none")}
                               placeholder={
                                 rowSwitched(r) && bidKind(rowStrategy(r)) !== "none"
                                   ? "required"
@@ -1226,32 +1337,20 @@ export function HsCloneBoard({
                           </div>
                         </div>
                       </td>
-                      <td className="w-[100px] px-2 py-2.5">
+                      <td className="px-2 py-2.5">
                         <input
                           value={r.budget}
                           onChange={(e) => patchRow(r.id, { budget: limitMoney(e.target.value, 10000) })}
+                          disabled={unreadableRow}
                           aria-label="Daily budget"
-                          className={cellInput}
+                          title={lowBudget ? "Min $1/day — this row won't fire until the budget is raised" : undefined}
+                          className={
+                            cellInput +
+                            (lowBudget ? " border-warn/60 focus:border-warn focus:ring-warn/15" : "")
+                          }
                         />
                       </td>
-                      <td className="max-w-[180px] px-2 py-3">
-                        <span
-                          className={
-                            "block truncate text-[11px] " +
-                            (r.state === "error"
-                              ? "text-danger"
-                              : r.state === "ok"
-                                ? "text-launch2"
-                                : r.state === "sending"
-                                  ? "text-[#9db8ff]"
-                                  : "text-faint")
-                          }
-                          title={r.msg}
-                        >
-                          {r.state === "sending" ? "Submitting…" : (r.msg ?? "—")}
-                        </span>
-                      </td>
-                      <td className="px-2 py-2.5 text-center">
+                      <td className="px-1 py-2.5 text-center">
                         <button
                           type="button"
                           aria-label="Remove row"
@@ -1262,13 +1361,14 @@ export function HsCloneBoard({
                         </button>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5">
+              <div className="flex min-w-0 grow basis-[240px] items-center gap-1.5 sm:grow-0">
                 <input
                   value={draftId}
                   onChange={(e) => setDraftId(e.target.value)}
@@ -1277,18 +1377,24 @@ export function HsCloneBoard({
                   }}
                   placeholder="Campaign ID(s) — paste one or a comma list"
                   aria-label="Add source campaign ids"
-                  className="h-8 w-[280px] rounded-md border border-line bg-surface2 px-2 font-mono text-[12px] text-ink outline-none transition-colors hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
+                  className="h-8 w-full min-w-0 rounded-md border border-line bg-surface2 px-2 font-mono text-[12px] text-ink outline-none transition-colors hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 sm:w-[280px]"
                 />
                 <button
                   type="button"
                   onClick={addSources}
-                  className="flex h-8 items-center gap-1.5 rounded-md border border-dashed border-line2 px-2.5 text-[11.5px] font-medium text-faint transition-colors hover:border-accent/50 hover:text-[#9db8ff]"
+                  className="flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-dashed border-line2 px-2.5 text-[11.5px] font-medium text-faint transition-colors hover:border-accent/50 hover:text-[#9db8ff]"
                 >
                   <PlusIcon className="h-3.5 w-3.5" />
                   Add
                 </button>
+                {rows.length >= MAX_SOURCES ? (
+                  // addSources silently .slice()s past the cap — say so instead of eating ids.
+                  <span className="shrink-0 rounded-md border border-warn/40 bg-warn/10 px-1.5 py-0.5 font-mono text-[10.5px] text-warn">
+                    {rows.length}/{MAX_SOURCES} max
+                  </span>
+                ) : null}
               </div>
-              <p className="text-[10.5px] text-faint">
+              <p className="min-w-0 text-[10.5px] text-faint">
                 Empty Bid = inherits the source’s · MIN_ROAS sources take a ROAS decimal (0,34 = 34%), cap sources $ · targeting & creatives inherit
               </p>
             </div>
