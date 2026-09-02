@@ -297,7 +297,10 @@ export const PARTNERS: PartnerConfig[] = [
     accountsFromToken: true,
     launchNote: "Submits via the AIF token",
     pageAdLimit: 250,
-    maxCreatives: 1,
+    // Up to 5 creatives per campaign (owner ask 09-02, MO-parity): one campaign → one ad set →
+    // one ad per creative; files ride the Blob broker, the route registers each and builds an
+    // ad per creative under the single ad set.
+    maxCreatives: 5,
     // AIF ships DORMANT on prod, same pattern as HS: the switcher unlocks only where
     // NEXT_PUBLIC_AIF_ENABLED=1 is baked into the build (.env.local locally; not set on Vercel
     // until the FB_AIF_LAUNCH_TOKEN env and a battle smoke land).

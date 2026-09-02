@@ -82,7 +82,8 @@ async function resolveLocales(names: string[]): Promise<number[]> {
 
 /**
  * POST /api/aif/launch — the AIF (Airfind Rewarded Web) launch rail. Mirrors /api/launch stage
- * for stage (same NDJSON events, same Task Manager pipeline), with the rail's own pieces:
+ * for stage (same NDJSON events, same Task Manager pipeline, up to 5 creatives per campaign —
+ * one campaign → one ad set → one ad per creative, 09-02), with the rail's own pieces:
  * the tree is built on the AIF token, the marker comes from the BRAND registry (aif-maps,
  * test01..test700), the ad link is the partner's RW page with the destination slug, and the
  * pixel comes from the cabinet's OFFERABLE list (token catalog minus retired — owner call
@@ -105,24 +106,40 @@ export async function POST(req: Request) {
   }
 
   let campaign: Campaign;
-  let mediaUrl = "";
-  let mediaKind: "video" | "image" = "video";
-  let coverUrl = "";
+  /** Creatives of this launch (1..maxCreatives, MO-parity 09-02): own-Blob URLs; cover = video
+   *  thumbnail image. */
+  let medias: { url: string; kind: "video" | "image"; coverUrl: string }[] = [];
   let taskId: string | null = null;
   try {
     const j = (await req.json()) as {
       campaign?: Campaign;
       partnerId?: string;
+      /** Multi-creative shape (5-creative AIF, 09-02 — the runner already sends it). */
+      medias?: { url?: string; kind?: string; coverUrl?: string }[];
+      /** Single-creative fields — the pre-multi wire, still sent (and accepted) for open tabs
+       *  and restored queued tasks. */
       mediaUrl?: string;
       mediaKind?: string;
-      /** Custom cover image for a video creative (own-Blob URL) — pinned as the thumbnail. */
       coverUrl?: string;
       taskId?: string;
     };
     campaign = (j.campaign ?? {}) as Campaign;
-    mediaUrl = typeof j.mediaUrl === "string" ? j.mediaUrl : "";
-    mediaKind = j.mediaKind === "image" ? "image" : "video";
-    coverUrl = mediaKind === "video" && typeof j.coverUrl === "string" ? j.coverUrl.trim() : "";
+    if (Array.isArray(j.medias) && j.medias.length > 0) {
+      medias = j.medias.slice(0, 10).map((m) => {
+        const kind = m?.kind === "image" ? ("image" as const) : ("video" as const);
+        return {
+          url: typeof m?.url === "string" ? m.url : "",
+          kind,
+          coverUrl: kind === "video" && typeof m?.coverUrl === "string" ? m.coverUrl.trim() : "",
+        };
+      });
+    } else {
+      const url = typeof j.mediaUrl === "string" ? j.mediaUrl : "";
+      const kind = j.mediaKind === "image" ? ("image" as const) : ("video" as const);
+      medias = [
+        { url, kind, coverUrl: kind === "video" && typeof j.coverUrl === "string" ? j.coverUrl.trim() : "" },
+      ];
+    }
     taskId = typeof j.taskId === "string" && /^[\w-]{6,64}$/.test(j.taskId) ? j.taskId : null;
   } catch (e) {
     return NextResponse.json({ ok: false, stage: "parse", error: String(e) }, { status: 400 });
@@ -239,23 +256,32 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  if (!mediaUrl) {
+  if (medias.length === 0 || medias.some((m) => !m.url)) {
     return NextResponse.json({ ok: false, stage: "media", error: "media_required" }, { status: 400 });
   }
   // Same contract as /api/launch: a video creative's destination link lives inside its CTA
   // (creativePayload) — a "No CTA" video would ship link-less (review find 08-24).
-  if (!String(campaign.cta ?? "").trim() && mediaKind === "video") {
+  if (!String(campaign.cta ?? "").trim() && medias.some((m) => m.kind === "video")) {
     return NextResponse.json(
       {
         ok: false,
         stage: "media",
-        error: "cta_required_for_video — pick a CTA button (its link is the video ad's destination); image cards may keep No CTA",
+        error: "cta_required_for_video — pick a CTA button (its link is the video ad's destination); image-only cards may keep No CTA",
       },
       { status: 400 },
     );
   }
-  // The creative must be a Vercel Blob URL our OWN broker produced — same SSRF fence as /api/launch.
+  // Every creative must be a Vercel Blob URL our OWN broker produced — same SSRF fence as
+  // /api/launch — and the count is capped by the partner's own limit (server-side truth: a
+  // stale tab could still POST more; the tree would then blow the function window mid-wave).
   {
+    const cap = Math.max(1, partner.maxCreatives ?? 1);
+    if (medias.length > cap) {
+      return NextResponse.json(
+        { ok: false, stage: "media", error: `too_many_creatives — this partner launches at most ${cap} per campaign` },
+        { status: 400 },
+      );
+    }
     const ownBlob = (raw: string): boolean => {
       try {
         const u = new URL(raw);
@@ -264,11 +290,14 @@ export async function POST(req: Request) {
         return false;
       }
     };
-    if (!ownBlob(mediaUrl)) {
-      return NextResponse.json({ ok: false, stage: "media", error: "media_url_invalid" }, { status: 400 });
-    }
-    if (coverUrl && !ownBlob(coverUrl)) {
-      return NextResponse.json({ ok: false, stage: "media", error: "cover_url_invalid" }, { status: 400 });
+    for (const m of medias) {
+      if (!ownBlob(m.url)) {
+        return NextResponse.json({ ok: false, stage: "media", error: "media_url_invalid" }, { status: 400 });
+      }
+      // Covers are fetched server-side into adimages — same own-Blob fence as the creatives.
+      if (m.coverUrl && !ownBlob(m.coverUrl)) {
+        return NextResponse.json({ ok: false, stage: "media", error: "cover_url_invalid" }, { status: 400 });
+      }
     }
   }
   if (!SUPPORTED_BID_STRATEGIES.has(campaign.bidStrategy)) {
@@ -311,13 +340,16 @@ export async function POST(req: Request) {
     );
   }
 
-  // Image launches + custom video covers: fetch + validate BEFORE the stream (clean 400,
-  // nothing claimed).
-  let imageBuf: Buffer | null = null;
-  let coverBuf: Buffer | null = null;
+  // Image launches + custom video covers: fetch + validate EVERY one BEFORE the stream (clean
+  // 400, nothing claimed). Worst case is bounded: 5 creatives × ≤8MB (fetchValidatedImage
+  // ceiling) ≈ 40MB in memory — same envelope as /api/launch.
+  const imageBufs = new Map<number, Buffer>();
+  const coverBufs = new Map<number, Buffer>();
   try {
-    if (mediaKind === "image") imageBuf = await fetchValidatedImage(mediaUrl);
-    if (coverUrl) coverBuf = await fetchValidatedImage(coverUrl);
+    for (let i = 0; i < medias.length; i++) {
+      if (medias[i].kind === "image") imageBufs.set(i, await fetchValidatedImage(medias[i].url));
+      if (medias[i].coverUrl) coverBufs.set(i, await fetchValidatedImage(medias[i].coverUrl));
+    }
   } catch (e) {
     return NextResponse.json(
       { ok: false, stage: "media", error: (e as FbError).message ?? String(e) },
@@ -378,28 +410,39 @@ export async function POST(req: Request) {
         const link = fullLandingUrl(partner, slug, brand, conversions, binds.pixelId);
         if (!link) throw new FbError("no destination — cannot build the RW link", {});
 
-        // 2) register the creative on the AIF account (video: FB pulls from the Blob URL, then
-        // processing is waited out; image: bytes → adimages hash).
+        // 2) register EVERY creative on the AIF account (MO-parity, 09-02). Videos: all uploads
+        // are fired first (advideos answers immediately, Meta processes in the background, in
+        // parallel), THEN processing is waited out one by one — a 5-video card's wall-clock is
+        // ~the slowest video, not the sum. Images: validated bytes → adimages hash.
         progress("video");
-        let videoId = "";
-        let thumbUrl = "";
-        let imageHash = "";
-        let coverHash = "";
-        if (mediaKind === "image") {
-          imageHash = await aifUploadImage(binds.accountId, imageBuf as Buffer); // validated pre-flight
-          created.image_hash = imageHash;
-        } else {
-          videoId = await aifUploadVideo(binds.accountId, mediaUrl, `${name} · video`);
-          created.video_id = videoId;
-          progress("processing");
-          await aifWaitForVideo(videoId);
+        type RegisteredMedia =
+          | { kind: "image"; imageHash: string }
+          | { kind: "video"; videoId: string; thumbUrl: string; coverHash?: string };
+        const regs: RegisteredMedia[] = new Array(medias.length);
+        for (let i = 0; i < medias.length; i++) {
+          const m = medias[i];
+          if (m.kind === "image") {
+            regs[i] = { kind: "image", imageHash: await aifUploadImage(binds.accountId, imageBufs.get(i) as Buffer) };
+          } else {
+            const suffix = medias.length > 1 ? ` · video ${i + 1}` : " · video";
+            regs[i] = { kind: "video", videoId: await aifUploadVideo(binds.accountId, m.url, `${name}${suffix}`), thumbUrl: "" };
+          }
+        }
+        created.video_id = regs.find((r) => r.kind === "video")?.videoId ?? undefined;
+        created.image_hash = (regs.find((r) => r.kind === "image") as { imageHash?: string } | undefined)?.imageHash;
+        progress("processing");
+        for (let i = 0; i < medias.length; i++) {
+          const r = regs[i];
+          if (r.kind !== "video") continue;
+          await aifWaitForVideo(r.videoId);
           // A custom cover replaces the auto-thumbnail entirely (no thumbnail poll needed).
-          if (coverBuf) coverHash = await aifUploadImage(binds.accountId, coverBuf);
-          else thumbUrl = await aifVideoThumb(videoId);
+          const coverBuf = coverBufs.get(i);
+          if (coverBuf) r.coverHash = await aifUploadImage(binds.accountId, coverBuf);
+          else r.thumbUrl = await aifVideoThumb(r.videoId);
         }
         const localeIds = await resolveLocales(serverCampaign.locales);
 
-        // 3) campaign → adset → creative → ad, all ACTIVE (parity with the MO rail)
+        // 3) campaign → adset → one creative+ad PER media, all ACTIVE (parity with the MO rail)
         progress("campaign");
         const camp = await aifFbPost(`act_${binds.accountId}/campaigns`, campaignPayload(serverCampaign, name));
         created.campaign_id = String(camp.id);
@@ -411,25 +454,46 @@ export async function POST(req: Request) {
         created.adset_id = String(adset.id);
 
         progress("creative");
-        const creative = await aifFbPost(
-          `act_${binds.accountId}/adcreatives`,
-          mediaKind === "image"
-            ? imageCreativePayload(serverCampaign, name, binds, { imageHash, link })
-            : creativePayload(serverCampaign, name, binds, { videoId, thumbUrl, link, ...(coverHash ? { coverHash } : {}) }),
-        );
-        created.creative_id = String(creative.id);
+        const creativeIds: string[] = [];
+        for (let i = 0; i < regs.length; i++) {
+          const r = regs[i];
+          const adName = regs.length > 1 ? `${name} · ${i + 1}` : name;
+          const creative = await aifFbPost(
+            `act_${binds.accountId}/adcreatives`,
+            r.kind === "image"
+              ? imageCreativePayload(serverCampaign, adName, binds, { imageHash: r.imageHash, link })
+              : creativePayload(serverCampaign, adName, binds, {
+                  videoId: r.videoId,
+                  thumbUrl: r.thumbUrl,
+                  link,
+                  ...(r.coverHash ? { coverHash: r.coverHash } : {}),
+                }),
+          );
+          creativeIds.push(String(creative.id));
+        }
+        created.creative_id = creativeIds[0];
 
         progress("ad");
-        const ad = await withParentRetry(String(adset.id), () =>
-          aifFbPost(`act_${binds.accountId}/ads`, adPayload(name, String(adset.id), String(creative.id))),
-        );
-        // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
-        if (!ad.id) throw new FbError("ad create returned no id", ad);
-        created.ad_id = String(ad.id);
+        const adIds: string[] = [];
+        for (let i = 0; i < creativeIds.length; i++) {
+          const adName = creativeIds.length > 1 ? `${name} · ${i + 1}` : name;
+          const ad = await withParentRetry(String(adset.id), () =>
+            aifFbPost(`act_${binds.accountId}/ads`, adPayload(adName, String(adset.id), creativeIds[i])),
+          );
+          // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
+          if (!ad.id) throw new FbError("ad create returned no id", ad);
+          adIds.push(String(ad.id));
+          // Progress lands on `created` AS ads are born (not after the loop): the catch below
+          // reads it to know whether money is already moving when a later ad throws.
+          created.ad_id = adIds[0];
+          if (adIds.length > 1) created.ad_ids = [...adIds];
+          send({ stage: "ad", done: adIds.length, total: creativeIds.length });
+        }
 
-        // 4) tell the hs-tools pages registry (AIF scope — inert until the box syncs AIF pages)
-        // + record the FB ids against the claimed brand (best-effort)
-        await reportPagesUsed("us", [{ pageId: binds.pageId, delta: 1 }]);
+        // 4) tell the hs-tools pages registry how many slots this fanka just took (one per ad;
+        // AIF scope — inert until the box syncs AIF pages) + record the FB ids against the
+        // claimed brand (best-effort)
+        await reportPagesUsed("us", [{ pageId: binds.pageId, delta: adIds.length }]);
         await backfillBrand(claim.documentId, {
           campaign_id: created.campaign_id,
           adset_id: created.adset_id,
@@ -479,9 +543,12 @@ export async function POST(req: Request) {
         send({ ok: false, stage: "error", error: err.message ?? String(e), detail: err.detail ?? null, created });
       } finally {
         clearInterval(beat);
-        // Drop the temporary Blob whether the launch succeeded or failed — never orphan the upload.
-        await del(mediaUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
-        if (coverUrl) await del(coverUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
+        // Drop EVERY temporary Blob (creatives + covers) whether the launch succeeded or
+        // failed — never orphan an upload.
+        for (const m of medias) {
+          await del(m.url, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
+          if (m.coverUrl) await del(m.coverUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
+        }
         await tw.flush();
         controller.close();
       }
