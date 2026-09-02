@@ -19,7 +19,6 @@ import {
   aifAccountPixels,
   aifAdvertisablePageName,
   aifCreateAdset,
-  aifDerivedPixel,
   aifFbGet,
   aifFbPost,
   aifIsAdvertisablePage,
@@ -86,12 +85,10 @@ async function resolveLocales(names: string[]): Promise<number[]> {
  * for stage (same NDJSON events, same Task Manager pipeline), with the rail's own pieces:
  * the tree is built on the AIF token, the marker comes from the BRAND registry (aif-maps,
  * test01..test700), the ad link is the partner's RW page with the destination slug, and the
- * pixel is the buyer's PICK from the account's own token-catalog list (a choice since 09-02,
- * validated here; an empty pick auto-derives the cabinet's pixel — aifDerivedPixel, no
- * hardcoded id) + Purchase, and rides the RW link's &pixel= param so the postback→CAPI
- * forwarder lands the Purchase on the same pixel; clicks carry no pixel at all. Min-ROAS pins
- * the value pixel VD-C1-HS-1 (MO-parity, 09-02) — the AIF postback pixel fails Meta's VO gate
- * (sub 2446368) — and requires it shared to the cabinet in BM.
+ * pixel for EVERY conversion launch (min-ROAS included) is the value pixel VD-C1-HS-1 (owner
+ * call 09-02 pt2 — the legacy «GC for AIF» postback pixel is retired): pinned server-side,
+ * validated as SHARED to the picked cabinet, and riding the RW link's &pixel= param so the
+ * postback→CAPI forwarder lands the Purchase on the same pixel. Clicks carry no pixel at all.
  */
 export async function POST(req: Request) {
   // Proxy-gated, but self-checks the session too (parity with /api/launch).
@@ -177,38 +174,25 @@ export async function POST(req: Request) {
     }
     // DSA beneficiary/payor for EU-reaching ad sets — same rule as MO (live failure 2026-08-10).
     binds.pageName = await aifAdvertisablePageName(pickedPage);
-    // Conversion launches carry the buyer's PICKED pixel (a choice since 09-02, owner ask),
-    // validated against the account's own token-catalog list — a pixel the cabinet doesn't
-    // carry would only be refused by Meta at adset-create, AFTER the campaign exists (orphan +
-    // burnt brand). Min-ROAS pins the value pixel VD-C1-HS-1 no matter what the draft sent
-    // (MO-parity — the only VO-eligible pixel; the AIF postback pixel fails Meta's gate, sub
-    // 2446368) and requires it SHARED to the cabinet. An empty non-roas pick (legacy drafts,
-    // queued tasks) auto-derives the cabinet's own pixel (aifDerivedPixel — throws the
-    // 400-shaped BM remedy when none is derivable).
+    // EVERY conversion launch (min-ROAS included) runs ONLY on the value pixel VD-C1-HS-1
+    // (owner call 09-02 pt2 — the legacy «GC for AIF» postback pixel is retired): pinned
+    // server-side no matter what the draft/pick sent, and it must be SHARED to the picked
+    // cabinet (pixel and cabinets live in the same BM VD-C1) — refused here with the remedy
+    // named, BEFORE anything is claimed; Meta would only reject the ad set after the campaign
+    // exists (orphan + burnt brand).
     if (conversions) {
-      const picked = bidKind(campaign.bidStrategy) === "roas" ? ROAS_PIXEL.id : String(campaign.pixel ?? "").trim();
-      if (picked) {
-        if (!/^\d{10,20}$/.test(picked)) {
-          return NextResponse.json({ ok: false, stage: "config", error: "pixel_invalid — bad pixel id" }, { status: 400 });
-        }
-        const pixels = await aifAccountPixels(pickedAccount);
-        if (!pixels.some((p) => p.id === picked)) {
-          return NextResponse.json(
-            {
-              ok: false,
-              stage: "config",
-              error:
-                picked === ROAS_PIXEL.id
-                  ? `pixel_not_on_account — min-ROAS runs only on ${ROAS_PIXEL.name} (${ROAS_PIXEL.id}); share it to this ad account in Business Manager first`
-                  : `pixel_not_on_account — share pixel ${picked} to this ad account in Business Manager first (or pick one of the account's own pixels)`,
-            },
-            { status: 400 },
-          );
-        }
-        binds.pixelId = picked;
-      } else {
-        binds.pixelId = (await aifDerivedPixel(pickedAccount)).id;
+      const pixels = await aifAccountPixels(pickedAccount);
+      if (!pixels.some((p) => p.id === ROAS_PIXEL.id)) {
+        return NextResponse.json(
+          {
+            ok: false,
+            stage: "config",
+            error: `pixel_not_on_account — AIF runs only on ${ROAS_PIXEL.name} (${ROAS_PIXEL.id}); share it to this ad account in Business Manager (BM VD-C1 → pixel → Connected assets) first, or launch with Clicks optimization`,
+          },
+          { status: 400 },
+        );
       }
+      binds.pixelId = ROAS_PIXEL.id;
     }
   } catch (e) {
     const err = e as FbError;

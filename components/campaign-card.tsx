@@ -382,10 +382,12 @@ function CampaignCardBase({
     tagTone: l.lang === "ES" ? ("ok" as const) : ("dim" as const),
   }));
   const conversions = c.optimization === "conversions";
-  // AIF: the picked account's own pixel list from the token catalog — feeds the pixel PICKER
-  // (a choice since 09-02, owner ask; the board auto-fills the cabinet's pixel, an empty pick
-  // still auto-derives server-side). Empty while the account is unpicked / catalog loading.
-  const aifPixels = aifMode ? pixelOptionsOf(adAccounts ?? null, c.account) : [];
+  // AIF: the ONLY offerable pixel is the value pixel VD-C1-HS-1 (owner call 09-02 pt2 — the
+  // legacy «GC for AIF» postback pixel is retired from the choice entirely), surfaced from the
+  // picked account's token catalog when the cabinet carries it. Empty = not shared yet /
+  // account unpicked / catalog loading — the field names the BM share remedy below.
+  const aifPixelPick = aifMode ? pickAifPixel(pixelOptionsOf(adAccounts ?? null, c.account)) : null;
+  const aifPixels = aifPixelPick ? [aifPixelPick] : [];
   // HS derives its link from the pasted base + tracking tail + picked pixel; MO from the landing
   // catalog. Either way this string is exactly what launches (and what Copy copies).
   const derivedLink = hsMode
@@ -688,15 +690,14 @@ function CampaignCardBase({
                         ? "Pick a pixel"
                         : undefined
                       : aifMode
-                        ? // A launch-time refusal foretold on the field: min-ROAS needs the
-                          // value pixel SHARED to this cabinet; conversions need any pixel.
-                          kind === "roas" && c.account && adAccounts?.some((a) => a.value === c.account) && !aifPixels.some((p) => p.id === ROAS_PIXEL.id)
-                          ? `share ${ROAS_PIXEL.name} to this cabinet in BM first`
-                          : kind !== "roas" && conversions && c.account && adAccounts?.some((a) => a.value === c.account) && aifPixels.length === 0
-                            ? "no pixel on this account — share the AIF pixel in BM or switch to Clicks"
-                            : kind !== "roas" && conversions && c.account && aifPixels.length > 0 && !c.pixel
-                              ? "Pick a pixel"
-                              : undefined
+                        ? // A launch-time refusal foretold on the field: every AIF conversion
+                          // (min-ROAS included) runs only on the value pixel — it must be
+                          // SHARED to this cabinet in BM VD-C1 (same business as the pixel).
+                          conversions && c.account && adAccounts?.some((a) => a.value === c.account) && !aifPixelPick
+                          ? `share ${ROAS_PIXEL.name} to this cabinet in BM first (or switch to Clicks)`
+                          : kind !== "roas" && conversions && c.account && aifPixelPick && !c.pixel
+                            ? "Pick a pixel"
+                            : undefined
                         : !aifMode && partner.accountsFromToken && kind === "roas" && c.pixel !== ROAS_PIXEL.id
                           ? `min ROAS runs only on ${ROAS_PIXEL.name}`
                           : !aifMode && partner.accountsFromToken && c.account && !c.pixel
@@ -721,7 +722,7 @@ function CampaignCardBase({
                           !c.account
                             ? "Pick an account first"
                             : adAccounts
-                              ? "No pixels on this account"
+                              ? `Share ${ROAS_PIXEL.name} to this cabinet in BM`
                               : "Loading pixels…"
                         }
                       />
@@ -844,14 +845,14 @@ function CampaignCardBase({
                         });
                       } else {
                         // Leaving min-ROAS unlocks the pixel back to the partner default (bid
-                        // launches keep the choice): MO → preferred/first, AIF → the cabinet's
-                        // own AIF-named pixel.
+                        // launches keep the choice): MO → preferred/first, AIF → the value
+                        // pixel (the only offerable one).
                         patch({
                           bidStrategy,
                           ...(kind === "roas" && partner.accountsFromToken
                             ? {
                                 pixel: aifMode
-                                  ? (pickAifPixel(aifPixels)?.id ?? "")
+                                  ? (aifPixelPick?.id ?? "")
                                   : defaultPixelFor(adAccounts ?? null, c.account, partner.preferredPixel),
                               }
                             : {}),

@@ -16,7 +16,7 @@ import {
 } from "@/lib/clone";
 import { bidKind, limitMoney, limitMoneyCents, moEnsureSocMark, moneyLabel, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { BID_STRATEGIES, OS_OPTIONS, countryName, geoSummary } from "@/lib/catalog";
-import { type PartnerId, partnerConfig, pickAifPixel } from "@/lib/partners";
+import { ROAS_PIXEL, type PartnerId, partnerConfig, pickAifPixel } from "@/lib/partners";
 import { AutoTextarea, BidKindTag, Field, Select } from "./ui";
 import {
   AlertIcon,
@@ -258,7 +258,11 @@ function CloneInner({
     adAccounts !== null &&
     !adAccounts.some((a) => a.value === settings.accountId);
   const accountMissing = Boolean(partner.accountsFromToken) && (!settings.accountId || accountStale);
-  const targetPixels = isTargetAccount ? pixelOptionsOf(adAccounts, settings.accountId) : [];
+  // AIF offers ONLY the value pixel (owner call 09-02 pt2 — the legacy postback pixel is
+  // retired from the choice); MO keeps the account's full list.
+  const targetPixelsAll = isTargetAccount ? pixelOptionsOf(adAccounts, settings.accountId) : [];
+  const aifTargetPixel = aifMode ? pickAifPixel(targetPixelsAll) : null;
+  const targetPixels = aifMode ? (aifTargetPixel ? [aifTargetPixel] : []) : targetPixelsAll;
   // A concrete target account needs a pixel of that account: conversion sources can't carry
   // their own pixel across (it lives on the source's account) — the server enforces this too.
   // AIF picks from the same token catalog since 09-02 (owner ask: pixel is a CHOICE, not a
@@ -530,9 +534,7 @@ function CloneInner({
                             accountId: v,
                             // Auto-pick the target's pixel (FARM-1 when it carries it) the same way
                             // a fresh launch card does; no pixel in source mode / when cleared.
-                            // AIF prefers its cabinet's own AIF-named pixel (pickAifPixel, 09-02) —
-                            // "first pixel" would grab whichever the catalog lists first once the
-                            // value pixel is shared alongside.
+                            // AIF auto-picks the value pixel VD-C1-HS-1 (the only offerable one, 09-02 pt2).
                             pixelId:
                               v && v !== SOURCE_ACCOUNT
                                 ? aifMode
@@ -562,7 +564,13 @@ function CloneInner({
                           onChange={(v) => patchSettings({ pixelId: v })}
                           options={targetPixels.map((p) => ({ value: p.id, label: p.name, meta: p.id }))}
                           placeholder="Search pixel"
-                          emptyHint={adAccounts ? "No pixels on this account" : "Loading pixels…"}
+                          emptyHint={
+                            adAccounts
+                              ? aifMode
+                                ? `Share ${ROAS_PIXEL.name} to this cabinet in BM`
+                                : "No pixels on this account"
+                              : "Loading pixels…"
+                          }
                           metaWhenClosed
                           warn={pixelMissing}
                         />

@@ -169,19 +169,14 @@ export const ROAS_PIXEL: Bound = { id: "4367956310124642", name: "VD-C1-HS-1" };
 // feeds the partner's click-spam report. FB appends fbclid itself.
 export const AIF_RW_BASE = "https://content.honeyandhues.com/rewarded";
 export const AIF_CLIENT_ID = "52105";
-/** The AUTO-DEFAULT for an AIF conversion pixel when the buyer made no pick (legacy drafts,
- *  queued tasks born before the picker) — chosen from the ACCOUNT'S OWN pixel list, pulled via
- *  the AIF token (owner ask 2026-09-02: no hardcoded pixel id anywhere; the id and even the
- *  pixel's name have already drifted once). Every AIF cabinet carries exactly the one postback
- *  pixel the CAPI forwarder lands Purchases on; should extras ever get shared, a unique
- *  AIF-named one still wins. null = underivable (no pixels, or several with no single AIF
- *  name) — an unpicked conversion launch must refuse rather than guess where Purchase
- *  optimization lands. Explicit picks skip this entirely (validated against the same list in
- *  lib/aif-launch aifDerivedPixel's callers). */
+/** The AIF rail runs ONLY on the value pixel VD-C1-HS-1 (owner call 09-02 pt2: the legacy
+ *  «GC for AIF» postback pixel is RETIRED from every choice — conversions and min-ROAS alike).
+ *  Returns the account's VD-C1-HS-1 entry when the cabinet carries it (share it in BM VD-C1 —
+ *  pixel and cabinets live in the SAME business), else null: launches refuse with the share
+ *  remedy rather than fall back to the retired pixel. Feeds the card/clone pickers and the
+ *  board auto-fill; the routes pin ROAS_PIXEL server-side regardless of the draft. */
 export function pickAifPixel(pixels: Bound[]): Bound | null {
-  if (pixels.length === 1) return pixels[0];
-  const aifNamed = pixels.filter((p) => /aif/i.test(p.name));
-  return aifNamed.length === 1 ? aifNamed[0] : null;
+  return pixels.find((p) => p.id === ROAS_PIXEL.id) ?? null;
 }
 /** Brand pool test01..test700 (partner-assigned): 1–9 keep the doc's 2-digit zero-padded shape
  *  ("test01"), 10+ are plain. One brand = one buy campaign — the registry enforces it. */

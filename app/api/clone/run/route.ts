@@ -19,7 +19,6 @@ import {
   aifAccountName,
   aifAccountPixels,
   aifAdvertisablePageName,
-  aifDerivedPixel,
   aifFbPost,
   aifIsAdvertisablePage,
   aifIsTokenAccount,
@@ -326,22 +325,27 @@ export async function POST(req: Request) {
           if (!(await accountAllowedFor(session, binds.accountId))) {
             throw new FbError(ACCOUNT_NOT_ASSIGNED_MSG, { campaignId: edit.campaignId }, 403);
           }
-          // AIF pixel (parity with /api/aif/launch, a choice since 09-02): conversion sources
-          // carry a pixel of the BUILD account — the buyer's target pick or the source's own
-          // promoted pixel when the resolver kept one (both validated against the account:
-          // picks in the targets pre-flight above, the source's by construction), else the
-          // cabinet's own pixel auto-derives LIVE via the token (aifDerivedPixel — no hardcoded
-          // id; throws the BM remedy BEFORE the brand marker is burned, not at adset-create
-          // time — review find 08-24). Min-ROAS targets skip the derive: the shared value-pixel
-          // pin below (MO+AIF alike) sets and validates ROAS_PIXEL. Click clones stay
-          // pixel-less; the link rewrite mirrors whatever the adset promotes.
+          // AIF pixel (parity with /api/aif/launch): EVERY conversion clone — a conversion
+          // source or a row switched to min-ROAS — runs ONLY on the value pixel VD-C1-HS-1
+          // (owner call 09-02 pt2, the legacy postback pixel is retired), pinned here no matter
+          // what the source promoted or the picker sent, and validated as SHARED to the BUILD
+          // account BEFORE the brand marker is burned (review find 08-24; Meta would only
+          // reject the ad set after the campaign exists). Click clones stay pixel-less; the
+          // link rewrite mirrors whatever the adset promotes.
           if (aif) {
-            binds.pixelId =
-              bidKind(targetStrategy) === "roas"
-                ? binds.pixelId
-                : /^\d{10,20}$/.test(src.pixelId)
-                  ? binds.pixelId || (await aifDerivedPixel(binds.accountId)).id
-                  : "";
+            const wantsPixel = bidKind(targetStrategy) === "roas" || /^\d{10,20}$/.test(src.pixelId);
+            if (wantsPixel) {
+              const pixels = await pixelsOf(binds.accountId);
+              if (!pixels.some((p) => p.id === ROAS_PIXEL.id)) {
+                throw new FbError(
+                  `pixel_not_on_account — AIF runs only on ${ROAS_PIXEL.name} (${ROAS_PIXEL.id}); share it to act_${binds.accountId} in Business Manager first`,
+                  { campaignId: edit.campaignId },
+                );
+              }
+              binds.pixelId = ROAS_PIXEL.id;
+            } else {
+              binds.pixelId = "";
+            }
           }
           // A conversion-optimized source cloned into ANOTHER account must carry a pixel of that
           // account (the source's pixel isn't valid there) — the adset's promoted_object and the
