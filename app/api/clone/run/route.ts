@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { ROAS_PIXEL, partnerConfig, type PartnerId } from "@/lib/partners";
+import { AIF_VALUE_PIXEL, ROAS_PIXEL, aifOfferablePixels, partnerConfig, pickAifPixel, type PartnerId } from "@/lib/partners";
 import { resolveMoChannel } from "@/lib/mo-soc";
 import { bidAmountMissing, bidKind, moEnsureSocMark, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
@@ -325,24 +325,37 @@ export async function POST(req: Request) {
           if (!(await accountAllowedFor(session, binds.accountId))) {
             throw new FbError(ACCOUNT_NOT_ASSIGNED_MSG, { campaignId: edit.campaignId }, 403);
           }
-          // AIF pixel (parity with /api/aif/launch): EVERY conversion clone — a conversion
-          // source or a row switched to min-ROAS — runs ONLY on the value pixel VD-C1-HS-1
-          // (owner call 09-02 pt2, the legacy postback pixel is retired), pinned here no matter
-          // what the source promoted or the picker sent, and validated as SHARED to the BUILD
-          // account BEFORE the brand marker is burned (review find 08-24; Meta would only
-          // reject the ad set after the campaign exists). Click clones stay pixel-less; the
-          // link rewrite mirrors whatever the adset promotes.
+          // AIF pixel (parity with /api/aif/launch): conversion clones run on the BUILD
+          // account's OFFERABLE pixels (token catalog minus retired — owner call 09-02 pt3).
+          // A row switched to min-ROAS pins the rail's value pixel VD-C1-HS-11; a plain
+          // conversion keeps a valid target pick / the source's own pixel when offerable, else
+          // falls to the pickAifPixel auto-default (clones of legacy campaigns migrate off the
+          // retired pixel automatically). Validated BEFORE the brand marker is burned (review
+          // find 08-24). Click clones stay pixel-less; the link rewrite mirrors whatever the
+          // adset promotes.
           if (aif) {
-            const wantsPixel = bidKind(targetStrategy) === "roas" || /^\d{10,20}$/.test(src.pixelId);
-            if (wantsPixel) {
-              const pixels = await pixelsOf(binds.accountId);
-              if (!pixels.some((p) => p.id === ROAS_PIXEL.id)) {
-                throw new FbError(
-                  `pixel_not_on_account — AIF runs only on ${ROAS_PIXEL.name} (${ROAS_PIXEL.id}); share it to act_${binds.accountId} in Business Manager first`,
-                  { campaignId: edit.campaignId },
-                );
+            const roasTarget = bidKind(targetStrategy) === "roas";
+            if (roasTarget || /^\d{10,20}$/.test(src.pixelId)) {
+              const raw = await pixelsOf(binds.accountId);
+              const offer = aifOfferablePixels(raw);
+              if (roasTarget) {
+                if (!offer.some((p) => p.id === AIF_VALUE_PIXEL.id)) {
+                  throw new FbError(
+                    `pixel_not_on_account — min-ROAS runs only on ${AIF_VALUE_PIXEL.name} (${AIF_VALUE_PIXEL.id}); share it to act_${binds.accountId} in Business Manager first`,
+                    { campaignId: edit.campaignId },
+                  );
+                }
+                binds.pixelId = AIF_VALUE_PIXEL.id;
+              } else {
+                const bound = offer.find((p) => p.id === binds.pixelId) ?? pickAifPixel(raw);
+                if (!bound) {
+                  throw new FbError(
+                    `no_pixel_on_account — share ${AIF_VALUE_PIXEL.name} to act_${binds.accountId} in Business Manager first`,
+                    { campaignId: edit.campaignId },
+                  );
+                }
+                binds.pixelId = bound.id;
               }
-              binds.pixelId = ROAS_PIXEL.id;
             } else {
               binds.pixelId = "";
             }
@@ -394,12 +407,12 @@ export async function POST(req: Request) {
               throw new FbError("roas_goal_ambiguous — type the decimal goal (0,30 = 30%) on the clone row", { campaignId: edit.campaignId });
             }
           }
-          // Owner rule (2026-08-11, AIF since 09-02): min-ROAS optimizes ONLY on the partner's
-          // value pixel VD-C1-HS-1. PIN it (launcher-card parity — same-account clones have no
-          // pixel picker, and a row switched to ROAS needs it regardless of what the source
-          // promoted) after verifying the build account carries the shared pixel; the link
-          // rewrite below then fires it too.
-          if (bidKind(campaign.bidStrategy) === "roas" && editBinds.pixelId !== ROAS_PIXEL.id) {
+          // Owner rule (2026-08-11): MO min-ROAS optimizes ONLY on the partner's value pixel
+          // VD-C1-HS-1. PIN it (launcher-card parity — same-account clones have no pixel
+          // picker, and a row switched to ROAS needs it regardless of what the source promoted)
+          // after verifying the build account carries the shared pixel; the link rewrite below
+          // then fires it too. AIF rows pinned their own value pixel above.
+          if (!aif && bidKind(campaign.bidStrategy) === "roas" && editBinds.pixelId !== ROAS_PIXEL.id) {
             const pixels = await pixelsOf(binds.accountId);
             if (!pixels.some((p) => p.id === ROAS_PIXEL.id)) {
               throw new FbError(

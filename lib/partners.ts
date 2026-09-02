@@ -61,10 +61,10 @@ export type PartnerConfig = {
    *  is the partner's RW page (destination = a free-typed article slug) carrying a brand marker
    *  from the test01..test700 pool (the revenue key — one brand per campaign, own registry).
    *  Conversions arrive via the postback→CAPI forwarder, which routes each Purchase into the
-   *  pixel named by the link's echoed &pixel= param (default: the AIF postback pixel); the
-   *  launch pixel is the buyer's PICK from the cabinet's own token-catalog list (09-02; empty
-   *  pick auto-derives server-side) + Purchase. Min-ROAS pins ROAS_PIXEL (VD-C1-HS-1, the value
-   *  pixel — same rule as MO; requires the BM share to the cabinet). */
+   *  pixel named by the link's echoed &pixel= param (default: the legacy postback pixel for
+   *  old links); the launch pixel is the buyer's PICK from the cabinet's OFFERABLE list
+   *  (aifOfferablePixels — retired pixels excluded; empty pick auto-defaults via pickAifPixel)
+   *  + Purchase. Min-ROAS pins the rail's value pixel AIF_VALUE_PIXEL (VD-C1-HS-11). */
   aifLaunch?: boolean;
   /** Not built out yet → the switcher renders this partner disabled ("in development"). */
   inDevelopment?: boolean;
@@ -151,14 +151,11 @@ const MKLEARN_LANDINGS: Landing[] = [
 const MAGICOFFERS_ACCOUNT: Bound = { id: "1297336295903991", name: "GC-Magicoffers-BR-1500" };
 const MO_DEFAULT_PIXEL: Bound = { id: "3075610185982313", name: "GC for MO Pixel" };
 
-/** The ONLY pixel min-ROAS launches may optimize on (owner rule 2026-08-11): the partner's HS
- *  value pixel — real purchase-value history, shared to every MO account and live-probed
- *  VO-eligible on 08-11. Everything else (never-fired GC-for-MO, FARM-1, the value-less AIF
- *  postback pixel — Meta sub 2446368) is rejected for ROAS even where technically eligible.
- *  Since 09-02 the SAME rule covers the AIF rail (owner ask: integrate VD-C1-HS-1 there too):
- *  AIF roas pins this pixel, and the launch validates it is shared to the picked cabinet — the
- *  400 remedy names the BM share until the VD-C1 admin performs it. Enforced in the card
- *  (pin + readiness), /api/launch, /api/aif/launch and /api/clone/run. */
+/** The ONLY pixel MO min-ROAS launches may optimize on (owner rule 2026-08-11): the partner's
+ *  HS value pixel — real purchase-value history, shared to every MO account and live-probed
+ *  VO-eligible on 08-11. Everything else (never-fired GC-for-MO, FARM-1) is rejected for ROAS
+ *  even where technically eligible. Enforced in the card (pin + readiness), /api/launch and
+ *  /api/clone/run. The AIF rail pins its own sibling value pixel instead — AIF_VALUE_PIXEL. */
 export const ROAS_PIXEL: Bound = { id: "4367956310124642", name: "VD-C1-HS-1" };
 
 // ---- AIF (Airfind "Google Rewarded Web") ----------------------------------------------------
@@ -169,14 +166,30 @@ export const ROAS_PIXEL: Bound = { id: "4367956310124642", name: "VD-C1-HS-1" };
 // feeds the partner's click-spam report. FB appends fbclid itself.
 export const AIF_RW_BASE = "https://content.honeyandhues.com/rewarded";
 export const AIF_CLIENT_ID = "52105";
-/** The AIF rail runs ONLY on the value pixel VD-C1-HS-1 (owner call 09-02 pt2: the legacy
- *  «GC for AIF» postback pixel is RETIRED from every choice — conversions and min-ROAS alike).
- *  Returns the account's VD-C1-HS-1 entry when the cabinet carries it (share it in BM VD-C1 —
- *  pixel and cabinets live in the SAME business), else null: launches refuse with the share
- *  remedy rather than fall back to the retired pixel. Feeds the card/clone pickers and the
- *  board auto-fill; the routes pin ROAS_PIXEL server-side regardless of the draft. */
+/** The AIF rail's value pixel «VD-C1-HS-11» — the VD-C1 admin shared it to all 12 AIF cabinets
+ *  on 09-02 (the rail's sibling of MO's VD-C1-HS-1), and a validate_only probe the same day
+ *  confirmed it VO-ELIGIBLE (VALUE + roas_average_floor accepted) → min-ROAS pins THIS pixel
+ *  on AIF. Conversions default to it too (pickAifPixel). */
+export const AIF_VALUE_PIXEL: Bound = { id: "1363973565348799", name: "VD-C1-HS-11" };
+
+/** Pixels RETIRED from the AIF rail (owner call 09-02 pt3): the legacy «GC for AIF» postback
+ *  pixel and MO's default «GC for MO Pixel» are never offered, never auto-picked and never
+ *  launchable there — even if someone shares them back to a cabinet. */
+export const AIF_RETIRED_PIXEL_IDS = new Set(["2130695154991928", "3075610185982313"]);
+
+/** An AIF cabinet's OFFERABLE pixels: its own token-catalog list minus the retired ones —
+ *  feeds the card/clone pickers and every server-side validation (one rule, no drift). */
+export function aifOfferablePixels(pixels: Bound[]): Bound[] {
+  return pixels.filter((p) => !AIF_RETIRED_PIXEL_IDS.has(p.id));
+}
+
+/** The AUTO-DEFAULT for an AIF conversion pixel when the buyer made no pick (fresh cards,
+ *  legacy drafts, queued tasks): the value pixel when the cabinet carries it, else the single
+ *  offerable pixel, else null — launches refuse with the BM share remedy rather than guess
+ *  (and never fall back to a retired pixel). */
 export function pickAifPixel(pixels: Bound[]): Bound | null {
-  return pixels.find((p) => p.id === ROAS_PIXEL.id) ?? null;
+  const offer = aifOfferablePixels(pixels);
+  return offer.find((p) => p.id === AIF_VALUE_PIXEL.id) ?? (offer.length === 1 ? offer[0] : null);
 }
 /** Brand pool test01..test700 (partner-assigned): 1–9 keep the doc's 2-digit zero-padded shape
  *  ("test01"), 10+ are plain. One brand = one buy campaign — the registry enforces it. */
@@ -336,10 +349,9 @@ export function launchReadyOpts(p: PartnerConfig): {
     // LION builds ads from the typed destination link + title/copy — all hard-required by create/.
     link: Boolean(p.lionLaunch),
     adText: Boolean(p.lionLaunch),
-    // Min-ROAS pins the partner's value pixel VD-C1-HS-1 — MO since 08-11, AIF since 09-02
-    // (the value-less AIF postback pixel cannot VALUE-optimize, Meta sub 2446368); LION
-    // partners validate pixels their own way.
-    roasPixel: p.accountsFromToken ? ROAS_PIXEL.id : "",
+    // Min-ROAS pins the partner's value pixel: MO → VD-C1-HS-1 (08-11), AIF → VD-C1-HS-11
+    // (09-02, VO-probed); LION partners validate pixels their own way.
+    roasPixel: p.aifLaunch ? AIF_VALUE_PIXEL.id : p.accountsFromToken ? ROAS_PIXEL.id : "",
   };
 }
 

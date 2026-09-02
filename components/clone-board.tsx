@@ -16,7 +16,7 @@ import {
 } from "@/lib/clone";
 import { bidKind, limitMoney, limitMoneyCents, moEnsureSocMark, moneyLabel, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { BID_STRATEGIES, OS_OPTIONS, countryName, geoSummary } from "@/lib/catalog";
-import { ROAS_PIXEL, type PartnerId, partnerConfig, pickAifPixel } from "@/lib/partners";
+import { AIF_VALUE_PIXEL, type PartnerId, aifOfferablePixels, partnerConfig, pickAifPixel } from "@/lib/partners";
 import { AutoTextarea, BidKindTag, Field, Select } from "./ui";
 import {
   AlertIcon,
@@ -258,11 +258,10 @@ function CloneInner({
     adAccounts !== null &&
     !adAccounts.some((a) => a.value === settings.accountId);
   const accountMissing = Boolean(partner.accountsFromToken) && (!settings.accountId || accountStale);
-  // AIF offers ONLY the value pixel (owner call 09-02 pt2 — the legacy postback pixel is
-  // retired from the choice); MO keeps the account's full list.
+  // AIF offers the cabinet's pixels minus the retired ones (owner call 09-02 pt3 — «GC for
+  // AIF» / «GC for MO» never offered); MO keeps the account's full list.
   const targetPixelsAll = isTargetAccount ? pixelOptionsOf(adAccounts, settings.accountId) : [];
-  const aifTargetPixel = aifMode ? pickAifPixel(targetPixelsAll) : null;
-  const targetPixels = aifMode ? (aifTargetPixel ? [aifTargetPixel] : []) : targetPixelsAll;
+  const targetPixels = aifMode ? aifOfferablePixels(targetPixelsAll) : targetPixelsAll;
   // A concrete target account needs a pixel of that account: conversion sources can't carry
   // their own pixel across (it lives on the source's account) — the server enforces this too.
   // AIF picks from the same token catalog since 09-02 (owner ask: pixel is a CHOICE, not a
@@ -567,7 +566,7 @@ function CloneInner({
                           emptyHint={
                             adAccounts
                               ? aifMode
-                                ? `Share ${ROAS_PIXEL.name} to this cabinet in BM`
+                                ? `Share ${AIF_VALUE_PIXEL.name} to this cabinet in BM`
                                 : "No pixels on this account"
                               : "Loading pixels…"
                           }

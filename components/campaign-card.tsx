@@ -25,7 +25,7 @@ import {
   pixelsFor,
 } from "@/lib/catalog";
 import { hsFinalLink, hsLinkSegments, hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
-import { type LinkRole, type PartnerConfig, ROAS_PIXEL, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
+import { AIF_VALUE_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifOfferablePixels, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
 import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-adaccounts";
@@ -308,14 +308,15 @@ function CampaignCardBase({
   const roasEntered = kind === "roas" ? parseMoney(c.bidCap) : 0;
   const roasGoal = roasEntered > 0 ? normalizeRoasGoal(roasEntered) : null;
   // Self-heal restored/copied min-ROAS drafts: the value-pixel pin is STATE, not just display —
-  // a draft restored with another pixel converges to the only ROAS-allowed one (MO and AIF
-  // alike since 09-02). Idempotent (patches only on mismatch), so the unstable `patch` identity
-  // is safe to leave out of deps.
+  // a draft restored with another pixel converges to the only ROAS-allowed one (MO →
+  // VD-C1-HS-1, AIF → VD-C1-HS-11). Idempotent (patches only on mismatch), so the unstable
+  // `patch` identity is safe to leave out of deps.
+  const roasPin = aifMode ? AIF_VALUE_PIXEL : ROAS_PIXEL;
   const roasPixelDrift =
-    !hsMode && partner.accountsFromToken && kind === "roas" && c.pixel !== ROAS_PIXEL.id;
+    !hsMode && partner.accountsFromToken && kind === "roas" && c.pixel !== roasPin.id;
   useEffect(() => {
-    if (roasPixelDrift) onPatch(c.id, { pixel: ROAS_PIXEL.id });
-  }, [roasPixelDrift, onPatch, c.id]);
+    if (roasPixelDrift) onPatch(c.id, { pixel: roasPin.id });
+  }, [roasPixelDrift, onPatch, c.id, roasPin.id]);
   // HS: a one-pixel account needs no picking — the field self-fills, but only ONCE THE FANKA IS
   // PICKED (owner ask 08-13: an id materialising right after the account read as noise — the
   // pixel belongs at the fanka step). Converges back if a stale draft carries some other id.
@@ -382,12 +383,12 @@ function CampaignCardBase({
     tagTone: l.lang === "ES" ? ("ok" as const) : ("dim" as const),
   }));
   const conversions = c.optimization === "conversions";
-  // AIF: the ONLY offerable pixel is the value pixel VD-C1-HS-1 (owner call 09-02 pt2 — the
-  // legacy «GC for AIF» postback pixel is retired from the choice entirely), surfaced from the
-  // picked account's token catalog when the cabinet carries it. Empty = not shared yet /
-  // account unpicked / catalog loading — the field names the BM share remedy below.
+  // AIF: the cabinet's OFFERABLE pixels (token catalog minus the retired «GC for AIF» / «GC
+  // for MO» — owner call 09-02 pt3) feed the picker; pickAifPixel is the auto-default (the
+  // value pixel VD-C1-HS-11 when carried). Empty = nothing shared yet / account unpicked /
+  // catalog loading — the field names the BM share remedy below.
+  const aifPixels = aifMode ? aifOfferablePixels(pixelOptionsOf(adAccounts ?? null, c.account)) : [];
   const aifPixelPick = aifMode ? pickAifPixel(pixelOptionsOf(adAccounts ?? null, c.account)) : null;
-  const aifPixels = aifPixelPick ? [aifPixelPick] : [];
   // HS derives its link from the pasted base + tracking tail + picked pixel; MO from the landing
   // catalog. Either way this string is exactly what launches (and what Copy copies).
   const derivedLink = hsMode
@@ -690,14 +691,16 @@ function CampaignCardBase({
                         ? "Pick a pixel"
                         : undefined
                       : aifMode
-                        ? // A launch-time refusal foretold on the field: every AIF conversion
-                          // (min-ROAS included) runs only on the value pixel — it must be
-                          // SHARED to this cabinet in BM VD-C1 (same business as the pixel).
-                          conversions && c.account && adAccounts?.some((a) => a.value === c.account) && !aifPixelPick
-                          ? `share ${ROAS_PIXEL.name} to this cabinet in BM first (or switch to Clicks)`
-                          : kind !== "roas" && conversions && c.account && aifPixelPick && !c.pixel
-                            ? "Pick a pixel"
-                            : undefined
+                        ? // A launch-time refusal foretold on the field: min-ROAS needs the
+                          // rail's value pixel on this cabinet; conversions need at least one
+                          // offerable (non-retired) pixel.
+                          kind === "roas" && c.account && adAccounts?.some((a) => a.value === c.account) && !aifPixels.some((p) => p.id === AIF_VALUE_PIXEL.id)
+                          ? `share ${AIF_VALUE_PIXEL.name} to this cabinet in BM first`
+                          : kind !== "roas" && conversions && c.account && adAccounts?.some((a) => a.value === c.account) && aifPixels.length === 0
+                            ? `share ${AIF_VALUE_PIXEL.name} to this cabinet in BM first (or switch to Clicks)`
+                            : kind !== "roas" && conversions && c.account && aifPixels.length > 0 && !c.pixel
+                              ? "Pick a pixel"
+                              : undefined
                         : !aifMode && partner.accountsFromToken && kind === "roas" && c.pixel !== ROAS_PIXEL.id
                           ? `min ROAS runs only on ${ROAS_PIXEL.name}`
                           : !aifMode && partner.accountsFromToken && c.account && !c.pixel
@@ -709,9 +712,9 @@ function CampaignCardBase({
                     // Pixel is a CHOICE on this rail (owner ask 09-02): conversions pick from
                     // the cabinet's own token-catalog pixels — the board auto-fills the
                     // account's pixel, and an empty pick still auto-derives server-side.
-                    // Min-ROAS pins the value pixel (MO-parity); clicks carry no pixel at all.
+                    // Min-ROAS pins the rail's value pixel; clicks carry no pixel at all.
                     kind === "roas" ? (
-                      <LockedField value={`${ROAS_PIXEL.name} · ${ROAS_PIXEL.id}`} hint="min ROAS" mono />
+                      <LockedField value={`${AIF_VALUE_PIXEL.name} · ${AIF_VALUE_PIXEL.id}`} hint="min ROAS" mono />
                     ) : conversions ? (
                       <SearchSelect
                         value={c.pixel}
@@ -722,7 +725,7 @@ function CampaignCardBase({
                           !c.account
                             ? "Pick an account first"
                             : adAccounts
-                              ? `Share ${ROAS_PIXEL.name} to this cabinet in BM`
+                              ? `Share ${AIF_VALUE_PIXEL.name} to this cabinet in BM`
                               : "Loading pixels…"
                         }
                       />
@@ -834,14 +837,14 @@ function CampaignCardBase({
                       const bidStrategy = e.target.value;
                       // Min-ROAS optimizes purchase value — the event pins to Purchase, the
                       // optimization pins to conversions (MO's link keeps &fire=click), and the
-                      // pixel pins to the value pixel VD-C1-HS-1 (MO since 08-11, AIF since
-                      // 09-02 — the only VO-eligible pixel either rail carries).
+                      // pixel pins to the rail's value pixel (MO → VD-C1-HS-1, AIF →
+                      // VD-C1-HS-11 — the VO-eligible ones).
                       if (bidKind(bidStrategy) === "roas") {
                         patch({
                           bidStrategy,
                           conversionEvent: "PURCHASE",
                           optimization: "conversions",
-                          ...(partner.accountsFromToken ? { pixel: ROAS_PIXEL.id } : {}),
+                          ...(partner.accountsFromToken ? { pixel: roasPin.id } : {}),
                         });
                       } else {
                         // Leaving min-ROAS unlocks the pixel back to the partner default (bid

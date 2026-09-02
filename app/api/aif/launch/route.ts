@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { type Campaign, bidAmountMissing, bidKind, normalizeRoasGoal, parseMoney } from "@/lib/types";
-import { ROAS_PIXEL, type PartnerId, fullLandingUrl, partnerConfig } from "@/lib/partners";
+import { AIF_VALUE_PIXEL, type PartnerId, aifOfferablePixels, fullLandingUrl, partnerConfig, pickAifPixel } from "@/lib/partners";
 import {
   type LaunchBinds,
   SUPPORTED_BID_STRATEGIES,
@@ -85,10 +85,11 @@ async function resolveLocales(names: string[]): Promise<number[]> {
  * for stage (same NDJSON events, same Task Manager pipeline), with the rail's own pieces:
  * the tree is built on the AIF token, the marker comes from the BRAND registry (aif-maps,
  * test01..test700), the ad link is the partner's RW page with the destination slug, and the
- * pixel for EVERY conversion launch (min-ROAS included) is the value pixel VD-C1-HS-1 (owner
- * call 09-02 pt2 — the legacy «GC for AIF» postback pixel is retired): pinned server-side,
- * validated as SHARED to the picked cabinet, and riding the RW link's &pixel= param so the
- * postback→CAPI forwarder lands the Purchase on the same pixel. Clicks carry no pixel at all.
+ * pixel comes from the cabinet's OFFERABLE list (token catalog minus retired — owner call
+ * 09-02 pt3): min-ROAS pins the rail's value pixel VD-C1-HS-11, plain conversions bind the
+ * buyer's pick (or the pickAifPixel auto-default), and the bound pixel rides the RW link's
+ * &pixel= param so the postback→CAPI forwarder lands the Purchase on the same pixel. Clicks
+ * carry no pixel at all.
  */
 export async function POST(req: Request) {
   // Proxy-gated, but self-checks the session too (parity with /api/launch).
@@ -174,25 +175,47 @@ export async function POST(req: Request) {
     }
     // DSA beneficiary/payor for EU-reaching ad sets — same rule as MO (live failure 2026-08-10).
     binds.pageName = await aifAdvertisablePageName(pickedPage);
-    // EVERY conversion launch (min-ROAS included) runs ONLY on the value pixel VD-C1-HS-1
-    // (owner call 09-02 pt2 — the legacy «GC for AIF» postback pixel is retired): pinned
-    // server-side no matter what the draft/pick sent, and it must be SHARED to the picked
-    // cabinet (pixel and cabinets live in the same BM VD-C1) — refused here with the remedy
-    // named, BEFORE anything is claimed; Meta would only reject the ad set after the campaign
-    // exists (orphan + burnt brand).
+    // Conversion launches run on the cabinet's OFFERABLE pixels (token catalog minus the
+    // retired «GC for AIF» / «GC for MO» — owner call 09-02 pt3), validated here BEFORE
+    // anything is claimed (Meta would only reject the ad set after the campaign exists —
+    // orphan + burnt brand). Min-ROAS pins the rail's value pixel VD-C1-HS-11 (VO-probed
+    // eligible 09-02) no matter what the draft sent; a plain conversion binds the buyer's pick
+    // or the pickAifPixel auto-default (fresh cards, legacy drafts, queued tasks).
     if (conversions) {
-      const pixels = await aifAccountPixels(pickedAccount);
-      if (!pixels.some((p) => p.id === ROAS_PIXEL.id)) {
-        return NextResponse.json(
-          {
-            ok: false,
-            stage: "config",
-            error: `pixel_not_on_account — AIF runs only on ${ROAS_PIXEL.name} (${ROAS_PIXEL.id}); share it to this ad account in Business Manager (BM VD-C1 → pixel → Connected assets) first, or launch with Clicks optimization`,
-          },
-          { status: 400 },
-        );
+      const raw = await aifAccountPixels(pickedAccount);
+      const offer = aifOfferablePixels(raw);
+      if (bidKind(campaign.bidStrategy) === "roas") {
+        if (!offer.some((p) => p.id === AIF_VALUE_PIXEL.id)) {
+          return NextResponse.json(
+            {
+              ok: false,
+              stage: "config",
+              error: `pixel_not_on_account — min-ROAS runs only on ${AIF_VALUE_PIXEL.name} (${AIF_VALUE_PIXEL.id}); share it to this ad account in Business Manager first`,
+            },
+            { status: 400 },
+          );
+        }
+        binds.pixelId = AIF_VALUE_PIXEL.id;
+      } else {
+        const picked = String(campaign.pixel ?? "").trim();
+        if (picked && !/^\d{10,20}$/.test(picked)) {
+          return NextResponse.json({ ok: false, stage: "config", error: "pixel_invalid — bad pixel id" }, { status: 400 });
+        }
+        const bound = picked ? offer.find((p) => p.id === picked) : pickAifPixel(raw);
+        if (!bound) {
+          return NextResponse.json(
+            {
+              ok: false,
+              stage: "config",
+              error: picked
+                ? `pixel_not_available — this cabinet's offerable pixels are: ${offer.map((p) => `${p.name} (${p.id})`).join(", ") || "none"}; retired pixels are not launchable`
+                : `no_pixel_on_account — share ${AIF_VALUE_PIXEL.name} to this ad account in Business Manager first (or launch with Clicks optimization)`,
+            },
+            { status: 400 },
+          );
+        }
+        binds.pixelId = bound.id;
       }
-      binds.pixelId = ROAS_PIXEL.id;
     }
   } catch (e) {
     const err = e as FbError;
