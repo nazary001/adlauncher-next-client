@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { type Campaign, bidAmountMissing, bidKind, normalizeRoasGoal, parseMoney } from "@/lib/types";
-import { type PartnerId, fullLandingUrl, partnerConfig } from "@/lib/partners";
+import { AIF_ROAS_LOCKED, type PartnerId, fullLandingUrl, partnerConfig } from "@/lib/partners";
 import {
   type LaunchBinds,
   SUPPORTED_BID_STRATEGIES,
@@ -128,6 +128,21 @@ export async function POST(req: Request) {
   }
 
   const partner = partnerConfig("us" as PartnerId);
+  // Min-ROAS is LOCKED on this rail while Meta's VO-eligibility gate stands (AIF_ROAS_LOCKED,
+  // re-probed 2026-09-02: sub 2446368 — the postback pixel has no purchase-value history). A
+  // roas launch would create the campaign and then have its VALUE ad set refused → ACTIVE
+  // orphan + burnt brand (exactly the 08-25 trio). Refused HERE, before anything is claimed.
+  if (AIF_ROAS_LOCKED && bidKind(campaign.bidStrategy) === "roas") {
+    return NextResponse.json(
+      {
+        ok: false,
+        stage: "config",
+        error:
+          "roas_unavailable — the AIF pixel has no purchase-value history yet (Meta VO eligibility, sub 2446368); launch Conversions until the postback CAPI values accrue",
+      },
+      { status: 400 },
+    );
+  }
   // Min-ROAS ALWAYS optimizes purchase value (goal VALUE, event Purchase — fb-launch pins both),
   // so it derives the postback pixel like any conversion launch, no matter what optimization a
   // stale/edited draft sent — the UI pins it, but the server is the truth (mirror of /api/launch).

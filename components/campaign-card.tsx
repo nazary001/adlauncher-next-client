@@ -25,7 +25,7 @@ import {
   pixelsFor,
 } from "@/lib/catalog";
 import { hsFinalLink, hsLinkSegments, hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
-import { type LinkRole, type PartnerConfig, ROAS_PIXEL, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
+import { AIF_ROAS_LOCKED, type LinkRole, type PartnerConfig, ROAS_PIXEL, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
 import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-adaccounts";
@@ -847,7 +847,13 @@ function CampaignCardBase({
                         });
                       }
                     }}
-                    options={BID_STRATEGIES}
+                    // AIF: min-ROAS is locked at Meta's VO-eligibility gate (AIF_ROAS_LOCKED) —
+                    // the option disappears; applyPartnerLocks snaps restored roas drafts back.
+                    options={
+                      aifMode && AIF_ROAS_LOCKED
+                        ? BID_STRATEGIES.filter((o) => bidKind(o.value) !== "roas")
+                        : BID_STRATEGIES
+                    }
                   />
                 </Field>
                 {!aifMode ? (

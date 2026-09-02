@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { ROAS_PIXEL, partnerConfig, type PartnerId } from "@/lib/partners";
+import { AIF_ROAS_LOCKED, ROAS_PIXEL, partnerConfig, type PartnerId } from "@/lib/partners";
 import { resolveMoChannel } from "@/lib/mo-soc";
 import { bidAmountMissing, bidKind, moEnsureSocMark, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
@@ -320,6 +320,16 @@ export async function POST(req: Request) {
           // The clone's EFFECTIVE strategy (per-row switch wins, else the source's) — resolved
           // once here so the pixel derivations below and cloneToCampaign can never disagree.
           const targetStrategy = cloneBidStrategy(edit, src);
+          // AIF: min-ROAS is locked at Meta's VO-eligibility gate (AIF_ROAS_LOCKED, sub 2446368
+          // re-probed 2026-09-02) — a roas clone would orphan its campaign + burn a brand at
+          // adset-create. Refused per-row here, before any claim/write; the row's fix is the
+          // strategy switch (cap/lowest).
+          if (aif && AIF_ROAS_LOCKED && bidKind(targetStrategy) === "roas") {
+            throw new FbError(
+              "roas_unavailable — the AIF pixel has no purchase-value history yet (Meta VO eligibility); switch the row to bid cap or lowest cost",
+              { campaignId: edit.campaignId },
+            );
+          }
           // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted
           // POST — and for a same-account clone whose SOURCE lives in someone else's account.
           if (!(await accountAllowedFor(session, binds.accountId))) {

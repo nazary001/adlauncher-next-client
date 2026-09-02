@@ -164,6 +164,16 @@ export const ROAS_PIXEL: Bound = { id: "4367956310124642", name: "VD-C1-HS-1" };
 // feeds the partner's click-spam report. FB appends fbclid itself.
 export const AIF_RW_BASE = "https://content.honeyandhues.com/rewarded";
 export const AIF_CLIENT_ID = "52105";
+/** Min-ROAS on the AIF rail is LOCKED at Meta's eligibility gate (re-probed 2026-09-02 via a
+ *  validate_only ad set: sub 2446368 «pixel doesn't meet value-optimization requirements») —
+ *  the postback pixel's CAPI Purchases still carry no value history, so a VALUE ad set cannot
+ *  be born: every roas launch since 08-21 orphaned its ACTIVE campaign and burnt a brand
+ *  (3 orphans on 08-25 alone). Enforced in the card + clone rows (option disabled, drafts
+ *  snapped back to lowest-cost) and 400-rejected by /api/aif/launch + /api/clone/run BEFORE
+ *  anything is claimed. Flip to false (one line) once pb_capi sends real purchase values and a
+ *  fresh validate_only probe passes — the MO playbook: value injection → VO probe → flip. */
+export const AIF_ROAS_LOCKED = true;
+
 /** Derive the AIF conversion pixel from an ACCOUNT'S OWN pixel list (pulled via the AIF token —
  *  owner ask 2026-09-02: no hardcoded pixel id anywhere; the id and even the pixel's name have
  *  already drifted once). Every AIF cabinet carries exactly the one postback pixel the CAPI
@@ -436,9 +446,12 @@ export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[
     if (fan && r.page !== fan) patch.page = fan;
     if (p.aifLaunch) {
       // Min-ROAS always optimizes purchase VALUE — the optimization pins to conversions (the
-      // card disables the select; this converges restored/copied drafts too).
+      // card disables the select; this converges restored/copied drafts too). While the rail's
+      // roas lock stands (Meta VO eligibility — see AIF_ROAS_LOCKED) a roas draft snaps back to
+      // lowest-cost instead: it could never launch, only orphan a campaign + burn a brand.
       const roas = bidKind(r.bidStrategy) === "roas";
-      if (roas && r.optimization !== "conversions") patch.optimization = "conversions";
+      if (roas && AIF_ROAS_LOCKED) patch.bidStrategy = "LOWEST_COST_WITHOUT_CAP";
+      else if (roas && r.optimization !== "conversions") patch.optimization = "conversions";
       // The pixel is DERIVED server-side from the token's account data at launch — never stored
       // on the card. Clearing converges old drafts that carried the once-hardcoded id.
       if (r.pixel !== "") patch.pixel = "";
