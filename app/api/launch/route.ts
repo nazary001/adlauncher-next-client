@@ -31,6 +31,7 @@ import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignme
 import { launchFailureDisposition, partialFailureNote } from "@/lib/launch-guards";
 import { fetchValidatedImage, uploadImage, uploadVideo, videoThumb, waitForVideo } from "@/lib/fb-media";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
+import { isAutoLandingSlug } from "@/lib/auto-landings";
 import { reportPagesUsed } from "@/lib/hs-pages";
 import { taskWriter } from "@/lib/task-store";
 import { del } from "@vercel/blob";
@@ -287,10 +288,15 @@ export async function POST(req: Request) {
   }
   // Landing must be a real slug from the partner catalog — a stale/renamed slug (e.g. from a
   // restored draft) would build a live ad pointing at a 404, reported as success, spend + a burnt
-  // gcm on a dead link. Validated here, before any gcm claim / FB write.
+  // gcm on a dead link. Validated here, before any gcm claim / FB write. Static catalog first;
+  // the Auto-landings registry (owner-generated MK Learn pages, live the moment a mo-landing row
+  // exists) is the second chance — same 400 when neither knows the slug.
   if (partner.usesGcm) {
     const slug = String(campaign.landing ?? "").trim();
-    if (!partner.landings.some((l) => l.slug === slug)) {
+    if (
+      !partner.landings.some((l) => l.slug === slug) &&
+      !(await isAutoLandingSlug(slug).catch(() => false))
+    ) {
       return NextResponse.json(
         { ok: false, stage: "config", error: "landing_invalid — pick a valid landing on the campaign card" },
         { status: 400 },

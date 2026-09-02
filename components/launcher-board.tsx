@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Campaign, FileItem } from "@/lib/types";
 import { bidKind, firstMedia, fullName, isLaunchable, makeCampaign, moEnsureSocMark } from "@/lib/types";
 import { geoSummary } from "@/lib/catalog";
@@ -20,6 +20,7 @@ import { makeGate } from "@/lib/launch-guards";
 import { Header } from "./header";
 import { CampaignCard } from "./campaign-card";
 import { useFanpages } from "./use-fanpages";
+import { useAutoLandings } from "./use-auto-landings";
 import { useMoSocs } from "./use-mo-socs";
 import { MO_CHANNEL_LS, defaultMoSoc } from "./mo-soc-picker";
 import { hsTokensAllDown, useHsTokenStatus } from "./hs-token-status";
@@ -157,7 +158,14 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   const [previewed, setPreviewed] = useState(false);
   const [copyOpen, setCopyOpen] = useState(false);
   const nextId = useRef(2);
-  const partner = partnerConfig(partnerId);
+  // Owner-generated MK Learn pages join the MO landing catalog live (grouped "Auto · <niche>",
+  // appended after the static niches so SearchSelect's contiguous-group contract holds).
+  const autoLandings = useAutoLandings(partnerId === "in");
+  const partner = useMemo(() => {
+    const base = partnerConfig(partnerId);
+    if (!base.usesGcm || autoLandings.length === 0) return base;
+    return { ...base, landings: [...base.landings, ...autoLandings] };
+  }, [partnerId, autoLandings]);
   // The board talks to the ACTIVE partner's own task manager: AIF launches queue/track in the
   // separate AIF instance (own drawer, own Strapi scope), everything else in the team one.
   const { enqueue, tasks } = partner.aifLaunch ? aifTm : teamTm;
