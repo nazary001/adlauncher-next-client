@@ -25,7 +25,7 @@ import {
   pixelsFor,
 } from "@/lib/catalog";
 import { hsFinalLink, hsLinkSegments, hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
-import { AIF_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, fullLandingUrl, landingUrlSegments, launchReadyOpts } from "@/lib/partners";
+import { type LinkRole, type PartnerConfig, ROAS_PIXEL, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
 import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-adaccounts";
@@ -381,6 +381,10 @@ function CampaignCardBase({
     tagTone: l.lang === "ES" ? ("ok" as const) : ("dim" as const),
   }));
   const conversions = c.optimization === "conversions";
+  // AIF: the conversion pixel of the picked account, derived from the token's catalog (same rule
+  // the server re-applies at launch — aifDerivedPixel). Display only; null while the account is
+  // unpicked, the catalog is loading, or the account carries no derivable pixel.
+  const aifPixel = aifMode && conversions ? pickAifPixel(pixelOptionsOf(adAccounts ?? null, c.account)) : null;
   // HS derives its link from the pasted base + tracking tail + picked pixel; MO from the landing
   // catalog. Either way this string is exactly what launches (and what Copy copies).
   const derivedLink = hsMode
@@ -682,19 +686,38 @@ function CampaignCardBase({
                         c.account && c.page && Array.isArray(hsPixels) && hsPixels.length > 0 && !c.pixel
                         ? "Pick a pixel"
                         : undefined
-                      : !aifMode && partner.accountsFromToken && kind === "roas" && c.pixel !== ROAS_PIXEL.id
-                        ? `min ROAS runs only on ${ROAS_PIXEL.name}`
-                        : !aifMode && partner.accountsFromToken && c.account && !c.pixel
-                          ? "Pick a pixel"
+                      : aifMode
+                        ? // Conversions on an account whose loaded catalog row derives NO pixel
+                          // would only fail at launch — name the BM remedy right on the field.
+                          conversions && c.account && adAccounts?.some((a) => a.value === c.account) && !aifPixel
+                          ? "no pixel on this account — share the AIF pixel in BM or switch to Clicks"
                           : undefined
+                        : !aifMode && partner.accountsFromToken && kind === "roas" && c.pixel !== ROAS_PIXEL.id
+                          ? `min ROAS runs only on ${ROAS_PIXEL.name}`
+                          : !aifMode && partner.accountsFromToken && c.account && !c.pixel
+                            ? "Pick a pixel"
+                            : undefined
                   }
                 >
                   {aifMode ? (
-                    // The pixel is never picked on this rail: conversions run ONLY on the AIF
-                    // postback pixel (where the CAPI forwarder lands Purchases), clicks carry
-                    // no pixel at all — both server-enforced, shown here as locked truth.
+                    // The pixel is never picked on this rail: conversions run ONLY on the picked
+                    // account's own postback pixel (where the CAPI forwarder lands Purchases),
+                    // derived from the token's catalog; clicks carry no pixel at all — both
+                    // server-enforced, shown here as locked truth.
                     conversions ? (
-                      <LockedField value={`${AIF_PIXEL.name} · ${AIF_PIXEL.id}`} hint="auto" mono />
+                      <LockedField
+                        value={
+                          aifPixel
+                            ? `${aifPixel.name} · ${aifPixel.id}`
+                            : !c.account
+                              ? "Pick an account first"
+                              : adAccounts
+                                ? "No pixel on this account"
+                                : "Loading pixels…"
+                        }
+                        hint="from token"
+                        mono={Boolean(aifPixel)}
+                      />
                     ) : (
                       <LockedField value="No pixel — click optimization" hint="auto" />
                     )
@@ -803,18 +826,14 @@ function CampaignCardBase({
                       const bidStrategy = e.target.value;
                       // Min-ROAS optimizes purchase value — the event pins to Purchase, the
                       // optimization pins to conversions (MO's link keeps &fire=click), and the
-                      // pixel pins to the partner's value pixel: MO → VD-C1-HS-1, AIF → the
-                      // postback CAPI pixel (the only pixel either rail may ROAS on).
+                      // pixel pins to MO's value pixel VD-C1-HS-1. AIF's pixel stays DERIVED
+                      // from the token's account data (server truth) — nothing to patch.
                       if (bidKind(bidStrategy) === "roas") {
                         patch({
                           bidStrategy,
                           conversionEvent: "PURCHASE",
                           optimization: "conversions",
-                          ...(aifMode
-                            ? { pixel: AIF_PIXEL.id }
-                            : partner.accountsFromToken
-                              ? { pixel: ROAS_PIXEL.id }
-                              : {}),
+                          ...(!aifMode && partner.accountsFromToken ? { pixel: ROAS_PIXEL.id } : {}),
                         });
                       } else {
                         // Leaving min-ROAS unlocks the pixel back to the partner default (bid

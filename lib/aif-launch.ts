@@ -8,6 +8,7 @@ import {
   type FanPage,
   type TokenAdAccount,
   type TokenCatalog,
+  FbError,
   accountPixels,
   advertisablePageName,
   advertisablePages,
@@ -20,6 +21,7 @@ import {
   tokenAdAccounts,
 } from "./fb-graph";
 import { uploadImage, uploadVideo, videoThumb, waitForVideo } from "./fb-media";
+import { type Bound, pickAifPixel } from "./partners";
 
 type Json = Record<string, unknown>;
 
@@ -53,6 +55,27 @@ export const aifIsTokenAccount = (accountId: string): Promise<boolean> => isToke
 export const aifAccountName = (accountId: string): Promise<string> => tokenAccountName(accountId, CAT);
 export const aifAccountPixels = (accountId: string): Promise<{ id: string; name: string }[]> =>
   accountPixels(accountId, CAT);
+
+/** The conversion pixel of an AIF account, derived LIVE from the token's own data
+ *  (act_<id>/adspixels — owner ask 2026-09-02: no hardcoded pixel id). Selection rule shared
+ *  with the card's display (pickAifPixel). Throws a 400-shaped FbError naming the BM remedy
+ *  when no pixel is derivable — conversion launches must refuse BEFORE anything is claimed or
+ *  created rather than guess where Purchase optimization lands. */
+export async function aifDerivedPixel(accountId: string): Promise<Bound> {
+  const pixels = await accountPixels(accountId, CAT);
+  const pick = pickAifPixel(pixels);
+  if (!pick) {
+    const names = pixels.map((p) => `${p.name} (${p.id})`).join(", ");
+    throw new FbError(
+      pixels.length === 0
+        ? `no_pixel_on_account — share the AIF postback pixel to act_${accountId} in Business Manager first (or launch with Clicks optimization)`
+        : `pixel_ambiguous — act_${accountId} carries ${pixels.length} pixels (${names}); leave exactly one (or a single AIF-named one) shared in BM`,
+      { accountId },
+      400,
+    );
+  }
+  return pick;
+}
 export const aifAdvertisablePages = (): Promise<FanPage[]> => advertisablePages(CAT);
 export const aifIsAdvertisablePage = (pageId: string): Promise<boolean> => isAdvertisablePage(pageId, CAT);
 export const aifAdvertisablePageName = (pageId: string): Promise<string> => advertisablePageName(pageId, CAT);

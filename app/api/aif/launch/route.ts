@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { type Campaign, bidAmountMissing, bidKind, normalizeRoasGoal, parseMoney } from "@/lib/types";
-import { AIF_PIXEL, type PartnerId, fullLandingUrl, partnerConfig } from "@/lib/partners";
+import { type PartnerId, fullLandingUrl, partnerConfig } from "@/lib/partners";
 import {
   type LaunchBinds,
   SUPPORTED_BID_STRATEGIES,
@@ -16,9 +16,9 @@ import { FbError, withFbBudget, withParentRetry } from "@/lib/fb-graph";
 import { fetchValidatedImage } from "@/lib/fb-media";
 import {
   aifAccountName,
-  aifAccountPixels,
   aifAdvertisablePageName,
   aifCreateAdset,
+  aifDerivedPixel,
   aifFbGet,
   aifFbPost,
   aifIsAdvertisablePage,
@@ -85,10 +85,10 @@ async function resolveLocales(names: string[]): Promise<number[]> {
  * for stage (same NDJSON events, same Task Manager pipeline), with the rail's own pieces:
  * the tree is built on the AIF token, the marker comes from the BRAND registry (aif-maps,
  * test01..test700), the ad link is the partner's RW page with the destination slug, and the
- * pixel is derived server-side — conversions pin the AIF postback pixel + Purchase, clicks
- * carry no pixel at all. Min-ROAS (enabled 2026-08-21) is a conversion launch on that same
- * derived pixel — fb-launch pins goal VALUE + the ×10000 roas_average_floor, recipe identical
- * to MO's.
+ * pixel is derived server-side — conversions carry the picked account's own postback pixel,
+ * pulled LIVE via the token (aifDerivedPixel, no hardcoded id) + Purchase; clicks carry no
+ * pixel at all. Min-ROAS (enabled 2026-08-21) is a conversion launch on that same derived
+ * pixel — fb-launch pins goal VALUE + the ×10000 roas_average_floor, recipe identical to MO's.
  */
 export async function POST(req: Request) {
   // Proxy-gated, but self-checks the session too (parity with /api/launch).
@@ -140,7 +140,7 @@ export async function POST(req: Request) {
     accountId: pickedAccount,
     pageId: pickedPage,
     pageName: "", // resolved below, once the picked page passes validation
-    pixelId: conversions ? AIF_PIXEL.id : "",
+    pixelId: "", // conversions derive it below, from the token's own account data
   };
   // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST.
   if (!(await accountAllowedFor(session, pickedAccount))) {
@@ -174,24 +174,19 @@ export async function POST(req: Request) {
     }
     // DSA beneficiary/payor for EU-reaching ad sets — same rule as MO (live failure 2026-08-10).
     binds.pageName = await aifAdvertisablePageName(pickedPage);
-    // Conversion launches may only optimize on the AIF postback pixel, and that pixel must be
-    // shared to the picked ad account in BM — otherwise Meta rejects the ad set AFTER the
-    // campaign exists (orphan + burnt brand). Rejected here with the real remedy named.
+    // Conversion launches optimize on the account's own postback pixel, derived LIVE from the
+    // token's data (aifDerivedPixel — no hardcoded id, owner ask 2026-09-02). An account with
+    // no derivable pixel throws a 400-shaped FbError naming the BM remedy — refused here,
+    // BEFORE anything is claimed, else Meta rejects the ad set AFTER the campaign exists
+    // (orphan + burnt brand).
     if (conversions) {
-      const pixels = await aifAccountPixels(pickedAccount);
-      if (!pixels.some((p) => p.id === AIF_PIXEL.id)) {
-        return NextResponse.json(
-          {
-            ok: false,
-            stage: "config",
-            error: `pixel_not_on_account — share the AIF pixel ${AIF_PIXEL.id} to this ad account in Business Manager first (or launch with Clicks optimization)`,
-          },
-          { status: 400 },
-        );
-      }
+      binds.pixelId = (await aifDerivedPixel(pickedAccount)).id;
     }
   } catch (e) {
-    const err = e as { message?: string };
+    const err = e as FbError;
+    if (err instanceof FbError && err.status === 400) {
+      return NextResponse.json({ ok: false, stage: "config", error: err.message }, { status: 400 });
+    }
     return NextResponse.json(
       { ok: false, stage: "config", error: `destination check failed: ${err.message ?? String(e)}` },
       { status: 502 },

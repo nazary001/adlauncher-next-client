@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { AIF_PIXEL, ROAS_PIXEL, partnerConfig, type PartnerId } from "@/lib/partners";
+import { ROAS_PIXEL, partnerConfig, type PartnerId } from "@/lib/partners";
 import { resolveMoChannel } from "@/lib/mo-soc";
 import { bidAmountMissing, bidKind, moEnsureSocMark, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
@@ -19,6 +19,7 @@ import {
   aifAccountName,
   aifAccountPixels,
   aifAdvertisablePageName,
+  aifDerivedPixel,
   aifFbPost,
   aifIsAdvertisablePage,
   aifIsTokenAccount,
@@ -325,25 +326,19 @@ export async function POST(req: Request) {
             throw new FbError(ACCOUNT_NOT_ASSIGNED_MSG, { campaignId: edit.campaignId }, 403);
           }
           // AIF pixel policy is DERIVED, never picked (parity with /api/aif/launch): the pixel
-          // follows the OPTIMIZATION — conversion sources AND any clone switched to min-ROAS pin
-          // the postback pixel (shared to every AIF cabinet); click clones stay pixel-less. The
-          // RW link carries no &pixel= param, so only the adset needs it.
+          // follows the OPTIMIZATION — conversion sources AND any clone switched to min-ROAS
+          // carry the BUILD account's own postback pixel, pulled LIVE via the token
+          // (aifDerivedPixel — no hardcoded id, owner ask 2026-09-02); click clones stay
+          // pixel-less. The RW link carries no &pixel= param, so only the adset needs it.
+          // Derived on EVERY account, same-account clones included: the derivation replaces
+          // whatever the source promoted, and a cabinet with no derivable pixel throws the BM
+          // remedy here — BEFORE the brand marker is burned, not at adset-create time
+          // (review find 08-24).
           if (aif) {
             binds.pixelId =
-              bidKind(targetStrategy) === "roas" || /^\d{10,20}$/.test(src.pixelId) ? AIF_PIXEL.id : "";
-            // Validate on EVERY account, same-account clones included: the swap to AIF_PIXEL
-            // replaces whatever the source promoted, and a cabinet the shared pixel never
-            // reached would otherwise orphan the campaign only at adset-create time — after the
-            // brand marker is already burned (review find 08-24).
-            if (binds.pixelId) {
-              const pixels = await pixelsOf(binds.accountId);
-              if (!pixels.some((p) => p.id === binds.pixelId)) {
-                throw new FbError(
-                  `pixel_not_on_account — share the AIF pixel ${AIF_PIXEL.id} to act_${binds.accountId} in Business Manager first`,
-                  { campaignId: edit.campaignId },
-                );
-              }
-            }
+              bidKind(targetStrategy) === "roas" || /^\d{10,20}$/.test(src.pixelId)
+                ? (await aifDerivedPixel(binds.accountId)).id
+                : "";
           }
           // A conversion-optimized source cloned into ANOTHER account must carry a pixel of that
           // account (the source's pixel isn't valid there) — the adset's promoted_object and the

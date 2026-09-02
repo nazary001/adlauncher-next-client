@@ -164,9 +164,19 @@ export const ROAS_PIXEL: Bound = { id: "4367956310124642", name: "VD-C1-HS-1" };
 // feeds the partner's click-spam report. FB appends fbclid itself.
 export const AIF_RW_BASE = "https://content.honeyandhues.com/rewarded";
 export const AIF_CLIENT_ID = "52105";
-/** The AIF pixel — where the postback→CAPI forwarder (HS server) lands Purchase events. The ONLY
- *  pixel AIF conversion launches may optimize on; click launches carry no pixel at all. */
-export const AIF_PIXEL: Bound = { id: "2130695154991928", name: "AIF Rewarded" };
+/** Derive the AIF conversion pixel from an ACCOUNT'S OWN pixel list (pulled via the AIF token —
+ *  owner ask 2026-09-02: no hardcoded pixel id anywhere; the id and even the pixel's name have
+ *  already drifted once). Every AIF cabinet carries exactly the one postback pixel the CAPI
+ *  forwarder lands Purchases on; should extras ever get shared, a unique AIF-named one still
+ *  wins. null = underivable (no pixels, or several with no single AIF name) — conversion
+ *  launches must refuse rather than guess where Purchase optimization lands. Pure and shared:
+ *  the card derives its display from the picker catalog, the server re-derives from the same
+ *  token data at launch (lib/aif-launch aifDerivedPixel — the truth). */
+export function pickAifPixel(pixels: Bound[]): Bound | null {
+  if (pixels.length === 1) return pixels[0];
+  const aifNamed = pixels.filter((p) => /aif/i.test(p.name));
+  return aifNamed.length === 1 ? aifNamed[0] : null;
+}
 /** Brand pool test01..test700 (partner-assigned): 1–9 keep the doc's 2-digit zero-padded shape
  *  ("test01"), 10+ are plain. One brand = one buy campaign — the registry enforces it. */
 export const AIF_POOL_MAX = 700;
@@ -324,9 +334,10 @@ export function launchReadyOpts(p: PartnerConfig): {
     // LION builds ads from the typed destination link + title/copy — all hard-required by create/.
     link: Boolean(p.lionLaunch),
     adText: Boolean(p.lionLaunch),
-    // Min-ROAS pins the partner's value pixel: MO → VD-C1-HS-1, AIF → the postback CAPI pixel
-    // (the only pixel that rail ever optimizes on); LION partners validate pixels their own way.
-    roasPixel: p.aifLaunch ? AIF_PIXEL.id : p.accountsFromToken ? ROAS_PIXEL.id : "",
+    // Min-ROAS pins the partner's value pixel: MO → VD-C1-HS-1. AIF's pixel is DERIVED from the
+    // token's account data at launch (aifDerivedPixel) — no id to pin here; LION partners
+    // validate pixels their own way.
+    roasPixel: p.accountsFromToken && !p.aifLaunch ? ROAS_PIXEL.id : "",
   };
 }
 
@@ -407,9 +418,9 @@ export function fullLandingUrl(
 }
 
 /** Pin account/pixel/fanpage to the partner's single bound values (Indians), and keep AIF cards
- *  on their derived invariants: the pixel follows the optimization (conversions → the AIF pixel,
- *  clicks → none), the objective/event are pinned to SALES/Purchase (the only event the CAPI
- *  forwarder ever sends), and min-ROAS pins conversions + that same pixel (purchase-value
+ *  on their derived invariants: the pixel is derived server-side from the token's account data
+ *  at launch (never stored on the card), the objective/event are pinned to SALES/Purchase (the
+ *  only event the CAPI forwarder ever sends), and min-ROAS pins conversions (purchase-value
  *  optimization — same recipe as MO, enabled 2026-08-21).
  *  Pure and idempotent; covers fresh, duplicated, copy-to-all'ed and restored cards alike. */
 export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[] {
@@ -425,12 +436,12 @@ export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[
     if (fan && r.page !== fan) patch.page = fan;
     if (p.aifLaunch) {
       // Min-ROAS always optimizes purchase VALUE — the optimization pins to conversions (the
-      // card disables the select; this converges restored/copied drafts too) and the pixel then
-      // derives to the postback pixel below.
+      // card disables the select; this converges restored/copied drafts too).
       const roas = bidKind(r.bidStrategy) === "roas";
       if (roas && r.optimization !== "conversions") patch.optimization = "conversions";
-      const pixel = roas || r.optimization === "conversions" ? AIF_PIXEL.id : "";
-      if (r.pixel !== pixel) patch.pixel = pixel;
+      // The pixel is DERIVED server-side from the token's account data at launch — never stored
+      // on the card. Clearing converges old drafts that carried the once-hardcoded id.
+      if (r.pixel !== "") patch.pixel = "";
       if (r.objective !== "OUTCOME_SALES") patch.objective = "OUTCOME_SALES";
       if (r.conversionEvent !== "PURCHASE") patch.conversionEvent = "PURCHASE";
     }
