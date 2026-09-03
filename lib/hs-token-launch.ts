@@ -42,6 +42,23 @@ const POOL: HsPoolToken[] = [];
 
 export const hsTokenConfigured = (): boolean => POOL.length > 0;
 
+// ---- dedicated duplicate/JURO signer (owner ask 09-03) -----------------------------------------
+// The partner issues a SEPARATE user token for the duplicator + JURO rails ("Peter5gc", app
+// «Peter 5 GC Acc», a 299-account grant vs T1's 379). NOT a pool member: a different user breaks
+// the pool's same-user manageability invariant, and mid-wave rotation would strand calls on
+// accounts only one of the two can see. When FB_HS_DUP_TOKEN is set, token-duplicate and
+// token-jurar sign EVERY call with it (the shared health row still marks it by fingerprint on
+// 429/dead, so the gate and cooldowns work unchanged); unset → those rails ride the launch pool
+// exactly as before (mid-deploy safety).
+const DUP_RAW = process.env.FB_HS_DUP_TOKEN || "";
+const DUP_POOL: HsPoolToken[] = DUP_RAW
+  ? [{ token: DUP_RAW, fp: createHash("sha256").update(DUP_RAW).digest("hex").slice(0, 12), index: 1 }]
+  : [];
+const dupPool = (): HsPoolToken[] => (DUP_POOL.length > 0 ? DUP_POOL : POOL);
+export const hsDupTokenConfigured = (): boolean => dupPool().length > 0;
+/** True when the dedicated signer is live (vs falling back to the launch pool) — status/report. */
+export const hsDupTokenDedicated = (): boolean => DUP_POOL.length > 0;
+
 // Health = per-token cooldown marks in the SHARED app-cache row (Strapi), so every serverless
 // instance — and the header's status widget — sees the same failover state. Keyed by token
 // FINGERPRINT (sha256 prefix), never by the token itself. Module L1 keeps reads cheap.
@@ -136,10 +153,10 @@ export const hsPoolTokens = (): HsPoolToken[] => [...POOL];
 
 /** Next-call order: healthy tokens first in configured priority (T1 → T2), cooled-down ones
  *  last by soonest expiry — an expired cooldown gets retried naturally and clears on success. */
-async function orderedPool(): Promise<{ t: HsPoolToken; limited: boolean }[]> {
+async function orderedPool(pool: HsPoolToken[] = POOL): Promise<{ t: HsPoolToken; limited: boolean }[]> {
   const { row } = await readHealth();
   const now = Date.now();
-  const entries = POOL.map((t) => ({ t, limited: (row.health[t.fp]?.limitedUntil ?? 0) > now }));
+  const entries = pool.map((t) => ({ t, limited: (row.health[t.fp]?.limitedUntil ?? 0) > now }));
   return [
     ...entries.filter((e) => !e.limited),
     ...entries
@@ -151,6 +168,13 @@ async function orderedPool(): Promise<{ t: HsPoolToken; limited: boolean }[]> {
 /** The bearer the next call would use — for callers that need a RAW token (media migration). */
 export async function hsActiveToken(): Promise<string> {
   const order = await orderedPool();
+  if (order.length === 0) throw new FbError("no_hs_token", null, 500);
+  return order[0].t.token;
+}
+
+/** Dup/JURO twin of hsActiveToken: the dedicated signer's bearer (else the pool's next pick). */
+export async function hsDupActiveToken(): Promise<string> {
+  const order = await orderedPool(dupPool());
   if (order.length === 0) throw new FbError("no_hs_token", null, 500);
   return order[0].t.token;
 }
@@ -169,8 +193,8 @@ const isDeadTokenErr = (e: unknown): boolean =>
  * and propagates untouched (failing over would just repeat it). A token that answers fine while
  * still inside a cooldown mark heals the mark early.
  */
-async function poolCall<T>(fn: (token: string) => Promise<T>): Promise<T> {
-  const order = await orderedPool();
+async function poolCall<T>(fn: (token: string) => Promise<T>, pool: HsPoolToken[] = POOL): Promise<T> {
+  const order = await orderedPool(pool);
   if (order.length === 0) throw new FbError("no_hs_token", null, 500);
   let lastErr: unknown = null;
   for (const { t, limited } of order) {
@@ -218,19 +242,30 @@ async function poolCall<T>(fn: (token: string) => Promise<T>): Promise<T> {
  * tokens are exhausted, launches must be blocked with an explicit "tokens are out" error).
  */
 export async function hsTokenGate(): Promise<{ ok: true } | { ok: false; error: string; retryAt: number }> {
-  if (POOL.length === 0) return { ok: false, error: "hs_fb_token_missing", retryAt: 0 };
+  return tokenGate(POOL);
+}
+
+/** Dup/JURO twin: gates on the dedicated signer when configured (else the launch pool). Its
+ *  429/dead marks come from poolCall on the shared health row; the mark expires on cooldown
+ *  (the POOL prober doesn't probe the dedicated bearer — expiry is the re-open path). */
+export async function hsDupTokenGate(): Promise<{ ok: true } | { ok: false; error: string; retryAt: number }> {
+  return tokenGate(dupPool());
+}
+
+async function tokenGate(pool: HsPoolToken[]): Promise<{ ok: true } | { ok: false; error: string; retryAt: number }> {
+  if (pool.length === 0) return { ok: false, error: "hs_fb_token_missing", retryAt: 0 };
   const now = Date.now();
   const { row } = await readHealth();
-  if (POOL.some((t) => (row.health[t.fp]?.limitedUntil ?? 0) <= now)) return { ok: true };
+  if (pool.some((t) => (row.health[t.fp]?.limitedUntil ?? 0) <= now)) return { ok: true };
   await hsProbeTokenHealth(); // maybe a limit already lifted — the probe clears healed marks
   const { row: after } = await readHealth();
-  if (POOL.some((t) => (after.health[t.fp]?.limitedUntil ?? 0) <= Date.now())) return { ok: true };
-  const retryAt = Math.min(...POOL.map((t) => after.health[t.fp]?.limitedUntil ?? Date.now()));
+  if (pool.some((t) => (after.health[t.fp]?.limitedUntil ?? 0) <= Date.now())) return { ok: true };
+  const retryAt = Math.min(...pool.map((t) => after.health[t.fp]?.limitedUntil ?? Date.now()));
   const mins = Math.max(1, Math.ceil((retryAt - Date.now()) / 60_000));
   return {
     ok: false,
     retryAt,
-    error: `all_hs_tokens_limited — ${POOL.length === 1 ? "the FB launch token is" : `all ${POOL.length} FB launch tokens are`} rate-limited/dead right now; launches are blocked for ~${mins} min (the pool re-opens automatically — watch the Tokens widget in the header)`,
+    error: `all_hs_tokens_limited — ${pool.length === 1 ? "the FB token is" : `all ${pool.length} FB tokens are`} rate-limited/dead right now; launches are blocked for ~${mins} min (the pool re-opens automatically — watch the Tokens widget in the header)`,
   };
 }
 
@@ -341,6 +376,13 @@ export const hsVideoThumb = (videoId: string): Promise<string> => poolCall((tok)
 export const hsCreateAdset = (path: string, payload: Json): Promise<Json> =>
   poolCall((tok) => createAdsetSelfHealing(path, payload, tok));
 
+/** Dup/JURO twins of the Graph wrappers — the dedicated signer when configured, else the pool. */
+export const hsDupFbGet = (path: string): Promise<Json> => poolCall((tok) => fbGet(path, tok), dupPool());
+export const hsDupFbPost = (path: string, params: Json): Promise<Json> =>
+  poolCall((tok) => fbPost(path, params, tok), dupPool());
+export const hsDupCreateAdset = (path: string, payload: Json): Promise<Json> =>
+  poolCall((tok) => createAdsetSelfHealing(path, payload, tok), dupPool());
+
 /**
  * Best-effort bounded pause of a token-rail campaign whose build just failed: the tree is born
  * ACTIVE with only the +30 min start gap between a partial failure and unattended delivery.
@@ -348,9 +390,23 @@ export const hsCreateAdset = (path: string, payload: Json): Promise<Json> =>
  * pump on its own retry ladder; past the window the caller reports "not confirmed" honestly.
  */
 export async function hsPauseCampaign(campaignId: string, confirmMs = 20_000): Promise<boolean> {
+  return pauseCampaign(hsFbPost, campaignId, confirmMs);
+}
+
+/** Dup/JURO twin — pauses with the SAME signer that built the tree (a different user's bearer
+ *  might not manage it). */
+export async function hsDupPauseCampaign(campaignId: string, confirmMs = 20_000): Promise<boolean> {
+  return pauseCampaign(hsDupFbPost, campaignId, confirmMs);
+}
+
+async function pauseCampaign(
+  post: (path: string, params: Json) => Promise<Json>,
+  campaignId: string,
+  confirmMs: number,
+): Promise<boolean> {
   try {
     return await Promise.race([
-      hsFbPost(String(campaignId), { status: "PAUSED" }).then(
+      post(String(campaignId), { status: "PAUSED" }).then(
         () => true,
         () => false,
       ),
@@ -370,20 +426,33 @@ export async function hsPauseCampaign(campaignId: string, confirmMs = 20_000): P
 // OPEN — the Graph error itself is then the backstop, exactly the pre-filter behaviour).
 
 const ACCT_CACHE_MS = 10 * 60_000;
-let acctCache: { at: number; ids: Set<string> } | null = null;
-let acctInflight: Promise<Set<string> | null> | null = null;
+const acctCaches = new Map<string, { at: number; ids: Set<string> }>();
+const acctInflights = new Map<string, Promise<Set<string> | null>>();
 
 /** Digit ids of every ad account the HS token can act on (act_ stripped), or null when the
  *  sweep fails. One Graph pagination per 10 min across all callers. */
 export function hsTokenAccountIds(): Promise<Set<string> | null> {
-  if (acctCache && Date.now() - acctCache.at < ACCT_CACHE_MS) return Promise.resolve(acctCache.ids);
-  if (acctInflight) return acctInflight;
-  acctInflight = (async () => {
+  return tokenAccountIds("main", hsFbGet);
+}
+
+/** Dup/JURO twin: the DEDICATED signer's own grant (299 accs vs T1's 379 as of 09-03) — the
+ *  visibility pre-filter must match the bearer that will actually build, or waves die on the
+ *  first Graph POST with "Unsupported post request". Falls back with the pool. */
+export function hsDupTokenAccountIds(): Promise<Set<string> | null> {
+  return tokenAccountIds(hsDupTokenDedicated() ? "dup" : "main", hsDupFbGet);
+}
+
+function tokenAccountIds(cacheKey: string, get: (path: string) => Promise<Json>): Promise<Set<string> | null> {
+  const cached = acctCaches.get(cacheKey);
+  if (cached && Date.now() - cached.at < ACCT_CACHE_MS) return Promise.resolve(cached.ids);
+  const inflight = acctInflights.get(cacheKey);
+  if (inflight) return inflight;
+  const p = (async () => {
     try {
       const ids = new Set<string>();
       let after = "";
       for (let i = 0; i < 20; i++) {
-        const body = await hsFbGet(`me/adaccounts?fields=account_id&limit=500${after ? `&after=${encodeURIComponent(after)}` : ""}`);
+        const body = await get(`me/adaccounts?fields=account_id&limit=500${after ? `&after=${encodeURIComponent(after)}` : ""}`);
         for (const row of (body.data as { account_id?: unknown }[] | undefined) ?? []) {
           if (row?.account_id) ids.add(String(row.account_id));
         }
@@ -391,15 +460,16 @@ export function hsTokenAccountIds(): Promise<Set<string> | null> {
         after = paging?.next && paging.cursors?.after ? String(paging.cursors.after) : "";
         if (!after) break;
       }
-      acctCache = { at: Date.now(), ids };
+      acctCaches.set(cacheKey, { at: Date.now(), ids });
       return ids;
     } catch {
       return null; // transient Graph failure — no negative cache, next caller retries
     } finally {
-      acctInflight = null;
+      acctInflights.delete(cacheKey);
     }
   })();
-  return acctInflight;
+  acctInflights.set(cacheKey, p);
+  return p;
 }
 
 /** Partner rule: token-rail campaigns must not start delivering for ~30 minutes after creation

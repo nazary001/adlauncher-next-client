@@ -19,13 +19,13 @@ import { readAppCache, writeAppCache } from "@/lib/app-cache";
 import { stampHsTaskRow, upsertTaskRow } from "@/lib/task-store";
 import { FbError, withFbBudget } from "@/lib/fb-graph";
 import {
-  hsCreateAdset,
-  hsFbGet,
-  hsFbPost,
-  hsPauseCampaign,
-  hsTokenAccountIds,
-  hsTokenConfigured,
-  hsTokenGate,
+  hsDupCreateAdset,
+  hsDupFbGet,
+  hsDupFbPost,
+  hsDupPauseCampaign,
+  hsDupTokenAccountIds,
+  hsDupTokenConfigured,
+  hsDupTokenGate,
   hsTokenStartTime,
 } from "@/lib/hs-token-launch";
 import { SUPPORTED_BID_STRATEGIES, adPayload } from "@/lib/fb-launch";
@@ -126,8 +126,8 @@ export async function POST(req: Request): Promise<NextResponse> {
   const startedAt = Date.now();
   const session = sessionFromCookieHeader(req.headers.get("cookie"));
   if (!session) return bad("unauthorized", 401);
-  if (!hsTokenConfigured()) {
-    return bad("hs_fb_token_missing — set FB_HS_LAUNCH_TOKEN (or FB_HS_VOLUME_TOKEN) in the environment", 500);
+  if (!hsDupTokenConfigured()) {
+    return bad("hs_fb_token_missing — set FB_HS_DUP_TOKEN (or FB_HS_LAUNCH_TOKEN) in the environment", 500);
   }
   if (!lionConfigured()) return bad("lion_not_configured", 500);
 
@@ -208,7 +208,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   // granted — aleph, 08-19). A failed sweep (null) falls OPEN; an unreadable SOURCE still fails
   // per shot inside the pump with its own actionable reason.
   {
-    const visible = await hsTokenAccountIds();
+    const visible = await hsDupTokenAccountIds();
     if (visible && !visible.has(acctKey(account))) {
       return bad(
         "account_not_visible_to_fb_token — our FB token was never granted this ad account; run JURO on the LION API rail (or pick a token-visible account)",
@@ -257,7 +257,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   // the idempotency answers above (a re-POST of an accepted wave must say alreadyAccepted, not
   // 429 off the pool its own pump just burned — same order as token-duplicate).
   {
-    const gate = await hsTokenGate();
+    const gate = await hsDupTokenGate();
     if (!gate.ok) return bad(gate.error, 429);
   }
 
@@ -335,7 +335,7 @@ async function readJuroTree(campaignId: string): Promise<JuroTree> {
     // of what LION's details read offers, so token JURO also covers launcher-born sources.
     "ads.limit(25){creative{effective_object_story_id,object_story_id}}",
   ].join(",");
-  const obj = await hsFbGet(`${campaignId}?fields=${encodeURIComponent(fields)}`);
+  const obj = await hsDupFbGet(`${campaignId}?fields=${encodeURIComponent(fields)}`);
   const adset = ((obj.adsets as { data?: Json[] } | undefined)?.data?.[0] ?? {}) as Json;
   const ads = ((obj.ads as { data?: Json[] } | undefined)?.data ?? []) as Json[];
   const stories = [
@@ -448,7 +448,7 @@ async function juroPageName(pageId: string, cache: Map<string, string>): Promise
   if (hit !== undefined) return hit;
   let bodyName = "";
   try {
-    const body = await hsFbGet(`${pageId}?fields=name`);
+    const body = await hsDupFbGet(`${pageId}?fields=name`);
     bodyName = typeof body.name === "string" ? body.name : "";
   } catch (e) {
     // Pool-wide limit keeps its own message (transient); anything else = the token genuinely
@@ -558,7 +558,7 @@ async function pumpTokenJuro(
         for (let m = 0; m < wire.stories.length; m++) {
           const adName = wire.stories.length > 1 ? `${name} · ${m + 1}` : name;
           try {
-            const creative = await hsFbPost(`act_${binds.account}/adcreatives`, {
+            const creative = await hsDupFbPost(`act_${binds.account}/adcreatives`, {
               name: adName,
               object_story_id: wire.stories[m],
             });
@@ -575,7 +575,7 @@ async function pumpTokenJuro(
 
         // campaign — CBO with the buyer's budget, the source's objective, the EFFECTIVE bid
         // strategy (per-row switch or the source's), ACTIVE.
-        const camp = await hsFbPost(`act_${binds.account}/campaigns`, {
+        const camp = await hsDupFbPost(`act_${binds.account}/campaigns`, {
           name,
           objective: tree.objective,
           status: "ACTIVE",
@@ -589,7 +589,7 @@ async function pumpTokenJuro(
         // adset — FRESH jurar-style targeting (geo/locales from the wire, 18–65, Advantage+
         // placements), the binds' pixel with jurar's conversion pairing (PURCHASE on min-ROAS,
         // CONTENT_VIEW otherwise), the partner's +30 min start gap, the page's DSA declaration;
-        // regional declarations self-heal inside hsCreateAdset.
+        // regional declarations self-heal inside hsDupCreateAdset.
         const adsetPayload: Json = {
           name,
           campaign_id: String(camp.id),
@@ -608,7 +608,7 @@ async function pumpTokenJuro(
         if (wire.bidConstraints) adsetPayload.bid_constraints = wire.bidConstraints;
         const cats = juroTokenRegionalCategories(wire.countries);
         if (cats.length) adsetPayload.regional_regulated_categories = cats;
-        const adset = await hsCreateAdset(`act_${binds.account}/adsets`, adsetPayload);
+        const adset = await hsDupCreateAdset(`act_${binds.account}/adsets`, adsetPayload);
         created.adset_id = String(adset.id);
         await rowWrite(user, s.taskId, { status: "running", stage: "ads", adset_id: created.adset_id });
 
@@ -617,7 +617,7 @@ async function pumpTokenJuro(
         const adIds: string[] = [];
         for (let m = 0; m < creativeIds.length; m++) {
           const adName = creativeIds.length > 1 ? `${name} · ${m + 1}` : name;
-          const ad = await hsFbPost(`act_${binds.account}/ads`, adPayload(adName, String(adset.id), creativeIds[m]));
+          const ad = await hsDupFbPost(`act_${binds.account}/ads`, adPayload(adName, String(adset.id), creativeIds[m]));
           if (!ad.id) throw new FbError("ad create returned no id", ad);
           adIds.push(String(ad.id));
           // Progress lands on `created` AS ads are born — the catch below reads it to know
@@ -655,12 +655,12 @@ async function pumpTokenJuro(
         // unattended delivery — pause the campaign (bounded) and put the confirmed state into
         // the row, same contract as the other token rails.
         const disposition = launchFailureDisposition(created);
-        const pausedOk = disposition.pauseNeeded ? await hsPauseCampaign(String(created.campaign_id)) : false;
+        const pausedOk = disposition.pauseNeeded ? await hsDupPauseCampaign(String(created.campaign_id)) : false;
         // No ad ever referenced the pre-built story creatives → they are orphans; best-effort
         // delete keeps the account's creative library clean (they never deliver either way).
         if (disposition.adsLive === 0 && Array.isArray(created.creative_ids)) {
           for (const cid of created.creative_ids as string[]) {
-            await hsFbPost(String(cid), { method: "delete" }).catch(() => {});
+            await hsDupFbPost(String(cid), { method: "delete" }).catch(() => {});
           }
         }
         s.settled = true;

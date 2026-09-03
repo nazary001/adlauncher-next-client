@@ -14,14 +14,14 @@ import { readAppCache, writeAppCache } from "@/lib/app-cache";
 import { stampHsTaskRow, upsertTaskRow } from "@/lib/task-store";
 import { FbError, withFbBudget } from "@/lib/fb-graph";
 import {
-  hsActiveToken,
-  hsCreateAdset,
-  hsFbGet,
-  hsFbPost,
-  hsPauseCampaign,
-  hsTokenAccountIds,
-  hsTokenConfigured,
-  hsTokenGate,
+  hsDupActiveToken,
+  hsDupCreateAdset,
+  hsDupFbGet,
+  hsDupFbPost,
+  hsDupPauseCampaign,
+  hsDupTokenAccountIds,
+  hsDupTokenConfigured,
+  hsDupTokenGate,
   hsTokenStartTime,
 } from "@/lib/hs-token-launch";
 import {
@@ -123,8 +123,8 @@ export async function POST(req: Request): Promise<NextResponse> {
   const startedAt = Date.now();
   const session = sessionFromCookieHeader(req.headers.get("cookie"));
   if (!session) return bad("unauthorized", 401);
-  if (!hsTokenConfigured()) {
-    return bad("hs_fb_token_missing — set FB_HS_LAUNCH_TOKEN (or FB_HS_VOLUME_TOKEN) in the environment", 500);
+  if (!hsDupTokenConfigured()) {
+    return bad("hs_fb_token_missing — set FB_HS_DUP_TOKEN (or FB_HS_LAUNCH_TOKEN) in the environment", 500);
   }
   if (!lionConfigured()) return bad("lion_not_configured", 500);
 
@@ -208,7 +208,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   // Graph blip can't block clones into provably-fine accounts. (An unreadable SOURCE still fails
   // per shot inside the pump — its account is only known after the source read.)
   {
-    const visible = await hsTokenAccountIds();
+    const visible = await hsDupTokenAccountIds();
     if (visible && !visible.has(acctKey(account))) {
       return bad(
         "account_not_visible_to_fb_token — our FB token was never granted this ad account; duplicate on the LION API rail (or pick a token-visible account)",
@@ -257,7 +257,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   // the idempotency answers above: a re-POST of an already-accepted wave must say
   // alreadyAccepted, not 429 off the pool its own pump just burned (review find 08-24).
   {
-    const gate = await hsTokenGate();
+    const gate = await hsDupTokenGate();
     if (!gate.ok) return bad(gate.error, 429);
   }
 
@@ -340,7 +340,7 @@ async function readSourceTree(campaignId: string): Promise<SourceTree> {
     "adsets.limit(1){targeting,optimization_goal,billing_event,promoted_object,bid_amount,bid_constraints,bid_strategy}",
     "ads.limit(10){creative{object_story_spec,asset_feed_spec}}",
   ].join(",");
-  const obj = await hsFbGet(`${campaignId}?fields=${encodeURIComponent(fields)}`);
+  const obj = await hsDupFbGet(`${campaignId}?fields=${encodeURIComponent(fields)}`);
   const adset = ((obj.adsets as { data?: Json[] } | undefined)?.data?.[0] ?? {}) as Json;
   const ads = ((obj.ads as { data?: Json[] } | undefined)?.data ?? []) as Json[];
   const medias = ads.map((a) => extractAdMedia(a)).filter((m): m is SourceMedia => m !== null);
@@ -476,7 +476,7 @@ async function pumpTokenBatch(
             const mKey = `${s.campaignId}:${m}→${binds.account}`;
             let done = migratedCache.get(mKey);
             if (!done) {
-              done = await migrateMediaToAccount(tree.medias[m], tree.accountId, binds.account, `${s.name || tree.name} · media ${m + 1}`, await hsActiveToken());
+              done = await migrateMediaToAccount(tree.medias[m], tree.accountId, binds.account, `${s.name || tree.name} · media ${m + 1}`, await hsDupActiveToken());
               migratedCache.set(mKey, done);
             }
             migrated.push(done);
@@ -491,7 +491,7 @@ async function pumpTokenBatch(
 
         // campaign — CBO with the buyer's budget, the source's objective, the EFFECTIVE bid
         // strategy (per-row switch or the source's), ACTIVE.
-        const camp = await hsFbPost(`act_${binds.account}/campaigns`, {
+        const camp = await hsDupFbPost(`act_${binds.account}/campaigns`, {
           name,
           objective: tree.objective,
           status: "ACTIVE",
@@ -505,7 +505,7 @@ async function pumpTokenBatch(
         // adset — the source's targeting VERBATIM (faithful duplicate) unless the buyer set a
         // Targeting override (geo/locales swapped in, everything else — age, placements,
         // advantage flags — stays the source's), the binds' pixel, the partner's +30 min start
-        // gap; regional declarations self-heal inside hsCreateAdset.
+        // gap; regional declarations self-heal inside hsDupCreateAdset.
         let targeting = JSON.parse(JSON.stringify(tree.adset.targeting ?? {})) as Json;
         delete targeting.age_range; // read-only echo field
         if (s.override) targeting = applyGeoOverride(targeting, s.override);
@@ -541,12 +541,12 @@ async function pumpTokenBatch(
         if (bidAmount != null) adsetPayload.bid_amount = bidAmount;
         if (bidConstraints) adsetPayload.bid_constraints = bidConstraints;
         // A WW override needs the TW/SG universal-ads declarations up front (further regions
-        // self-heal inside hsCreateAdset, same as the launcher's create path).
+        // self-heal inside hsDupCreateAdset, same as the launcher's create path).
         if (s.override) {
           const cats = geoOverrideRegionalCategories(s.override);
           if (cats.length) adsetPayload.regional_regulated_categories = cats;
         }
-        const adset = await hsCreateAdset(`act_${binds.account}/adsets`, adsetPayload);
+        const adset = await hsDupCreateAdset(`act_${binds.account}/adsets`, adsetPayload);
         created.adset_id = String(adset.id);
         await rowWrite(user, s.taskId, { status: "running", stage: "ads", adset_id: created.adset_id });
 
@@ -558,11 +558,11 @@ async function pumpTokenBatch(
         const adIds: string[] = [];
         for (let m = 0; m < medias.length; m++) {
           const adName = medias.length > 1 ? `${name} · ${m + 1}` : name;
-          const creative = await hsFbPost(
+          const creative = await hsDupFbPost(
             `act_${binds.account}/adcreatives`,
             cloneCreativePayload(adName, binds.page, medias[m], "", "", (l) => swapPixel(l, binds.pixel)),
           );
-          const ad = await hsFbPost(`act_${binds.account}/ads`, adPayload(adName, String(adset.id), String(creative.id)));
+          const ad = await hsDupFbPost(`act_${binds.account}/ads`, adPayload(adName, String(adset.id), String(creative.id)));
           if (!ad.id) throw new FbError("ad create returned no id", ad);
           adIds.push(String(ad.id));
           // Progress lands on `created` AS ads are born — the catch below reads it to know
@@ -600,7 +600,7 @@ async function pumpTokenBatch(
         // failure and unattended delivery — pause the campaign (bounded) and put the confirmed
         // state into the row, same contract as the launch rails (review find 08-24).
         const disposition = launchFailureDisposition(created);
-        const pausedOk = disposition.pauseNeeded ? await hsPauseCampaign(String(created.campaign_id)) : false;
+        const pausedOk = disposition.pauseNeeded ? await hsDupPauseCampaign(String(created.campaign_id)) : false;
         s.settled = true;
         await rowWrite(user, s.taskId, {
           status: "error",
