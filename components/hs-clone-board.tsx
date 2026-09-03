@@ -489,15 +489,29 @@ export function HsCloneBoard({
   // wave cap is tighter (mirrors the server's MAX_TOKEN_SHOTS).
   const MAX_SHOTS_PER_FIRE = 45;
   const MAX_TOKEN_SHOTS_PER_FIRE = 10;
-  // Whole launch-token pool burned → the token rail is closed (the server gate refuses waves
+  // The token rails HERE sign with the duplicate/JURO signer (dedicated FB_HS_DUP_TOKEN since
+  // 09-03, else the launch pool) — ITS health gates the channel (the server gate refuses waves
   // anyway — this keeps the click honest instead of round-tripping into a 429).
   const tokenStatus = useHsTokenStatus();
-  const tokensDown = hsTokensAllDown(tokenStatus.tokens, tokenStatus.loaded);
+  const dupSigner = tokenStatus.dup;
+  const tokensDown = tokenStatus.loaded
+    ? dupSigner?.dedicated
+      ? dupSigner.state !== "ok"
+      : hsTokensAllDown(tokenStatus.tokens, tokenStatus.loaded)
+    : false;
 
-  // FB Token rails: offer only accounts OUR token can act on — LION binds cover segments the
-  // token was never granted (aleph, 08-19), and a build there dies on the first Graph POST. null
-  // sweep → no filtering (fail open; the server guard still answers with the actionable error).
-  const tokenVisible = tokenRail ? (data?.tokenAccounts ?? null) : null;
+  // "Signs as Peter5gc (Peter 5 GC Acc)" — the owner-visible truth of WHO builds token-rail
+  // waves (ask 09-03: entering the cloner must show the new token). Falls back honestly while
+  // the status is loading or when no dedicated bearer is configured.
+  const signerLabel = dupSigner
+    ? `${dupSigner.user || "our FB token"}${dupSigner.app ? ` (${dupSigner.app})` : ""}${dupSigner.dedicated ? "" : " — launch pool"}`
+    : "our FB token";
+
+  // FB Token rails: offer only accounts the DUP signer can act on (its grant is its own — 299
+  // accs vs the pool's 379 as of 09-03) — LION binds cover segments a token was never granted
+  // (aleph, 08-19), and a build there dies on the first Graph POST. null sweep → no filtering
+  // (fail open; the server guard still answers with the actionable error).
+  const tokenVisible = tokenRail ? (data?.dupTokenAccounts ?? data?.tokenAccounts ?? null) : null;
   const accountOptions =
     tokenVisible !== null ? (data?.accounts ?? []).filter((a) => tokenVisible.has(a.value)) : (data?.accounts ?? []);
   // A picked account that the rail switch just hid would submit a bind the picker can't display —
@@ -706,9 +720,9 @@ export function HsCloneBoard({
                       down: tokensDown,
                       hint: hs.tokenLaunch
                         ? tokensDown
-                          ? "All FB launch tokens are rate-limited — the rail re-opens after a cooldown (see the Tokens widget)"
-                          : undefined
-                        : "FB token not configured on the server (FB_HS_LAUNCH_TOKEN)",
+                          ? "The FB token is rate-limited/dead — the rail re-opens after a cooldown (see the Tokens widget)"
+                          : `Signs as ${signerLabel}`
+                        : "FB token not configured on the server (FB_HS_DUP_TOKEN / FB_HS_LAUNCH_TOKEN)",
                     },
                   ].map((opt) => {
                     const active = (mode === "juro" ? juroChannel : dupChannel) === opt.key;
@@ -748,11 +762,13 @@ export function HsCloneBoard({
                   }
                 >
                   {tokenRail && tokensDown
-                    ? "All FB launch tokens are rate-limited — this rail is blocked until a cooldown lifts; fire on LION API or wait"
+                    ? dupSigner?.dedicated
+                      ? `The ${dupSigner.user || "duplicate/JURO"} token is rate-limited/dead — this rail is blocked until its cooldown lifts; fire on LION API or wait`
+                      : "All FB launch tokens are rate-limited — this rail is blocked until a cooldown lifts; fire on LION API or wait"
                     : effDupChannel === "token"
-                      ? `Our FB token rebuilds each tree · starts +30 min · max ${MAX_TOKEN_SHOTS_PER_FIRE}/wave`
+                      ? `Signs as ${signerLabel} · rebuilds each tree · starts +30 min · max ${MAX_TOKEN_SHOTS_PER_FIRE}/wave`
                       : effDupChannel === "juro-token"
-                        ? `Our FB token relaunches the posts (social proof kept) · source languages preserved · starts +30 min · max ${MAX_TOKEN_SHOTS_PER_FIRE}/wave`
+                        ? `Signs as ${signerLabel} · relaunches the posts (social proof kept) · starts +30 min · max ${MAX_TOKEN_SHOTS_PER_FIRE}/wave`
                         : effDupChannel === "juro"
                           ? "New campaign from the source's page posts (social proof kept) · geo/languages editable per row · born ACTIVE"
                           : "LION's clone weapon builds on the weapon side"}

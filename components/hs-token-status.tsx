@@ -21,6 +21,10 @@ export type HsTokenRow = {
 };
 type TokenRow = HsTokenRow;
 
+/** The DUPLICATE/JURO rails' signer (dedicated bearer since 09-03, else the pool's active
+ *  token) — powers the cloner's "signs as …" badge next to the FB Token channel pick. */
+export type HsDupTokenRow = Omit<HsTokenRow, "active"> & { dedicated: boolean };
+
 const POLL_MS = 60_000;
 
 /** Every configured launch bearer is burned right now → the boards must not fire token-rail
@@ -28,8 +32,9 @@ const POLL_MS = 60_000;
 export const hsTokensAllDown = (tokens: HsTokenRow[], loaded: boolean): boolean =>
   loaded && tokens.length > 0 && tokens.every((t) => t.state !== "ok");
 
-export function useHsTokenStatus(enabled = true): { tokens: TokenRow[]; loaded: boolean } {
+export function useHsTokenStatus(enabled = true): { tokens: TokenRow[]; dup: HsDupTokenRow | null; loaded: boolean } {
   const [tokens, setTokens] = useState<TokenRow[]>([]);
+  const [dup, setDup] = useState<HsDupTokenRow | null>(null);
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     if (!enabled) return;
@@ -37,10 +42,11 @@ export function useHsTokenStatus(enabled = true): { tokens: TokenRow[]; loaded: 
     async function load() {
       try {
         const r = await fetch("/api/hs/token-status");
-        const d = (await r.json().catch(() => ({}))) as { ok?: boolean; tokens?: TokenRow[] };
+        const d = (await r.json().catch(() => ({}))) as { ok?: boolean; tokens?: TokenRow[]; dup?: HsDupTokenRow | null };
         if (!alive) return;
         if (r.ok && d?.ok && Array.isArray(d.tokens)) {
           setTokens(d.tokens);
+          setDup(d.dup ?? null);
           setLoaded(true);
         }
       } catch {
@@ -57,7 +63,7 @@ export function useHsTokenStatus(enabled = true): { tokens: TokenRow[]; loaded: 
       window.removeEventListener("focus", onFocus);
     };
   }, [enabled]);
-  return { tokens, loaded };
+  return { tokens, dup, loaded };
 }
 
 const dotTone = (t: TokenRow): string =>
@@ -77,7 +83,7 @@ function stateChip(t: TokenRow): { text: string; cls: string } {
 }
 
 export function HsTokenStatusWidget() {
-  const { tokens, loaded } = useHsTokenStatus();
+  const { tokens, dup, loaded } = useHsTokenStatus();
   const [open, setOpen] = useState(false);
   const boxRef = useRef<HTMLDivElement | null>(null);
 
@@ -174,9 +180,34 @@ export function HsTokenStatusWidget() {
               );
             })}
           </div>
+          {dup?.dedicated ? (
+            <>
+              <p className="px-1 pb-2 pt-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-faint">
+                Duplicate / JURO signer
+              </p>
+              <div
+                className="flex items-center justify-between gap-2 rounded-xl border border-accent/35 bg-accent/[0.07] px-2.5 py-2"
+                title={dup.reason || undefined}
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${dotTone(dup as unknown as TokenRow)}`} />
+                  <div className="min-w-0">
+                    <p className="truncate text-[12px] font-medium text-ink">{dup.app || "dedicated token"}</p>
+                    <p className="truncate font-mono text-[10px] text-faint">{dup.user || dup.fp}</p>
+                  </div>
+                </div>
+                <span
+                  className={`shrink-0 rounded-md border px-1.5 py-0.5 text-[10.5px] font-semibold ${stateChip({ ...dup, active: true } as TokenRow).cls}`}
+                >
+                  {stateChip({ ...dup, active: true } as TokenRow).text}
+                </span>
+              </div>
+            </>
+          ) : null}
           <p className="px-1 pt-2 text-[10.5px] leading-snug text-faint">
             Launches use the first healthy token; a rate-limited or dead one is skipped
             automatically and retried after its cooldown.
+            {dup?.dedicated ? " Duplicates and JURO sign with their own dedicated token." : ""}
           </p>
         </div>
       ) : null}

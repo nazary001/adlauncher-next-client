@@ -283,70 +283,76 @@ export type HsTokenProbe = HsTokenState & { state: "ok" | "limited" | "dead"; ac
 
 let probeCache: { at: number; states: HsTokenProbe[] } | null = null;
 
+/** One RAW health probe of a bearer: state + shared-row marks/identity, exactly the pool
+ *  prober's per-token body (extracted so the dedicated dup signer probes the same way). */
+async function probeOne(t: HsPoolToken): Promise<HsTokenState & { state: "ok" | "limited" | "dead" }> {
+  let state: "ok" | "limited" | "dead" = "ok";
+  let probeReason = "";
+  try {
+    const res = await fetch(`https://graph.facebook.com/v21.0/me?fields=id,name`, {
+      headers: { Authorization: `Bearer ${t.token}` },
+      cache: "no-store",
+      signal: AbortSignal.timeout(8_000),
+    });
+    const body = (await res.json().catch(() => ({}))) as {
+      id?: string;
+      name?: string;
+      error?: { code?: number; message?: string; is_transient?: boolean };
+    };
+    if (body.error) {
+      const code = body.error.code ?? 0;
+      probeReason = `(#${code}) ${body.error.message ?? ""}`.trim();
+      if (PROBE_RATE_CODES.has(code) || body.error.is_transient === true) {
+        state = "limited";
+        await hsMarkTokenLimited(t.fp, probeReason, PROBE_COOLDOWN_MS);
+      } else {
+        // 190 = dead session; anything else unexpected is equally unusable for launches.
+        state = "dead";
+        await hsMarkTokenLimited(t.fp, probeReason, code === 190 ? DEAD_COOLDOWN_MS : PROBE_COOLDOWN_MS);
+      }
+    } else if (body.id) {
+      const { row } = await readHealth();
+      if ((row.health[t.fp]?.limitedUntil ?? 0) > Date.now()) await hsClearTokenLimited(t.fp);
+      if (!row.names[t.fp]?.user || !row.names[t.fp]?.app) {
+        // Resolve display identity once: the user behind the bearer + the APP it was issued
+        // through (the (#4) limit is app-level — the app name IS the meaningful label).
+        let app = row.names[t.fp]?.app ?? "";
+        try {
+          const ares = await fetch(`https://graph.facebook.com/v21.0/app?fields=name`, {
+            headers: { Authorization: `Bearer ${t.token}` },
+            cache: "no-store",
+            signal: AbortSignal.timeout(8_000),
+          });
+          const abody = (await ares.json().catch(() => ({}))) as { name?: string };
+          if (abody.name) app = String(abody.name);
+        } catch {
+          /* name resolution is decoration */
+        }
+        await hsRememberTokenNames(t.fp, { user: String(body.name ?? ""), ...(app ? { app } : {}) });
+      }
+    }
+  } catch {
+    probeReason = "probe timeout"; // network blip — report, but never mark on it
+  }
+  const { row } = await readHealth();
+  const h = row.health[t.fp];
+  const limited = h && h.limitedUntil > Date.now() ? h : null;
+  return {
+    index: t.index,
+    fp: t.fp,
+    user: row.names[t.fp]?.user ?? "",
+    app: row.names[t.fp]?.app ?? "",
+    limitedUntil: limited?.limitedUntil ?? 0,
+    reason: limited?.reason || probeReason,
+    state: limited ? (state === "dead" ? "dead" : "limited") : state,
+  };
+}
+
 export async function hsProbeTokenHealth(): Promise<HsTokenProbe[]> {
   if (probeCache && Date.now() - probeCache.at < PROBE_TTL_MS) return probeCache.states;
   const states: (HsTokenState & { state: "ok" | "limited" | "dead" })[] = [];
   for (const t of POOL) {
-    let state: "ok" | "limited" | "dead" = "ok";
-    let probeReason = "";
-    try {
-      const res = await fetch(`https://graph.facebook.com/v21.0/me?fields=id,name`, {
-        headers: { Authorization: `Bearer ${t.token}` },
-        cache: "no-store",
-        signal: AbortSignal.timeout(8_000),
-      });
-      const body = (await res.json().catch(() => ({}))) as {
-        id?: string;
-        name?: string;
-        error?: { code?: number; message?: string; is_transient?: boolean };
-      };
-      if (body.error) {
-        const code = body.error.code ?? 0;
-        probeReason = `(#${code}) ${body.error.message ?? ""}`.trim();
-        if (PROBE_RATE_CODES.has(code) || body.error.is_transient === true) {
-          state = "limited";
-          await hsMarkTokenLimited(t.fp, probeReason, PROBE_COOLDOWN_MS);
-        } else {
-          // 190 = dead session; anything else unexpected is equally unusable for launches.
-          state = "dead";
-          await hsMarkTokenLimited(t.fp, probeReason, code === 190 ? DEAD_COOLDOWN_MS : PROBE_COOLDOWN_MS);
-        }
-      } else if (body.id) {
-        const { row } = await readHealth();
-        if ((row.health[t.fp]?.limitedUntil ?? 0) > Date.now()) await hsClearTokenLimited(t.fp);
-        if (!row.names[t.fp]?.user || !row.names[t.fp]?.app) {
-          // Resolve display identity once: the user behind the bearer + the APP it was issued
-          // through (the (#4) limit is app-level — the app name IS the meaningful label).
-          let app = row.names[t.fp]?.app ?? "";
-          try {
-            const ares = await fetch(`https://graph.facebook.com/v21.0/app?fields=name`, {
-              headers: { Authorization: `Bearer ${t.token}` },
-              cache: "no-store",
-              signal: AbortSignal.timeout(8_000),
-            });
-            const abody = (await ares.json().catch(() => ({}))) as { name?: string };
-            if (abody.name) app = String(abody.name);
-          } catch {
-            /* name resolution is decoration */
-          }
-          await hsRememberTokenNames(t.fp, { user: String(body.name ?? ""), ...(app ? { app } : {}) });
-        }
-      }
-    } catch {
-      probeReason = "probe timeout"; // network blip — report, but never mark on it
-    }
-    const { row } = await readHealth();
-    const h = row.health[t.fp];
-    const limited = h && h.limitedUntil > Date.now() ? h : null;
-    states.push({
-      index: t.index,
-      fp: t.fp,
-      user: row.names[t.fp]?.user ?? "",
-      app: row.names[t.fp]?.app ?? "",
-      limitedUntil: limited?.limitedUntil ?? 0,
-      reason: limited?.reason || probeReason,
-      state: limited ? state === "dead" ? "dead" : "limited" : state,
-    });
+    states.push(await probeOne(t));
   }
   // "active" = the token the next launch call would actually pick (orderedPool's head).
   const firstOk = states.findIndex((s) => s.state === "ok");
@@ -357,6 +363,26 @@ export async function hsProbeTokenHealth(): Promise<HsTokenProbe[]> {
   const out = states.map((s, i) => ({ ...s, active: i === activeIdx }));
   probeCache = { at: Date.now(), states: out };
   return out;
+}
+
+/** Identity + health of the DUPLICATE/JURO signer, for the boards' "signs as …" badge (owner
+ *  ask 09-03: entering the cloner must SHOW the FB Token channel runs on the new token).
+ *  dedicated=true → the FB_HS_DUP_TOKEN bearer; dedicated=false → no dedicated bearer is
+ *  configured and those rails ride the launch pool (the ACTIVE pool token is reported). */
+export type HsDupTokenProbe = HsTokenState & { state: "ok" | "limited" | "dead"; dedicated: boolean };
+
+let dupProbeCache: { at: number; state: HsDupTokenProbe } | null = null;
+
+export async function hsProbeDupToken(): Promise<HsDupTokenProbe | null> {
+  if (DUP_POOL.length === 0) {
+    const pool = await hsProbeTokenHealth();
+    const act = pool.find((p) => p.active) ?? pool[0];
+    return act ? { ...act, dedicated: false } : null;
+  }
+  if (dupProbeCache && Date.now() - dupProbeCache.at < PROBE_TTL_MS) return dupProbeCache.state;
+  const state: HsDupTokenProbe = { ...(await probeOne(DUP_POOL[0])), dedicated: true };
+  dupProbeCache = { at: Date.now(), state };
+  return state;
 }
 
 type Json = Record<string, unknown>;
