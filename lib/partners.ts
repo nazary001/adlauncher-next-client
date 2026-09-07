@@ -80,10 +80,12 @@ export type PartnerConfig = {
 // Ordered by niche — the picker emits a section header whenever `niche` changes.
 const MKLEARN_LANDINGS: Landing[] = [
   { slug: "auto-financing-explained", title: "Auto Financing Explained", lang: "EN", niche: "Cars" },
+  { slug: "auto-loans-2026", title: "Auto Loans 2026 – Rates & How to Apply", lang: "EN", niche: "Cars" },
   { slug: "financiamiento-de-auto", title: "Financiamiento de auto", lang: "ES", niche: "Cars" },
   { slug: "personal-loans", title: "Personal Loans Explained", lang: "EN", niche: "Loans" },
   { slug: "personal-lending-and-investment", title: "Personal Lending & Investment", lang: "EN", niche: "Loans" },
   { slug: "digital-marketing-skills-course", title: "Digital Marketing Skills Course", lang: "EN", niche: "MK Digital" },
+  { slug: "digital-marketing-jobs-2026", title: "Digital Marketing Jobs 2026 – Salary & How to Apply", lang: "EN", niche: "MK Digital" },
   { slug: "curso-marketing-digital", title: "Curso de Marketing Digital", lang: "ES", niche: "MK Digital" },
   { slug: "affiliate-marketing-basics-course", title: "Affiliate Marketing Basics", lang: "EN", niche: "MK Digital" },
   { slug: "ai-marketing-tools-course", title: "AI Marketing Tools Course", lang: "EN", niche: "MK Digital" },
