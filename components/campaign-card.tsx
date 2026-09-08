@@ -627,6 +627,14 @@ function CampaignCardBase({
                 <Field
                   label={partner.pageLabel}
                   className={setupCol}
+                  // HS: the picker offers only fankas hs-tools marks OK (server-filtered, owner
+                  // rule 09-07) — say how many the rule hid, so a missing page isn't mistaken
+                  // for a LION catalog gap.
+                  hint={
+                    hsMode && hsData && hsData.pages.length > 0 && hsData.pagesHidden > 0
+                      ? `${hsData.pagesHidden} fanka${hsData.pagesHidden === 1 ? "" : "s"} hidden — not OK in hs-tools`
+                      : undefined
+                  }
                   error={
                     hsMode
                       ? c.profile && hsData && !c.page
@@ -644,7 +652,15 @@ function CampaignCardBase({
                       options={hsData?.pages ?? []}
                       placeholder={partner.pagePlaceholder}
                       emptyHint={
-                        !c.profile ? "Pick a profile first" : hsData ? "No pages on this profile" : "Loading pages…"
+                        !c.profile
+                          ? "Pick a profile first"
+                          : !hsData
+                            ? "Loading pages…"
+                            : hsData.pagesUnavailable
+                              ? `No fankas offered — ${hsData.pagesUnavailable} (only OK fankas may launch)`
+                              : hsData.pagesHidden > 0
+                                ? `No OK fankas on this profile — ${hsData.pagesHidden} hidden by hs-tools status`
+                                : "No pages on this profile"
                       }
                       metaWhenClosed
                     />

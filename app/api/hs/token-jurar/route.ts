@@ -12,7 +12,7 @@ import {
   juroTokenRegionalCategories,
   juroTokenTargeting,
 } from "@/lib/juro";
-import { reportPagesUsed } from "@/lib/hs-pages";
+import { hsPageRefusal, reportPagesUsed } from "@/lib/hs-pages";
 import { type GeoOverride, parseGeoOverride } from "@/lib/targeting-override";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { readAppCache, writeAppCache } from "@/lib/app-cache";
@@ -535,6 +535,13 @@ async function pumpTokenJuro(
         if (typeof wire === "string") {
           familyFailed.set(s.campaignId, wire);
           throw new FbError(wire, { campaignId: s.campaignId });
+        }
+        // Owner rule 2026-09-07: the copy lands on the source post's OWN fanka — it must be OK in
+        // hs-tools like any picked page (family-scoped; nothing is built yet, the slot frees).
+        const fankaRefusal = await hsPageRefusal("br", wire.pages.map((p) => ({ id: p.pageId })));
+        if (fankaRefusal) {
+          familyFailed.set(s.campaignId, fankaRefusal.error);
+          throw new FbError(fankaRefusal.error, { campaignId: s.campaignId });
         }
 
         // Page-access pre-check + the DSA declaration value, BEFORE anything is created.

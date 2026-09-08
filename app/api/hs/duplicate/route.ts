@@ -1,8 +1,9 @@
 import { NextResponse, after } from "next/server";
 import { bidKind, parseMoney } from "@/lib/types";
+import { LION_NAME_SUFFIX_MAX } from "@/lib/hs-clone-name";
 import { hsWireBid } from "@/lib/hs-launch";
 import { overrideDeadlineError } from "@/lib/launch-guards";
-import { reportPagesUsed } from "@/lib/hs-pages";
+import { hsPageRefusal, reportPagesUsed } from "@/lib/hs-pages";
 import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { readAppCache, writeAppCache } from "@/lib/app-cache";
@@ -87,6 +88,10 @@ async function validateBinds(
   if (acct.status !== 1) return { error: bad("account_disabled") };
   const pageRow = data.pages.find((p) => p.id === page);
   if (!pageRow) return { error: bad("page_not_on_profile") };
+  // Owner rule 2026-09-07: clones may only land on fankas hs-tools marks OK (belt over the
+  // picker filter — profile-data hides the rest).
+  const fankaRefusal = await hsPageRefusal("br", [pageRow]);
+  if (fankaRefusal) return { error: bad(fankaRefusal.error, fankaRefusal.status) };
   let pixels;
   try {
     pixels = await lionAccountPixels(profile, account);
@@ -105,6 +110,8 @@ type BatchShot = {
   bid: number | null;
   bidStrategy: string;
   name: string;
+  /** LION `name_suffix` for this shot (see the wire type above). */
+  suffix: string;
   geo: string;
   label: string;
   taskId: string;
@@ -157,8 +164,12 @@ export async function POST(req: Request): Promise<NextResponse> {
        *  re-read strategy (the client's bidStrategy is only the unreadable-source fallback). */
       bid?: string;
       bidStrategy?: string;
-      /** Full clone name (fixed grammar prefix + edited tail); absent = LION rebuilds it. */
+      /** Full clone name (fixed grammar prefix + edited tail) — the row title and the geo-override
+       *  Graph rename. LION's duplicate/ never reads it (not in its contract). */
       name?: string;
+      /** The buyer's addition beyond the source's tail (lib/hs-clone-name) — the ONLY naming input
+       *  LION's duplicate/ honours, appended verbatim as `name_suffix`. */
+      suffix?: string;
       geo?: string;
       /** Row title for the shared task list (source name + copy counter). */
       label?: string;
@@ -222,6 +233,7 @@ export async function POST(req: Request): Promise<NextResponse> {
         bid,
         bidStrategy: String(raw?.bidStrategy ?? "").trim(),
         name: String(raw?.name ?? "").trim().slice(0, 200),
+        suffix: String(raw?.suffix ?? "").trim().slice(0, LION_NAME_SUFFIX_MAX),
         geo: String(raw?.geo ?? "").slice(0, 40) || "inherited",
         label: String(raw?.label ?? "").trim().slice(0, 200),
         override,
@@ -440,7 +452,6 @@ export async function POST(req: Request): Promise<NextResponse> {
       number_of_copies: copies,
       name_suffix: nameSuffix,
       ...(startingBid != null ? { starting_bid: startingBid } : {}),
-      ...(name ? { name } : {}),
     });
     const taskIds = (result.task_ids ?? []).map(String).filter(Boolean);
     if ((result.result === "success" || taskIds.length > 0) && taskIds.length > 0) {
@@ -599,9 +610,12 @@ async function pumpBatch(
           campaign_id: s.campaignId,
           starting_budget: Math.round(s.budget * 100),
           number_of_copies: 1, // single-copy shots → controllable pacing, gentler on the profile
-          name_suffix: "",
+          // The ONLY naming input LION's duplicate/ honours (partner docs 09-08): the buyer's
+          // addition beyond the source tail, appended after LION's own "<family> <lang> <random5>".
+          // The composed `name` stays on the row and drives the geo-override Graph rename — LION
+          // never read it, which is how every clone 08-14→09-08 lost its "- <buyer>" tail.
+          name_suffix: s.suffix,
           ...(startingBid != null ? { starting_bid: startingBid } : {}),
-          ...(s.name ? { name: s.name } : {}),
         });
         const lionTaskId = (result.task_ids ?? []).map(String).filter(Boolean)[0];
         if (lionTaskId) {

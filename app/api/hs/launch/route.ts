@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { Campaign } from "@/lib/types";
 import { hsCampaignError, hsCountryCodes, hsCreatePayload, todaySaoPauloDDMM } from "@/lib/hs-launch";
-import { reportPagesUsed } from "@/lib/hs-pages";
+import { hsPageRefusal, reportPagesUsed } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { stampHsTaskRow } from "@/lib/task-store";
 import { AcctLimitedError, acctKey, claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
@@ -70,7 +70,12 @@ export async function POST(req: Request): Promise<NextResponse> {
   const account = data.accounts.find((a) => a.id === c.account);
   if (!account) return bad("account_not_on_profile");
   if (account.status !== 1) return bad("account_disabled");
-  if (!data.pages.some((p) => p.id === c.page)) return bad("page_not_on_profile");
+  const pageRow = data.pages.find((p) => p.id === c.page);
+  if (!pageRow) return bad("page_not_on_profile");
+  // Owner rule 2026-09-07: only fankas hs-tools marks OK may launch — belt over the picker
+  // filter (profile-data hides the rest), holding for a crafted or stale-draft POST too.
+  const fankaRefusal = await hsPageRefusal("br", [pageRow]);
+  if (fankaRefusal) return bad(fankaRefusal.error, fankaRefusal.status);
   let pixels;
   try {
     pixels = await lionAccountPixels(c.profile, c.account);

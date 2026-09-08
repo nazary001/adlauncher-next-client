@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { filterAccountsFor } from "@/lib/acct-assignments";
+import { hsOfferablePages } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { hsDupTokenAccountIds, hsDupTokenConfigured, hsTokenAccountIds, hsTokenConfigured } from "@/lib/hs-token-launch";
 import { lionConfigured, lionProfileData } from "@/lib/lion";
@@ -40,7 +41,21 @@ export async function GET(req: Request): Promise<NextResponse> {
       const ids = await hsDupTokenAccountIds();
       if (ids) dupTokenAccounts = accounts.filter((a) => ids.has(a.id.replace(/^act_/, ""))).map((a) => a.id);
     }
-    return NextResponse.json({ ok: true, ...data, accounts, tokenAccounts, dupTokenAccounts });
+    // Owner rule 2026-09-07: the pickers offer ONLY fankas the hs-tools registry marks OK — every
+    // other state and every unregistered page is hidden here at the source (launcher card and
+    // clone board share this route); the creating routes refuse the same pages at fire time.
+    // Registry off/unreachable = NO pages offered (fail closed), the reason rides along.
+    const fankas = await hsOfferablePages("br", data.pages);
+    return NextResponse.json({
+      ok: true,
+      ...data,
+      accounts,
+      pages: fankas.pages,
+      pagesHidden: fankas.hidden,
+      pagesUnavailable: fankas.unavailable,
+      tokenAccounts,
+      dupTokenAccounts,
+    });
   } catch (e) {
     return NextResponse.json({ ok: false, error: String((e as Error).message) }, { status: 502 });
   }

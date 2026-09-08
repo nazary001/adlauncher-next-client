@@ -34,7 +34,7 @@ import {
   parseTokenCreatives,
 } from "@/lib/hs-token-launch";
 import { LION_ACR, LionError, lionAccountPixels, lionConfigured, lionProfileData } from "@/lib/lion";
-import { reportPagesUsed } from "@/lib/hs-pages";
+import { hsPageRefusal, reportPagesUsed } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { taskWriter } from "@/lib/task-store";
 import { acctKey, claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
@@ -123,6 +123,10 @@ export async function POST(req: Request): Promise<Response> {
   if (account.status !== 1) return bad("account_disabled");
   const page = data.pages.find((p) => p.id === c.page);
   if (!page) return bad("page_not_on_profile");
+  // Owner rule 2026-09-07: only fankas hs-tools marks OK may launch — belt over the picker
+  // filter (profile-data hides the rest), holding for a crafted or stale-draft POST too.
+  const fankaRefusal = await hsPageRefusal("br", [page]);
+  if (fankaRefusal) return bad(fankaRefusal.error, fankaRefusal.status);
   let pixels;
   try {
     pixels = await lionAccountPixels(c.profile, c.account);

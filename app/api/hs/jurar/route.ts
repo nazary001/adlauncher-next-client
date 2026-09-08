@@ -2,7 +2,7 @@ import { NextResponse, after } from "next/server";
 import { bidKind, parseMoney } from "@/lib/types";
 import { hsWireBid } from "@/lib/hs-launch";
 import { juroBlockingError, juroConversionEvent, juroStoryPages, juroWireCountries } from "@/lib/juro";
-import { reportPagesUsed } from "@/lib/hs-pages";
+import { hsPageRefusal, reportPagesUsed } from "@/lib/hs-pages";
 import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { readAppCache, writeAppCache } from "@/lib/app-cache";
@@ -423,6 +423,15 @@ async function pumpJuro(
         familyFailed.set(s.campaignId, wire);
         s.settled = true;
         await rowWrite(user, s.taskId, { status: "error", error: wire, finished_at: Date.now() });
+        continue;
+      }
+      // Owner rule 2026-09-07: JURO copies land on the source post's OWN fanka — it must be OK in
+      // hs-tools like any picked page (family-scoped: every copy of this source refuses alike).
+      const fankaRefusal = await hsPageRefusal("br", wire.pages.map((p) => ({ id: p.pageId })));
+      if (fankaRefusal) {
+        familyFailed.set(s.campaignId, fankaRefusal.error);
+        s.settled = true;
+        await rowWrite(user, s.taskId, { status: "error", error: fankaRefusal.error, finished_at: Date.now() });
         continue;
       }
       let slotDoc: string | null = null;

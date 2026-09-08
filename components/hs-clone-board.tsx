@@ -8,6 +8,7 @@ import { useHs } from "./use-hs";
 import { useHsTaskManager } from "./hs-task-manager";
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
 import { bidKind, limitMoney, limitMoneyCents, moneyLabel, parseMoney } from "@/lib/types";
+import { lionNameSuffix } from "@/lib/hs-clone-name";
 import { BID_STRATEGIES, geoSummary } from "@/lib/catalog";
 import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { juroEnsureMark } from "@/lib/juro";
@@ -456,8 +457,25 @@ export function HsCloneBoard({
     const st = hs.pageStats(pageId);
     return st !== null && (juroPageDemand.get(pageId) ?? 0) > st.free;
   };
+  // Owner rule 09-07: JURO lands on the source's own fanka, which must be OK in hs-tools like any
+  // picked page — a known non-OK (or unregistered) state blocks the row here with the reason the
+  // server would refuse it with; an unknown state (feed not landed) leaves the verdict to the
+  // server gate.
+  const juroPageBad = (pageId: string): string | null => {
+    const state = hs.pageState(pageId);
+    if (state === null || state === "ok") return null;
+    return state || "unregistered";
+  };
+  const juroBadCount =
+    mode === "juro"
+      ? validRows.filter((r) => (r.info?.pages ?? []).some((p) => juroPageBad(p.pageId) !== null)).length
+      : 0;
   const juroBlockedCount =
-    mode === "juro" ? validRows.filter((r) => (r.info?.pages ?? []).some((p) => juroPageOver(p.pageId))).length : 0;
+    mode === "juro"
+      ? validRows.filter((r) =>
+          (r.info?.pages ?? []).some((p) => juroPageOver(p.pageId) || juroPageBad(p.pageId) !== null),
+        ).length
+      : 0;
   // Sidebar fanka meter for JURO (owner ask 09-01, narrowed same day): ONLY the fanka(s) the
   // JURO copies actually land on — the source pages of the added rows — each with its live fill
   // and the wave's summed demand (+N, the rows' numbers aggregated where the buyer tunes
@@ -472,6 +490,7 @@ export function HsCloneBoard({
             need,
             st,
             over: st !== null && need > st.free,
+            bad: juroPageBad(pageId),
           };
         })
       : [];
@@ -596,9 +615,21 @@ export function HsCloneBoard({
           ? { suffix: r.suffix.trim() }
           : effDupChannel === "juro-token"
             ? { name: r.info?.name ? `${juroPrefixPreview(prefix)}${HS_TOKEN_MARK}${r.suffix.trim()}`.trim() : r.suffix.trim() }
-            : r.info?.name
-              ? { name: `${prefix}${mark}${r.suffix.trim()}`.trim() }
-              : {}),
+            : effDupChannel === "token"
+              ? r.info?.name
+                ? { name: `${prefix}${mark}${r.suffix.trim()}`.trim() }
+                : {}
+              : {
+                  // LION duplicate: LION writes the whole name itself and honours ONLY
+                  // name_suffix (partner docs 09-08), so the wire carries the buyer's ADDITION
+                  // beyond the source tail (default tail = source tail + owner → just the owner).
+                  // The composed name still rides for the row title + geo-override rename.
+                  suffix: lionNameSuffix(
+                    r.suffix,
+                    r.info?.name ? splitLionName(r.info.name, todaySaoPauloDDMM()).tail : "",
+                  ),
+                  ...(r.info?.name ? { name: `${prefix}${r.suffix.trim()}`.trim() } : {}),
+                }),
         // Targeting override — JURO sends it natively in the jurar wire; the other rails patch
         // the clone (token rail: before creating the ad set; LION rail: Graph after birth).
         ...(overridden ? { countries: r.countries } : {}),
@@ -814,7 +845,9 @@ export function HsCloneBoard({
                     page && boundPageStats && !pageOver
                       ? `${boundPageStats.approx ? "~" : ""}${boundPageStats.used}/${boundPageStats.limit} ads on this page · ${boundPageStats.approx ? "~" : ""}${boundPageStats.free} free` +
                         (pageAdsDemand > 0 ? ` · wave adds ${pageAdsDemand}` : "")
-                      : undefined
+                      : !page && data && data.pages.length > 0 && data.pagesHidden > 0
+                        ? `${data.pagesHidden} fanka${data.pagesHidden === 1 ? "" : "s"} hidden — not OK in hs-tools`
+                        : undefined
                   }
                   error={
                     page && boundPageStats && pageOver
@@ -830,7 +863,17 @@ export function HsCloneBoard({
                     }}
                     options={data?.pages ?? []}
                     placeholder="Search page"
-                    emptyHint={!profile ? "Pick a profile first" : data ? "No pages" : "Loading…"}
+                    emptyHint={
+                      !profile
+                        ? "Pick a profile first"
+                        : !data
+                          ? "Loading…"
+                          : data.pagesUnavailable
+                            ? `No fankas offered — ${data.pagesUnavailable} (only OK fankas may launch)`
+                            : data.pagesHidden > 0
+                              ? `No OK fankas on this profile — ${data.pagesHidden} hidden by hs-tools status`
+                              : "No pages"
+                    }
                   />
                 </Field>
               ) : (
@@ -853,7 +896,14 @@ export function HsCloneBoard({
                             <span className="truncate text-[11px] text-dim" title={`${p.name} · ${p.pageId}`}>
                               {p.name}
                             </span>
-                            {p.st ? (
+                            {p.bad ? (
+                              <span
+                                className="shrink-0 font-mono text-[10.5px] font-semibold uppercase text-danger"
+                                title={`hs-tools marks this fanka ${p.bad.toUpperCase()} — only OK fankas may launch; this source's JURO copies would be refused`}
+                              >
+                                not OK · {p.bad}
+                              </span>
+                            ) : p.st ? (
                               <span
                                 className={
                                   "shrink-0 font-mono text-[10.5px] tabular-nums " +
@@ -982,12 +1032,19 @@ export function HsCloneBoard({
                   page.
                 </p>
               ) : null}
-              {mode === "juro" && juroBlockedCount > 0 ? (
+              {mode === "juro" && juroBadCount > 0 ? (
                 <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
-                  {juroBlockedCount} source{juroBlockedCount === 1 ? "" : "s"} won&apos;t fit{" "}
-                  {juroBlockedCount === 1 ? "its" : "their"} own fanpage (JURO lands the ads
-                  there) — see the red meters in the Source page column. Lower copies or remove
-                  those rows.
+                  {juroBadCount} source{juroBadCount === 1 ? " sits" : "s sit"} on a fanpage hs-tools
+                  doesn&apos;t mark OK — JURO lands the ads there, and only OK fankas may launch.
+                  Remove those rows (see the Source page column).
+                </p>
+              ) : null}
+              {mode === "juro" && juroBlockedCount > juroBadCount ? (
+                <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
+                  {juroBlockedCount - juroBadCount} source{juroBlockedCount - juroBadCount === 1 ? "" : "s"}{" "}
+                  won&apos;t fit {juroBlockedCount - juroBadCount === 1 ? "its" : "their"} own fanpage
+                  (JURO lands the ads there) — see the red meters in the Source page column. Lower
+                  copies or remove those rows.
                 </p>
               ) : null}
               {strategyBidMissing > 0 ? (
@@ -1089,7 +1146,9 @@ export function HsCloneBoard({
                                 // ellipsis); token JURO's name is exact — board-built.
                                 if (effDupChannel === "juro") return `${juroPrefixPreview(p)}…`;
                                 if (effDupChannel === "juro-token") return juroPrefixPreview(p) + HS_TOKEN_MARK;
-                                return p + (effDupChannel === "token" ? HS_TOKEN_MARK : "");
+                                // LION duplicate: LION fills "<family> <lang> <random5>" itself (ellipsis), then
+                // appends the buyer's addition; token duplicates carry the exact board-built name.
+                return effDupChannel === "token" ? p + HS_TOKEN_MARK : `${p}…`;
                               })()
                             ) : (
                               "—"
@@ -1182,6 +1241,7 @@ export function HsCloneBoard({
                               // JURO charges the page with the WHOLE wave's ads on it (all rows).
                               const need = juroPageDemand.get(p.pageId) ?? p.ads * copiesN;
                               const over = mode === "juro" && juroPageOver(p.pageId);
+                              const bad = mode === "juro" ? juroPageBad(p.pageId) : null;
                               return (
                                 <div key={p.pageId} className="flex flex-col">
                                   <span
@@ -1190,7 +1250,14 @@ export function HsCloneBoard({
                                   >
                                     {name ?? p.pageId}
                                   </span>
-                                  {st ? (
+                                  {bad ? (
+                                    <span
+                                      className="font-mono text-[10.5px] font-semibold uppercase text-danger"
+                                      title={`hs-tools marks this fanka ${bad.toUpperCase()} — only OK fankas may launch; this source's JURO copies would be refused`}
+                                    >
+                                      not OK · {bad}
+                                    </span>
+                                  ) : st ? (
                                     <span
                                       className={
                                         "font-mono text-[10.5px] tabular-nums " +
@@ -1428,7 +1495,9 @@ export function HsCloneBoard({
                               ? `${juroPrefixPreview(relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries))}… ${r.suffix.trim()}`
                               : effDupChannel === "juro-token"
                                 ? `${juroPrefixPreview(relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries))}${HS_TOKEN_MARK}${r.suffix.trim()}`
-                                : `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}${effDupChannel === "token" ? HS_TOKEN_MARK : ""}${r.suffix.trim()}`
+                                : effDupChannel === "token"
+                                  ? `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}${HS_TOKEN_MARK}${r.suffix.trim()}`
+                                  : `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}… ${lionNameSuffix(r.suffix, splitLionName(r.info.name, todaySaoPauloDDMM()).tail)}`
                             ).slice(0, 110)
                           : `#${r.campaignId}`}
                       </span>{" "}

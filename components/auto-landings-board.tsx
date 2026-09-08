@@ -15,6 +15,7 @@ import {
   CheckIcon,
   PlusIcon,
   RetryIcon,
+  RocketIcon,
   SparklesIcon,
   TimerIcon,
   TrashIcon,
@@ -22,6 +23,7 @@ import {
 } from "./icons";
 import type { PartnerId } from "@/lib/partners";
 import type { AutoLandingJob } from "@/lib/auto-landings";
+import { AutoLaunchModal } from "./auto-launch-modal";
 import {
   MAX_BATCH,
   SCHEDULE_TZ,
@@ -455,6 +457,7 @@ export function AutoLandingsBoard({ user }: { user: SessionUser }) {
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(new Set());
   const [reschedFor, setReschedFor] = useState<string | null>(null);
   const [deleteFor, setDeleteFor] = useState<string | null>(null);
+  const [launchFor, setLaunchFor] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const withBusy = useCallback(
@@ -1041,6 +1044,16 @@ export function AutoLandingsBoard({ user }: { user: SessionUser }) {
                               Retry
                             </button>
                           ) : null}
+                          {j.status === "published" && j.slug && !busy ? (
+                            <button
+                              type="button"
+                              onClick={() => setLaunchFor(j.documentId)}
+                              className="flex h-7 items-center gap-1 rounded-lg border border-launch/40 bg-launch/10 px-2 text-[11px] font-semibold text-launch2 transition-colors hover:bg-launch/20"
+                            >
+                              <RocketIcon className="h-3 w-3" />
+                              Launch campaign
+                            </button>
+                          ) : null}
                           {(j.status === "published" || j.status === "failed" || j.status === "canceled") && !busy ? (
                             <div className="relative">
                               <button
@@ -1073,6 +1086,12 @@ export function AutoLandingsBoard({ user }: { user: SessionUser }) {
           </section>
         </div>
       </main>
+      {launchFor ? (
+        (() => {
+          const j = (jobs ?? []).find((x) => x.documentId === launchFor);
+          return j ? <AutoLaunchModal job={j} onClose={() => setLaunchFor(null)} /> : null;
+        })()
+      ) : null}
     </>
   );
 }
