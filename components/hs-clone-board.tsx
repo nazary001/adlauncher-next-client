@@ -48,6 +48,9 @@ type Row = {
     budget: number | null; // MAJOR $ (LION reads are major)
     bid: number | null;
     bidStrategy: string;
+    /** Source account billing currency ("" = unknown) — LION duplicate v2 can't inherit a
+     *  monetary bid into an account of another currency (partner docs 09-09). */
+    currency: string;
     adsCount: number;
     /** Fanpage(s) the source's ads live on (per-page ad tally from the story ids) — where a JURO
      *  copy lands its ads. [] = underivable → no fanka meter, never blocks. */
@@ -55,10 +58,10 @@ type Row = {
   } | null;
   loading: boolean;
   bid: string; // editable override; "" = inherit from source (safe default)
-  /** The row's PICKED bid strategy (seeded with the source's once facts land). On the FB Token
-   *  rails and LION JURO it may differ from the source's (ROAS ↔ cap ↔ lowest — owner asks
-   *  09-01 / 09-08: the token rails rebuild the ad set, /jurar/ takes bid_strategy natively);
-   *  LION duplicate always rides the source's — the select locks there. */
+  /** The row's PICKED bid strategy (seeded with the source's once facts land). May differ from
+   *  the source's on every rail (ROAS ↔ cap ↔ cost cap ↔ lowest — owner asks 09-01 / 09-08 /
+   *  09-09: the token rails rebuild the ad set, /jurar/ and LION duplicate v2 take
+   *  bid_strategy natively). */
   bidStrategy: string;
   /** Editable daily budget — cash-register display ("10,00", digits fill cents) → cents on the wire. */
   budget: string;
@@ -292,16 +295,15 @@ export function HsCloneBoard({
         : "lion";
   /** Both FB-Token channels ride the same token pool — one flag for every pool-dependent gate. */
   const tokenRail = effDupChannel === "token" || effDupChannel === "juro-token";
-  /** Rails where the row's strategy pick WINS: the FB Token rails rebuild the ad set (owner ask
-   *  09-01) and LION JURO births a new campaign whose /jurar/ wire takes bid_strategy natively
-   *  (owner ask 09-08). LION duplicate inherits the source's — LION can't re-bid a tree clone. */
-  const strategySwitchable = tokenRail || effDupChannel === "juro";
-  /** The row's EFFECTIVE bid strategy: the row's pick where switchable, else the source's. */
-  const rowStrategy = (r: Row): string => (strategySwitchable && r.bidStrategy) || r.info?.bidStrategy || "";
+  /** The row's strategy pick WINS on every rail since 09-09: the FB Token rails rebuild the ad
+   *  set (owner ask 09-01), LION JURO's /jurar/ takes bid_strategy natively (owner ask 09-08) and
+   *  LION duplicate v2 does too (partner docs 09-09 — ROAS ↔ cap ↔ cost cap ↔ lowest). */
+  const rowStrategy = (r: Row): string => r.bidStrategy || r.info?.bidStrategy || "";
   const rowSwitched = (r: Row): boolean =>
-    strategySwitchable && r.info !== null && Boolean(r.bidStrategy) && r.bidStrategy !== r.info.bidStrategy;
-  /** Strategies pickable on the current rail — LION's jurar documents no COST_CAP (a source born
-   *  with one still shows as the "exotic" option, pickable back = unswitched). */
+    r.info !== null && Boolean(r.bidStrategy) && r.bidStrategy !== r.info.bidStrategy;
+  /** Strategies pickable on the current rail — LION's jurar documents no COST_CAP; duplicate v2
+   *  and the token rails take all four (a source born with an exotic strategy still shows as the
+   *  "exotic" option, pickable back = unswitched). */
   const strategyOptions =
     effDupChannel === "juro" ? BID_STRATEGIES.filter((o) => juroLionStrategyAccepted(o.value)) : BID_STRATEGIES;
   // JURO relaunches the source's page POSTS — the ads live on the source post's fanpage, so
@@ -428,6 +430,7 @@ export function HsCloneBoard({
               budget: number | null;
               bid: number | null;
               bidStrategy: string;
+              currency?: string;
               adsCount: number;
               pages?: Array<{ pageId: string; ads: number }>;
             }>;
@@ -450,6 +453,7 @@ export function HsCloneBoard({
                   budget: s.budget,
                   bid: s.bid,
                   bidStrategy: s.bidStrategy,
+                  currency: s.currency ?? "",
                   adsCount: s.adsCount,
                   pages: Array.isArray(s.pages) ? s.pages : [],
                 },
@@ -705,11 +709,29 @@ export function HsCloneBoard({
       : [];
   /** The active mode's fanka verdict — one flag for the fire guard and the button. */
   const fankaOver = mode === "juro" ? juroBlockedCount > 0 : pageOver;
-  // Switchable rails: a row SWITCHED to cap/ROAS must type a Bid (nothing inherits across
-  // strategies) — the fire button blocks here instead of the wave dying per shot in the drawer.
-  const strategyBidMissing = strategySwitchable
-    ? validRows.filter((r) => rowSwitched(r) && bidKind(r.bidStrategy) !== "none" && !r.bid.trim()).length
-    : 0;
+  // A row SWITCHED to cap/ROAS must type a Bid (nothing inherits across strategies) — the fire
+  // button blocks here instead of the wave dying per shot in the drawer.
+  const strategyBidMissing = validRows.filter(
+    (r) => rowSwitched(r) && bidKind(r.bidStrategy) !== "none" && !r.bid.trim(),
+  ).length;
+  /** Destination currency of a row's account (LION catalog) — "" until the profile data lands. */
+  const rowDestCurrency = (r: Row): string => {
+    const b = rowBinds(r);
+    return (b.profile && b.account && hs.dataFor(b.profile)?.currencies[b.account]) || "";
+  };
+  /** LION duplicate v2 can't inherit a MONETARY bid into an account of another currency (partner
+   *  docs 09-09) — an unswitched cap/cost-cap row whose source bids in another currency than its
+   *  destination: with an empty Bid the fire blocks (LION would reject the shot), with a bid the
+   *  row is flagged (the number rides in the DESTINATION currency — the prefilled source amount
+   *  may need retyping). ROAS goals are multipliers, currency-free. LION duplicate rail only:
+   *  JURO builds a fresh ad set, the token rails write Meta-native values themselves. */
+  const rowCurrencyGap = (r: Row): { src: string; dest: string } | null => {
+    if (effDupChannel !== "lion" || !r.info?.currency || rowSwitched(r) || bidKind(rowStrategy(r)) !== "cap") return null;
+    const dest = rowDestCurrency(r);
+    return dest && dest !== r.info.currency ? { src: r.info.currency, dest } : null;
+  };
+  const currencyBidMissing = validRows.filter((r) => rowCurrencyGap(r) !== null && !r.bid.trim()).length;
+  const currencyRetype = validRows.filter((r) => rowCurrencyGap(r) !== null && r.bid.trim()).length;
 
   // The server pump takes the whole wave in ONE call and paces/polls/activates it after the
   // response (fire-and-forget, owner ask 08-14) — its shot cap must fit the pump's time budget.
@@ -768,6 +790,7 @@ export function HsCloneBoard({
     acctOver ||
     fankaOver ||
     strategyBidMissing > 0 ||
+    currencyBidMissing > 0 ||
     hiddenRows > 0 ||
     limits.staleBuild;
 
@@ -846,9 +869,8 @@ export function HsCloneBoard({
         // Fallback for the server's bid scaling (its own details/ re-read wins) — the bid
         // rides in HUMAN units and is scaled to LION's Meta-native wire unit server-side.
         ...(r.info?.bidStrategy ? { bidStrategy: r.info.bidStrategy } : {}),
-        // Switchable rails (FB Token + LION JURO): the row's SWITCHED strategy — the token rails
-        // rebuild the ad set around it, /jurar/ takes it as bid_strategy (LION duplicate
-        // inherits the source's and never sees this field).
+        // The row's SWITCHED strategy — the token rails rebuild the ad set around it, /jurar/ and
+        // LION duplicate v2 take it as bid_strategy (unswitched rows omit it = inherit).
         ...(rowSwitched(r) ? { bidStrategyOverride: r.bidStrategy } : {}),
         geo,
         // LION JURO: LION builds the name itself (`… API - JURO - …`) — only the buyer's tail
@@ -1356,6 +1378,20 @@ export function HsCloneBoard({
                   doesn&apos;t carry across strategies).
                 </p>
               ) : null}
+              {currencyBidMissing > 0 ? (
+                <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
+                  {currencyBidMissing} row{currencyBidMissing === 1 ? " clones" : "s clone"} a bid-capped source into an
+                  account of another currency without a Bid — LION can&apos;t inherit a monetary bid across
+                  currencies; type the cap in the destination currency.
+                </p>
+              ) : null}
+              {currencyRetype > 0 ? (
+                <p className="animate-pop-in text-center text-[11px] leading-relaxed text-faint">
+                  {currencyRetype} row{currencyRetype === 1 ? "" : "s"}: the source bids in another currency than the
+                  destination account — the Bid rides in the destination currency (0,50 BRL ≠ 0,50 USD), retype it
+                  if needed.
+                </p>
+              ) : null}
               {hiddenRows > 0 ? (
                 <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
                   {hiddenRows} row{hiddenRows === 1 ? " targets" : "s target"} an account our FB token
@@ -1426,6 +1462,7 @@ export function HsCloneBoard({
                 const strategy = rowStrategy(r);
                 const kind = bidKind(strategy);
                 const switched = rowSwitched(r);
+                const gap = rowCurrencyGap(r);
                 const rowData = hs.dataFor(b.profile);
                 const rowPixels = b.profile && b.account ? hs.pixelsFor(b.profile, b.account) : undefined;
                 const rowAccounts = accountOptionsFor(b.profile);
@@ -1764,9 +1801,8 @@ export function HsCloneBoard({
                       </div>
                     </div>
 
-                    {/* The CLONE's strategy — switchable per row on the FB Token rails (they
-                        rebuild the ad set) and on LION JURO (/jurar/ takes bid_strategy natively);
-                        LION duplicate inherits the source's, so the select locks there.
+                    {/* The CLONE's strategy — switchable per row on every rail (FB Token rails
+                        rebuild the ad set; LION JURO and LION duplicate v2 take bid_strategy).
                         The bid field follows the EFFECTIVE strategy: ROAS decimal (blue R) / cap $
                         / nothing on lowest. A kind change clears the typed bid; switching back to
                         the source's kind re-prefills its own bid. */}
@@ -1788,16 +1824,14 @@ export function HsCloneBoard({
                                     : "";
                               patchRow(r.id, { bidStrategy, bid });
                             }}
-                            disabled={!strategySwitchable || !r.info || unreadableRow}
+                            disabled={!r.info || unreadableRow}
                             aria-label="Clone bid strategy"
                             title={
-                              !strategySwitchable
-                                ? "Strategy change needs JURO or the FB Token rail — LION duplicate inherits the source's strategy"
-                                : switched
-                                  ? kind === "roas"
-                                    ? "Strategy switched to min ROAS — the clone value-optimizes PURCHASE and needs a value-optimization (VO) pixel; on any other pixel Meta births an ad-less shell"
-                                    : "Strategy switched — the clone launches with THIS strategy, not the source's"
-                                  : "The clone's bid strategy (the source's — switch it to re-bid the clone)"
+                              switched
+                                ? kind === "roas"
+                                  ? "Strategy switched to min ROAS — the clone value-optimizes PURCHASE and needs a value-optimization (VO) pixel; on any other pixel Meta births an ad-less shell"
+                                  : "Strategy switched — the clone launches with THIS strategy, not the source's"
+                                : "The clone's bid strategy (the source's — switch it to re-bid the clone)"
                             }
                             className={cellSelect + (switched ? " border-accent/50 text-[#9db8ff]" : "")}
                           >
@@ -1843,7 +1877,9 @@ export function HsCloneBoard({
                             placeholder={
                               switched && kind !== "none"
                                 ? "required"
-                                : kind === "roas"
+                                : gap
+                                  ? `required in ${gap.dest}`
+                                  : kind === "roas"
                                   ? "inherits ROAS goal"
                                   : kind === "none" && r.info
                                     ? "auto"
@@ -1855,7 +1891,8 @@ export function HsCloneBoard({
                                   (switched ? " · required for the switched strategy" : " · empty = inherit the source's goal")
                                 : kind === "cap"
                                   ? "Bid cap in $ — digits fill cents, 34 → $0,34" +
-                                    (switched ? " · required for the switched strategy" : " · empty = inherit the source's cap")
+                                    (switched ? " · required for the switched strategy" : " · empty = inherit the source's cap") +
+                                    (gap ? ` · source bids in ${gap.src}, this account is ${gap.dest} — the Bid rides in ${gap.dest}` : "")
                                   : "Lowest cost bids automatically"
                             }
                             inputMode="decimal"
@@ -1863,7 +1900,7 @@ export function HsCloneBoard({
                             className={
                               cellInput +
                               (kind !== "none" ? " pl-5" : "") +
-                              (switched && kind !== "none" && !r.bid.trim() ? " border-warn/60 focus:border-warn focus:ring-warn/15" : "")
+                              (((switched && kind !== "none") || gap) && !r.bid.trim() ? " border-warn/60 focus:border-warn focus:ring-warn/15" : "")
                             }
                           />
                         </div>

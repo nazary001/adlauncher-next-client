@@ -212,5 +212,15 @@ export function juroBlockingError(message: string | undefined | null): { reason:
   if (/person or organization being promoted/i.test(msg)) {
     return { reason: "Meta wall: EU DSA beneficiary required — jurar can't set it via API.", scope: "family" };
   }
+  if (/2446671|Minimum ROAS Isn.?t Available/i.test(msg)) {
+    // Partner docs 09-09: code 100 / subcode 2446671 — the destination business isn't eligible
+    // for minimum ROAS; LION keeps retrying the requested strategy, never launches another.
+    // (Same match as lib/lion-dup-bid lionRoasWall — both leaves, duplicated on purpose.)
+    return {
+      reason:
+        "Meta: min ROAS isn't available for the destination business/account (subcode 2446671) — LION keeps the task on the requested strategy; re-fire with bid cap / lowest cost or pick another account.",
+      scope: "family",
+    };
+  }
   return null;
 }

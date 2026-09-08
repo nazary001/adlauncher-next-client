@@ -89,6 +89,12 @@ test("verified-advertiser / beneficiary walls → family scope", () => {
   assert.equal(juroBlockingError("Enter the person or organization being promoted by an ad")?.scope, "family");
 });
 
+test("min-ROAS eligibility rejection (subcode 2446671, partner docs 09-09) → family scope", () => {
+  const wall = juroBlockingError("(#100) Minimum ROAS Isn't Available (code 100, subcode 2446671)");
+  assert.equal(wall?.scope, "family");
+  assert.match(String(wall?.reason), /min ROAS/i);
+});
+
 test("transient noise → null", () => {
   assert.equal(juroBlockingError(undefined), null);
   assert.equal(juroBlockingError(""), null);
