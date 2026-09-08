@@ -20,7 +20,8 @@ import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { makeGate } from "@/lib/launch-guards";
 import { Header } from "./header";
 import { CampaignCard } from "./campaign-card";
-import { useFanpages } from "./use-fanpages";
+import { type FanpageOption, useFanpages } from "./use-fanpages";
+import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { useAutoLandings } from "./use-auto-landings";
 import { useMoSocs } from "./use-mo-socs";
 import { MO_CHANNEL_LS, defaultMoSoc } from "./mo-soc-picker";
@@ -83,29 +84,35 @@ function freshCard(id: string, partner: PartnerConfig, owner: string): Campaign 
   return c;
 }
 
-/** Token-account partners: fill an empty/invalid account with the partner default (else the first
- *  token account) and keep the pixel on something the chosen account actually carries. When the
- *  natural default sits at its 5/30min launch limit, the fill prefers the first account with
- *  room (falls back to the full one when every account is full). Only ever touches EMPTY/invalid
- *  accounts — a buyer's pick is never moved. Pure — returns the SAME array when nothing changes. */
+/** Token-account partners: fill an empty/invalid account with the LEAST-LOADED account on the
+ *  5/30-min launch timer (owner rule 09-08 — fewest launches in its open window, then the sooner
+ *  reset; the partner's preferred account is ranked first so it wins ties, i.e. a quiet board
+ *  still lands on the historical default) and keep the pixel on something the chosen account
+ *  actually carries. Only ever touches EMPTY/invalid accounts — a buyer's pick is never moved.
+ *  Pure — returns the SAME array when nothing changes. */
 function fillAccountDefaults(
   rows: Campaign[],
   partner: PartnerConfig,
   adAccounts: AdAccountOption[] | null,
-  limits?: Pick<AcctLimits, "countFor" | "limit">,
+  limits?: Pick<AcctLimits, "countFor" | "limit" | "resetAtFor">,
 ): Campaign[] {
   if (!partner.accountsFromToken || !adAccounts || adAccounts.length === 0) return rows;
-  const hasRoom = (id: string) => !limits || limits.countFor(id) < limits.limit;
+  const preferred = partner.defaultAccount?.id ?? "";
+  const ordered = adAccounts.slice().sort((a, b) => (a.value === preferred ? -1 : b.value === preferred ? 1 : 0));
+  const pick = limits
+    ? leastLoadedAccount(
+        accountLoads(
+          ordered.map((a) => ({ id: a.value, disabled: a.disabled })),
+          limits,
+        ),
+        limits.limit,
+      )
+    : "";
   let changed = false;
   const next = rows.map((c) => {
     let account = c.account;
     if (!account || !adAccounts.some((a) => a.value === account)) {
-      const preferred = adAccounts.some((a) => a.value === partner.defaultAccount?.id)
-        ? partner.defaultAccount!.id
-        : adAccounts[0].value;
-      account = hasRoom(preferred)
-        ? preferred
-        : (adAccounts.find((a) => hasRoom(a.value))?.value ?? preferred);
+      account = pick || ordered[0].value;
     }
     let pixel = c.pixel;
     const pixels = adAccounts.find((a) => a.value === account)?.pixels ?? [];
@@ -121,6 +128,32 @@ function fillAccountDefaults(
     if (account === c.account && pixel === c.pixel) return c;
     changed = true;
     return { ...c, account, pixel };
+  });
+  return changed ? next : rows;
+}
+
+/** Token-fanpage partners: fill an EMPTY/invalid fanpage with the LEAST-FILLED page (owner rule
+ *  09-08 — lowest ads/limit ratio; full pages never). The card REMEMBERS what the fill chose
+ *  (`autoPage`, carried in the row itself) so the fill keeps re-picking such cards while the fill
+ *  numbers keep landing — the list arrives before its counts, so the first pick settles on the
+ *  emptiest page once the counts do. A buyer's own pick (page ≠ the remembered auto value) is
+ *  never moved. PURE: no outside memory (React double-invokes state updaters in dev StrictMode —
+ *  a ref mutated in here made the second call see its own mark and freeze the card, 09-08) and
+ *  the SAME array comes back when nothing changes. */
+function fillPageDefaults(rows: Campaign[], partner: PartnerConfig, fanpages: FanpageOption[] | null): Campaign[] {
+  if (!partner.fanpagesFromToken || !fanpages || fanpages.length === 0) return rows;
+  const pick = leastFilledPage(
+    fanpages.map((o) => ({ id: o.value, used: o.adCount, limit: o.adLimit, disabled: o.disabled })),
+    partner.pageAdLimit ?? 250,
+  );
+  if (!pick) return rows;
+  let changed = false;
+  const next = rows.map((c) => {
+    const valid = Boolean(c.page) && fanpages.some((o) => o.value === c.page);
+    if (valid && c.autoPage !== c.page) return c; // the buyer's own pick
+    if (c.page === pick && c.autoPage === pick) return c;
+    changed = true;
+    return { ...c, page: pick, autoPage: pick };
   });
   return changed ? next : rows;
 }
@@ -287,13 +320,25 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     adAccountsRef.current = adAccounts;
   }, [adAccounts]);
 
-  // When the account list ARRIVES, backfill defaults (BR-1500 + its preferred pixel) into cards
-  // created while it was loading. Functional updater returns the same reference when nothing
-  // changes, so this never cascades.
+  // When the account list ARRIVES, backfill defaults (the least-loaded account + its preferred
+  // pixel) into cards created while it was loading. Functional updater returns the same
+  // reference when nothing changes, so this never cascades.
   useEffect(() => {
     if (!adAccounts || adAccounts.length === 0) return;
     setCampaigns((cs) => fillAccountDefaults(cs, partnerRef.current, adAccounts, limitsRef.current));
   }, [adAccounts]);
+
+  // Fanpage defaults (owner rule 09-08): the least-filled fanka fills every empty card — on the
+  // list's arrival, again when its fill counts land (the auto memory lets those cards re-settle
+  // on the emptiest page), and for every new card via mutate().
+  const fanpagesRef = useRef<FanpageOption[] | null>(null);
+  useEffect(() => {
+    fanpagesRef.current = fanpages;
+  }, [fanpages]);
+  useEffect(() => {
+    if (!fanpages || fanpages.length === 0) return;
+    setCampaigns((cs) => fillPageDefaults(cs, partnerRef.current, fanpages));
+  }, [fanpages]);
 
   // Pull the live registry and (re)assign gcm codes above whatever is already used. Runs on
   // mount and again when the window regains focus (≥15s apart): with several accounts working
@@ -534,7 +579,11 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   const mutate = useCallback(
     (fn: (cs: Campaign[]) => Campaign[]) => {
       setCampaigns((cs) =>
-        fillAccountDefaults(normalize(fn(cs), partner, reserved), partner, adAccountsRef.current, limitsRef.current),
+        fillPageDefaults(
+          fillAccountDefaults(normalize(fn(cs), partner, reserved), partner, adAccountsRef.current, limitsRef.current),
+          partner,
+          fanpagesRef.current,
+        ),
       );
       setPreviewed(false);
     },

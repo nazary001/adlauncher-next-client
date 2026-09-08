@@ -29,6 +29,7 @@ import {
 } from "@/lib/types";
 import { BID_STRATEGIES, OS_OPTIONS, countryName, geoSummary } from "@/lib/catalog";
 import { AIF_VALUE_PIXEL, type PartnerId, aifOfferablePixels, partnerConfig, pickAifPixel } from "@/lib/partners";
+import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { AutoTextarea, BidKindTag, Field, Select } from "./ui";
 import {
   AlertIcon,
@@ -299,20 +300,60 @@ function CloneInner({
   const destMissingFor = (d: CloneRowDest): boolean =>
     fanpageMissingFor(d) || accountMissingFor(d) || pixelMissingFor(d);
 
-  // The batch Settings tuple (the wave defaults) — decorates the Settings pickers.
-  const defaults: CloneRowDest = { pageId: settings.pageId, accountId: settings.accountId, pixelId: settings.pixelId };
+  // Account launch limit (5 campaigns / 30 min) — the pickers' N/5 badges, the default account
+  // pick and the batch gate below.
+  const limits = useAcctLimits();
+
+  // ---- default binds (owner rule 09-08): the LEAST-FILLED fanka and the LEAST-LOADED account
+  // on our 5/30-min timer are what an EMPTY Settings pick shows and fires; a real pick (incl.
+  // "From each source") wins via state and the × clear returns to auto. The partner's preferred
+  // account (BR-1500) is ranked first so it wins ties. Purely derived — live as the meters move.
+  const autoPageId = partner.fanpagesFromToken
+    ? leastFilledPage(
+        (fanpages ?? []).map((o) => ({ id: o.value, used: o.adCount, limit: o.adLimit, disabled: o.disabled })),
+        partner.pageAdLimit ?? 250,
+      )
+    : "";
+  const preferredAcct = partner.defaultAccount?.id ?? "";
+  const acctCandidates = (adAccounts ?? [])
+    .slice()
+    .sort((a, b) => (a.value === preferredAcct ? -1 : b.value === preferredAcct ? 1 : 0));
+  const autoAccountId = partner.accountsFromToken
+    ? leastLoadedAccount(
+        accountLoads(
+          acctCandidates.map((a) => ({ id: a.value, disabled: a.disabled })),
+          limits,
+        ),
+        limits.limit,
+      )
+    : "";
+  const settingsPageIsAuto = Boolean(partner.fanpagesFromToken) && !settings.pageId && Boolean(autoPageId);
+  const settingsAccountIsAuto = Boolean(partner.accountsFromToken) && !settings.accountId && Boolean(autoAccountId);
+  const effPageId = settings.pageId || autoPageId;
+  const effAccountId = settings.accountId || autoAccountId;
+  // An auto account brings its own default pixel (the same rule the manual pick applies).
+  const effPixelId =
+    settings.pixelId ||
+    (settingsAccountIsAuto && effAccountId !== SOURCE_ACCOUNT
+      ? aifMode
+        ? (pickAifPixel(pixelOptionsOf(adAccounts, effAccountId))?.id ?? "")
+        : defaultPixelFor(adAccounts, effAccountId, partner.preferredPixel)
+      : "");
+  // The batch Settings tuple (the wave defaults, auto picks resolved) — decorates the pickers
+  // and is what every row without its own destination rides.
+  const defaults: CloneRowDest = { pageId: effPageId, accountId: effAccountId, pixelId: effPixelId };
   const pageStale = pageStaleFor(defaults);
   const fanpageMissing = fanpageMissingFor(defaults);
   const isTargetAccount = isTargetFor(defaults);
   const accountStale = accountStaleFor(defaults);
   const accountMissing = accountMissingFor(defaults);
-  const targetPixels = isTargetAccount ? targetPixelsFor(settings.accountId) : [];
+  const targetPixels = isTargetAccount ? targetPixelsFor(effAccountId) : [];
   const pixelMissing = pixelMissingFor(defaults);
   // The defaults only matter while some row rides them (or no rows yet — guide the pick).
   const defaultsUsed = rows.length === 0 || rows.some((r) => !r.dest);
 
   // Per-row effective destination + copies (its own, else the batch settings).
-  const destOf = (r: CloneRow): CloneRowDest => rowDestination(r, settings);
+  const destOf = (r: CloneRow): CloneRowDest => rowDestination(r, defaults);
   const copiesOf = (r: CloneRow): number => rowCopiesOf(r, settings);
   const rowsMissing = rows.filter((r) => destMissingFor(destOf(r)));
   const destinationMissing = rows.length > 0 && rowsMissing.length > 0;
@@ -321,7 +362,6 @@ function CloneInner({
   // share (rows × copies bound to it). From-each-source rows aren't metered here — the sources'
   // accounts aren't exposed to the board, so the per-copy server claim refuses any overflow with
   // the countdown instead.
-  const limits = useAcctLimits();
   const acctDemand = new Map<string, number>();
   for (const r of rows) {
     const d = destOf(r);
@@ -358,9 +398,9 @@ function CloneInner({
     );
   const fankaOver = fankaShort.length > 0;
   /** The batch Settings fanpage's own meter + what the rows bound to it add (Settings line). */
-  const fankaStats = fankaStatsOf(settings.pageId);
-  const defaultFankaDemand = settings.pageId ? (pageDemand.get(settings.pageId) ?? 0) : 0;
-  const defaultFankaOver = fankaShort.some((x) => x.pageId === settings.pageId);
+  const fankaStats = fankaStatsOf(effPageId);
+  const defaultFankaDemand = effPageId ? (pageDemand.get(effPageId) ?? 0) : 0;
+  const defaultFankaOver = fankaShort.some((x) => x.pageId === effPageId);
   // Rows whose picked strategy needs a Bid that isn't there (cap $ / ROAS goal / ambiguous ROAS
   // band) — the fire button blocks on this instead of burning markers on per-clone 400s.
   const bidMissingCount = rows.filter(rowBidMissing).length;
@@ -592,7 +632,7 @@ function CloneInner({
                       Fanpage{pageStale ? " — re-pick (not on this signer)" : fanpageMissing && defaultsUsed ? " — required" : ""}
                     </span>
                     <SearchSelect
-                      value={settings.pageId}
+                      value={effPageId}
                       onChange={(v) => patchSettings({ pageId: v })}
                       options={fanpages ?? []}
                       placeholder={partner.pagePlaceholder}
@@ -601,7 +641,8 @@ function CloneInner({
                       warn={fanpageMissing && defaultsUsed}
                     />
                     {/* Live fill of the picked fanka vs what the rows bound to it add (1 ad per
-                        clone) — red when it won't fit; Duplicate locks on the same flag. */}
+                        clone) — red when it won't fit; Duplicate locks on the same flag. The
+                        auto pick names itself (least filled). */}
                     {fankaStats ? (
                       <p
                         className={
@@ -613,9 +654,12 @@ function CloneInner({
                               : "text-faint")
                         }
                       >
+                        {settingsPageIsAuto ? "auto · least filled · " : ""}
                         {fankaStats.used}/{fankaStats.limit} ads · {fankaStats.free} free
                         {defaultFankaDemand > 0 ? ` · batch adds ${defaultFankaDemand}` : ""}
                       </p>
+                    ) : settingsPageIsAuto ? (
+                      <p className="px-0.5 text-[10.5px] text-faint">auto · least filled fanka — pick another to override</p>
                     ) : null}
                   </div>
                 ) : null}
@@ -628,7 +672,7 @@ function CloneInner({
                         Account{accountStale ? " — re-pick (not on this signer)" : accountMissing && defaultsUsed ? " — required" : ""}
                       </span>
                       <SearchSelect
-                        value={settings.accountId}
+                        value={effAccountId}
                         onChange={(v) =>
                           patchSettings({
                             accountId: v,
@@ -651,6 +695,12 @@ function CloneInner({
                         emptyHint={adAccounts ? "No accounts on the token" : "Loading accounts…"}
                         warn={accountMissing && defaultsUsed}
                       />
+                      {settingsAccountIsAuto ? (
+                        <p className="px-0.5 font-mono text-[10.5px] tabular-nums text-faint">
+                          auto · least loaded · {limits.countFor(effAccountId)}/{limits.limit} launches in its 30-min window —
+                          pick another (or “From each source”) to override
+                        </p>
+                      ) : null}
                     </div>
                     {isTargetAccount ? (
                       <div className="flex flex-col gap-1 px-1.5 py-1">
@@ -660,7 +710,7 @@ function CloneInner({
                           Pixel{pixelMissing && defaultsUsed ? " — required" : ""}
                         </span>
                         <SearchSelect
-                          value={settings.pixelId}
+                          value={effPixelId}
                           onChange={(v) => patchSettings({ pixelId: v })}
                           options={targetPixels.map((p) => ({ value: p.id, label: p.name, meta: p.id }))}
                           placeholder="Search pixel"
@@ -675,7 +725,7 @@ function CloneInner({
                           warn={pixelMissing && defaultsUsed}
                         />
                       </div>
-                    ) : settings.accountId === SOURCE_ACCOUNT ? (
+                    ) : effAccountId === SOURCE_ACCOUNT ? (
                       <LockedRow label="Pixel" value="From each source" />
                     ) : null}
                   </>

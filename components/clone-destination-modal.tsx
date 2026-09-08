@@ -8,6 +8,7 @@ import { SearchSelect } from "./search-select";
 import type { FanpageOption } from "./use-fanpages";
 import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-adaccounts";
 import { type AcctLimits, decorateAccountOptions } from "./use-acct-limit";
+import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { LockIcon, TargetIcon, XIcon } from "./icons";
 
 /**
@@ -64,16 +65,54 @@ export function CloneDestinationModal({
     return () => window.removeEventListener("keydown", h);
   }, [onClose]);
 
-  const isTarget = Boolean(draft.accountId) && draft.accountId !== SOURCE_ACCOUNT;
-  const pixelsAll = isTarget ? pixelOptionsOf(adAccounts, draft.accountId) : [];
+  // Default binds (owner rule 09-08), same as the batch Settings: an EMPTY fanpage/account pick
+  // shows and applies the least-filled fanka / least-loaded account (preferred account first on
+  // ties); a real pick — "From each source" included — wins.
+  const autoPageId = partner.fanpagesFromToken
+    ? leastFilledPage(
+        (fanpages ?? []).map((o) => ({ id: o.value, used: o.adCount, limit: o.adLimit, disabled: o.disabled })),
+        partner.pageAdLimit ?? 250,
+      )
+    : "";
+  const preferredAcct = partner.defaultAccount?.id ?? "";
+  const autoAccountId = partner.accountsFromToken
+    ? leastLoadedAccount(
+        accountLoads(
+          (adAccounts ?? [])
+            .slice()
+            .sort((a, b) => (a.value === preferredAcct ? -1 : b.value === preferredAcct ? 1 : 0))
+            .map((a) => ({ id: a.value, disabled: a.disabled })),
+          limits,
+        ),
+        limits.limit,
+      )
+    : "";
+  const effPageId = draft.pageId || autoPageId;
+  const effAccountId = draft.accountId || autoAccountId;
+  const pageIsAuto = Boolean(partner.fanpagesFromToken) && !draft.pageId && Boolean(autoPageId);
+  const accountIsAuto = Boolean(partner.accountsFromToken) && !draft.accountId && Boolean(autoAccountId);
+  const isTarget = Boolean(effAccountId) && effAccountId !== SOURCE_ACCOUNT;
+  const effPixelId =
+    draft.pixelId ||
+    (accountIsAuto && isTarget
+      ? aifMode
+        ? (pickAifPixel(pixelOptionsOf(adAccounts, effAccountId))?.id ?? "")
+        : defaultPixelFor(adAccounts, effAccountId, partner.preferredPixel)
+      : "");
+  const pixelsAll = isTarget ? pixelOptionsOf(adAccounts, effAccountId) : [];
   const pixels = aifMode ? aifOfferablePixels(pixelsAll) : pixelsAll;
-  const fanpageOk = !partner.fanpagesFromToken || Boolean(draft.pageId);
-  const accountOk = !partner.accountsFromToken || Boolean(draft.accountId);
-  const pixelOk = !isTarget || Boolean(draft.pixelId);
+  const fanpageOk = !partner.fanpagesFromToken || Boolean(effPageId);
+  const accountOk = !partner.accountsFromToken || Boolean(effAccountId);
+  const pixelOk = !isTarget || Boolean(effPixelId);
   const complete = fanpageOk && accountOk && pixelOk;
   const copiesN = Number(copies);
   const copiesOk = copies === "" || (Number.isFinite(copiesN) && copiesN >= 1 && copiesN <= MAX_CLONE_COPIES);
-  const result = (): CloneRowDest => ({ ...draft, pixelId: isTarget ? draft.pixelId : "" });
+  const fankaLine = (id: string): string => {
+    const o = fanpages?.find((x) => x.value === id);
+    return o && o.adCount != null && o.adLimit != null ? `${o.adCount}/${o.adLimit} ads · ${Math.max(o.adLimit - o.adCount, 0)} free` : "";
+  };
+  // Apply stores the EFFECTIVE tuple — a row's own destination is always concrete.
+  const result = (): CloneRowDest => ({ pageId: effPageId, accountId: effAccountId, pixelId: isTarget ? effPixelId : "" });
   const copiesOut = (): number | null => (copies === "" ? null : Math.max(1, Math.min(MAX_CLONE_COPIES, copiesN)));
 
   return (
@@ -110,23 +149,41 @@ export function CloneDestinationModal({
             accounts and copies across rows in one batch.
           </p>
           {partner.fanpagesFromToken ? (
-            <Field label="Fanpage" error={!draft.pageId ? "required" : undefined}>
+            <Field
+              label="Fanpage"
+              error={!effPageId ? "required" : undefined}
+              hint={
+                pageIsAuto
+                  ? `auto · least filled${fankaLine(effPageId) ? ` (${fankaLine(effPageId)})` : ""} — pick another to override`
+                  : effPageId
+                    ? fankaLine(effPageId) || undefined
+                    : undefined
+              }
+            >
               <SearchSelect
-                value={draft.pageId}
+                value={effPageId}
                 onChange={(v) => setDraft((d) => ({ ...d, pageId: v }))}
                 options={fanpages ?? []}
                 placeholder={partner.pagePlaceholder}
                 emptyHint={fanpages ? "No fanpages on the token" : "Loading fanpages…"}
                 metaWhenClosed
-                warn={!draft.pageId}
+                warn={!effPageId}
               />
             </Field>
           ) : null}
           {partner.accountsFromToken ? (
             <>
-              <Field label="Account" error={!draft.accountId ? "required" : undefined}>
+              <Field
+                label="Account"
+                error={!effAccountId ? "required" : undefined}
+                hint={
+                  accountIsAuto
+                    ? `auto · least loaded (${limits.countFor(effAccountId)}/${limits.limit} launches in its 30-min window) — pick another or “From each source” to override`
+                    : undefined
+                }
+              >
                 <SearchSelect
-                  value={draft.accountId}
+                  value={effAccountId}
                   onChange={(v) =>
                     setDraft((d) => ({
                       ...d,
@@ -147,13 +204,13 @@ export function CloneDestinationModal({
                   ]}
                   placeholder="Select account"
                   emptyHint={adAccounts ? "No accounts on the token" : "Loading accounts…"}
-                  warn={!draft.accountId}
+                  warn={!effAccountId}
                 />
               </Field>
               {isTarget ? (
-                <Field label="Pixel" error={!draft.pixelId ? "required" : undefined}>
+                <Field label="Pixel" error={!effPixelId ? "required" : undefined}>
                   <SearchSelect
-                    value={draft.pixelId}
+                    value={effPixelId}
                     onChange={(v) => setDraft((d) => ({ ...d, pixelId: v }))}
                     options={pixels.map((p) => ({ value: p.id, label: p.name, meta: p.id }))}
                     placeholder="Search pixel"
@@ -165,7 +222,7 @@ export function CloneDestinationModal({
                         : "Loading pixels…"
                     }
                     metaWhenClosed
-                    warn={!draft.pixelId}
+                    warn={!effPixelId}
                   />
                 </Field>
               ) : (

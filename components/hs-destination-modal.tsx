@@ -5,6 +5,7 @@ import { Field } from "./ui";
 import { SearchSelect } from "./search-select";
 import { type AcctLimits, decorateAccountOptions } from "./use-acct-limit";
 import type { HsCatalog } from "./use-hs";
+import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { TargetIcon, XIcon } from "./icons";
 
 /** One row's OWN destination on the HS clone board (owner ask 2026-09-08): the full bind chain —
@@ -70,28 +71,55 @@ export function HsDestinationModal({
     return () => window.removeEventListener("keydown", h);
   }, [onClose]);
 
-  // The seeded picks may name a profile/account the board never loaded (a row applied from
-  // another row) — the idempotent loaders fetch what the draft shows.
-  useEffect(() => {
-    if (draft.profile) hs.ensureProfile(draft.profile);
-    if (draft.profile && draft.account) hs.ensurePixels(draft.profile, draft.account);
-  }, [hs, draft.profile, draft.account]);
-
   const data = draft.profile ? hs.dataFor(draft.profile) : undefined;
-  const pixels = draft.profile && draft.account ? hs.pixelsFor(draft.profile, draft.account) : undefined;
   // Same account filter as the Settings column: on the FB Token rails only the signer's own
   // grant is offered (null sweep → no filtering, fail open).
   const tokenVisible = tokenRail ? (data?.dupTokenAccounts ?? data?.tokenAccounts ?? null) : null;
   const accountOptions =
     tokenVisible !== null ? (data?.accounts ?? []).filter((a) => tokenVisible.has(a.value)) : (data?.accounts ?? []);
+  // Default binds (owner rule 09-08), same as the Settings column: an empty account/page pick
+  // shows and applies the least-loaded account / least-filled fanka; a real pick wins.
+  const autoAccount = leastLoadedAccount(
+    accountLoads(
+      accountOptions.map((a) => ({ id: a.value, disabled: a.disabled })),
+      limits,
+    ),
+    limits.limit,
+  );
+  const autoPage = needsPage
+    ? leastFilledPage(
+        (data?.pages ?? []).map((p) => {
+          const st = hs.pageStats(p.value);
+          return { id: p.value, used: st?.used ?? null, limit: st?.limit ?? null, disabled: p.disabled };
+        }),
+      )
+    : "";
+  const effAccount = draft.account || autoAccount;
+  const effPage = needsPage ? draft.page || autoPage : "";
+  const accountIsAuto = !draft.account && Boolean(autoAccount);
+  const pageIsAuto = needsPage && !draft.page && Boolean(autoPage);
+
+  // The seeded picks may name a profile/account the board never loaded (a row applied from
+  // another row) — the idempotent loaders fetch what the draft shows (the auto account too).
+  useEffect(() => {
+    if (draft.profile) hs.ensureProfile(draft.profile);
+    if (draft.profile && effAccount) hs.ensurePixels(draft.profile, effAccount);
+  }, [hs, draft.profile, effAccount]);
+
+  const pixels = draft.profile && effAccount ? hs.pixelsFor(draft.profile, effAccount) : undefined;
   // A one-pixel account derives its pixel once the page step is done (owner ask 08-13 — the
   // pixel belongs at the fanka step); the board re-derives the same way at render time.
   const onlyPixel = Array.isArray(pixels) && pixels.length === 1 ? pixels[0].id : "";
-  const effectivePixel = draft.pixel || (draft.page || !needsPage ? onlyPixel : "");
-  const complete = Boolean(draft.profile && draft.account && (draft.page || !needsPage) && effectivePixel);
+  const effectivePixel = draft.pixel || (effPage || !needsPage ? onlyPixel : "");
+  const complete = Boolean(draft.profile && effAccount && (effPage || !needsPage) && effectivePixel);
   const copiesN = Number(copies);
   const copiesOk = copies === "" || (Number.isFinite(copiesN) && copiesN >= 1 && copiesN <= maxCopies);
-  const result = (): HsRowDest => ({ ...draft, page: needsPage ? draft.page : "", pixel: effectivePixel });
+  const pageStatsLine = (id: string): string => {
+    const st = hs.pageStats(id);
+    return st ? `${st.approx ? "~" : ""}${st.used}/${st.limit} ads · ${st.approx ? "~" : ""}${st.free} free` : "";
+  };
+  // Apply stores the EFFECTIVE tuple — a row's own destination is always concrete.
+  const result = (): HsRowDest => ({ profile: draft.profile, account: effAccount, page: effPage, pixel: effectivePixel });
 
   return (
     <div className="fixed inset-0 z-[90] flex items-center justify-center p-4">
@@ -140,9 +168,16 @@ export function HsDestinationModal({
               metaWhenClosed
             />
           </Field>
-          <Field label="Account">
+          <Field
+            label="Account"
+            hint={
+              accountIsAuto
+                ? `auto · least loaded (${limits.countFor(effAccount)}/${limits.limit} launches in its 30-min window) — pick another to override`
+                : undefined
+            }
+          >
             <SearchSelect
-              value={draft.account}
+              value={effAccount}
               onChange={(v) => {
                 setDraft((d) => ({ ...d, account: v, pixel: "" }));
                 if (draft.profile && v) hs.ensurePixels(draft.profile, v);
@@ -162,9 +197,18 @@ export function HsDestinationModal({
             />
           </Field>
           {needsPage ? (
-            <Field label="Page">
+            <Field
+              label="Page"
+              hint={
+                pageIsAuto
+                  ? `auto · least filled${pageStatsLine(effPage) ? ` (${pageStatsLine(effPage)})` : ""} — pick another to override`
+                  : effPage
+                    ? pageStatsLine(effPage) || undefined
+                    : undefined
+              }
+            >
               <SearchSelect
-                value={draft.page}
+                value={effPage}
                 onChange={(v) => setDraft((d) => ({ ...d, page: v }))}
                 options={data?.pages ?? []}
                 placeholder="Search page"

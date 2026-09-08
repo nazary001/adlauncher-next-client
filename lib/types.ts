@@ -22,6 +22,10 @@ export type Campaign = {
   /** LION partners: page name from the profile catalog. Token-fanpage partners (Indians): the
    *  PICKED fanpage ID (names duplicate across the token's pages, so the id is the value). */
   page: string;
+  /** Token-fanpage partners: the page id the board's least-filled fill chose for this card. While
+   *  `page` still equals it the fill may move the card as fill counts land; a buyer's own pick
+   *  (page ≠ autoPage) is never touched. Client-side only — the server ignores it. */
+  autoPage?: string;
   pixel: string;
   objective: string;
   bidStrategy: string;

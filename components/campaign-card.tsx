@@ -25,6 +25,7 @@ import {
   pixelsFor,
 } from "@/lib/catalog";
 import { hsFinalLink, hsLinkSegments, hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
+import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { AIF_VALUE_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifOfferablePixels, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
@@ -351,6 +352,34 @@ function CampaignCardBase({
   useEffect(() => {
     if (hsAccountHidden) onPatch(c.id, { account: "", pixel: "" });
   }, [hsAccountHidden, onPatch, c.id]);
+  // Default binds (owner rule 09-08): once the profile's catalog lands, an EMPTY account fills
+  // with the LEAST-LOADED one on the 5/30-min timer and an empty page with the LEAST-FILLED
+  // fanka. Re-pickable like any pick; a duplicate keeps its source's (they arrive non-empty).
+  const hsAutoAccount =
+    hsMode && hsData && !c.account
+      ? leastLoadedAccount(
+          accountLoads(
+            hsAccountOptions.map((a) => ({ id: a.value, disabled: a.disabled })),
+            limits,
+          ),
+          limits.limit,
+        )
+      : "";
+  useEffect(() => {
+    if (hsAutoAccount) onPatch(c.id, { account: hsAutoAccount, pixel: "" });
+  }, [hsAutoAccount, onPatch, c.id]);
+  const hsAutoPage =
+    hsMode && hsData && !c.page
+      ? leastFilledPage(
+          hsData.pages.map((p) => {
+            const st = hs?.pageStats(p.value);
+            return { id: p.value, used: st?.used ?? null, limit: st?.limit ?? null, disabled: p.disabled };
+          }),
+        )
+      : "";
+  useEffect(() => {
+    if (hsAutoPage) onPatch(c.id, { page: hsAutoPage });
+  }, [hsAutoPage, onPatch, c.id]);
   const hsCurrency = hsMode ? hsData?.currencies?.[c.account] || "" : "";
   // The LION-validated name prefix is DERIVED (date + ACR + redirect label + geo, and the FB
   // Token rail's fixed TOKEN marker) — it re-renders live as the buyer flips redirect type, geo

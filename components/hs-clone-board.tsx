@@ -12,6 +12,7 @@ import { BID_STRATEGIES, geoSummary } from "@/lib/catalog";
 import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { juroEnsureMark } from "@/lib/juro";
 import { relabelNameGeo } from "@/lib/targeting-override";
+import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import type { PartnerId } from "@/lib/partners";
 import { ChevronDownIcon, CopyIcon, EyeIcon, GlobeIcon, PlusIcon, RetryIcon, TargetIcon, TrashIcon } from "./icons";
 import { HsTargetingModal } from "./hs-targeting-modal";
@@ -266,7 +267,6 @@ export function HsCloneBoard({
   });
 
   const data = profile ? hs.dataFor(profile) : undefined;
-  const pixels = profile && account ? hs.pixelsFor(profile, account) : undefined;
 
   const effDupChannel: "lion" | "token" | "juro" | "juro-token" =
     mode === "juro"
@@ -289,13 +289,53 @@ export function HsCloneBoard({
   // catalog; the token rail checks our token's own page access — both server-side).
   const needsPage = mode !== "juro";
 
+  // Account launch limit (5 campaigns / 30 min) — feeds the pickers' N/5 badges, the default
+  // account pick and the wave gate below.
+  const limits = useAcctLimits();
+  // FB Token rails: offer only accounts the DUP signer can act on (its grant is its own — 299
+  // accs vs the pool's 379 as of 09-03) — LION binds cover segments a token was never granted
+  // (aleph, 08-19), and a build there dies on the first Graph POST. null sweep → no filtering
+  // (fail open; the server guard still answers with the actionable error).
+  const tokenVisible = tokenRail ? (data?.dupTokenAccounts ?? data?.tokenAccounts ?? null) : null;
+  const accountOptions =
+    tokenVisible !== null ? (data?.accounts ?? []).filter((a) => tokenVisible.has(a.value)) : (data?.accounts ?? []);
+
+  // ---- default binds (owner rule 09-08): the LEAST-LOADED account on our 5/30-min timer and
+  // the LEAST-FILLED fanka are what the Settings picks DEFAULT to. Purely derived: an empty pick
+  // ("" — nothing chosen, or the × clear) shows and fires the auto value, live as the meters
+  // move; a real pick wins via state and the auto value stops mattering. The choice stays.
+  const autoAccount = leastLoadedAccount(
+    accountLoads(
+      accountOptions.map((a) => ({ id: a.value, disabled: a.disabled })),
+      limits,
+    ),
+    limits.limit,
+  );
+  const autoPage = needsPage
+    ? leastFilledPage(
+        (data?.pages ?? []).map((p) => {
+          const st = hs.pageStats(p.value);
+          return { id: p.value, used: st?.used ?? null, limit: st?.limit ?? null, disabled: p.disabled };
+        }),
+      )
+    : "";
+  const effAccount = account || autoAccount;
+  const effPage = needsPage ? page || autoPage : "";
+  const accountIsAuto = !account && Boolean(autoAccount);
+  const pageIsAuto = needsPage && !page && Boolean(autoPage);
+  const pixels = profile && effAccount ? hs.pixelsFor(profile, effAccount) : undefined;
+  // The auto account's pixels load like a picked one's (idempotent loader).
+  useEffect(() => {
+    if (profile && effAccount) hs.ensurePixels(profile, effAccount);
+  }, [profile, effAccount, hs]);
+
   // A one-pixel account needs no picking — the field DERIVES the lone id (no effect write: the
   // react-compiler lint rejects sync setState in effects, and a derived value can't ever lag the
   // list), but only once the page is picked (owner ask 08-13 — the pixel belongs at the fanka
   // step, not right after the account). A real user pick (multi list) still wins via state.
   const onlyPixel = Array.isArray(pixels) && pixels.length === 1 ? pixels[0].id : "";
   // JURO has no page step — the lone pixel derives right after the account there.
-  const effectivePixel = pixel || (page || !needsPage ? onlyPixel : "");
+  const effectivePixel = pixel || (effPage || !needsPage ? onlyPixel : "");
 
   const pickProfile = (slug: string) => {
     setProfile(slug);
@@ -447,7 +487,7 @@ export function HsCloneBoard({
           page: needsPage ? r.dest.page : "",
           pixel: r.dest.pixel || lonePixelFor(r.dest.profile, r.dest.account, Boolean(r.dest.page) || !needsPage),
         }
-      : { profile, account, page: needsPage ? page : "", pixel: effectivePixel };
+      : { profile, account: effAccount, page: effPage, pixel: effectivePixel };
   const bindsComplete = (b: HsRowDest): boolean =>
     Boolean(b.profile && b.account && (b.page || !needsPage) && b.pixel);
   const rowCopies = (r: Row): number => {
@@ -462,7 +502,7 @@ export function HsCloneBoard({
   const pixelLabelOf = (prof: string, acct: string, id: string): string =>
     (hs.pixelsFor(prof, acct) ?? []).find((p) => p.id === id)?.name || id;
 
-  const defaultsReady = Boolean(profile && account && (page || !needsPage) && effectivePixel);
+  const defaultsReady = Boolean(profile && effAccount && (effPage || !needsPage) && effectivePixel);
   // Fireable rows only: a real id, a ≥$1 budget AND not UNREADABLE — an unreadable source's
   // duplicate dies the same way (LION can't read it), so firing it only burns wave slots and the
   // account's 30-min window. Every wave number (totalClones, acct gate, fanka demand) counts the
@@ -490,7 +530,6 @@ export function HsCloneBoard({
   // Account launch limit (5 campaigns / 30 min): EVERY account the wave targets must take its
   // share — an over-capacity account blocks the fire here with the countdown (the server
   // precheck would 429 it anyway).
-  const limits = useAcctLimits();
   const acctDemand = new Map<string, number>();
   for (const r of validRows) {
     const a = rowBinds(r).account;
@@ -528,9 +567,9 @@ export function HsCloneBoard({
     );
   const pageOver = pageShort.length > 0;
   /** The Settings (default) page's own meter + what the wave adds THERE (rows bound to it). */
-  const boundPageStats = needsPage && page ? hs.pageStats(page) : null;
-  const pageAdsDemand = page ? (pageDemand.get(page) ?? 0) : 0;
-  const defaultPageOver = pageShort.some((x) => x.pageId === page);
+  const boundPageStats = needsPage && effPage ? hs.pageStats(effPage) : null;
+  const pageAdsDemand = effPage ? (pageDemand.get(effPage) ?? 0) : 0;
+  const defaultPageOver = pageShort.some((x) => x.pageId === effPage);
   // JURO: ads land on each source's OWN page(s) — demand is summed PER PAGE across the whole
   // wave (two rows on one fanka charge it together), and every page must fit its free slots.
   const juroPageDemand = new Map<string, number>();
@@ -611,9 +650,6 @@ export function HsCloneBoard({
     const d = hs.dataFor(prof);
     return d?.dupTokenAccounts ?? d?.tokenAccounts ?? null;
   };
-  const tokenVisible = tokenRail ? (data?.dupTokenAccounts ?? data?.tokenAccounts ?? null) : null;
-  const accountOptions =
-    tokenVisible !== null ? (data?.accounts ?? []).filter((a) => tokenVisible.has(a.value)) : (data?.accounts ?? []);
   // A picked account that the rail switch just hid would submit a bind the picker can't display —
   // clear it (and its dependent pixel), same self-heal idiom as the card's unlisted-pixel guard.
   const accountHidden = Boolean(account) && tokenVisible !== null && !tokenVisible.has(account);
@@ -750,7 +786,7 @@ export function HsCloneBoard({
     // own tuple (a fully per-row wave may leave Settings blank — old servers still need them).
     const first = shots[0];
     const waveBinds = defaultsReady
-      ? { profile, account, page: needsPage ? page : "", pixel: effectivePixel }
+      ? { profile, account: effAccount, page: effPage, pixel: effectivePixel }
       : { profile: first.profile, account: first.account, page: first.page ?? "", pixel: first.pixel };
     validRows.forEach((r) => patchRow(r.id, { state: "sending", msg: "queuing on server…" }));
     // The channel is part of the wave's identity — a LION wave retried on the token rail (or
@@ -950,9 +986,17 @@ export function HsCloneBoard({
                   metaWhenClosed
                 />
               </Field>
-              <Field label="Account">
+              <Field
+                label="Account"
+                // The auto pick names itself: the least-loaded account on the 5/30-min timer.
+                hint={
+                  accountIsAuto
+                    ? `auto · least loaded (${limits.countFor(effAccount)}/${limits.limit} launches in its 30-min window) — pick another to override`
+                    : undefined
+                }
+              >
                 <SearchSelect
-                  value={account}
+                  value={effAccount}
                   onChange={pickAccount}
                   options={decorateAccountOptions(accountOptions, limits)}
                   placeholder="Search account"
@@ -975,19 +1019,21 @@ export function HsCloneBoard({
                   // button locks on the same flag). Unknown meter → no line, no gate; "~" marks
                   // the LION-tally estimate (registry never read this page).
                   hint={
-                    page && boundPageStats && !defaultPageOver
-                      ? `${boundPageStats.approx ? "~" : ""}${boundPageStats.used}/${boundPageStats.limit} ads on this page · ${boundPageStats.approx ? "~" : ""}${boundPageStats.free} free` +
+                    effPage && boundPageStats && !defaultPageOver
+                      ? `${pageIsAuto ? "auto · least filled · " : ""}${boundPageStats.approx ? "~" : ""}${boundPageStats.used}/${boundPageStats.limit} ads on this page · ${boundPageStats.approx ? "~" : ""}${boundPageStats.free} free` +
                         (pageAdsDemand > 0 ? ` · wave adds ${pageAdsDemand}` : "")
-                      : undefined
+                      : pageIsAuto
+                        ? "auto · least filled fanka — pick another to override"
+                        : undefined
                   }
                   error={
-                    page && boundPageStats && defaultPageOver
+                    effPage && boundPageStats && defaultPageOver
                       ? `Won't fit — the wave adds ${pageAdsDemand} ads here, only ${boundPageStats.approx ? "~" : ""}${boundPageStats.free} free (${boundPageStats.approx ? "~" : ""}${boundPageStats.used}/${boundPageStats.limit}). Trim copies/rows or pick another page.`
                       : undefined
                   }
                 >
                   <SearchSelect
-                    value={page}
+                    value={effPage}
                     onChange={(v) => {
                       setPage(v);
                       setPreviewed(false);
