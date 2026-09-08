@@ -2,7 +2,7 @@ import { NextResponse, after } from "next/server";
 import { bidKind, parseMoney } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES } from "@/lib/fb-launch";
 import { hsEnsureTokenMark, hsNormalizedConstraints, hsWireBid } from "@/lib/hs-launch";
-import { reportPagesUsed } from "@/lib/hs-pages";
+import { hsPageRefusal, reportPagesUsed } from "@/lib/hs-pages";
 import {
   type GeoOverride,
   applyGeoOverride,
@@ -85,6 +85,10 @@ async function validateBinds(
   if (acct.status !== 1) return { error: bad(`account_disabled — ${account}`) };
   const pageRow = data.pages.find((p) => p.id === page);
   if (!pageRow) return { error: bad(`page_not_on_profile — page ${page} is not on ${profile}`) };
+  // Owner rule 2026-09-07: clones may only land on fankas hs-tools marks OK (belt over the
+  // picker filter — profile-data hides the rest).
+  const fankaRefusal = await hsPageRefusal("br", [pageRow]);
+  if (fankaRefusal) return { error: bad(fankaRefusal.error, fankaRefusal.status) };
   let pixels;
   try {
     pixels = await lionAccountPixels(profile, account);

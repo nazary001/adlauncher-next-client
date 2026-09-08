@@ -238,9 +238,12 @@ export type LionDuplicationResult = {
 /**
  * Clone ONE existing LION campaign into the picked binds (playbook-proven flow: duplicate →
  * creation-status → activate). `starting_budget` is integer CENTS of the account currency
- * (write-side convention). LION rebuilds the clone's name itself (re-dated prefix + "(CLONE)"
- * marker) and appends `name_suffix`. Preflight rejections (object-story creatives → "No valid
- * creative URL…") come back in duplication_results with a reason and create NOTHING.
+ * (write-side convention). LION builds the clone's WHOLE name itself (re-dated prefix, "(CLONE)"
+ * marker, "<landing family> <lang> <random5>") and `name_suffix` is the ONLY naming input its
+ * body takes (partner API docs 09-08) — it is appended verbatim at the end. A `name` field is not
+ * in the contract and was silently dropped: every clone 08-14→09-08 lost the buyer's tail that
+ * way (lib/hs-clone-name). Preflight rejections (object-story creatives → "No valid creative
+ * URL…") come back in duplication_results with a reason and create NOTHING.
  */
 export async function lionDuplicate(args: {
   profile_slug: string;
@@ -257,9 +260,6 @@ export async function lionDuplicate(args: {
    *  "roas_average_floor … not valid" retry loop — live 08-10). Omitted = inherit the source's
    *  bid (the safe default). */
   starting_bid?: number;
-  /** Full clone name (structured prefix + edited tail) — LION's own duplicator UI edits the
-   *  whole name, so the field mirrors it; omitted = LION rebuilds the name itself. */
-  name?: string;
 }): Promise<LionDuplicationResult> {
   const body = (await lionPostOnce("/api/facebook/campaigns/duplicate/", {
     profile_slug: args.profile_slug,
@@ -273,7 +273,6 @@ export async function lionDuplicate(args: {
         number_of_copies: args.number_of_copies,
         name_suffix: args.name_suffix,
         ...(args.starting_bid != null ? { starting_bid: args.starting_bid } : {}),
-        ...(args.name ? { name: args.name } : {}),
       },
     ],
   })) as Record<string, unknown> | null;

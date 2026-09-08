@@ -21,6 +21,11 @@ export type HsProfileData = {
   /** Same sweep for the DEDICATED duplicate/JURO signer (09-03: a different user with its own
    *  smaller grant) — the clone board filters against THIS one. null = don't filter. */
   dupTokenAccounts: ReadonlySet<string> | null;
+  /** Fankas the server HID from `pages` — not OK in hs-tools, or unregistered there (owner
+   *  rule 09-07: the pickers offer only OK fankas; the fire-time gate refuses the rest). */
+  pagesHidden: number;
+  /** Registry off/unreachable → the server offered NO pages; the reason for the empty picker. */
+  pagesUnavailable: string | null;
 };
 
 export type HsCatalog = {
@@ -44,6 +49,10 @@ export type HsCatalog = {
    *  null = unknown (feed not landed, or registry answered without a tally gap-fill); legacy mode
    *  keeps its absent-=-0 contract. */
   pageStats: (pageId: string) => { used: number; limit: number; free: number; name: string; approx: boolean } | null;
+  /** hs-tools registry state of ONE fanpage ("ok" / "banned" / "pub_stale" / "no_access" / …;
+   *  "" = the registry has no row for it). null = the registry feed hasn't landed (or runs in
+   *  legacy mode) → unknown here; the server gate still judges at fire time. */
+  pageState: (pageId: string) => string | null;
 };
 
 const EMPTY: HsCatalog = {
@@ -55,6 +64,7 @@ const EMPTY: HsCatalog = {
   ensureProfile: () => {},
   ensurePixels: () => {},
   pageStats: () => null,
+  pageState: () => null,
 };
 
 // Meta's per-page ad limit the fill badge meters against (same convention as MO's picker).
@@ -83,6 +93,8 @@ export function useHs(enabled: boolean): HsCatalog {
     limits: Record<string, number>;
     /** Registry display names per page id — names pages outside a profile's catalog. */
     names: Record<string, string>;
+    /** Registry state per page id (EVERY registry row, numbers or not) — the fanka gate. */
+    states: Record<string, string>;
     /** Page ids whose count is the LION-tally ESTIMATE (registry never read them) → "~N". */
     approx: Set<string>;
     /** The tally gap-fill landed — a page absent from counts is then "~0" (nothing active
@@ -176,6 +188,7 @@ export function useHs(enabled: boolean): HsCatalog {
           counts?: Record<string, number>;
           limits?: Record<string, number>;
           names?: Record<string, string>;
+          states?: Record<string, string>;
           approx?: string[];
           tallied?: boolean;
           mode?: string;
@@ -186,6 +199,7 @@ export function useHs(enabled: boolean): HsCatalog {
             counts: d.counts,
             limits: d.limits ?? {},
             names: d.names ?? {},
+            states: d.states ?? {},
             approx: new Set(d.approx ?? []),
             tallied: d.tallied === true,
             mode: d.mode === "registry" ? "registry" : "legacy",
@@ -226,6 +240,8 @@ export function useHs(enabled: boolean): HsCatalog {
             locales?: { id: number; name: string }[];
             tokenAccounts?: string[] | null;
             dupTokenAccounts?: string[] | null;
+            pagesHidden?: number;
+            pagesUnavailable?: string | null;
           };
           if (!r.ok || !d?.ok) throw new Error(`HTTP ${r.status}`);
           // Disabled accounts are DROPPED entirely (owner call 2026-08-11) — the picker offers
@@ -259,6 +275,9 @@ export function useHs(enabled: boolean): HsCatalog {
             currencies,
             tokenAccounts: Array.isArray(d.tokenAccounts) ? new Set(d.tokenAccounts.map(String)) : null,
             dupTokenAccounts: Array.isArray(d.dupTokenAccounts) ? new Set(d.dupTokenAccounts.map(String)) : null,
+            pagesHidden: typeof d.pagesHidden === "number" ? d.pagesHidden : 0,
+            pagesUnavailable:
+              typeof d.pagesUnavailable === "string" && d.pagesUnavailable ? d.pagesUnavailable : null,
           };
           failedAt.current.delete(key);
           doneRef.current.add(key);
@@ -381,11 +400,24 @@ export function useHs(enabled: boolean): HsCatalog {
     [pageVolume],
   );
 
+  // The registry's word on one fanka — registry mode only; the legacy feed carries no states, so
+  // there the client can't judge and leaves the gate to the server (which fails closed keyless).
+  const pageState = useCallback(
+    (pageId: string): string | null => {
+      if (!pageVolume || pageVolume.mode !== "registry" || !pageId) return null;
+      return pageVolume.states[pageId] ?? "";
+    },
+    [pageVolume],
+  );
+
   // Stable identity: a fresh object literal per render forced every memoized card taking `hs`
   // to re-render on ANY board render (review find 08-24) — the parts are all stable/memoized,
   // so the wrapper must be too.
   return useMemo(
-    () => (enabled ? { acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels, pageStats } : EMPTY),
-    [enabled, acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels, pageStats],
+    () =>
+      enabled
+        ? { acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels, pageStats, pageState }
+        : EMPTY,
+    [enabled, acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels, pageStats, pageState],
   );
 }

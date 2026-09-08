@@ -268,6 +268,37 @@ export async function deleteLanding(documentId: string): Promise<boolean> {
   }
 }
 
+/** Launch-time facts for the Auto-launch rail: the published landing's polished title/subtitle +
+ *  niche/lang, read fresh by slug (the ad copy is generated from these). null when absent/unavailable
+ *  — the caller then falls back to the job's own fields. */
+export type LandingLaunchFacts = { slug: string; title: string; subtitle: string; niche: string; lang: "en" | "es" };
+export async function fetchLandingForLaunch(slug: string): Promise<LandingLaunchFacts | null> {
+  if (!STRAPI || !TOKEN) return null;
+  try {
+    const res = await strapiFetch(
+      `${STRAPI}/api/mo-landings?filters[slug][$eq]=${encodeURIComponent(slug)}` +
+        `&fields[0]=title&fields[1]=title_accent&fields[2]=subtitle&fields[3]=niche&fields[4]=slug&fields[5]=lang&pagination[pageSize]=1`,
+      { headers: auth, cache: "no-store" },
+    );
+    if (!res.ok) return null;
+    const body = (await res.json().catch(() => ({}))) as {
+      data?: Array<{ title?: string; title_accent?: string; subtitle?: string; niche?: string; lang?: string }>;
+    };
+    const r = body.data?.[0];
+    if (!r) return null;
+    const title = `${String(r.title ?? "")}${r.title_accent ? " " + r.title_accent : ""}`.trim();
+    return {
+      slug,
+      title,
+      subtitle: String(r.subtitle ?? ""),
+      niche: String(r.niche ?? "") || "Auto",
+      lang: r.lang === "es" ? "es" : "en",
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** The landing documentId for a published job's slug (for unpublish). */
 export async function findLandingBySlug(slug: string): Promise<string | null> {
   if (!STRAPI || !TOKEN) return null;

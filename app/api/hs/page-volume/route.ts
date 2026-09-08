@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { LionError, lionConfigured, lionPageAdCounts } from "@/lib/lion";
 import { hsPageAdCounts } from "@/lib/hs-page-volume";
-import { hsPagesConfigured, hsToolsPageStats } from "@/lib/hs-pages";
+import { hsPagesConfigured, hsToolsPageStates, hsToolsPageStats } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
 
 export const runtime = "nodejs";
@@ -30,6 +30,10 @@ export const maxDuration = 120;
  * Registry numbers always win; the moment the box learns a page, its real meter replaces the
  * tally estimate. A LION hiccup degrades to the plain registry slice (absent = unknown).
  *
+ * `states` (registry mode only) = the registry's state per page id for EVERY row it holds,
+ * numbers or not — the client's fanka gate (owner rule 09-07: only "ok" fankas may launch);
+ * a page absent from `states` has no registry row at all.
+ *
  * KILL SWITCH: without HS_PAGES_API_KEY the route serves the legacy feed (LION metrics tally +
  * partner-token ads_volume sweep, mode "legacy", absent = 0 counted ads — the old contract).
  */
@@ -41,6 +45,7 @@ export async function GET(req: Request) {
   if (hsPagesConfigured()) {
     try {
       const stats = await hsToolsPageStats("br");
+      const states = await hsToolsPageStates("br"); // same cached snapshot as the stats
       const counts: Record<string, number> = {};
       const limits: Record<string, number> = {};
       const names: Record<string, string> = {};
@@ -65,7 +70,7 @@ export async function GET(req: Request) {
           /* LION hiccup — the registry slice alone still answers */
         }
       }
-      return NextResponse.json({ ok: true, mode: "registry", counts, limits, names, approx, tallied });
+      return NextResponse.json({ ok: true, mode: "registry", counts, limits, names, approx, tallied, states });
     } catch (e) {
       return NextResponse.json(
         { ok: false, reason: "registry", error: (e as Error).message ?? String(e), counts: {} },
