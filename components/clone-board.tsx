@@ -179,6 +179,9 @@ function CloneInner({
   const [rows, setRows] = useState<CloneRow[]>([]);
   const [loading, setLoading] = useState<boolean>(initialIds.length > 0);
   const [error, setError] = useState<string | null>(null);
+  // Ids the last read could NOT deliver (not found / no access on this signer) while others
+  // loaded — shown above the table instead of vanishing silently.
+  const [loadWarn, setLoadWarn] = useState<string | null>(null);
   const [previewed, setPreviewed] = useState(false);
   const [targetingRowId, setTargetingRowId] = useState<string | null>(null);
   const [highOfferRowId, setHighOfferRowId] = useState<string | null>(null);
@@ -371,6 +374,16 @@ function CloneInner({
   const pixelLabel = (accountId: string, pixelId: string): string =>
     pixelOptionsOf(adAccounts, accountId).find((p) => p.id === pixelId)?.name || pixelId;
 
+  // The MO source read rides the picked SIGNER's token (the retired system token can't see the
+  // campaigns — owner report 09-08: the board sat on "No campaigns received"); AIF reads on
+  // its own token, no channel.
+  const sourceChannel = aifMode ? undefined : moSoc ? `soc:${moSoc}` : undefined;
+  const partialWarn = (failed: { id: string; error: string }[]): string | null =>
+    failed.length
+      ? `${failed.length} campaign${failed.length === 1 ? "" : "s"} didn't load with this signer: ` +
+        failed.map((f) => `#${f.id} — ${f.error}`).join(" · ")
+      : null;
+
   /** (Re)load real sources for a set of ids from Facebook. Used by the Retry button — an event
    *  handler, so the synchronous loading/error flips are fine here. */
   const loadIds = useCallback(
@@ -384,9 +397,10 @@ function CloneInner({
       setLoading(true);
       setError(null);
       const ddmm = todayDDMM();
-      loadCloneSources(ids, partnerId)
-        .then((sources) => {
+      loadCloneSources(ids, partnerId, sourceChannel)
+        .then(({ sources, failed }) => {
           setRows(sources.map((s) => seedRow(s, ddmm, `r${nextRowId.current++}`, me)));
+          setLoadWarn(partialWarn(failed));
           setPreviewed(false);
         })
         .catch((e) => {
@@ -395,7 +409,7 @@ function CloneInner({
         })
         .finally(() => setLoading(false));
     },
-    [partnerId, me],
+    [partnerId, me, sourceChannel],
   );
 
   /** Load local mock sources for the "Load sample" button — no Facebook call. */
@@ -406,22 +420,38 @@ function CloneInner({
     loadSampleSources()
       .then((sources) => {
         setRows(sources.map((s) => seedRow(s, ddmm, `r${nextRowId.current++}`, me)));
+        setLoadWarn(null);
         setPreviewed(false);
       })
       .finally(() => setLoading(false));
   };
 
-  // Initial load from the ids handed over in the link. Async-only (all setState lives in the
-  // promise callbacks) so it never sets state synchronously inside the effect; `loading` is
-  // already seeded true when ids are present.
+  // Initial load from the ids handed over in the link — ONCE, as soon as the reading token is
+  // known: AIF right away, MO only after the signer roster lands and the pick settles (the read
+  // rides that soc's token). Async-only (all setState lives in the promise callbacks) so it never
+  // sets state synchronously inside the effect; `loading` is already seeded true when ids are
+  // present. A roster with NO provisioned soc can never read → say so instead of spinning.
+  const initialLoadRef = useRef(false);
   useEffect(() => {
-    if (initialIds.length === 0) return;
+    if (initialIds.length === 0 || initialLoadRef.current) return;
+    if (!aifMode && !moSoc) {
+      if (moSocs && moSocs.length === 0) {
+        initialLoadRef.current = true;
+        Promise.resolve().then(() => {
+          setLoading(false);
+          setError("No MO signer is provisioned on the server (FB_MO_SOC_TOKENS) — the system token is retired, sources can't be read");
+        });
+      }
+      return;
+    }
+    initialLoadRef.current = true;
     let alive = true;
     const ddmm = todayDDMM();
-    loadCloneSources(initialIds, partnerId)
-      .then((sources) => {
+    loadCloneSources(initialIds, partnerId, sourceChannel)
+      .then(({ sources, failed }) => {
         if (!alive) return;
         setRows(sources.map((s) => seedRow(s, ddmm, `r${nextRowId.current++}`, me)));
+        setLoadWarn(partialWarn(failed));
         setPreviewed(false);
       })
       .catch((e) => {
@@ -436,7 +466,7 @@ function CloneInner({
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [aifMode, moSoc, moSocs]);
 
   const patchRow = (id: string, patch: Partial<CloneRow>) => {
     setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
@@ -852,9 +882,14 @@ function CloneInner({
               Selected Campaigns
             </SectionHeading>
 
+            {loadWarn && !loading && !error ? (
+              <div className="rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-[11.5px] leading-relaxed text-warn">
+                {loadWarn}
+              </div>
+            ) : null}
             {loading ? (
               <div className="flex h-40 items-center justify-center rounded-2xl border border-dashed border-line2 text-[13px] text-faint">
-                Loading campaigns from Facebook…
+                {!aifMode && !moSoc ? "Waiting for the signer…" : "Loading campaigns from Facebook…"}
               </div>
             ) : error ? (
               <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-danger/30 bg-danger/5 px-6 py-12 text-center">

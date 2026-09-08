@@ -303,26 +303,48 @@ function mockSource(campaignId: string, i: number): CloneSource {
   };
 }
 
+/** One source id the read could not deliver, with Meta's reason (not found / no access …). */
+export type CloneSourceFailure = { id: string; error: string };
+
 /**
  * Fetch the source campaigns for the given ids from Facebook (via /api/clone/sources). Throws on
  * failure so the board can surface a proper error state — it never silently substitutes mock data.
+ * `channel` = the MO signer (`soc:<name>`) whose token performs the read (the retired system
+ * token can't see the campaigns any more — owner report 09-08); AIF passes none. When NOT ONE
+ * id could be read the call throws with the per-id reasons, so the board shows an error + Retry
+ * instead of an empty "No campaigns received"; partial failures come back in `failed`.
  */
-export async function loadCloneSources(ids: string[], partner: PartnerId): Promise<CloneSource[]> {
+export async function loadCloneSources(
+  ids: string[],
+  partner: PartnerId,
+  channel?: string,
+): Promise<{ sources: CloneSource[]; failed: CloneSourceFailure[] }> {
   const clean = ids.filter(Boolean);
-  if (clean.length === 0) return [];
+  if (clean.length === 0) return { sources: [], failed: [] };
   const res = await fetch(
-    `/api/clone/sources?partner=${encodeURIComponent(partner)}&ids=${encodeURIComponent(clean.join(","))}`,
+    `/api/clone/sources?partner=${encodeURIComponent(partner)}&ids=${encodeURIComponent(clean.join(","))}` +
+      (channel ? `&channel=${encodeURIComponent(channel)}` : ""),
     { cache: "no-store" },
   );
   const body = (await res.json().catch(() => ({}))) as {
     ok?: boolean;
     sources?: CloneSource[];
+    failed?: string[];
+    failures?: Record<string, string>;
     error?: string;
   };
   if (!res.ok || !body.ok) {
     throw new Error(body?.error || `Failed to load campaigns (${res.status})`);
   }
-  return body.sources ?? [];
+  const sources = body.sources ?? [];
+  const failed = (body.failed ?? []).map((id) => ({ id, error: body.failures?.[id] || "not found / no access" }));
+  if (sources.length === 0 && failed.length > 0) {
+    throw new Error(
+      `Couldn't read ${failed.length === 1 ? "the campaign" : `${failed.length} campaigns`} with this signer: ` +
+        failed.map((f) => `#${f.id} — ${f.error}`).join(" · "),
+    );
+  }
+  return { sources, failed };
 }
 
 /** Local sample sources for the "Load sample" button — mock data, no Facebook call. */
