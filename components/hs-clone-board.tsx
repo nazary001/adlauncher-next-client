@@ -11,7 +11,7 @@ import { bidKind, limitMoneyCents, moneyCentsLabel, moneyLabel, parseMoney } fro
 import { lionNameSuffix } from "@/lib/hs-clone-name";
 import { BID_STRATEGIES, geoSummary } from "@/lib/catalog";
 import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from "@/lib/hs-launch";
-import { juroEnsureMark } from "@/lib/juro";
+import { juroEnsureMark, juroLionStrategyAccepted } from "@/lib/juro";
 import { relabelNameGeo } from "@/lib/targeting-override";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import type { PartnerId } from "@/lib/partners";
@@ -56,8 +56,9 @@ type Row = {
   loading: boolean;
   bid: string; // editable override; "" = inherit from source (safe default)
   /** The row's PICKED bid strategy (seeded with the source's once facts land). On the FB Token
-   *  rails it may differ from the source's (ROAS ↔ cap ↔ lowest — owner ask 09-01, the rail
-   *  rebuilds the ad set); LION rails always ride the source's — the select locks there. */
+   *  rails and LION JURO it may differ from the source's (ROAS ↔ cap ↔ lowest — owner asks
+   *  09-01 / 09-08: the token rails rebuild the ad set, /jurar/ takes bid_strategy natively);
+   *  LION duplicate always rides the source's — the select locks there. */
   bidStrategy: string;
   /** Editable daily budget — cash-register display ("10,00", digits fill cents) → cents on the wire. */
   budget: string;
@@ -291,12 +292,18 @@ export function HsCloneBoard({
         : "lion";
   /** Both FB-Token channels ride the same token pool — one flag for every pool-dependent gate. */
   const tokenRail = effDupChannel === "token" || effDupChannel === "juro-token";
-  /** The row's EFFECTIVE bid strategy: on the FB Token rails the row's pick wins (those rails
-   *  rebuild the ad set — ROAS ↔ cap ↔ lowest all reachable, owner ask 09-01); LION rails
-   *  always ride the source's (LION inherits, it can't re-bid — the select locks there). */
-  const rowStrategy = (r: Row): string => (tokenRail && r.bidStrategy) || r.info?.bidStrategy || "";
+  /** Rails where the row's strategy pick WINS: the FB Token rails rebuild the ad set (owner ask
+   *  09-01) and LION JURO births a new campaign whose /jurar/ wire takes bid_strategy natively
+   *  (owner ask 09-08). LION duplicate inherits the source's — LION can't re-bid a tree clone. */
+  const strategySwitchable = tokenRail || effDupChannel === "juro";
+  /** The row's EFFECTIVE bid strategy: the row's pick where switchable, else the source's. */
+  const rowStrategy = (r: Row): string => (strategySwitchable && r.bidStrategy) || r.info?.bidStrategy || "";
   const rowSwitched = (r: Row): boolean =>
-    tokenRail && r.info !== null && Boolean(r.bidStrategy) && r.bidStrategy !== r.info.bidStrategy;
+    strategySwitchable && r.info !== null && Boolean(r.bidStrategy) && r.bidStrategy !== r.info.bidStrategy;
+  /** Strategies pickable on the current rail — LION's jurar documents no COST_CAP (a source born
+   *  with one still shows as the "exotic" option, pickable back = unswitched). */
+  const strategyOptions =
+    effDupChannel === "juro" ? BID_STRATEGIES.filter((o) => juroLionStrategyAccepted(o.value)) : BID_STRATEGIES;
   // JURO relaunches the source's page POSTS — the ads live on the source post's fanpage, so
   // there is no page bind at all on either channel (LION checks the executor profile's page
   // catalog; the token rail checks our token's own page access — both server-side).
@@ -698,9 +705,9 @@ export function HsCloneBoard({
       : [];
   /** The active mode's fanka verdict — one flag for the fire guard and the button. */
   const fankaOver = mode === "juro" ? juroBlockedCount > 0 : pageOver;
-  // Token rails: a row SWITCHED to cap/ROAS must type a Bid (nothing inherits across strategies)
-  // — the fire button blocks here instead of the wave dying per shot in the drawer.
-  const strategyBidMissing = tokenRail
+  // Switchable rails: a row SWITCHED to cap/ROAS must type a Bid (nothing inherits across
+  // strategies) — the fire button blocks here instead of the wave dying per shot in the drawer.
+  const strategyBidMissing = strategySwitchable
     ? validRows.filter((r) => rowSwitched(r) && bidKind(r.bidStrategy) !== "none" && !r.bid.trim()).length
     : 0;
 
@@ -839,8 +846,9 @@ export function HsCloneBoard({
         // Fallback for the server's bid scaling (its own details/ re-read wins) — the bid
         // rides in HUMAN units and is scaled to LION's Meta-native wire unit server-side.
         ...(r.info?.bidStrategy ? { bidStrategy: r.info.bidStrategy } : {}),
-        // FB Token rails only: the row's SWITCHED strategy — those rails rebuild the ad set
-        // around it (LION rails inherit the source's and never see this field).
+        // Switchable rails (FB Token + LION JURO): the row's SWITCHED strategy — the token rails
+        // rebuild the ad set around it, /jurar/ takes it as bid_strategy (LION duplicate
+        // inherits the source's and never sees this field).
         ...(rowSwitched(r) ? { bidStrategyOverride: r.bidStrategy } : {}),
         geo,
         // LION JURO: LION builds the name itself (`… API - JURO - …`) — only the buyer's tail
@@ -1756,8 +1764,9 @@ export function HsCloneBoard({
                       </div>
                     </div>
 
-                    {/* The CLONE's strategy — switchable per row on the FB Token rails only (they
-                        rebuild the ad set; LION inherits the source's, so the select locks there).
+                    {/* The CLONE's strategy — switchable per row on the FB Token rails (they
+                        rebuild the ad set) and on LION JURO (/jurar/ takes bid_strategy natively);
+                        LION duplicate inherits the source's, so the select locks there.
                         The bid field follows the EFFECTIVE strategy: ROAS decimal (blue R) / cap $
                         / nothing on lowest. A kind change clears the typed bid; switching back to
                         the source's kind re-prefills its own bid. */}
@@ -1779,20 +1788,22 @@ export function HsCloneBoard({
                                     : "";
                               patchRow(r.id, { bidStrategy, bid });
                             }}
-                            disabled={!tokenRail || !r.info || unreadableRow}
+                            disabled={!strategySwitchable || !r.info || unreadableRow}
                             aria-label="Clone bid strategy"
                             title={
-                              !tokenRail
-                                ? "Strategy change needs the FB Token rail — LION builds inherit the source's strategy"
+                              !strategySwitchable
+                                ? "Strategy change needs JURO or the FB Token rail — LION duplicate inherits the source's strategy"
                                 : switched
-                                  ? "Strategy switched — the clone launches with THIS strategy, not the source's"
+                                  ? kind === "roas"
+                                    ? "Strategy switched to min ROAS — the clone value-optimizes PURCHASE and needs a value-optimization (VO) pixel; on any other pixel Meta births an ad-less shell"
+                                    : "Strategy switched — the clone launches with THIS strategy, not the source's"
                                   : "The clone's bid strategy (the source's — switch it to re-bid the clone)"
                             }
                             className={cellSelect + (switched ? " border-accent/50 text-[#9db8ff]" : "")}
                           >
                             {/* An exotic source strategy stays visible (and pickable back) even
                                 though it's not in the shared list. */}
-                            {strategy && !BID_STRATEGIES.some((o) => o.value === strategy) ? (
+                            {strategy && !strategyOptions.some((o) => o.value === strategy) ? (
                               <option value={strategy} className="bg-surface text-ink">
                                 {strategy}
                               </option>
@@ -1802,7 +1813,7 @@ export function HsCloneBoard({
                                 …
                               </option>
                             ) : null}
-                            {BID_STRATEGIES.map((o) => (
+                            {strategyOptions.map((o) => (
                               <option key={o.value} value={o.value} className="bg-surface text-ink">
                                 {o.label}
                               </option>
