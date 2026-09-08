@@ -28,11 +28,87 @@ export function juroStoryPages(stories: string[]): { pageId: string; delta: numb
   return [...counts].map(([pageId, delta]) => ({ pageId, delta }));
 }
 
+/** The bid strategies LION's `/jurar/` documents as `bid_strategy` (partner docs 09-08): lowest
+ *  cost (the default when no bid rides), bid cap (cents) and min ROAS (goal ×100). COST_CAP is
+ *  documented for the bid ENDPOINTS only — never sent on this wire. */
+export const JURO_LION_BID_STRATEGIES = ["LOWEST_COST_WITHOUT_CAP", "LOWEST_COST_WITH_BID_CAP", "LOWEST_COST_WITH_MIN_ROAS"] as const;
+
+export function juroLionStrategyAccepted(strategy: string): boolean {
+  return (JURO_LION_BID_STRATEGIES as readonly string[]).includes(strategy);
+}
+
+export type JuroBidKind = "none" | "cap" | "roas";
+
+/** How a strategy bids — mirrors lib/types `bidKind` arm for arm (kept inline, see the import
+ *  note above; tests/juro.test.ts pins the two together). */
+export function juroBidKind(strategy: string): JuroBidKind {
+  if (strategy === "LOWEST_COST_WITH_MIN_ROAS") return "roas";
+  if (strategy === "LOWEST_COST_WITH_BID_CAP" || strategy === "COST_CAP") return "cap";
+  return "none";
+}
+
 /** jurar's conversion_event rides the bid kind: MIN_ROAS optimizes PURCHASE (value), everything
- *  else keeps the team's CONTENT_VIEW default (same pairing the HS bot ships). The strategy
- *  match mirrors lib/types bidKind's "roas" arm (kept inline — see the import note above). */
+ *  else keeps the team's CONTENT_VIEW default (same pairing the HS bot ships). */
 export function juroConversionEvent(bidStrategy: string): "PURCHASE" | "CONTENT_VIEW" {
-  return bidStrategy === "LOWEST_COST_WITH_MIN_ROAS" ? "PURCHASE" : "CONTENT_VIEW";
+  return juroBidKind(bidStrategy) === "roas" ? "PURCHASE" : "CONTENT_VIEW";
+}
+
+export type JuroBidPlan =
+  | { refusal: string }
+  | {
+      /** The copy's EFFECTIVE strategy — the buyer's per-row switch, else the source's. */
+      strategy: string;
+      switched: boolean;
+      kind: JuroBidKind;
+      /** Human bid to scale onto the wire (typed, else the source's own); null on lowest cost. */
+      human: number | null;
+      /** `bid_strategy` for the jurar wire: the effective strategy whenever a bid rides or the
+       *  buyer switched (an explicit lowest-cost switch must reach LION — the source's cap/ROAS
+       *  would not inherit anyway, but the intent is on the wire). undefined keeps today's
+       *  bid-less wire for an unswitched lowest-cost source (live-verified shape). */
+      wireStrategy: string | undefined;
+    };
+
+/**
+ * jurar has NO bid inheritance: whatever rides the wire IS the new campaign's strategy. Since
+ * 09-08 the buyer may switch that strategy per row (ROAS ↔ cap ↔ lowest — LION's /jurar/ takes
+ * `bid_strategy` natively, unlike /duplicate/). The rules mirror the token JURO rail:
+ *  - a switched cap/ROAS copy needs a TYPED bid (the source's bid means another thing);
+ *  - an unswitched cap/ROAS copy rides the typed bid, else the source's own (unreadable →
+ *    refuse rather than birth a shell Meta then rejects);
+ *  - a lowest-cost copy (source's or switched) takes no bid — a typed one is refused instead
+ *    of silently dropped (same honesty rule as the duplicate rails).
+ * The human bid is scaled by the caller (hsWireBid "lion": ROAS ×100 / cap cents).
+ */
+export function juroBidPlan(args: {
+  sourceStrategy: string;
+  /** "" = ride the source's strategy. */
+  override: string;
+  typedBid: number | null;
+  sourceBid: number | null;
+}): JuroBidPlan {
+  const strategy = args.override || args.sourceStrategy;
+  const switched = Boolean(args.override) && args.override !== args.sourceStrategy;
+  const kind = juroBidKind(strategy);
+  if (kind === "none") {
+    if (args.typedBid != null) {
+      return {
+        refusal: switched
+          ? "strategy switched to lowest cost (no cap) — clear the Bid on this row"
+          : "source bids lowest-cost (no cap) — clear the Bid on this row",
+      };
+    }
+    return { strategy, switched, kind, human: null, wireStrategy: switched ? strategy : undefined };
+  }
+  if (switched && args.typedBid == null) {
+    return {
+      refusal: `strategy switched to ${strategy} — type a Bid on this row (the source's bid doesn't carry across strategies)`,
+    };
+  }
+  const human = args.typedBid ?? args.sourceBid;
+  if (human == null) return { refusal: "source bid unreadable right now (LION metrics lag) — type a Bid on this row" };
+  if (kind === "roas" && human > 100) return { refusal: "roas_goal_invalid" };
+  return { strategy, switched, kind, human, wireStrategy: strategy };
 }
 
 /** Countries for the jurar wire: the override wins (WW → LION's "WORLD" token), else the

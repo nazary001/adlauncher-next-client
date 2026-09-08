@@ -2,10 +2,13 @@
 // JURO rail helpers — wire facts probed live 2026-08-25 (see lib/juro.ts header).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { bidKind } from "../lib/types.ts";
 import {
+  juroBidPlan,
   juroBlockingError,
   juroConversionEvent,
   juroEnsureMark,
+  juroLionStrategyAccepted,
   juroSourceGeo,
   juroSourceLocaleIds,
   juroStoryPage,
@@ -164,6 +167,108 @@ test("WW → worldwide group minus TW/SG (owner rule), declarations pair rides s
   });
   assert.deepEqual(juroTokenRegionalCategories(["WW"]), ["TAIWAN_UNIVERSAL", "SINGAPORE_UNIVERSAL"]);
   assert.deepEqual(juroTokenRegionalCategories(["MX"]), []);
+});
+
+// ---- juroLionStrategyAccepted: the strategies LION's /jurar/ takes as bid_strategy ----------
+
+test("LION jurar takes lowest / bid cap / min ROAS — COST_CAP and junk are refused", () => {
+  assert.equal(juroLionStrategyAccepted("LOWEST_COST_WITHOUT_CAP"), true);
+  assert.equal(juroLionStrategyAccepted("LOWEST_COST_WITH_BID_CAP"), true);
+  assert.equal(juroLionStrategyAccepted("LOWEST_COST_WITH_MIN_ROAS"), true);
+  // Documented for the bid endpoints, NOT for jurar (partner docs 09-08) — never on this wire.
+  assert.equal(juroLionStrategyAccepted("COST_CAP"), false);
+  assert.equal(juroLionStrategyAccepted(""), false);
+  assert.equal(juroLionStrategyAccepted("lowest_cost_with_bid_cap"), false);
+});
+
+// ---- juroBidPlan: the copy's effective strategy + which bid rides (per-row switch, 09-08) ----
+
+const CAP = "LOWEST_COST_WITH_BID_CAP";
+const ROAS = "LOWEST_COST_WITH_MIN_ROAS";
+const LOWEST = "LOWEST_COST_WITHOUT_CAP";
+
+test("no override rides the source's strategy — the typed bid wins, else the source's own", () => {
+  assert.deepEqual(juroBidPlan({ sourceStrategy: CAP, override: "", typedBid: 0.5, sourceBid: 0.4 }), {
+    strategy: CAP,
+    switched: false,
+    kind: "cap",
+    human: 0.5,
+    wireStrategy: CAP,
+  });
+  assert.deepEqual(juroBidPlan({ sourceStrategy: ROAS, override: "", typedBid: null, sourceBid: 0.4 }), {
+    strategy: ROAS,
+    switched: false,
+    kind: "roas",
+    human: 0.4,
+    wireStrategy: ROAS,
+  });
+});
+
+test("an override equal to the source's strategy is not a switch", () => {
+  const plan = juroBidPlan({ sourceStrategy: CAP, override: CAP, typedBid: null, sourceBid: 0.4 });
+  assert.deepEqual(plan, { strategy: CAP, switched: false, kind: "cap", human: 0.4, wireStrategy: CAP });
+});
+
+test("unswitched lowest-cost source keeps today's bid-less wire; a typed bid is refused", () => {
+  assert.deepEqual(juroBidPlan({ sourceStrategy: LOWEST, override: "", typedBid: null, sourceBid: null }), {
+    strategy: LOWEST,
+    switched: false,
+    kind: "none",
+    human: null,
+    wireStrategy: undefined,
+  });
+  const refused = juroBidPlan({ sourceStrategy: LOWEST, override: "", typedBid: 0.5, sourceBid: null });
+  assert.match((refused as { refusal: string }).refusal, /source bids lowest-cost.*clear the Bid/);
+});
+
+test("cap/ROAS source with an unreadable bid and nothing typed → refusal (LION metrics lag)", () => {
+  const refused = juroBidPlan({ sourceStrategy: ROAS, override: "", typedBid: null, sourceBid: null });
+  assert.match((refused as { refusal: string }).refusal, /source bid unreadable.*type a Bid/);
+});
+
+test("switched to cap/ROAS needs a typed bid — the source's bid doesn't carry across strategies", () => {
+  const refused = juroBidPlan({ sourceStrategy: ROAS, override: CAP, typedBid: null, sourceBid: 0.4 });
+  assert.match((refused as { refusal: string }).refusal, /switched to LOWEST_COST_WITH_BID_CAP.*type a Bid/);
+  assert.deepEqual(juroBidPlan({ sourceStrategy: ROAS, override: CAP, typedBid: 0.5, sourceBid: 0.4 }), {
+    strategy: CAP,
+    switched: true,
+    kind: "cap",
+    human: 0.5,
+    wireStrategy: CAP,
+  });
+  assert.deepEqual(juroBidPlan({ sourceStrategy: CAP, override: ROAS, typedBid: 0.3, sourceBid: 0.5 }), {
+    strategy: ROAS,
+    switched: true,
+    kind: "roas",
+    human: 0.3,
+    wireStrategy: ROAS,
+  });
+});
+
+test("a ROAS goal above 100 is refused whether switched or inherited", () => {
+  const switched = juroBidPlan({ sourceStrategy: CAP, override: ROAS, typedBid: 150, sourceBid: 0.5 });
+  assert.deepEqual(switched, { refusal: "roas_goal_invalid" });
+  const inherited = juroBidPlan({ sourceStrategy: ROAS, override: "", typedBid: null, sourceBid: 150 });
+  assert.deepEqual(inherited, { refusal: "roas_goal_invalid" });
+});
+
+test("switched to lowest cost rides an EXPLICIT strategy on the wire; a typed bid is refused", () => {
+  assert.deepEqual(juroBidPlan({ sourceStrategy: ROAS, override: LOWEST, typedBid: null, sourceBid: 0.4 }), {
+    strategy: LOWEST,
+    switched: true,
+    kind: "none",
+    human: null,
+    wireStrategy: LOWEST,
+  });
+  const refused = juroBidPlan({ sourceStrategy: ROAS, override: LOWEST, typedBid: 0.5, sourceBid: 0.4 });
+  assert.match((refused as { refusal: string }).refusal, /switched to lowest cost.*clear the Bid/);
+});
+
+test("the plan's bid kind agrees with lib/types bidKind for every strategy", () => {
+  for (const s of [LOWEST, CAP, "COST_CAP", ROAS, "", "SOME_EXOTIC_STRATEGY"]) {
+    const plan = juroBidPlan({ sourceStrategy: s, override: "", typedBid: null, sourceBid: 1 });
+    assert.equal((plan as { kind: string }).kind, bidKind(s), s);
+  }
 });
 
 // jurar's bid wire = hsWireBid's "lion" channel (ROAS ×100 / cap cents), probed live 08-25:

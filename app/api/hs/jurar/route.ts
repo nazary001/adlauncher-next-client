@@ -1,7 +1,14 @@
 import { NextResponse, after } from "next/server";
-import { bidKind, parseMoney } from "@/lib/types";
+import { parseMoney } from "@/lib/types";
 import { hsWireBid } from "@/lib/hs-launch";
-import { juroBlockingError, juroConversionEvent, juroStoryPages, juroWireCountries } from "@/lib/juro";
+import {
+  juroBidPlan,
+  juroBlockingError,
+  juroConversionEvent,
+  juroLionStrategyAccepted,
+  juroStoryPages,
+  juroWireCountries,
+} from "@/lib/juro";
 import { hsPageRefusal, reportPagesUsed } from "@/lib/hs-pages";
 import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import { sessionFromCookieHeader } from "@/lib/session";
@@ -93,6 +100,8 @@ type JuroShot = {
   budget: number;
   budgetRaw: string;
   bid: number | null;
+  /** Per-row strategy switch ("" = the source's) — LION's /jurar/ takes bid_strategy natively. */
+  bidStrategyOverride: string;
   suffix: string;
   geo: string;
   label: string;
@@ -131,8 +140,12 @@ export async function POST(req: Request): Promise<NextResponse> {
       campaignId?: string;
       budget?: string;
       /** Optional bid override in HUMAN units (ROAS goal decimal / cap $) — scaled to jurar's
-       *  wire by the SOURCE's strategy in the pump (empty = the source's own bid). */
+       *  wire by the copy's EFFECTIVE strategy in the pump (empty = the source's own bid). */
       bid?: string;
+      /** Per-row strategy switch (owner ask 09-08): one of LION jurar's bid_strategy values —
+       *  ROAS ↔ cap ↔ lowest all reachable (/jurar/ builds a fresh campaign). "" = the source's.
+       *  A switched cap/ROAS row must carry a typed `bid` (nothing inherits across strategies). */
+      bidStrategyOverride?: string;
       /** Buyer tail — LION builds the JURO name itself and appends this as name_suffix. */
       suffix?: string;
       geo?: string;
@@ -176,6 +189,12 @@ export async function POST(req: Request): Promise<NextResponse> {
     }
     const override = parseGeoOverride(raw?.countries, raw?.locales);
     if (override && "error" in override) return bad(`targeting_override_${override.error}`);
+    // The strategy switch is validated against what /jurar/ documents — COST_CAP (a bid-endpoint
+    // value) or junk would only die inside LION's task with an opaque reason.
+    const strategyOverride = String(raw?.bidStrategyOverride ?? "").trim();
+    if (strategyOverride && !juroLionStrategyAccepted(strategyOverride)) {
+      return bad("bid_strategy_invalid — LION jurar takes lowest cost / bid cap / min ROAS only");
+    }
     // The shot's own destination over the wave defaults (per-row binds, 09-08; no page on JURO).
     const shotBinds = resolveShotBinds(raw, waveBinds, false);
     if ("error" in shotBinds) return bad(shotBinds.error);
@@ -184,6 +203,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       budget,
       budgetRaw: String(raw?.budget ?? ""),
       bid,
+      bidStrategyOverride: strategyOverride,
       suffix: String(raw?.suffix ?? "").trim().slice(0, 80),
       geo: String(raw?.geo ?? "").slice(0, 40) || "inherited",
       label: String(raw?.label ?? "").trim().slice(0, 200),
@@ -339,31 +359,27 @@ function resolveShotWire(
   if (countries.length === 0) {
     return "source geo unreadable — set a Targeting override on this row";
   }
-  // jurar has no bid inheritance: whatever rides the wire IS the new campaign's strategy. A
-  // cap/ROAS source therefore NEEDS a bid value — the typed override or the source's own.
-  const kind = bidKind(src.bidStrategy);
-  let bidStrategy: string | undefined;
+  // jurar has no bid inheritance: whatever rides the wire IS the new campaign's strategy — the
+  // row's switch (09-08) or the source's. juroBidPlan owns the rules (typed-bid duties, lowest
+  // refusals, unreadable sources — tests/juro.test.ts); the scaling to LION's wire unit is here.
+  const plan = juroBidPlan({
+    sourceStrategy: src.bidStrategy,
+    override: s.bidStrategyOverride,
+    typedBid: s.bid,
+    sourceBid: src.bid,
+  });
+  if ("refusal" in plan) return plan.refusal;
   let startingBid: number | undefined;
-  if (kind === "none" && s.bid != null) {
-    // Same honesty rule as the duplicate route: jurar would silently drop a bid on a
-    // lowest-cost source — refuse instead of pretending it applied.
-    return "source bids lowest-cost (no cap) — clear the Bid on this row";
-  }
-  if (kind !== "none" && src.bidStrategy) {
-    const human = s.bid ?? src.bid;
-    if (human == null) {
-      return "source bid unreadable right now (LION metrics lag) — type a Bid on this row";
-    }
-    if (kind === "roas" && human > 100) return "roas_goal_invalid";
-    const wire = hsWireBid(human, src.bidStrategy, "lion");
+  if (plan.human != null) {
+    const wire = hsWireBid(plan.human, plan.strategy, "lion");
     if (wire == null) {
-      return kind === "roas"
+      return plan.kind === "roas"
         ? "roas goal ambiguous — type the decimal goal (0,30 = 30%)"
         : "bid not resolvable for this source — clear the Bid to use the source's";
     }
-    bidStrategy = src.bidStrategy;
     startingBid = wire;
   }
+  const bidStrategy = plan.wireStrategy;
   const locales =
     s.override && s.override.localeIds.length > 0
       ? s.override.localeIds.map((id) => ({ id, name: binds.localeNames.get(id) ?? "" }))
@@ -375,7 +391,8 @@ function resolveShotWire(
     locales,
     bidStrategy,
     startingBid,
-    conversionEvent: juroConversionEvent(bidStrategy ?? ""),
+    // The pairing follows the EFFECTIVE strategy: a ROAS switch value-optimizes PURCHASE.
+    conversionEvent: juroConversionEvent(plan.strategy),
   };
 }
 
