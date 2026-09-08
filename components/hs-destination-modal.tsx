@@ -8,9 +8,10 @@ import type { HsCatalog } from "./use-hs";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { TargetIcon, XIcon } from "./icons";
 
-/** One row's OWN destination on the HS clone board (owner ask 2026-09-08): the full bind chain —
- *  a half chain is meaningless (an account belongs to a profile, a page to a profile, a pixel to
- *  an account), so a row either rides the wave defaults or carries its complete own tuple. */
+/** One row's OWN destination picks on the HS clone board (owner ask 2026-09-08). Every field is
+ *  optional: "" = ride the wave Settings for it — the board's rowBinds resolves the chain (an
+ *  account belongs to a profile, a pixel to an account). The modal always applies a COMPLETE
+ *  tuple; the inline row pickers override one field at a time. */
 export type HsRowDest = { profile: string; account: string; page: string; pixel: string };
 
 /**

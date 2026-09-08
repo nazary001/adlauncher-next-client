@@ -14,7 +14,19 @@ import { juroEnsureMark } from "@/lib/juro";
 import { relabelNameGeo } from "@/lib/targeting-override";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import type { PartnerId } from "@/lib/partners";
-import { ChevronDownIcon, CopyIcon, EyeIcon, GlobeIcon, PlusIcon, RetryIcon, TargetIcon, TrashIcon } from "./icons";
+import {
+  ChevronDownIcon,
+  CopyIcon,
+  EyeIcon,
+  GlobeIcon,
+  LockIcon,
+  MinusIcon,
+  MoreIcon,
+  PlusIcon,
+  RetryIcon,
+  TrashIcon,
+  UndoIcon,
+} from "./icons";
 import { HsTargetingModal } from "./hs-targeting-modal";
 import { HsDestinationModal, type HsRowDest } from "./hs-destination-modal";
 import { hsAllBearersDown, hsTokensAllDown, useHsTokenStatus } from "./hs-token-status";
@@ -458,16 +470,6 @@ export function HsCloneBoard({
     return () => clearTimeout(timer);
   }, [rows, user?.username]);
 
-  // Rows with their OWN destination may name a profile/account the Settings column never
-  // loaded — the idempotent loaders fetch what those rows show (names, pixels, token sweeps).
-  useEffect(() => {
-    for (const r of rows) {
-      if (!r.dest) continue;
-      if (r.dest.profile) hs.ensureProfile(r.dest.profile);
-      if (r.dest.profile && r.dest.account) hs.ensurePixels(r.dest.profile, r.dest.account);
-    }
-  }, [rows, hs]);
-
   // ---- per-row destination (owner ask 09-08) ------------------------------------------------
   // A row rides the wave defaults (Settings) unless it carries its own tuple; copies likewise.
   // Every wave number below (demand per account / per fanka, the fire cap, the shots) is built
@@ -480,14 +482,67 @@ export function HsCloneBoard({
     const list = hs.pixelsFor(prof, acct);
     return Array.isArray(list) && list.length === 1 ? list[0].id : "";
   };
-  const rowBinds = (r: Row): HsRowDest =>
-    r.dest
-      ? {
-          ...r.dest,
-          page: needsPage ? r.dest.page : "",
-          pixel: r.dest.pixel || lonePixelFor(r.dest.profile, r.dest.account, Boolean(r.dest.page) || !needsPage),
-        }
-      : { profile, account: effAccount, page: effPage, pixel: effectivePixel };
+  // FB Token rails: offer only accounts the DUP signer can act on (its grant is its own — 299
+  // accs vs the pool's 379 as of 09-03) — LION binds cover segments a token was never granted
+  // (aleph, 08-19), and a build there dies on the first Graph POST. null sweep → no filtering
+  // (fail open; the server guard still answers with the actionable error).
+  const visibleFor = (prof: string): ReadonlySet<string> | null => {
+    if (!tokenRail) return null;
+    const d = hs.dataFor(prof);
+    return d?.dupTokenAccounts ?? d?.tokenAccounts ?? null;
+  };
+  /** The accounts a row on `prof` may bind (its profile's catalog, token-filtered on the FB
+   *  Token rails) — the row pickers' list and the auto pick's candidates. */
+  const accountOptionsFor = (prof: string) => {
+    const d = hs.dataFor(prof);
+    const vis = visibleFor(prof);
+    return vis !== null ? (d?.accounts ?? []).filter((a) => vis.has(a.value)) : (d?.accounts ?? []);
+  };
+  /** Default binds for ANY profile (owner rule 09-08): least-loaded account, least-filled page. */
+  const autoAccountFor = (prof: string): string =>
+    prof
+      ? leastLoadedAccount(
+          accountLoads(
+            accountOptionsFor(prof).map((a) => ({ id: a.value, disabled: a.disabled })),
+            limits,
+          ),
+          limits.limit,
+        )
+      : "";
+  const autoPageFor = (prof: string): string =>
+    needsPage && prof
+      ? leastFilledPage(
+          (hs.dataFor(prof)?.pages ?? []).map((pg) => {
+            const st = hs.pageStats(pg.value);
+            return { id: pg.value, used: st?.used ?? null, limit: st?.limit ?? null, disabled: pg.disabled };
+          }),
+        )
+      : "";
+  const emptyDest: HsRowDest = { profile: "", account: "", page: "", pixel: "" };
+  /** A row's EFFECTIVE binds: its own picks first, the wave Settings for whatever it leaves
+   *  empty — resolved down the cascade (owner ask 09-08, inline row pickers): an account belongs
+   *  to a profile and a pixel to an account, so a row on ANOTHER profile gets that profile's
+   *  auto account / page instead of the wave's, and a row on another account never inherits the
+   *  wave's pixel (a one-pixel account still derives its lone pixel once the page step is done). */
+  const rowBinds = (r: Row): HsRowDest => {
+    const own = r.dest ?? emptyDest;
+    const prof = own.profile || profile;
+    const sameProfile = prof === profile;
+    const acct = own.account || (sameProfile ? effAccount : autoAccountFor(prof));
+    const pg = needsPage ? own.page || (sameProfile ? effPage : autoPageFor(prof)) : "";
+    const sameAccount = sameProfile && acct === effAccount;
+    const pageDone = Boolean(pg) || !needsPage;
+    const pix = own.pixel || (sameAccount ? pixel : "") || lonePixelFor(prof, acct, pageDone);
+    return { profile: prof, account: acct, page: pg, pixel: pix };
+  };
+  /** Inline per-field destination edit: only the touched field becomes the row's own — the rest
+   *  keeps riding the wave (rowBinds resolves it). Every field empty → back to the wave (null). */
+  const patchRowDest = (r: Row, patch: Partial<HsRowDest>) => {
+    const next = { ...(r.dest ?? emptyDest), ...patch };
+    patchRow(r.id, { dest: next.profile || next.account || next.page || next.pixel ? next : null });
+    setPreviewed(false);
+    if (next.profile) hs.ensureProfile(next.profile);
+  };
   const bindsComplete = (b: HsRowDest): boolean =>
     Boolean(b.profile && b.account && (b.page || !needsPage) && b.pixel);
   const rowCopies = (r: Row): number => {
@@ -501,6 +556,25 @@ export function HsCloneBoard({
     hs.dataFor(prof)?.pages.find((p) => p.value === id)?.label || id;
   const pixelLabelOf = (prof: string, acct: string, id: string): string =>
     (hs.pixelsFor(prof, acct) ?? []).find((p) => p.id === id)?.name || id;
+
+  // Rows with their OWN destination may resolve to a profile/account the Settings column never
+  // loaded (their own profile's auto account included) — the idempotent loaders fetch what
+  // those rows show (names, pixels, token sweeps). Keyed by the resolved pairs, so the effect
+  // runs only when a row's binds actually change.
+  const ownBindsKey = rows
+    .filter((r) => r.dest)
+    .map((r) => {
+      const bnd = rowBinds(r);
+      return `${bnd.profile}|${bnd.account}`;
+    })
+    .join(",");
+  useEffect(() => {
+    for (const pair of ownBindsKey.split(",")) {
+      const [prof, acct] = pair.split("|");
+      if (prof) hs.ensureProfile(prof);
+      if (prof && acct) hs.ensurePixels(prof, acct);
+    }
+  }, [ownBindsKey, hs]);
 
   const defaultsReady = Boolean(profile && effAccount && (effPage || !needsPage) && effectivePixel);
   // Fireable rows only: a real id, a ≥$1 budget AND not UNREADABLE — an unreadable source's
@@ -641,15 +715,6 @@ export function HsCloneBoard({
     ? `${dupSigner.user || "our FB token"}${dupSigner.app ? ` (${dupSigner.app})` : ""}${dupSigner.dedicated ? "" : " — launch pool"}`
     : "our FB token";
 
-  // FB Token rails: offer only accounts the DUP signer can act on (its grant is its own — 299
-  // accs vs the pool's 379 as of 09-03) — LION binds cover segments a token was never granted
-  // (aleph, 08-19), and a build there dies on the first Graph POST. null sweep → no filtering
-  // (fail open; the server guard still answers with the actionable error).
-  const visibleFor = (prof: string): ReadonlySet<string> | null => {
-    if (!tokenRail) return null;
-    const d = hs.dataFor(prof);
-    return d?.dupTokenAccounts ?? d?.tokenAccounts ?? null;
-  };
   // A picked account that the rail switch just hid would submit a bind the picker can't display —
   // clear it (and its dependent pixel), same self-heal idiom as the card's unlisted-pixel guard.
   const accountHidden = Boolean(account) && tokenVisible !== null && !tokenVisible.has(account);
@@ -664,9 +729,10 @@ export function HsCloneBoard({
   /** A row's OWN account the token rail can't act on — flagged on the row, blocks the fire
    *  (the wave-default pick self-heals above; an own pick stays visible so the buyer re-picks). */
   const rowAccountHidden = (r: Row): boolean => {
-    if (!r.dest || !r.dest.account) return false;
-    const v = visibleFor(r.dest.profile);
-    return v !== null && !v.has(r.dest.account);
+    if (!r.dest?.account) return false;
+    const bnd = rowBinds(r);
+    const v = visibleFor(bnd.profile);
+    return v !== null && !v.has(bnd.account);
   };
   const hiddenRows = validRows.filter(rowAccountHidden).length;
 
@@ -1267,431 +1333,471 @@ export function HsCloneBoard({
               ) : null}
             </div>
 
-            {/* table-fixed + one flexible Name column: fixed columns take their widths, the name
-                absorbs the rest — no 1080px floor, so the board fits a 1024px viewport with zero
-                horizontal scroll. Informational columns (source page / source facts) hide below
-                xl (the sidebar meters and the Preview carry the same numbers); the min-w only
-                guards true mobile, where the wrapper scrolls as the last resort. */}
-            <div className="overflow-x-auto rounded-2xl border border-line bg-surface">
-              <table className="w-full min-w-[760px] table-fixed text-left">
-                <thead>
-                  <tr className="border-b border-line text-[10px] font-semibold uppercase tracking-[0.1em] text-faint">
-                    <th className="w-[34px] px-2 py-2 font-semibold">#</th>
-                    <th className="px-2 py-2 font-semibold">Name (fixed) + suffix · status</th>
-                    <th className="w-[122px] px-2 py-2 font-semibold">Countries</th>
-                    <th className="w-[168px] px-2 py-2 font-semibold">Destination · copies</th>
-                    <th className="hidden w-[142px] px-2 py-2 font-semibold xl:table-cell">Source page</th>
-                    <th className="hidden w-[110px] px-2 py-2 font-semibold xl:table-cell">Source $ · bid</th>
-                    <th className="w-[150px] px-2 py-2 font-semibold">Strategy · Bid</th>
-                    <th className="w-[92px] px-2 py-2 font-semibold">Budget $</th>
-                    <th className="w-[36px] px-1 py-2" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((r, i) => {
-                    const unreadableRow = r.info?.status === "UNREADABLE";
-                    const lowBudget =
-                      /^\d{5,}$/.test(r.campaignId.trim()) && !unreadableRow && parseMoney(r.budget) < 1;
-                    const binds = rowBinds(r);
-                    const own = r.dest !== null;
-                    const complete = bindsComplete(binds);
-                    const hidden = rowAccountHidden(r);
-                    return (
-                    <tr
-                      key={r.id}
-                      className={
-                        "border-b border-line/60 align-top last:border-b-0" +
-                        (unreadableRow ? " opacity-60" : "")
-                      }
-                    >
-                      <td className="px-2 py-3 font-mono text-[11px] text-faint">{String(i + 1).padStart(2, "0")}</td>
-                      <td className="px-2 py-2.5">
-                        {/* Like the launcher's name field: the LION-rebuilt part is FIXED (muted),
-                            only the trailing suffix is the buyer's to edit. */}
-                        <div className="rounded-md border border-line bg-surface2 px-2.5 py-1.5">
-                          <p className="font-mono text-[10px] text-faint">#{r.campaignId}</p>
-                          <p className="mt-0.5 break-words text-[11.5px] leading-snug text-dim" title={r.info?.name}>
-                            {r.loading ? (
-                              "Loading from LION…"
-                            ) : r.info?.status === "UNREADABLE" ? (
-                              <span className="text-danger">LION can’t read this campaign — excluded from the wave</span>
-                            ) : !r.info && r.failed ? (
-                              <span className="text-danger">LION read failed</span>
-                            ) : r.info?.name ? (
-                              // Fixed part = grammar prefix + the FIRE channel's marker (token →
-                              // TOKEN, live-toggles with the rail switch; source markers were
-                              // stripped into the tail parse).
-                              (() => {
-                                const p = relabelNameGeo(
-                                  splitLionName(r.info.name, todaySaoPauloDDMM()).prefix,
-                                  r.countries,
-                                );
-                                if (!p) return r.info.name;
-                                // LION JURO appends its own family label server-side (hence the
-                                // ellipsis); token JURO's name is exact — board-built.
-                                if (effDupChannel === "juro") return `${juroPrefixPreview(p)}…`;
-                                if (effDupChannel === "juro-token") return juroPrefixPreview(p) + HS_TOKEN_MARK;
-                                return p + (effDupChannel === "token" ? HS_TOKEN_MARK : "");
-                              })()
-                            ) : (
-                              "—"
-                            )}
-                          </p>
-                          {/* Grows with the typed tail (wraps, no inner scroll) — same adaptive
-                              name editing as the MO clone board; Enter/newlines never reach the
-                              campaign name (singleLine). */}
-                          <AutoTextarea
-                            value={r.suffix}
-                            onChange={(v) => patchRow(r.id, { suffix: v })}
-                            placeholder="tail — edit to rename the clone"
-                            ariaLabel="Name suffix"
-                            maxLength={80}
-                            singleLine
-                            className="mt-1.5 block w-full resize-none overflow-hidden rounded border border-line bg-surface px-2 py-1 text-[12px] leading-snug text-ink outline-none transition-colors hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
-                          />
-                          {!r.info && r.failed && !r.loading ? (
-                            // Manual re-ask (the effect no longer auto-loops a dead LION). The row
-                            // can still fire blind — the duplicate weapon re-reads the source.
-                            <button
-                              type="button"
-                              onClick={() => retrySource(r)}
-                              className="mt-1.5 inline-flex items-center gap-1.5 rounded-md border border-line bg-surface px-2 py-1 text-[11px] font-medium text-dim transition-colors hover:border-accent/50 hover:text-[#9db8ff] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-                            >
-                              <RetryIcon className="h-3 w-3" />
-                              Retry read
-                            </button>
-                          ) : null}
-                          {r.state !== "idle" ? (
-                            // Wave status lives UNDER the name (was its own truncated 180px column):
-                            // full-width, wraps — a real FB/LION error is readable, not hover-only.
-                            <p
-                              className={
-                                "mt-1.5 break-words font-mono text-[10.5px] leading-snug " +
-                                (r.state === "error"
-                                  ? "text-danger"
-                                  : r.state === "ok"
-                                    ? "text-launch2"
-                                    : "text-[#9db8ff]")
-                              }
-                            >
-                              {r.state === "sending" ? "Submitting…" : (r.msg ?? "—")}
-                            </p>
-                          ) : null}
-                        </div>
-                      </td>
-                      <td className="px-2 py-3 text-[11.5px]">
-                        <div className="flex flex-col gap-1.5">
-                          {r.countries.length > 0 ? (
-                            <span
-                              className="font-medium text-[#9db8ff]"
-                              title="Geo override — the clone launches with THIS targeting, not the source's"
-                            >
-                              {overrideGeoLabel(r.countries)}
-                              <span className="ml-1 rounded border border-accent/40 bg-accent/10 px-1 py-px text-[9px] font-semibold uppercase tracking-wide">
-                                override
-                              </span>
-                            </span>
-                          ) : (
-                            <span className="text-dim">
-                              {r.info?.countries.length
-                                ? geoSummary(r.info.countries)
-                                : r.info?.name
-                                  ? geoFromName(r.info.name, geoSummary) || "inherited"
-                                  : "—"}
-                            </span>
-                          )}
-                          {effDupChannel === "lion" && (r.countries.length > 0 || r.locales.length > 0) && bearersDown ? (
-                            <span
-                              className="text-[10px] font-semibold leading-snug text-warn"
-                              title="The LION rail patches the geo through our FB token after LION builds the clone — every bearer is down right now. JURO (LION API) carries the geo natively."
-                            >
-                              needs an FB token — or JURO
-                            </span>
-                          ) : null}
+            {/* Responsive grid list (owner ask 09-08, same as the MO/AIF board): ONE aligned line
+                per row on a wide board, folded lines on a laptop board, a stacked card below
+                ~672px — CSS container queries on the list (globals.css `.clone-row`), so the
+                layout follows the BOARD's width. The row's destination is edited INLINE (profile
+                → account → page → pixel pickers with the live load / fill badges); the modal
+                stays for "apply to all rows". */}
+            <div className="clone-rows rounded-2xl border border-line bg-surface">
+              <div className="clone-row clone-head border-b border-line bg-surface2/40 text-[10px] font-semibold uppercase tracking-[0.1em] text-faint">
+                <span className="cr-num text-center">#</span>
+                <span className="cr-name">Campaign</span>
+                <span className="cr-geo">Geo</span>
+                <span className="cr-dest">Destination</span>
+                <span className="cr-bid">Strategy · Bid</span>
+                <span className="cr-budget">Budget · Copies</span>
+                <span className="cr-del" />
+              </div>
+              {rows.map((r, i) => {
+                const unreadableRow = r.info?.status === "UNREADABLE";
+                const lowBudget =
+                  /^\d{5,}$/.test(r.campaignId.trim()) && !unreadableRow && parseMoney(r.budget) < 1;
+                const b = rowBinds(r);
+                const own = r.dest !== null;
+                const complete = bindsComplete(b);
+                const hidden = rowAccountHidden(r);
+                const copiesEff = rowCopies(r);
+                const strategy = rowStrategy(r);
+                const kind = bidKind(strategy);
+                const switched = rowSwitched(r);
+                const rowData = hs.dataFor(b.profile);
+                const rowPixels = b.profile && b.account ? hs.pixelsFor(b.profile, b.account) : undefined;
+                const rowAccounts = accountOptionsFor(b.profile);
+                // Fixed name part = grammar prefix (re-dated, geo-relabeled) + the FIRE channel's
+                // marker (token → TOKEN, live-toggles with the rail switch).
+                const fixedName = r.info?.name
+                  ? (() => {
+                      const p = relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries);
+                      if (!p) return r.info.name;
+                      if (effDupChannel === "juro") return `${juroPrefixPreview(p)}…`;
+                      if (effDupChannel === "juro-token") return juroPrefixPreview(p) + HS_TOKEN_MARK;
+                      return p + (effDupChannel === "token" ? HS_TOKEN_MARK : "");
+                    })()
+                  : "";
+                const geoInherited = r.info?.countries.length
+                  ? geoSummary(r.info.countries)
+                  : r.info?.name
+                    ? geoFromName(r.info.name, geoSummary) || "inherited"
+                    : "";
+                return (
+                  <div
+                    key={r.id}
+                    className={
+                      "clone-row border-b border-line/60 transition-colors last:border-b-0 hover:bg-raise/25" +
+                      (unreadableRow ? " opacity-60" : "")
+                    }
+                  >
+                    <div className="cr-num">
+                      <span className="flex h-8 items-center justify-center font-mono text-[12px] text-faint">{i + 1}</span>
+                    </div>
+
+                    {/* name — the LION-rebuilt part is FIXED (muted), only the tail is editable;
+                        the chips under it carry the source id, its facts (budget · ads · bid)
+                        and the fanka(s) its ads live on, with the live fill — always visible
+                        (were xl-only columns). */}
+                    <div className="cr-name min-w-0">
+                      {r.loading ? (
+                        <span className="mb-1 flex items-center gap-1.5 font-mono text-[10.5px] text-faint">
+                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+                          Loading from LION…
+                        </span>
+                      ) : unreadableRow ? (
+                        <span className="mb-1 block font-mono text-[10.5px] font-semibold text-danger">
+                          LION can’t read this campaign — excluded from the wave
+                        </span>
+                      ) : !r.info && r.failed ? (
+                        <span className="mb-1 block font-mono text-[10.5px] font-semibold text-danger">LION read failed</span>
+                      ) : (
+                        <span
+                          className="mb-1 flex items-center gap-1 truncate font-mono text-[10.5px] text-faint"
+                          title={fixedName ? `${fixedName} — fixed, LION's grammar` : undefined}
+                        >
+                          <LockIcon className="h-2.5 w-2.5 shrink-0" />
+                          {fixedName || "—"}
+                        </span>
+                      )}
+                      <AutoTextarea
+                        value={r.suffix}
+                        onChange={(v) => patchRow(r.id, { suffix: v })}
+                        placeholder="tail — edit to rename the clone"
+                        ariaLabel="Name suffix"
+                        maxLength={80}
+                        singleLine
+                        className="block w-full resize-none overflow-hidden rounded-lg border border-line bg-surface2 px-2.5 py-2 text-[12.5px] leading-relaxed text-ink outline-none transition-colors duration-150 hover:border-line2 focus:border-accent/60 focus:bg-surface2/80 focus:ring-2 focus:ring-accent/15"
+                      />
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        <span className="inline-flex items-center rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-[10px] text-faint">
+                          #{r.campaignId}
+                        </span>
+                        {!r.info && r.failed && !r.loading ? (
+                          // Manual re-ask (the effect no longer auto-loops a dead LION). The row
+                          // can still fire blind — the duplicate weapon re-reads the source.
                           <button
                             type="button"
-                            onClick={() => setTargetingRowId(r.id)}
-                            className="inline-flex w-fit items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] font-medium text-dim transition-colors hover:bg-accent/10 hover:text-[#9db8ff] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                            onClick={() => retrySource(r)}
+                            className="inline-flex items-center gap-1 rounded border border-line bg-surface px-1.5 py-0.5 text-[10px] font-medium text-dim transition-colors hover:border-accent/50 hover:text-[#9db8ff] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                           >
-                            <GlobeIcon className="h-3 w-3" />
-                            Targeting
+                            <RetryIcon className="h-3 w-3" />
+                            Retry read
                           </button>
-                        </div>
-                      </td>
-                      {/* The row's destination (owner ask 09-08): its own tuple or the wave
-                          defaults, + its copies. Names come from the catalog of the ROW's profile.
-                          Incomplete / token-blind picks are flagged here and block the fire. */}
-                      <td className="px-2 py-2.5 text-[11px]">
-                        <div className="flex flex-col gap-1">
-                          <div className="flex flex-wrap items-center gap-1">
-                            {own ? (
-                              <span
-                                className="rounded border border-accent/40 bg-accent/10 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-[#9db8ff]"
-                                title="This row carries its own destination — the wave defaults don't apply to it"
-                              >
-                                own
-                              </span>
-                            ) : (
-                              <span
-                                className="rounded border border-line bg-surface2 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-faint"
-                                title="Rides the wave defaults from Settings"
-                              >
-                                defaults
-                              </span>
-                            )}
-                            {!complete ? (
-                              <span className="text-[10px] font-semibold text-warn" title="Profile · account · page · pixel not all picked yet">
-                                incomplete
-                              </span>
-                            ) : null}
-                            {hidden ? (
-                              <span className="text-[10px] font-semibold text-danger" title="Our FB token was never granted this account — pick another or fire on LION API">
-                                not on token
-                              </span>
-                            ) : null}
-                          </div>
+                        ) : null}
+                        {r.info ? (
                           <span
-                            className={"truncate " + (binds.account ? "text-dim" : "text-faint")}
-                            title={binds.account ? `${accountLabel(binds.profile, binds.account)} · ${binds.account} · ${binds.profile}` : undefined}
+                            className="inline-flex items-center gap-1 rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-faint"
+                            title="Source campaign — daily budget · ads · bid (the clone's own settings are on the right)"
                           >
-                            {binds.account ? accountLabel(binds.profile, binds.account) : "— account"}
+                            <span className="text-dim">src</span>
+                            <span>{r.info.budget != null ? `$${moneyLabel(r.info.budget)}` : "—"}</span>
+                            <span className="text-dim">·</span>
+                            <span>{r.info.adsCount} ads</span>
+                            <span className="text-dim">·</span>
+                            <BidKindTag strategy={r.info.bidStrategy} />
+                            <span>{origBidLabel(r.info)}</span>
                           </span>
-                          {needsPage ? (
+                        ) : null}
+                        {/* Source fanka(s) + live fill. In JURO mode the copies LAND here, so the
+                            chip also shows what the wave needs — red when it won't fit (the fire
+                            button locks on the same check). Cloner mode: info only. */}
+                        {r.info?.pages.map((p) => {
+                          const st = hs.pageStats(p.pageId);
+                          const name = data?.pages.find((o) => o.value === p.pageId)?.label || st?.name || p.pageId;
+                          const need = juroPageDemand.get(p.pageId) ?? p.ads * copiesEff;
+                          const over = mode === "juro" && juroPageOver(p.pageId);
+                          return (
                             <span
-                              className={"truncate " + (binds.page ? "text-faint" : "text-faint")}
-                              title={binds.page ? `${pageLabelOf(binds.profile, binds.page)} · ${binds.page}` : undefined}
-                            >
-                              {binds.page ? pageLabelOf(binds.profile, binds.page) : "— page"}
-                            </span>
-                          ) : null}
-                          <span
-                            className="truncate font-mono text-[10px] text-faint"
-                            title={binds.pixel ? `pixel ${binds.pixel}` : undefined}
-                          >
-                            {binds.pixel ? pixelLabelOf(binds.profile, binds.account, binds.pixel) : "— pixel"}
-                          </span>
-                          <div className="flex items-center gap-1.5">
-                            <span className="font-mono text-[10.5px] text-faint" title="Copies of this row">
-                              ×
-                            </span>
-                            <input
-                              value={r.copies}
-                              onChange={(e) => {
-                                const raw = e.target.value.replace(/\D/g, "").slice(0, 2);
-                                patchRow(r.id, { copies: raw !== "" && Number(raw) > MAX_COPIES ? String(MAX_COPIES) : raw });
-                                setPreviewed(false);
-                              }}
-                              onBlur={() => {
-                                if (r.copies !== "" && Number(r.copies) < 1) patchRow(r.id, { copies: "" });
-                              }}
-                              inputMode="numeric"
-                              placeholder={String(copiesN)}
-                              aria-label="Copies for this row"
-                              title={`Copies of this row · empty = the wave default (${copiesN}) · max ${MAX_COPIES}`}
-                              disabled={unreadableRow}
+                              key={p.pageId}
                               className={
-                                "h-6 w-10 rounded border border-line bg-surface2 px-1 text-center font-mono text-[11px] tabular-nums outline-none transition-colors hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 " +
-                                (r.copies ? "text-[#9db8ff]" : "text-dim")
+                                "inline-flex max-w-full items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] tabular-nums " +
+                                (over
+                                  ? "border-danger/40 bg-danger/10 text-danger"
+                                  : st && st.limit > 0 && st.used / st.limit >= 0.8
+                                    ? "border-warn/40 bg-warn/10 text-warn"
+                                    : "border-line bg-surface text-faint")
                               }
-                            />
+                              title={
+                                `${mode === "juro" ? "JURO copies land here — " : "Source ads live on "}${name} · ${p.pageId}` +
+                                (st
+                                  ? ` · ${st.approx ? "~" : ""}${st.used} of ${st.limit} ad slots used, ${st.approx ? "~" : ""}${st.free} free` +
+                                    (st.approx ? " (LION-tally estimate)" : "") +
+                                    (mode === "juro" && need > 0 ? ` · this wave adds ${need}` : "")
+                                  : " · fill unknown")
+                              }
+                            >
+                              <span className="truncate text-dim">{name}</span>
+                              {st ? (
+                                <span>
+                                  {st.approx ? "~" : ""}
+                                  {st.used}/{st.limit}
+                                  {over ? ` · needs ${need}, free ${st.free}` : ""}
+                                </span>
+                              ) : (
+                                <span>fill ?</span>
+                              )}
+                            </span>
+                          );
+                        })}
+                      </div>
+                      {r.state !== "idle" ? (
+                        // Wave status lives UNDER the name: full-width, wraps — a real FB/LION
+                        // error is readable, not hover-only.
+                        <p
+                          className={
+                            "mt-1.5 break-words font-mono text-[10.5px] leading-snug " +
+                            (r.state === "error" ? "text-danger" : r.state === "ok" ? "text-launch2" : "text-[#9db8ff]")
+                          }
+                        >
+                          {r.state === "sending" ? "Submitting…" : (r.msg ?? "—")}
+                        </p>
+                      ) : null}
+                    </div>
+
+                    {/* geo — the whole block opens the targeting editor */}
+                    <div className="cr-geo min-w-0">
+                      <span className="cr-label">Geo</span>
+                      <button
+                        type="button"
+                        onClick={() => setTargetingRowId(r.id)}
+                        title={
+                          r.countries.length > 0
+                            ? "Geo override — the clone launches with THIS targeting, not the source's · click to edit"
+                            : "Inherits the source's targeting · click to override countries / languages"
+                        }
+                        className="group/geo -m-1 flex max-w-full flex-col items-start gap-1.5 rounded-md p-1 text-left transition-colors hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                      >
+                        {r.countries.length > 0 ? (
+                          <span className="flex max-w-full flex-wrap items-center gap-1">
+                            <span className="inline-flex max-w-full truncate rounded-md border border-accent/40 bg-accent/10 px-1.5 py-0.5 font-mono text-[11px] font-medium text-[#9db8ff]">
+                              {overrideGeoLabel(r.countries)}
+                            </span>
+                            <span className="rounded border border-accent/40 bg-accent/10 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-[#9db8ff]">
+                              override
+                            </span>
+                          </span>
+                        ) : geoInherited ? (
+                          <span className="inline-flex max-w-full truncate rounded-md border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[11px] text-dim">
+                            {geoInherited}
+                          </span>
+                        ) : (
+                          <span className="text-[11px] text-faint">—</span>
+                        )}
+                        {effDupChannel === "lion" && (r.countries.length > 0 || r.locales.length > 0) && bearersDown ? (
+                          <span
+                            className="text-[10px] font-semibold leading-snug text-warn"
+                            title="The LION rail patches the geo through our FB token after LION builds the clone — every bearer is down right now. JURO (LION API) carries the geo natively."
+                          >
+                            needs an FB token — or JURO
+                          </span>
+                        ) : null}
+                        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-dim transition-colors group-hover/geo:text-[#9db8ff]">
+                          <GlobeIcon className="h-3 w-3" />
+                          Targeting
+                        </span>
+                      </button>
+                    </div>
+
+                    {/* destination — INLINE pickers (owner ask 09-08): profile → account → page →
+                        pixel; every field the row leaves empty rides the wave Settings (the
+                        cascade re-resolves: another profile brings its own least-loaded account /
+                        least-filled page), a pick here overrides just that field (accent border =
+                        the row's own). × returns a field to the default, ↺ drops the whole
+                        override. Badges: the account's 5/30-min load, the fanka fill. */}
+                    <div className="cr-dest min-w-0">
+                      <span className="cr-label">Destination</span>
+                      <div className="mb-1.5 flex flex-wrap items-center gap-1">
+                        {own ? (
+                          <>
+                            <span
+                              className="rounded border border-accent/40 bg-accent/10 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-[#9db8ff]"
+                              title="This row carries its own destination picks — the wave defaults fill only what it leaves empty"
+                            >
+                              own
+                            </span>
                             <button
                               type="button"
-                              onClick={() => setDestRowId(r.id)}
-                              disabled={unreadableRow}
-                              className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-dim transition-colors hover:bg-accent/10 hover:text-[#9db8ff] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-                            >
-                              <TargetIcon className="h-3 w-3" />
-                              Destination
-                            </button>
-                          </div>
-                        </div>
-                      </td>
-                      {/* Source fanka(s) + live fill meter. In JURO mode the copies LAND here, so
-                          each page also shows what this row's wave needs — red when it won't fit
-                          (the fire button locks on the same check). Cloner mode: info only (the
-                          clones go to the row's bound Page, metered there). */}
-                      <td className="hidden px-2 py-3 text-[11px] xl:table-cell">
-                        {r.info && r.info.pages.length > 0 ? (
-                          <div className="flex flex-col gap-1">
-                            {r.info.pages.map((p) => {
-                              const st = hs.pageStats(p.pageId);
-                              const name =
-                                data?.pages.find((o) => o.value === p.pageId)?.label || st?.name || undefined;
-                              // JURO charges the page with the WHOLE wave's ads on it (all rows).
-                              const need = juroPageDemand.get(p.pageId) ?? p.ads * rowCopies(r);
-                              const over = mode === "juro" && juroPageOver(p.pageId);
-                              return (
-                                <div key={p.pageId} className="flex flex-col">
-                                  <span
-                                    className="truncate text-dim"
-                                    title={`${name ? `${name} · ` : ""}${p.pageId}`}
-                                  >
-                                    {name ?? p.pageId}
-                                  </span>
-                                  {st ? (
-                                    <span
-                                      className={
-                                        "font-mono text-[10.5px] tabular-nums " +
-                                        (over
-                                          ? "font-semibold text-danger"
-                                          : st.limit > 0 && st.used / st.limit >= 0.8
-                                            ? "text-warn"
-                                            : "text-faint")
-                                      }
-                                      title={
-                                        `${st.approx ? "~" : ""}${st.used} ads running or in review of ${st.limit} — ` +
-                                        `${st.approx ? "~" : ""}${st.free} free` +
-                                        (st.approx ? " (LION-tally estimate — the registry hasn't read this page)" : "")
-                                      }
-                                    >
-                                      {st.approx ? "~" : ""}
-                                      {st.used}/{st.limit}
-                                      {over ? ` · needs ${need}, free ${st.free}` : ` · free ${st.free}`}
-                                    </span>
-                                  ) : (
-                                    <span className="font-mono text-[10.5px] text-faint">fill unknown</span>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <span className="text-faint">—</span>
-                        )}
-                      </td>
-                      {/* Source facts, one stacked cell (was three columns): budget + ads count on
-                          top, the bid (kind-tagged) under — the same numbers in a third the width. */}
-                      <td className="hidden px-2 py-3 xl:table-cell">
-                        {r.info ? (
-                          <div className="flex flex-col gap-1 font-mono text-[11px] tabular-nums text-dim">
-                            <span className="truncate">
-                              {r.info.budget != null ? `$${moneyLabel(r.info.budget)}` : "—"}
-                              <span className="text-faint"> · {r.info.adsCount} ads</span>
-                            </span>
-                            <span className="inline-flex flex-wrap items-center gap-1">
-                              <BidKindTag strategy={r.info.bidStrategy} />
-                              <span>{origBidLabel(r.info)}</span>
-                            </span>
-                          </div>
-                        ) : (
-                          <span className="font-mono text-[11px] text-faint">—</span>
-                        )}
-                      </td>
-                      <td className="px-2 py-2.5">
-                        {/* The CLONE's strategy — switchable per row on the FB Token rails only
-                            (they rebuild the ad set; LION inherits the source's, so the select
-                            locks there). The bid field below follows the EFFECTIVE strategy:
-                            ROAS decimal (blue R) / cap $ / nothing on lowest. A kind change
-                            clears the typed bid (a $ cap is not a ROAS goal); switching back to
-                            the source's kind re-prefils its own bid. */}
-                        <div className="flex flex-col gap-1.5">
-                          <div className="relative">
-                            <select
-                              value={rowStrategy(r) || ""}
-                              onChange={(e) => {
-                                const bidStrategy = e.target.value;
-                                const kind = bidKind(bidStrategy);
-                                const srcKind = bidKind(r.info?.bidStrategy ?? "");
-                                const bid =
-                                  kind === bidKind(rowStrategy(r))
-                                    ? r.bid
-                                    : kind === srcKind && r.info?.bid != null
-                                      ? r.info.bid.toFixed(2).replace(".", ",")
-                                      : "";
-                                patchRow(r.id, { bidStrategy, bid });
+                              onClick={() => {
+                                patchRow(r.id, { dest: null });
+                                setPreviewed(false);
                               }}
-                              disabled={!tokenRail || !r.info || r.info.status === "UNREADABLE"}
-                              aria-label="Clone bid strategy"
-                              title={
-                                !tokenRail
-                                  ? "Strategy change needs the FB Token rail — LION builds inherit the source's strategy"
-                                  : rowSwitched(r)
-                                    ? "Strategy switched — the clone launches with THIS strategy, not the source's"
-                                    : "The clone's bid strategy (the source's — switch it to re-bid the clone)"
-                              }
-                              className={cellSelect + (rowSwitched(r) ? " border-accent/50 text-[#9db8ff]" : "")}
+                              aria-label="Back to the wave defaults"
+                              title="Back to the wave defaults"
+                              className="inline-flex h-5 w-5 items-center justify-center rounded text-faint transition-colors hover:bg-raise hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                             >
-                              {/* An exotic source strategy stays visible (and pickable back) even
-                                  though it's not in the shared list. */}
-                              {rowStrategy(r) && !BID_STRATEGIES.some((o) => o.value === rowStrategy(r)) ? (
-                                <option value={rowStrategy(r)} className="bg-surface text-ink">
-                                  {rowStrategy(r)}
-                                </option>
-                              ) : null}
-                              {!rowStrategy(r) ? (
-                                <option value="" className="bg-surface text-ink">
-                                  …
-                                </option>
-                              ) : null}
-                              {BID_STRATEGIES.map((o) => (
-                                <option key={o.value} value={o.value} className="bg-surface text-ink">
-                                  {o.label}
-                                </option>
-                              ))}
-                            </select>
-                            <ChevronDownIcon className="pointer-events-none absolute right-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-faint" />
-                          </div>
-                          <div className="relative">
-                            {bidKind(rowStrategy(r)) !== "none" ? (
-                              <span
-                                className={
-                                  "pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[11px] " +
-                                  (bidKind(rowStrategy(r)) === "roas"
-                                    ? "font-semibold text-[#9db8ff]"
-                                    : "text-faint")
-                                }
-                              >
-                                {bidKind(rowStrategy(r)) === "roas" ? "R" : "$"}
-                              </span>
+                              <UndoIcon className="h-3 w-3" />
+                            </button>
+                          </>
+                        ) : (
+                          <span
+                            className="rounded border border-line bg-surface2 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-faint"
+                            title="Rides the wave defaults from Settings — pick a profile / account / page / pixel here to override just that field"
+                          >
+                            defaults
+                          </span>
+                        )}
+                        {!complete ? (
+                          <span
+                            className="text-[10px] font-semibold text-warn"
+                            title={needsPage ? "Profile · account · page · pixel not all picked yet" : "Profile · account · pixel not all picked yet"}
+                          >
+                            incomplete
+                          </span>
+                        ) : null}
+                        {hidden ? (
+                          <span
+                            className="text-[10px] font-semibold text-danger"
+                            title="Our FB token was never granted this account — pick another or fire on LION API"
+                          >
+                            not on token
+                          </span>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => setDestRowId(r.id)}
+                          disabled={unreadableRow}
+                          aria-label="Destination options"
+                          title="Destination options — apply this row's destination and copies to all rows"
+                          className="ml-auto inline-flex h-5 w-5 items-center justify-center rounded text-faint transition-colors hover:bg-raise hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                        >
+                          <MoreIcon className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                      <div className="cr-dest-picks">
+                        <SearchSelect
+                          size="sm"
+                          value={b.profile}
+                          onChange={(v) => patchRowDest(r, { profile: v, account: "", page: "", pixel: "" })}
+                          options={hs.profiles ?? []}
+                          placeholder="Profile"
+                          emptyHint={hs.profiles?.length ? "No matches" : "Loading profiles…"}
+                          disabled={unreadableRow}
+                          warn={!b.profile}
+                          accent={Boolean(r.dest?.profile)}
+                          ariaLabel={`Profile for row ${i + 1}`}
+                        />
+                        <SearchSelect
+                          size="sm"
+                          value={b.account}
+                          onChange={(v) => patchRowDest(r, { account: v, pixel: "" })}
+                          options={decorateAccountOptions(rowAccounts, limits)}
+                          placeholder="Account"
+                          emptyHint={
+                            !b.profile
+                              ? "Pick a profile first"
+                              : !rowData
+                                ? "Loading…"
+                                : visibleFor(b.profile) !== null && (rowData.accounts?.length ?? 0) > 0 && rowAccounts.length === 0
+                                  ? "No accounts here are visible to our FB token — use the LION API rail (or another profile)"
+                                  : "No enabled accounts"
+                          }
+                          disabled={unreadableRow}
+                          warn={!b.account || hidden}
+                          accent={Boolean(r.dest?.account)}
+                          ariaLabel={`Account for row ${i + 1}`}
+                        />
+                        {needsPage ? (
+                          <SearchSelect
+                            size="sm"
+                            value={b.page}
+                            onChange={(v) => patchRowDest(r, { page: v })}
+                            options={rowData?.pages ?? []}
+                            placeholder="Page"
+                            emptyHint={!b.profile ? "Pick a profile first" : rowData ? "No pages" : "Loading…"}
+                            disabled={unreadableRow}
+                            warn={!b.page}
+                            accent={Boolean(r.dest?.page)}
+                            ariaLabel={`Page for row ${i + 1}`}
+                          />
+                        ) : (
+                          <span
+                            className="flex h-8 items-center gap-1.5 rounded-md border border-dashed border-line px-2 font-mono text-[11px] text-faint"
+                            title="JURO copies land on the source post's own fanpage — no page bind on this row"
+                          >
+                            <LockIcon className="h-3 w-3 shrink-0" />
+                            Page · source post’s fanpage
+                          </span>
+                        )}
+                        <SearchSelect
+                          size="sm"
+                          value={b.pixel}
+                          onChange={(v) => patchRowDest(r, { pixel: v })}
+                          options={(rowPixels ?? []).map((p) => ({ value: p.id, label: p.name, meta: p.id }))}
+                          placeholder="Pixel"
+                          emptyHint={!b.account ? "Pick an account first" : rowPixels ? "No pixels on this account" : "Loading…"}
+                          disabled={unreadableRow}
+                          warn={!b.pixel}
+                          accent={Boolean(r.dest?.pixel)}
+                          ariaLabel={`Pixel for row ${i + 1}`}
+                        />
+                      </div>
+                    </div>
+
+                    {/* The CLONE's strategy — switchable per row on the FB Token rails only (they
+                        rebuild the ad set; LION inherits the source's, so the select locks there).
+                        The bid field follows the EFFECTIVE strategy: ROAS decimal (blue R) / cap $
+                        / nothing on lowest. A kind change clears the typed bid; switching back to
+                        the source's kind re-prefills its own bid. */}
+                    <div className="cr-bid min-w-0">
+                      <span className="cr-label">Strategy · Bid</span>
+                      <div className="cr-bid-inner">
+                        <div className="relative">
+                          <select
+                            value={strategy || ""}
+                            onChange={(e) => {
+                              const bidStrategy = e.target.value;
+                              const next = bidKind(bidStrategy);
+                              const srcKind = bidKind(r.info?.bidStrategy ?? "");
+                              const bid =
+                                next === bidKind(strategy)
+                                  ? r.bid
+                                  : next === srcKind && r.info?.bid != null
+                                    ? r.info.bid.toFixed(2).replace(".", ",")
+                                    : "";
+                              patchRow(r.id, { bidStrategy, bid });
+                            }}
+                            disabled={!tokenRail || !r.info || unreadableRow}
+                            aria-label="Clone bid strategy"
+                            title={
+                              !tokenRail
+                                ? "Strategy change needs the FB Token rail — LION builds inherit the source's strategy"
+                                : switched
+                                  ? "Strategy switched — the clone launches with THIS strategy, not the source's"
+                                  : "The clone's bid strategy (the source's — switch it to re-bid the clone)"
+                            }
+                            className={cellSelect + (switched ? " border-accent/50 text-[#9db8ff]" : "")}
+                          >
+                            {/* An exotic source strategy stays visible (and pickable back) even
+                                though it's not in the shared list. */}
+                            {strategy && !BID_STRATEGIES.some((o) => o.value === strategy) ? (
+                              <option value={strategy} className="bg-surface text-ink">
+                                {strategy}
+                              </option>
                             ) : null}
-                            <input
-                              value={r.bid}
-                              // Cash-register entry, SAME as the launcher's bid/ROAS field: typed
-                              // digits fill hundredths from the right (34 → 0,34 · 120 → 1,20), so
-                              // a missed comma can never inflate a bid 100×. HUMAN units — the
-                              // routes scale to Meta-native wire units by the EFFECTIVE strategy.
-                              // Empty inherits the source's own bid (same strategy only).
-                              onChange={(e) =>
-                                patchRow(r.id, {
-                                  bid: limitMoneyCents(
-                                    e.target.value,
-                                    bidKind(rowStrategy(r)) === "roas" ? 100 : 1000,
-                                  ),
-                                })
-                              }
-                              disabled={unreadableRow || (Boolean(r.info) && bidKind(rowStrategy(r)) === "none")}
-                              placeholder={
-                                rowSwitched(r) && bidKind(rowStrategy(r)) !== "none"
-                                  ? "required"
-                                  : bidKind(rowStrategy(r)) === "roas"
-                                    ? "inherits ROAS goal"
-                                    : bidKind(rowStrategy(r)) === "none" && r.info
-                                      ? "auto"
-                                      : "inherit"
-                              }
-                              title={
-                                bidKind(rowStrategy(r)) === "roas"
-                                  ? "ROAS decimal — 34 → 0,34 (34%)" +
-                                    (rowSwitched(r) ? " · required for the switched strategy" : " · empty = inherit the source's goal")
-                                  : bidKind(rowStrategy(r)) === "cap"
-                                    ? "Bid cap in $ — digits fill cents, 34 → $0,34" +
-                                      (rowSwitched(r) ? " · required for the switched strategy" : " · empty = inherit the source's cap")
-                                    : "Lowest cost bids automatically"
-                              }
-                              inputMode="decimal"
-                              aria-label="Bid / ROAS goal"
-                              className={
-                                cellInput +
-                                (bidKind(rowStrategy(r)) !== "none" ? " pl-5" : "") +
-                                (rowSwitched(r) && bidKind(rowStrategy(r)) !== "none" && !r.bid.trim()
-                                  ? " border-warn/60 focus:border-warn focus:ring-warn/15"
-                                  : "")
-                              }
-                            />
-                          </div>
+                            {!strategy ? (
+                              <option value="" className="bg-surface text-ink">
+                                …
+                              </option>
+                            ) : null}
+                            {BID_STRATEGIES.map((o) => (
+                              <option key={o.value} value={o.value} className="bg-surface text-ink">
+                                {o.label}
+                              </option>
+                            ))}
+                          </select>
+                          <ChevronDownIcon className="pointer-events-none absolute right-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-faint" />
                         </div>
-                      </td>
-                      <td className="px-2 py-2.5">
+                        <div className="relative">
+                          {kind !== "none" ? (
+                            <span
+                              className={
+                                "pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[11px] " +
+                                (kind === "roas" ? "font-semibold text-[#9db8ff]" : "text-faint")
+                              }
+                            >
+                              {kind === "roas" ? "R" : "$"}
+                            </span>
+                          ) : null}
+                          <input
+                            value={r.bid}
+                            // Cash-register entry, SAME as the launcher's bid/ROAS field: typed
+                            // digits fill hundredths from the right (34 → 0,34 · 120 → 1,20).
+                            // HUMAN units — the routes scale to Meta-native wire units by the
+                            // EFFECTIVE strategy. Empty inherits the source's own bid.
+                            onChange={(e) => patchRow(r.id, { bid: limitMoneyCents(e.target.value, kind === "roas" ? 100 : 1000) })}
+                            disabled={unreadableRow || (Boolean(r.info) && kind === "none")}
+                            placeholder={
+                              switched && kind !== "none"
+                                ? "required"
+                                : kind === "roas"
+                                  ? "inherits ROAS goal"
+                                  : kind === "none" && r.info
+                                    ? "auto"
+                                    : "inherit"
+                            }
+                            title={
+                              kind === "roas"
+                                ? "ROAS decimal — 34 → 0,34 (34%)" +
+                                  (switched ? " · required for the switched strategy" : " · empty = inherit the source's goal")
+                                : kind === "cap"
+                                  ? "Bid cap in $ — digits fill cents, 34 → $0,34" +
+                                    (switched ? " · required for the switched strategy" : " · empty = inherit the source's cap")
+                                  : "Lowest cost bids automatically"
+                            }
+                            inputMode="decimal"
+                            aria-label="Bid / ROAS goal"
+                            className={
+                              cellInput +
+                              (kind !== "none" ? " pl-5" : "") +
+                              (switched && kind !== "none" && !r.bid.trim() ? " border-warn/60 focus:border-warn focus:ring-warn/15" : "")
+                            }
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* budget (cash register) + this row's copies (stepper; empty = wave default) */}
+                    <div className="cr-budget min-w-0">
+                      <span className="cr-label">Budget · Copies</span>
+                      <div className="cr-budget-inner">
                         <div className="relative">
                           <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[12px] text-faint">
                             $
@@ -1711,29 +1817,80 @@ export function HsCloneBoard({
                                 ? "Min $1/day — this row won't fire until the budget is raised"
                                 : "Daily budget in $ — digits fill cents, 1000 → 10,00"
                             }
-                            className={
-                              cellInput +
-                              " pl-5" +
-                              (lowBudget ? " border-warn/60 focus:border-warn focus:ring-warn/15" : "")
-                            }
+                            className={cellInput + " pl-5" + (lowBudget ? " border-warn/60 focus:border-warn focus:ring-warn/15" : "")}
                           />
                         </div>
-                      </td>
-                      <td className="px-1 py-2.5 text-center">
-                        <button
-                          type="button"
-                          aria-label="Remove row"
-                          onClick={() => removeRow(r.id)}
-                          className="flex h-7 w-7 items-center justify-center rounded-md text-faint transition-colors hover:bg-raise hover:text-danger"
+                        <div
+                          className={
+                            "flex h-8 items-stretch overflow-hidden rounded-md border bg-surface2 transition-colors focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/15 " +
+                            (r.copies ? "border-accent/45" : "border-line hover:border-line2") +
+                            (unreadableRow ? " opacity-50" : "")
+                          }
+                          title={`Copies of this row · empty = the wave default (${copiesN}) · max ${MAX_COPIES}`}
                         >
-                          <TrashIcon className="h-3.5 w-3.5" />
-                        </button>
-                      </td>
-                    </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              patchRow(r.id, { copies: String(Math.max(1, copiesEff - 1)) });
+                              setPreviewed(false);
+                            }}
+                            disabled={unreadableRow || copiesEff <= 1}
+                            aria-label="Fewer copies"
+                            className="flex w-7 shrink-0 items-center justify-center text-faint transition-colors hover:bg-raise hover:text-ink disabled:cursor-not-allowed disabled:opacity-30"
+                          >
+                            <MinusIcon className="h-3 w-3" />
+                          </button>
+                          <span className="pointer-events-none self-center font-mono text-[10.5px] text-faint">×</span>
+                          <input
+                            value={r.copies}
+                            onChange={(e) => {
+                              const raw = e.target.value.replace(/\D/g, "").slice(0, 2);
+                              patchRow(r.id, { copies: raw !== "" && Number(raw) > MAX_COPIES ? String(MAX_COPIES) : raw });
+                              setPreviewed(false);
+                            }}
+                            onBlur={() => {
+                              if (r.copies !== "" && Number(r.copies) < 1) patchRow(r.id, { copies: "" });
+                            }}
+                            inputMode="numeric"
+                            placeholder={String(copiesN)}
+                            aria-label="Copies for this row"
+                            disabled={unreadableRow}
+                            className={
+                              "min-w-0 flex-1 bg-transparent px-1 text-center font-mono text-[12px] tabular-nums outline-none placeholder:text-faint disabled:cursor-not-allowed " +
+                              (r.copies ? "text-[#9db8ff]" : "text-dim")
+                            }
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              patchRow(r.id, { copies: String(Math.min(MAX_COPIES, copiesEff + 1)) });
+                              setPreviewed(false);
+                            }}
+                            disabled={unreadableRow || copiesEff >= MAX_COPIES}
+                            aria-label="More copies"
+                            className="flex w-7 shrink-0 items-center justify-center text-faint transition-colors hover:bg-raise hover:text-ink disabled:cursor-not-allowed disabled:opacity-30"
+                          >
+                            <PlusIcon className="h-3 w-3" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* remove */}
+                    <div className="cr-del">
+                      <button
+                        type="button"
+                        aria-label="Remove row"
+                        title="Remove from the wave"
+                        onClick={() => removeRow(r.id)}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-md text-faint transition-colors hover:bg-danger/10 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40"
+                      >
+                        <TrashIcon className="h-[18px] w-[18px]" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-2">
