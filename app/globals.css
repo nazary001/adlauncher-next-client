@@ -355,6 +355,122 @@ body {
   translate: -50% -4px;
 }
 
+
+/* ---------- clone board rows (MO/AIF clone-board.tsx) ----------
+   One responsive grid per row, driven by CONTAINER queries on the list — the layout follows the
+   board's own width (the sticky Settings column eats 280-300px of the viewport):
+     < 42rem   stacked card         (num name | geo | destination | strategy+bid / budget+copies)
+     ≥ 42rem   two/three lines      (num name geo del | destination pickers side by side | bids)
+     ≥ 56rem   ONE aligned line     (a table's scan: fixed columns, the name takes the rest)
+   Cells are named grid areas so the JSX order never changes; the in-cell labels (.cr-label) show
+   only while the header row is hidden. */
+.clone-rows {
+  container-type: inline-size;
+}
+.clone-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) minmax(0, 1fr) 36px;
+  grid-template-areas:
+    "num name name del"
+    "geo geo geo geo"
+    "dest dest dest dest"
+    "bid bid budget budget";
+  column-gap: 10px;
+  row-gap: 12px;
+  padding: 12px 10px;
+  align-items: start;
+}
+.clone-head {
+  display: none;
+}
+.cr-num {
+  grid-area: num;
+}
+.cr-name {
+  grid-area: name;
+}
+.cr-geo {
+  grid-area: geo;
+}
+.cr-dest {
+  grid-area: dest;
+}
+.cr-bid {
+  grid-area: bid;
+}
+.cr-budget {
+  grid-area: budget;
+}
+.cr-del {
+  grid-area: del;
+  justify-self: end;
+}
+.cr-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-faint);
+  user-select: none;
+}
+/* the field groups: side by side while the row is folded into lines, stacked on the wide board */
+.cr-dest-picks,
+.cr-bid-inner,
+.cr-budget-inner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.cr-dest-picks > * {
+  flex: 1 1 170px;
+  min-width: 0;
+}
+.cr-bid-inner > *,
+.cr-budget-inner > * {
+  flex: 1 1 110px;
+  min-width: 0;
+}
+
+@container (min-width: 42rem) {
+  .clone-row {
+    grid-template-columns: 34px minmax(0, 1fr) minmax(0, 1fr) 132px 36px;
+    grid-template-areas:
+      "num name name geo del"
+      "dest dest dest dest dest"
+      "bid bid budget budget budget";
+  }
+}
+
+@container (min-width: 56rem) {
+  .clone-row {
+    grid-template-columns: 34px minmax(0, 1fr) 108px 232px 140px 104px 32px;
+    grid-template-areas: "num name geo dest bid budget del";
+    row-gap: 0;
+    padding: 12px 8px;
+  }
+  .clone-head {
+    display: grid;
+    padding: 10px 8px;
+  }
+  .cr-label {
+    display: none;
+  }
+  .cr-dest-picks,
+  .cr-bid-inner,
+  .cr-budget-inner {
+    flex-direction: column;
+    flex-wrap: nowrap;
+  }
+  .cr-dest-picks > *,
+  .cr-bid-inner > *,
+  .cr-budget-inner > * {
+    flex: none;
+    width: 100%;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

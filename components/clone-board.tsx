@@ -15,6 +15,7 @@ import {
   loadCloneSources,
   loadSampleSources,
   makeCloneRow,
+  normalizeRowDest,
   rowCopiesOf,
   rowDestination,
 } from "@/lib/clone";
@@ -38,11 +39,14 @@ import {
   FilmIcon,
   GlobeIcon,
   LockIcon,
+  MinusIcon,
+  MoreIcon,
   PlusIcon,
   RetryIcon,
   SlidersIcon,
   TargetIcon,
   TrashIcon,
+  UndoIcon,
 } from "./icons";
 import { Header } from "./header";
 import { useAifTaskManager, useTaskManager } from "./task-manager";
@@ -511,6 +515,21 @@ function CloneInner({
   const patchRow = (id: string, patch: Partial<CloneRow>) => {
     setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
     setPreviewed(false);
+  };
+  /** The pixel a fresh account pick brings along (the Settings rule): the target's preferred
+   *  pixel — AIF: the value pixel — when the cabinet carries it; none in source mode. */
+  const autoPixelFor = (accountId: string): string =>
+    accountId && accountId !== SOURCE_ACCOUNT
+      ? aifMode
+        ? (pickAifPixel(pixelOptionsOf(adAccounts, accountId))?.id ?? "")
+        : defaultPixelFor(adAccounts, accountId, partner.preferredPixel)
+      : "";
+  /** Inline per-field destination edit (owner ask 09-08): only the touched field becomes the
+   *  row's own — the rest keeps riding the batch defaults (rowDestination fills them). Clearing
+   *  every field hands the row back to the defaults (dest → null). */
+  const patchRowDest = (r: CloneRow, patch: Partial<CloneRowDest>) => {
+    const base = r.dest ?? { pageId: "", accountId: "", pixelId: "" };
+    patchRow(r.id, { dest: normalizeRowDest({ ...base, ...patch }) });
   };
   const patchSettings = (patch: Partial<CloneSettings>) => {
     setSettings((s) => ({ ...s, ...patch }));
@@ -990,311 +1009,338 @@ function CloneInner({
                 </button>
               </div>
             ) : (
-              // table-fixed + one flexible Name column — no 900px floor, so the board fits a
-              // 1024px viewport scroll-free. The read-only source facts (orig $/bid/videos) fold
-              // into ONE stacked column and hide below xl; the redirect config chip lives in the
-              // name cell. The min-w only guards true mobile (wrapper scrolls there).
-              <div className="overflow-x-auto rounded-2xl border border-line">
-                <table className="w-full min-w-[760px] table-fixed border-collapse text-left">
-                  <thead>
-                    <tr className="border-b border-line bg-surface2/40 text-[10px] font-semibold uppercase tracking-[0.1em] text-faint">
-                      <th className="w-[34px] px-1.5 py-2.5 text-center">#</th>
-                      <th className="px-3 py-2.5">Campaign name</th>
-                      <th className="w-[122px] px-2 py-2.5">Geo</th>
-                      <th className="w-[168px] px-2 py-2.5">Destination · copies</th>
-                      <th className="hidden w-[110px] px-2 py-2.5 xl:table-cell">Source $ · bid</th>
-                      <th className="w-[150px] border-l border-line px-2 py-2.5">Strategy · Bid</th>
-                      <th className="w-[92px] px-2 py-2.5">Budget</th>
-                      <th className="w-[40px] px-1 py-2.5" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.map((r, i) => {
-                      const d = destOf(r);
-                      const own = r.dest !== null;
-                      const missing = destMissingFor(d);
-                      return (
-                      <tr
-                        key={r.id}
-                        className="border-b border-line align-middle transition-colors last:border-b-0 hover:bg-raise/25"
-                      >
-                        <td className="px-1.5 py-3.5 text-center">
-                          <span className="flex h-8 items-center justify-center font-mono text-[12px] text-faint">
-                            {i + 1}
-                          </span>
-                        </td>
+              // Responsive grid list (owner ask 09-08 «адаптивно и удобно»): ONE aligned line per
+              // row on a wide board (a table's scan, no horizontal scroll), two lines on a laptop
+              // board, a stack on a narrow one — CSS container queries on the list (globals.css
+              // `.clone-row`), so the layout follows the BOARD's width, not the viewport's. The
+              // row's destination is edited INLINE (fanpage / account / pixel pickers carrying the
+              // live fill / load badges); the modal stays for "apply to all rows".
+              <div className="clone-rows rounded-2xl border border-line">
+                <div className="clone-row clone-head border-b border-line bg-surface2/40 text-[10px] font-semibold uppercase tracking-[0.1em] text-faint">
+                  <span className="cr-num text-center">#</span>
+                  <span className="cr-name">Campaign</span>
+                  <span className="cr-geo">Geo</span>
+                  <span className="cr-dest">Destination</span>
+                  <span className="cr-bid">Strategy · Bid</span>
+                  <span className="cr-budget">Budget · Copies</span>
+                  <span className="cr-del" />
+                </div>
+                {rows.map((r, i) => {
+                  const d = destOf(r);
+                  const own = r.dest !== null;
+                  const target = isTargetFor(d);
+                  const pageMissing = fanpageMissingFor(d);
+                  const acctMissing = accountMissingFor(d);
+                  const pxMissing = pixelMissingFor(d);
+                  const missing = pageMissing || acctMissing || pxMissing;
+                  const copiesEff = copiesOf(r);
+                  const srcKind = bidKind(r.source.bidStrategy);
+                  const srcBid =
+                    srcKind === "none"
+                      ? r.source.bidStrategy === "LOWEST_COST_WITHOUT_CAP"
+                        ? "auto"
+                        : r.source.originalRoas || "—"
+                      : r.source.originalRoas
+                        ? `${srcKind === "cap" ? "$" : ""}${r.source.originalRoas}`
+                        : "—";
+                  const kind = bidKind(r.bidStrategy);
+                  return (
+                    <div
+                      key={r.id}
+                      className="clone-row border-b border-line transition-colors last:border-b-0 hover:bg-raise/25"
+                    >
+                      <div className="cr-num">
+                        <span className="flex h-8 items-center justify-center font-mono text-[12px] text-faint">{i + 1}</span>
+                      </div>
 
-                        {/* name — fixed prefix (locked) + editable remainder */}
-                        <td className="px-3 py-3.5">
-                          <span
-                            className="mb-1 flex items-center gap-1 truncate font-mono text-[10.5px] text-faint"
-                            title={`${r.namePrefix.trim()} — fixed, not editable`}
-                          >
-                            <LockIcon className="h-2.5 w-2.5 shrink-0" />
-                            {r.namePrefix.trim()}
+                      {/* name — fixed prefix (locked) + editable remainder; the chips under it carry
+                          the source id, the redirect config and the SOURCE facts (budget · creatives
+                          · bid) so they never hide on a narrow board (was an xl-only column). */}
+                      <div className="cr-name min-w-0">
+                        <span
+                          className="mb-1 flex items-center gap-1 truncate font-mono text-[10.5px] text-faint"
+                          title={`${r.namePrefix.trim()} — fixed, not editable`}
+                        >
+                          <LockIcon className="h-2.5 w-2.5 shrink-0" />
+                          {r.namePrefix.trim()}
+                        </span>
+                        <AutoTextarea
+                          value={r.name}
+                          onChange={(v) => patchRow(r.id, { name: v })}
+                          maxLength={400}
+                          ariaLabel="Campaign name (editable part)"
+                          className="block w-full resize-none overflow-hidden rounded-lg border border-line bg-surface2 px-2.5 py-2 text-[12.5px] leading-relaxed text-ink outline-none transition-colors duration-150 hover:border-line2 focus:border-accent/60 focus:bg-surface2/80 focus:ring-2 focus:ring-accent/15"
+                        />
+                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                          <span className="inline-flex items-center rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-[10px] text-faint">
+                            #{r.source.campaignId}
                           </span>
-                          <AutoTextarea
-                            value={r.name}
-                            onChange={(v) => patchRow(r.id, { name: v })}
-                            maxLength={400}
-                            ariaLabel="Campaign name (editable part)"
-                            className="block w-full resize-none overflow-hidden rounded-lg border border-line bg-surface2 px-2.5 py-2 text-[12.5px] leading-relaxed text-ink outline-none transition-colors duration-150 hover:border-line2 focus:border-accent/60 focus:bg-surface2/80 focus:ring-2 focus:ring-accent/15"
-                          />
-                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                            <span className="inline-flex items-center rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-[10px] text-faint">
-                              #{r.source.campaignId}
-                            </span>
-                            {/* Redirect config rides with the name (was its own 112px column):
-                                HIGH ADX opens the High Offer modal, the rest is a passive tag. */}
-                            {r.redirectType === "HIGH ADX" ? (
-                              <button
-                                type="button"
-                                onClick={() => setHighOfferRowId(r.id)}
-                                className={
-                                  "inline-flex items-center gap-1.5 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors " +
-                                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warn/40 " +
-                                  (r.highOffer.enabled
-                                    ? "border-warn/50 bg-warn/15 text-warn"
-                                    : "border-warn/40 bg-warn/5 text-warn hover:bg-warn/10")
-                                }
-                              >
-                                <SlidersIcon className="h-3 w-3" />
-                                High Offer
-                              </button>
-                            ) : (
-                              <span className="inline-flex rounded border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[10px] text-faint">
-                                {r.redirectType}
-                              </span>
-                            )}
-                          </div>
-                        </td>
-
-                        {/* geo + targeting */}
-                        <td className="px-2 py-3.5">
-                          <div className="flex flex-col gap-2">
-                            <GeoChips codes={r.countries} />
+                          {/* Redirect config rides with the name: HIGH ADX opens the High Offer
+                              modal, the rest is a passive tag. */}
+                          {r.redirectType === "HIGH ADX" ? (
                             <button
                               type="button"
-                              onClick={() => setTargetingRowId(r.id)}
-                              className="inline-flex w-fit items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] font-medium text-dim transition-colors hover:bg-accent/10 hover:text-[#9db8ff] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                              onClick={() => setHighOfferRowId(r.id)}
+                              className={
+                                "inline-flex items-center gap-1.5 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors " +
+                                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warn/40 " +
+                                (r.highOffer.enabled
+                                  ? "border-warn/50 bg-warn/15 text-warn"
+                                  : "border-warn/40 bg-warn/5 text-warn hover:bg-warn/10")
+                              }
                             >
-                              <GlobeIcon className="h-3 w-3" />
-                              Targeting
+                              <SlidersIcon className="h-3 w-3" />
+                              High Offer
                             </button>
-                          </div>
-                        </td>
-
-                        {/* The row's destination (owner ask 09-08): its own tuple or the batch
-                            defaults, + its copies. Incomplete picks are flagged here and lock
-                            Duplicate. */}
-                        <td className="px-2 py-3.5 text-[11px]">
-                          <div className="flex flex-col gap-1">
-                            <div className="flex flex-wrap items-center gap-1">
-                              {own ? (
-                                <span
-                                  className="rounded border border-accent/40 bg-accent/10 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-[#9db8ff]"
-                                  title="This row carries its own destination — the batch defaults don't apply to it"
-                                >
-                                  own
-                                </span>
-                              ) : (
-                                <span
-                                  className="rounded border border-line bg-surface2 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-faint"
-                                  title="Rides the batch defaults from Settings"
-                                >
-                                  defaults
-                                </span>
-                              )}
-                              {missing ? (
-                                <span className="text-[10px] font-semibold text-warn" title="Fanpage · account · pixel not all picked (or no longer on this signer)">
-                                  incomplete
-                                </span>
-                              ) : null}
-                            </div>
-                            {partner.fanpagesFromToken ? (
-                              <span
-                                className={"truncate " + (d.pageId ? "text-dim" : "text-faint")}
-                                title={d.pageId ? `${fanpageLabel(d.pageId)} · ${d.pageId}` : undefined}
-                              >
-                                {d.pageId ? fanpageLabel(d.pageId) : "— fanpage"}
-                              </span>
-                            ) : null}
-                            <span
-                              className={"truncate " + (d.accountId ? "text-faint" : "text-faint")}
-                              title={d.accountId && d.accountId !== SOURCE_ACCOUNT ? `${accountLabel(d.accountId)} · ${d.accountId}` : undefined}
-                            >
-                              {partner.accountsFromToken ? (d.accountId ? accountLabel(d.accountId) : "— account") : "From each source"}
+                          ) : (
+                            <span className="inline-flex rounded border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[10px] text-faint">
+                              {r.redirectType}
                             </span>
-                            {isTargetFor(d) ? (
-                              <span className="truncate font-mono text-[10px] text-faint" title={d.pixelId ? `pixel ${d.pixelId}` : undefined}>
-                                {d.pixelId ? pixelLabel(d.accountId, d.pixelId) : "— pixel"}
+                          )}
+                          <span
+                            className="inline-flex items-center gap-1 rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-faint"
+                            title="Source campaign — daily budget · creatives · bid (the clone's own settings are on the right)"
+                          >
+                            <span className="text-dim">src</span>
+                            <span>${moneyLabel(r.source.originalBudget)}</span>
+                            <span className="text-dim">·</span>
+                            <FilmIcon className="h-3 w-3" />
+                            <span>{r.source.creatives.length}</span>
+                            <span className="text-dim">·</span>
+                            <BidKindTag strategy={r.source.bidStrategy} />
+                            <span>{srcBid}</span>
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* geo — the whole block opens the targeting editor (chips are clickable) */}
+                      <div className="cr-geo min-w-0">
+                        <span className="cr-label">Geo</span>
+                        <button
+                          type="button"
+                          onClick={() => setTargetingRowId(r.id)}
+                          title="Edit targeting — countries, languages, OS, age"
+                          className="group/geo -m-1 flex max-w-full flex-col items-start gap-1.5 rounded-md p-1 text-left transition-colors hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                        >
+                          <GeoChips codes={r.countries} />
+                          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-dim transition-colors group-hover/geo:text-[#9db8ff]">
+                            <GlobeIcon className="h-3 w-3" />
+                            Targeting
+                          </span>
+                        </button>
+                      </div>
+
+                      {/* destination — INLINE pickers (owner ask 09-08): every field the row leaves
+                          empty rides the batch Settings; a pick here overrides just that field
+                          (accent border = the row's own). × on a field returns it to the default;
+                          ↺ drops the whole override. The badges are the live fanka fill and the
+                          account's 5/30-min load. */}
+                      <div className="cr-dest min-w-0">
+                        <span className="cr-label">Destination</span>
+                        <div className="mb-1.5 flex flex-wrap items-center gap-1">
+                          {own ? (
+                            <>
+                              <span
+                                className="rounded border border-accent/40 bg-accent/10 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-[#9db8ff]"
+                                title="This row carries its own destination picks — the batch defaults fill only what it leaves empty"
+                              >
+                                own
                               </span>
-                            ) : null}
-                            <div className="flex items-center gap-1.5">
-                              <span className="font-mono text-[10.5px] text-faint" title="Copies of this row">
-                                ×
-                              </span>
-                              <input
-                                value={r.copies != null ? String(r.copies) : ""}
-                                onChange={(e) => {
-                                  const raw = e.target.value.replace(/\D/g, "").slice(0, 3);
-                                  patchRow(r.id, {
-                                    copies: raw === "" ? null : Math.max(1, Math.min(MAX_CLONE_COPIES, Number(raw))),
-                                  });
-                                }}
-                                inputMode="numeric"
-                                placeholder={String(settings.copies)}
-                                aria-label="Copies for this row"
-                                title={`Copies of this row · empty = the batch default (${settings.copies}) · max ${MAX_CLONE_COPIES}`}
-                                className={
-                                  "h-6 w-10 rounded border border-line bg-surface2 px-1 text-center font-mono text-[11px] tabular-nums outline-none transition-colors hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 " +
-                                  (r.copies != null ? "text-[#9db8ff]" : "text-dim")
-                                }
-                              />
                               <button
                                 type="button"
-                                onClick={() => setDestRowId(r.id)}
-                                className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-dim transition-colors hover:bg-accent/10 hover:text-[#9db8ff] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                                onClick={() => patchRow(r.id, { dest: null })}
+                                aria-label="Back to the batch defaults"
+                                title="Back to the batch defaults"
+                                className="inline-flex h-5 w-5 items-center justify-center rounded text-faint transition-colors hover:bg-raise hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                               >
-                                <TargetIcon className="h-3 w-3" />
-                                Destination
+                                <UndoIcon className="h-3 w-3" />
                               </button>
-                            </div>
-                          </div>
-                        </td>
-
-                        {/* Source facts, one stacked read-only cell (was three columns): budget +
-                            creative count on top, the bid — marked by HOW it bids (blue ROAS tag /
-                            amber CAP tag / "auto") — under. Hidden below xl; the Preview repeats
-                            the numbers that matter for the fire. */}
-                        <td className="hidden px-2 py-3 xl:table-cell">
-                          <div className="flex flex-col gap-1 font-mono text-[11px] tabular-nums text-faint">
-                            <span className="flex items-center gap-1">
-                              <span>${moneyLabel(r.source.originalBudget)}</span>
-                              <span className="text-dim">·</span>
-                              <FilmIcon className="h-3 w-3" />
-                              <span>{r.source.creatives.length}</span>
+                            </>
+                          ) : (
+                            <span
+                              className="rounded border border-line bg-surface2 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-faint"
+                              title="Rides the batch defaults from Settings — pick a fanpage / account / pixel here to override just that field"
+                            >
+                              defaults
                             </span>
-                            <span className="flex flex-wrap items-center gap-1">
-                              <BidKindTag strategy={r.source.bidStrategy} />
-                              {bidKind(r.source.bidStrategy) === "none"
-                                ? r.source.bidStrategy === "LOWEST_COST_WITHOUT_CAP"
-                                  ? "auto"
-                                  : r.source.originalRoas || "—"
-                                : r.source.originalRoas
-                                  ? `${bidKind(r.source.bidStrategy) === "cap" ? "$" : ""}${r.source.originalRoas}`
-                                  : "—"}
+                          )}
+                          {missing ? (
+                            <span
+                              className="text-[10px] font-semibold text-warn"
+                              title="Fanpage · account · pixel not all picked (or no longer on this signer) — Duplicate stays locked"
+                            >
+                              incomplete
                             </span>
-                          </div>
-                        </td>
-
-                        {/* clone settings (editable) — money-sanitized like the launcher's fields
-                            (ROAS = cash-register mode, budget = cash-register too since 09-08) so
-                            garbage can't reach CloneEdit.roasGoal/budget → money()=0 → an ad set
-                            Meta rejects (orphan + burnt gcm). */}
-                        <td className="border-l border-line px-2 py-3.5">
-                          {/* The CLONE's strategy — switchable per row (ROAS ↔ cap ↔ lowest,
-                              owner ask 09-01; the token rail rebuilds the ad set, so any
-                              supported strategy is reachable). The bid field follows the PICKED
-                              strategy; a kind change clears the value (a $ cap is not a ROAS
-                              goal) and switching back to the source's kind restores its bid. */}
-                          <div className="flex flex-col gap-1.5">
-                            <div className="relative">
-                              <select
-                                value={r.bidStrategy}
-                                onChange={(e) => {
-                                  const bidStrategy = e.target.value;
-                                  const kind = bidKind(bidStrategy);
-                                  const roasGoal =
-                                    kind === bidKind(r.bidStrategy)
-                                      ? r.roasGoal
-                                      : kind === bidKind(r.source.bidStrategy)
-                                        ? r.source.originalRoas
-                                        : "";
-                                  patchRow(r.id, { bidStrategy, roasGoal });
-                                }}
-                                aria-label="Clone bid strategy"
-                                title={
-                                  r.bidStrategy !== r.source.bidStrategy
-                                    ? "Strategy switched — the clone launches with THIS strategy, not the source's"
-                                    : "The clone's bid strategy (the source's — switch it to re-bid the clone)"
+                          ) : null}
+                          <button
+                            type="button"
+                            onClick={() => setDestRowId(r.id)}
+                            aria-label="Destination options"
+                            title="Destination options — apply this row's destination and copies to all rows"
+                            className="ml-auto inline-flex h-5 w-5 items-center justify-center rounded text-faint transition-colors hover:bg-raise hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                          >
+                            <MoreIcon className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                        <div className="cr-dest-picks">
+                          {partner.fanpagesFromToken ? (
+                            <SearchSelect
+                              size="sm"
+                              value={d.pageId}
+                              onChange={(v) => patchRowDest(r, { pageId: v })}
+                              options={fanpages ?? []}
+                              placeholder={partner.pagePlaceholder}
+                              emptyHint={fanpages ? "No fanpages on the token" : "Loading fanpages…"}
+                              warn={pageMissing}
+                              accent={Boolean(r.dest?.pageId)}
+                              ariaLabel={`Fanpage for row ${i + 1}`}
+                            />
+                          ) : null}
+                          {partner.accountsFromToken ? (
+                            <SearchSelect
+                              size="sm"
+                              value={d.accountId}
+                              onChange={(v) => patchRowDest(r, { accountId: v, pixelId: autoPixelFor(v) })}
+                              options={[
+                                { value: SOURCE_ACCOUNT, label: "From each source" },
+                                ...decorateAccountOptions(adAccounts ?? [], limits),
+                              ]}
+                              placeholder="Account"
+                              emptyHint={adAccounts ? "No accounts on the token" : "Loading accounts…"}
+                              warn={acctMissing}
+                              accent={Boolean(r.dest?.accountId)}
+                              ariaLabel={`Account for row ${i + 1}`}
+                            />
+                          ) : (
+                            <span className="flex h-8 items-center gap-1.5 rounded-md border border-dashed border-line px-2 font-mono text-[11px] text-faint">
+                              <LockIcon className="h-3 w-3 shrink-0" />
+                              Account · from each source
+                            </span>
+                          )}
+                          {partner.accountsFromToken ? (
+                            target ? (
+                              <SearchSelect
+                                size="sm"
+                                value={d.pixelId}
+                                onChange={(v) => patchRowDest(r, { pixelId: v })}
+                                options={targetPixelsFor(d.accountId).map((p) => ({ value: p.id, label: p.name, meta: p.id }))}
+                                placeholder="Pixel"
+                                emptyHint={
+                                  adAccounts
+                                    ? aifMode
+                                      ? `Share ${AIF_VALUE_PIXEL.name} to this cabinet in BM`
+                                      : "No pixels on this account"
+                                    : "Loading pixels…"
                                 }
+                                warn={pxMissing}
+                                accent={Boolean(r.dest?.pixelId)}
+                                ariaLabel={`Pixel for row ${i + 1}`}
+                              />
+                            ) : (
+                              <span
+                                className="flex h-8 items-center gap-1.5 rounded-md border border-dashed border-line px-2 font-mono text-[11px] text-faint"
+                                title="The clones keep their source campaign's pixel"
+                              >
+                                <LockIcon className="h-3 w-3 shrink-0" />
+                                Pixel · from source
+                              </span>
+                            )
+                          ) : null}
+                        </div>
+                      </div>
+
+                      {/* clone settings (editable) — money-sanitized like the launcher's fields
+                          (ROAS = cash-register mode, budget = cash-register too since 09-08) so
+                          garbage can't reach CloneEdit.roasGoal/budget → money()=0 → an ad set
+                          Meta rejects (orphan + burnt gcm). */}
+                      <div className="cr-bid min-w-0">
+                        <span className="cr-label">Strategy · Bid</span>
+                        <div className="cr-bid-inner">
+                          {/* The CLONE's strategy — switchable per row (ROAS ↔ cap ↔ lowest, owner
+                              ask 09-01). The bid field follows the PICKED strategy; a kind change
+                              clears the value and switching back to the source's kind restores
+                              its bid. */}
+                          <div className="relative">
+                            <select
+                              value={r.bidStrategy}
+                              onChange={(e) => {
+                                const bidStrategy = e.target.value;
+                                const next = bidKind(bidStrategy);
+                                const roasGoal =
+                                  next === bidKind(r.bidStrategy)
+                                    ? r.roasGoal
+                                    : next === bidKind(r.source.bidStrategy)
+                                      ? r.source.originalRoas
+                                      : "";
+                                patchRow(r.id, { bidStrategy, roasGoal });
+                              }}
+                              aria-label="Clone bid strategy"
+                              title={
+                                r.bidStrategy !== r.source.bidStrategy
+                                  ? "Strategy switched — the clone launches with THIS strategy, not the source's"
+                                  : "The clone's bid strategy (the source's — switch it to re-bid the clone)"
+                              }
+                              className={
+                                cellSelect + (r.bidStrategy !== r.source.bidStrategy ? " border-accent/50 text-[#9db8ff]" : "")
+                              }
+                            >
+                              {BID_STRATEGIES.map((o) => (
+                                <option key={o.value} value={o.value} className="bg-surface text-ink">
+                                  {o.label}
+                                </option>
+                              ))}
+                            </select>
+                            <ChevronDownIcon className="pointer-events-none absolute right-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-faint" />
+                          </div>
+                          <div className="relative">
+                            {kind !== "none" ? (
+                              <span
                                 className={
-                                  cellSelect +
-                                  (r.bidStrategy !== r.source.bidStrategy
-                                    ? " border-accent/50 text-[#9db8ff]"
-                                    : "")
+                                  "pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[11px] " +
+                                  (kind === "roas" ? "font-semibold text-[#9db8ff]" : "text-faint")
                                 }
                               >
-                                {BID_STRATEGIES.map((o) => (
-                                  <option key={o.value} value={o.value} className="bg-surface text-ink">
-                                    {o.label}
-                                  </option>
-                                ))}
-                              </select>
-                              <ChevronDownIcon className="pointer-events-none absolute right-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-faint" />
-                            </div>
-                            <div className="relative">
-                              {bidKind(r.bidStrategy) !== "none" ? (
-                                <span
-                                  className={
-                                    "pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[11px] " +
-                                    (bidKind(r.bidStrategy) === "roas"
-                                      ? "font-semibold text-[#9db8ff]"
-                                      : "text-faint")
-                                  }
-                                >
-                                  {bidKind(r.bidStrategy) === "roas" ? "R" : "$"}
-                                </span>
-                              ) : null}
-                              <input
-                                value={bidKind(r.bidStrategy) === "none" ? "" : r.roasGoal}
-                                onChange={(e) =>
-                                  patchRow(r.id, {
-                                    roasGoal: limitMoneyCents(
-                                      e.target.value,
-                                      bidKind(r.bidStrategy) === "roas" ? 100 : 1000,
-                                    ),
-                                  })
-                                }
-                                inputMode="decimal"
-                                disabled={bidKind(r.bidStrategy) === "none"}
-                                placeholder={
-                                  bidKind(r.bidStrategy) === "roas"
-                                    ? "1,20"
-                                    : bidKind(r.bidStrategy) === "cap"
-                                      ? "0,50"
-                                      : "auto"
-                                }
-                                title={
-                                  bidKind(r.bidStrategy) === "roas"
-                                    ? "ROAS decimal — 34 → 0,34 (34%)"
-                                    : bidKind(r.bidStrategy) === "cap"
-                                      ? "Bid cap in $ — digits fill cents, 34 → $0,34"
-                                      : "Lowest cost bids automatically"
-                                }
-                                aria-label="Bid / ROAS goal"
-                                className={
-                                  cellInput +
-                                  (bidKind(r.bidStrategy) !== "none" ? " pl-5" : " opacity-50") +
-                                  (rowBidMissing(r)
-                                    ? " border-warn/60 focus:border-warn focus:ring-warn/15"
-                                    : "")
-                                }
-                              />
-                            </div>
+                                {kind === "roas" ? "R" : "$"}
+                              </span>
+                            ) : null}
+                            <input
+                              value={kind === "none" ? "" : r.roasGoal}
+                              onChange={(e) =>
+                                patchRow(r.id, {
+                                  roasGoal: limitMoneyCents(e.target.value, kind === "roas" ? 100 : 1000),
+                                })
+                              }
+                              inputMode="decimal"
+                              disabled={kind === "none"}
+                              placeholder={kind === "roas" ? "1,20" : kind === "cap" ? "0,50" : "auto"}
+                              title={
+                                kind === "roas"
+                                  ? "ROAS decimal — 34 → 0,34 (34%)"
+                                  : kind === "cap"
+                                    ? "Bid cap in $ — digits fill cents, 34 → $0,34"
+                                    : "Lowest cost bids automatically"
+                              }
+                              aria-label="Bid / ROAS goal"
+                              className={
+                                cellInput +
+                                (kind !== "none" ? " pl-5" : " opacity-50") +
+                                (rowBidMissing(r) ? " border-warn/60 focus:border-warn focus:ring-warn/15" : "")
+                              }
+                            />
                           </div>
-                        </td>
-                        <td className="px-2 py-3.5">
+                        </div>
+                      </div>
+
+                      {/* budget (cash register) + this row's copies (stepper; empty = batch default) */}
+                      <div className="cr-budget min-w-0">
+                        <span className="cr-label">Budget · Copies</span>
+                        <div className="cr-budget-inner">
                           <div className="relative">
                             <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[12px] text-faint">
                               $
                             </span>
                             <input
                               value={r.budget}
-                              // Cash-register entry like the ROAS/bid field (owner ask 09-08): the
-                              // cents are always visible and typed digits fill them from the right
-                              // — 1000 → 10,00 · 1250 → 12,50.
                               onChange={(e) => patchRow(r.id, { budget: limitMoneyCents(e.target.value, 10000) })}
                               inputMode="decimal"
                               placeholder="10,00"
@@ -1306,26 +1352,67 @@ function CloneInner({
                               }
                             />
                           </div>
-                        </td>
-
-                        {/* remove */}
-                        <td className="px-1 py-3.5">
-                          <div className="flex h-8 items-center justify-center">
+                          <div
+                            className={
+                              "flex h-8 items-stretch overflow-hidden rounded-md border bg-surface2 transition-colors focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/15 " +
+                              (r.copies != null ? "border-accent/45" : "border-line hover:border-line2")
+                            }
+                            title={`Copies of this row · empty = the batch default (${settings.copies}) · max ${MAX_CLONE_COPIES}`}
+                          >
                             <button
                               type="button"
-                              onClick={() => removeRow(r.id)}
-                              aria-label="Remove campaign"
-                              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-faint transition-colors hover:bg-danger/10 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40"
+                              onClick={() => patchRow(r.id, { copies: Math.max(1, copiesEff - 1) })}
+                              disabled={copiesEff <= 1}
+                              aria-label="Fewer copies"
+                              className="flex w-7 shrink-0 items-center justify-center text-faint transition-colors hover:bg-raise hover:text-ink disabled:cursor-not-allowed disabled:opacity-30"
                             >
-                              <TrashIcon className="h-[18px] w-[18px]" />
+                              <MinusIcon className="h-3 w-3" />
+                            </button>
+                            <span className="pointer-events-none self-center font-mono text-[10.5px] text-faint">×</span>
+                            <input
+                              value={r.copies != null ? String(r.copies) : ""}
+                              onChange={(e) => {
+                                const raw = e.target.value.replace(/\D/g, "").slice(0, 3);
+                                patchRow(r.id, {
+                                  copies: raw === "" ? null : Math.max(1, Math.min(MAX_CLONE_COPIES, Number(raw))),
+                                });
+                              }}
+                              inputMode="numeric"
+                              placeholder={String(settings.copies)}
+                              aria-label="Copies for this row"
+                              className={
+                                "min-w-0 flex-1 bg-transparent px-1 text-center font-mono text-[12px] tabular-nums outline-none placeholder:text-faint " +
+                                (r.copies != null ? "text-[#9db8ff]" : "text-dim")
+                              }
+                            />
+                            <button
+                              type="button"
+                              onClick={() => patchRow(r.id, { copies: Math.min(MAX_CLONE_COPIES, copiesEff + 1) })}
+                              disabled={copiesEff >= MAX_CLONE_COPIES}
+                              aria-label="More copies"
+                              className="flex w-7 shrink-0 items-center justify-center text-faint transition-colors hover:bg-raise hover:text-ink disabled:cursor-not-allowed disabled:opacity-30"
+                            >
+                              <PlusIcon className="h-3 w-3" />
                             </button>
                           </div>
-                        </td>
-                      </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                        </div>
+                      </div>
+
+                      {/* remove */}
+                      <div className="cr-del">
+                        <button
+                          type="button"
+                          onClick={() => removeRow(r.id)}
+                          aria-label="Remove campaign"
+                          title="Remove from the batch"
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-md text-faint transition-colors hover:bg-danger/10 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40"
+                        >
+                          <TrashIcon className="h-[18px] w-[18px]" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
 

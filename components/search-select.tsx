@@ -92,6 +92,9 @@ export function SearchSelect({
   metaWhenClosed,
   warn,
   facets,
+  size,
+  accent,
+  ariaLabel,
 }: {
   id?: string;
   value: string;
@@ -108,6 +111,11 @@ export function SearchSelect({
    *  distinct `tag` (language) with counts — built for catalogs that will keep growing. Chip
    *  filters compose with the typed query. */
   facets?: boolean;
+  /** "sm" = the dense table/grid variant (h-8, 12px) — the clone board's inline row pickers. */
+  size?: "sm";
+  /** Accent border: the value is the row's OWN pick (vs an inherited default). */
+  accent?: boolean;
+  ariaLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ left: number; width: number; top: number; up: boolean } | null>(null);
@@ -212,6 +220,7 @@ export function SearchSelect({
     setListH(null); // reopening starts at natural size (no stale height to glide from)
   }
 
+  const sm = size === "sm";
   const toneCls = (tone?: RichOption["tagTone"]) =>
     tone === "danger"
       ? "text-danger"
@@ -284,7 +293,12 @@ export function SearchSelect({
         }
       }}
     >
-      <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-faint" />
+      <SearchIcon
+        className={
+          "pointer-events-none absolute top-1/2 -translate-y-1/2 text-faint " +
+          (sm ? "left-2 h-3 w-3" : "left-2.5 h-3.5 w-3.5")
+        }
+      />
       <input
         id={id}
         ref={inputRef}
@@ -293,6 +307,7 @@ export function SearchSelect({
         aria-controls={id ? `${id}-listbox` : undefined}
         autoComplete="off"
         spellCheck={false}
+        aria-label={ariaLabel}
         disabled={disabled}
         placeholder={placeholder}
         value={open ? query : displayValue}
@@ -309,21 +324,25 @@ export function SearchSelect({
         }}
         onKeyDown={onKeyDown}
         className={
-          "h-9 w-full rounded-lg border bg-surface2 pl-8 text-[13px] text-ink " +
+          (sm ? "h-8 rounded-md pl-7 text-[12px] " : "h-9 rounded-lg pl-8 text-[13px] ") +
+          "w-full border bg-surface2 text-ink " +
           "placeholder:text-faint outline-none transition-[border-color,box-shadow] duration-150 " +
           "disabled:opacity-40 disabled:cursor-not-allowed " +
           (warn
             ? "border-warn/60 hover:border-warn/80 focus:border-warn focus:ring-2 focus:ring-warn/15 "
-            : "border-line hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 ") +
+            : accent
+              ? "border-accent/45 hover:border-accent/60 focus:border-accent/70 focus:ring-2 focus:ring-accent/15 "
+              : "border-line hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 ") +
           // Room on the right for the status tag (+ the clear button beside it) so a picked
           // option's label truncates cleanly instead of running under them.
-          (!open && selected?.tag ? "pr-24" : "pr-8")
+          (!open && selected?.tag ? (sm ? "pr-[74px]" : "pr-24") : sm ? "pr-7" : "pr-8")
         }
       />
       {!open && selected?.tag ? (
         <span
           className={
-            "pointer-events-none absolute right-8 top-1/2 -translate-y-1/2 font-mono text-[11px] tabular-nums " +
+            "pointer-events-none absolute top-1/2 -translate-y-1/2 font-mono tabular-nums " +
+            (sm ? "right-7 text-[10.5px] " : "right-8 text-[11px] ") +
             toneCls(selected.tagTone)
           }
         >
@@ -339,7 +358,10 @@ export function SearchSelect({
             e.preventDefault();
             onChange("");
           }}
-          className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-faint transition-colors hover:text-ink"
+          className={
+            "absolute top-1/2 -translate-y-1/2 rounded text-faint transition-colors hover:text-ink " +
+            (sm ? "right-1.5 p-0.5" : "right-2 p-1")
+          }
         >
           <XIcon className="h-3 w-3" />
         </button>
@@ -352,7 +374,9 @@ export function SearchSelect({
               style={{
                 position: "fixed",
                 left: pos.left,
-                width: pos.width,
+                // The dense variant sits in a ~230px grid cell — its list opens wider (names + ids
+                // + fill badges stay readable), clamped to the viewport edge.
+                width: sm ? Math.min(Math.max(pos.width, 320), window.innerWidth - pos.left - 8) : pos.width,
                 ...(pos.up ? { bottom: window.innerHeight - pos.top + 6 } : { top: pos.top + 6 }),
                 zIndex: 120,
               }}

@@ -79,14 +79,28 @@ export type CloneRow = {
 export const MAX_CLONE_COPIES = 100;
 const clampCopies = (n: number): number => Math.max(1, Math.min(MAX_CLONE_COPIES, Math.floor(n) || 1));
 
-/** A row's EFFECTIVE destination: its own tuple, else the batch settings. */
+/** A row's EFFECTIVE destination: its own picks, the batch settings for whatever it leaves empty
+ *  (owner ask 09-08 — the board's inline pickers override ONE field at a time). The pixel only
+ *  inherits while the row lands in the batch's own account: a pixel belongs to its account, so
+ *  an account of the row's own with no pixel pick reads as "pixel missing", never as the batch's. */
 export function rowDestination(
   row: Pick<CloneRow, "dest">,
   settings: Pick<CloneSettings, "pageId" | "accountId" | "pixelId">,
 ): CloneRowDest {
-  return row.dest
-    ? { pageId: row.dest.pageId, accountId: row.dest.accountId, pixelId: row.dest.pixelId }
-    : { pageId: settings.pageId, accountId: settings.accountId, pixelId: settings.pixelId };
+  const own = row.dest;
+  if (!own) return { pageId: settings.pageId, accountId: settings.accountId, pixelId: settings.pixelId };
+  const accountId = own.accountId || settings.accountId;
+  return {
+    pageId: own.pageId || settings.pageId,
+    accountId,
+    pixelId: own.pixelId || (accountId === settings.accountId ? settings.pixelId : ""),
+  };
+}
+
+/** A row's own destination with nothing picked is no override at all → null (rides the batch). */
+export function normalizeRowDest(dest: CloneRowDest | null): CloneRowDest | null {
+  if (!dest) return null;
+  return dest.pageId || dest.accountId || dest.pixelId ? dest : null;
 }
 
 /** A row's EFFECTIVE number of copies: its own (clamped), else the batch settings' (clamped). */
