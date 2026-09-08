@@ -378,6 +378,7 @@ export async function lionJuroSources(campaignIds: string[]): Promise<Record<str
     campaign_id?: string | number;
     campaign_name?: string;
     campaign_status?: string;
+    error?: string;
     bid_strategy?: string;
     adsets?: Array<{ bid_amount?: number; adset_bid?: number; ads?: Ad[] }>;
   };
@@ -405,7 +406,7 @@ export async function lionJuroSources(campaignIds: string[]): Promise<Record<str
     const locales = (t?.locales_ids ?? [])
       .map((id, i) => ({ id: Number(id), name: String((t?.locales ?? [])[i] ?? "") }))
       .filter((l) => Number.isFinite(l.id) && l.id > 0);
-    if (!d) {
+    if (!d || d.error) {
       out[cid] = {
         campaignId: cid, name: "", status: "UNREADABLE", stories: [], page: "",
         countries: (t?.countries_code ?? []).map(String), locales, adsCount: 0, bidStrategy: "", bid: null,
@@ -564,6 +565,9 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
     campaign_id?: string | number;
     campaign_name?: string;
     campaign_status?: string;
+    /** LION answers a per-id error row ("Campaign data not found") instead of omitting the id —
+     *  such a row is UNREADABLE too (its duplicate would die the same way). */
+    error?: string;
     bid_strategy?: string;
     campaign_budget?: number;
     adsets?: Array<{
@@ -589,7 +593,7 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
   const byId = new Map(details.map((d) => [String(d.campaign_id ?? ""), d]));
   const rows = campaignIds.map((cid) => {
     const d = byId.get(cid);
-    if (!d) {
+    if (!d || d.error) {
       return { campaignId: cid, name: "", status: "UNREADABLE", budget: null, bid: null, bidStrategy: "", adsCount: 0, countries: geoById.get(cid) ?? [], pages: [] as { pageId: string; ads: number }[] };
     }
     const adsets = Array.isArray(d.adsets) ? d.adsets : [];

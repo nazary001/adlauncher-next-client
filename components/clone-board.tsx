@@ -4,8 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CloneEdit,
   type CloneRow,
+  type CloneRowDest,
   type CloneSettings,
   type HighOfferConfig,
+  MAX_CLONE_COPIES,
   SOURCE_ACCOUNT,
   defaultSettings,
   flattenPreview,
@@ -13,8 +15,18 @@ import {
   loadCloneSources,
   loadSampleSources,
   makeCloneRow,
+  rowCopiesOf,
+  rowDestination,
 } from "@/lib/clone";
-import { bidKind, limitMoney, limitMoneyCents, moEnsureSocMark, moneyLabel, normalizeRoasGoal, parseMoney } from "@/lib/types";
+import {
+  bidKind,
+  limitMoneyCents,
+  moEnsureSocMark,
+  moneyCentsLabel,
+  moneyLabel,
+  normalizeRoasGoal,
+  parseMoney,
+} from "@/lib/types";
 import { BID_STRATEGIES, OS_OPTIONS, countryName, geoSummary } from "@/lib/catalog";
 import { AIF_VALUE_PIXEL, type PartnerId, aifOfferablePixels, partnerConfig, pickAifPixel } from "@/lib/partners";
 import { AutoTextarea, BidKindTag, Field, Select } from "./ui";
@@ -35,6 +47,7 @@ import { Header } from "./header";
 import { useAifTaskManager, useTaskManager } from "./task-manager";
 import { CloneTargetingModal } from "./clone-targeting-modal";
 import { CloneHighOfferModal } from "./clone-high-offer-modal";
+import { CloneDestinationModal } from "./clone-destination-modal";
 import { SearchSelect } from "./search-select";
 import { useMoSocs } from "./use-mo-socs";
 import { MO_CHANNEL_LS, MoSocPicker, defaultMoSoc } from "./mo-soc-picker";
@@ -66,6 +79,13 @@ function rowBidMissing(r: CloneRow): boolean {
   const v = parseMoney(r.roasGoal);
   if (v <= 0) return true;
   return kind === "roas" && normalizeRoasGoal(v) == null;
+}
+
+/** A source row seeded for the board: makeCloneRow + the budget in the cash-register spelling
+ *  the Budget cell runs in (owner ask 09-08 — "10" would re-read as 0,10 on the first keystroke). */
+function seedRow(...args: Parameters<typeof makeCloneRow>): CloneRow {
+  const row = makeCloneRow(...args);
+  return { ...row, budget: moneyCentsLabel(row.budget) };
 }
 
 /** Column heading with the underline rule + an optional right-aligned count chip. */
@@ -162,13 +182,14 @@ function CloneInner({
   const [previewed, setPreviewed] = useState(false);
   const [targetingRowId, setTargetingRowId] = useState<string | null>(null);
   const [highOfferRowId, setHighOfferRowId] = useState<string | null>(null);
+  const [destRowId, setDestRowId] = useState<string | null>(null);
   const [justQueued, setJustQueued] = useState(0);
   // Copies input: `null` = not being edited (show the committed settings.copies). While editing it
   // holds the raw string so the field can be transiently empty — clearing "1" to type "20" no longer
   // snaps back to 1 on every keystroke. Committed value stays clamped 1..100.
   const [copiesDraft, setCopiesDraft] = useState<string | null>(null);
   const setCopies = (n: number) => {
-    patchSettings({ copies: Math.max(1, Math.min(100, n)) });
+    patchSettings({ copies: Math.max(1, Math.min(MAX_CLONE_COPIES, n)) });
     setCopiesDraft(null);
   };
   const nextRowId = useRef(1);
@@ -230,16 +251,6 @@ function CloneInner({
       ? { list: "/api/aif/fanpages", volume: "/api/aif/fanpages/volume" }
       : { list: `/api/fanpages?channel=soc:${encodeURIComponent(moSoc)}`, volume: "/api/fanpages/volume" },
   );
-  // A signer switch swaps the WHOLE catalog (each soc sees its own pages/accounts) but the
-  // picked ids survive in state — a pick absent from the freshly LOADED list would fire a bind
-  // the new signer can't use (per-clone server errors). Same derived-staleness idiom as
-  // pixelStale below: a mid-load list (null) never flags a legit pick.
-  const pageStale =
-    Boolean(partner.fanpagesFromToken) &&
-    Boolean(settings.pageId) &&
-    fanpages !== null &&
-    !fanpages.some((o) => o.value === settings.pageId);
-  const fanpageMissing = Boolean(partner.fanpagesFromToken) && (!settings.pageId || pageStale);
   // Token ad accounts for the destination pick. The destination is an EXPLICIT choice:
   // "" = nothing chosen yet (Duplicate stays locked), SOURCE_ACCOUNT = consciously keep each
   // clone in its source campaign's own account, digits = a concrete target account (media gets
@@ -249,64 +260,116 @@ function CloneInner({
     partner.preferredPixel,
     aifMode ? "/api/aif/adaccounts" : `/api/adaccounts?channel=soc:${encodeURIComponent(moSoc)}`,
   );
-  const isTargetAccount = Boolean(settings.accountId) && settings.accountId !== SOURCE_ACCOUNT;
-  // Same staleness rule for a concrete target account (SOURCE_ACCOUNT is a sentinel — never
-  // stale): picked under one signer, absent from the other's loaded catalog → re-pick.
-  const accountStale =
+
+  // ---- destination verdicts, per TUPLE (owner ask 09-08: a row may carry its own) -----------
+  // The batch Settings tuple is judged with the same helpers as any row's own tuple. Staleness
+  // (a pick absent from the freshly LOADED catalog after a signer switch / list refresh) counts
+  // as missing — the pick would fire a bind the new signer can't use. A mid-load list (null)
+  // never flags a legit pick; the server's own catalog checks stay the final authority.
+  const isTargetFor = (d: CloneRowDest): boolean => Boolean(d.accountId) && d.accountId !== SOURCE_ACCOUNT;
+  const pageStaleFor = (d: CloneRowDest): boolean =>
+    Boolean(partner.fanpagesFromToken) &&
+    Boolean(d.pageId) &&
+    fanpages !== null &&
+    !fanpages.some((o) => o.value === d.pageId);
+  const fanpageMissingFor = (d: CloneRowDest): boolean =>
+    Boolean(partner.fanpagesFromToken) && (!d.pageId || pageStaleFor(d));
+  const accountStaleFor = (d: CloneRowDest): boolean =>
     Boolean(partner.accountsFromToken) &&
-    isTargetAccount &&
+    isTargetFor(d) &&
     adAccounts !== null &&
-    !adAccounts.some((a) => a.value === settings.accountId);
-  const accountMissing = Boolean(partner.accountsFromToken) && (!settings.accountId || accountStale);
+    !adAccounts.some((a) => a.value === d.accountId);
+  const accountMissingFor = (d: CloneRowDest): boolean =>
+    Boolean(partner.accountsFromToken) && (!d.accountId || accountStaleFor(d));
   // AIF offers the cabinet's pixels minus the retired ones (owner call 09-02 pt3 — «GC for
   // AIF» / «GC for MO» never offered); MO keeps the account's full list.
-  const targetPixelsAll = isTargetAccount ? pixelOptionsOf(adAccounts, settings.accountId) : [];
-  const targetPixels = aifMode ? aifOfferablePixels(targetPixelsAll) : targetPixelsAll;
-  // A concrete target account needs a pixel of that account: conversion sources can't carry
-  // their own pixel across (it lives on the source's account) — the server enforces this too.
-  // AIF picks from the same token catalog since 09-02 (owner ask: pixel is a CHOICE, not a
-  // hardcode); an empty AIF pick still auto-derives server-side, but the board fills and gates
-  // it exactly like MO so the pick is always visible.
-  // A reloaded account catalog can drop the picked pixel (pixel unshared / list refresh): a pick
-  // outside the current LOADED options counts as missing — the bay blocks firing and the picker
-  // asks again. Purely DERIVED (no state surgery, no effect), so a mid-load list (null) never
-  // clears a legit pick and the server's pixel-on-account check stays the final authority.
-  const pixelStale =
-    isTargetAccount &&
-    Boolean(settings.pixelId) &&
+  const targetPixelsFor = (accountId: string) => {
+    const all = pixelOptionsOf(adAccounts, accountId);
+    return aifMode ? aifOfferablePixels(all) : all;
+  };
+  const pixelStaleFor = (d: CloneRowDest): boolean =>
+    isTargetFor(d) &&
+    Boolean(d.pixelId) &&
     Boolean(adAccounts?.length) &&
-    !targetPixels.some((p) => p.id === settings.pixelId);
-  const pixelMissing = isTargetAccount && (!settings.pixelId || pixelStale);
-  const destinationMissing = fanpageMissing || accountMissing || pixelMissing;
-  // Account launch limit (5 campaigns / 30 min): a concrete TARGET account must fit the whole
-  // batch (rows × copies). From-each-source batches aren't metered here — the sources' accounts
-  // aren't exposed to the board, so the per-copy server claim refuses any overflow with the
-  // countdown instead.
+    !targetPixelsFor(d.accountId).some((p) => p.id === d.pixelId);
+  const pixelMissingFor = (d: CloneRowDest): boolean => isTargetFor(d) && (!d.pixelId || pixelStaleFor(d));
+  const destMissingFor = (d: CloneRowDest): boolean =>
+    fanpageMissingFor(d) || accountMissingFor(d) || pixelMissingFor(d);
+
+  // The batch Settings tuple (the wave defaults) — decorates the Settings pickers.
+  const defaults: CloneRowDest = { pageId: settings.pageId, accountId: settings.accountId, pixelId: settings.pixelId };
+  const pageStale = pageStaleFor(defaults);
+  const fanpageMissing = fanpageMissingFor(defaults);
+  const isTargetAccount = isTargetFor(defaults);
+  const accountStale = accountStaleFor(defaults);
+  const accountMissing = accountMissingFor(defaults);
+  const targetPixels = isTargetAccount ? targetPixelsFor(settings.accountId) : [];
+  const pixelMissing = pixelMissingFor(defaults);
+  // The defaults only matter while some row rides them (or no rows yet — guide the pick).
+  const defaultsUsed = rows.length === 0 || rows.some((r) => !r.dest);
+
+  // Per-row effective destination + copies (its own, else the batch settings).
+  const destOf = (r: CloneRow): CloneRowDest => rowDestination(r, settings);
+  const copiesOf = (r: CloneRow): number => rowCopiesOf(r, settings);
+  const rowsMissing = rows.filter((r) => destMissingFor(destOf(r)));
+  const destinationMissing = rows.length > 0 && rowsMissing.length > 0;
+
+  // Account launch limit (5 campaigns / 30 min): EVERY concrete TARGET account must fit its
+  // share (rows × copies bound to it). From-each-source rows aren't metered here — the sources'
+  // accounts aren't exposed to the board, so the per-copy server claim refuses any overflow with
+  // the countdown instead.
   const limits = useAcctLimits();
-  const cloneDemand = rows.length * Math.max(1, Math.floor(settings.copies) || 1);
-  // Fanka capacity: each clone ships ONE ad (campaign→adset→ad, clone-run) — the batch adds
-  // rows×copies ads to the ONE picked fanpage. Free slots come from the picker's own volume feed;
-  // unknown fill (numbers not landed / no registry data) = fail open, same as the badge grammar.
-  const pickedFanka = settings.pageId ? fanpages?.find((o) => o.value === settings.pageId) : undefined;
-  const fankaStats =
-    pickedFanka && pickedFanka.adCount != null && pickedFanka.adLimit != null
-      ? {
-          used: pickedFanka.adCount,
-          limit: pickedFanka.adLimit,
-          free: Math.max(pickedFanka.adLimit - pickedFanka.adCount, 0),
-        }
+  const acctDemand = new Map<string, number>();
+  for (const r of rows) {
+    const d = destOf(r);
+    if (isTargetFor(d)) acctDemand.set(d.accountId, (acctDemand.get(d.accountId) ?? 0) + copiesOf(r));
+  }
+  const acctShort = [...acctDemand.entries()]
+    .map(([accountId, need]) => ({
+      accountId,
+      need,
+      remaining: Math.max(0, limits.limit - limits.countFor(accountId)),
+      resetAt: limits.resetAtFor(accountId),
+    }))
+    .filter((x) => x.need > x.remaining);
+  const acctBlocked = acctShort.length > 0;
+  // Fanka capacity: each clone ships ONE ad (campaign→adset→ad, clone-run) — every fanpage the
+  // batch binds must fit the rows × copies landing on it. Free slots come from the picker's own
+  // volume feed; unknown fill (numbers not landed / no registry data) = fail open, same as the
+  // badge grammar.
+  const pageDemand = new Map<string, number>();
+  for (const r of rows) {
+    const d = destOf(r);
+    if (d.pageId) pageDemand.set(d.pageId, (pageDemand.get(d.pageId) ?? 0) + copiesOf(r));
+  }
+  const fankaStatsOf = (pageId: string) => {
+    const o = pageId ? fanpages?.find((x) => x.value === pageId) : undefined;
+    return o && o.adCount != null && o.adLimit != null
+      ? { name: o.label, used: o.adCount, limit: o.adLimit, free: Math.max(o.adLimit - o.adCount, 0) }
       : null;
-  const fankaOver = fankaStats !== null && rows.length > 0 && cloneDemand > fankaStats.free;
+  };
+  const fankaShort = [...pageDemand.entries()]
+    .map(([pageId, need]) => ({ pageId, need, st: fankaStatsOf(pageId) }))
+    .filter((x): x is { pageId: string; need: number; st: NonNullable<ReturnType<typeof fankaStatsOf>> } =>
+      x.st !== null && x.need > x.st.free,
+    );
+  const fankaOver = fankaShort.length > 0;
+  /** The batch Settings fanpage's own meter + what the rows bound to it add (Settings line). */
+  const fankaStats = fankaStatsOf(settings.pageId);
+  const defaultFankaDemand = settings.pageId ? (pageDemand.get(settings.pageId) ?? 0) : 0;
+  const defaultFankaOver = fankaShort.some((x) => x.pageId === settings.pageId);
   // Rows whose picked strategy needs a Bid that isn't there (cap $ / ROAS goal / ambiguous ROAS
   // band) — the fire button blocks on this instead of burning markers on per-clone 400s.
   const bidMissingCount = rows.filter(rowBidMissing).length;
-  const targetRemaining = isTargetAccount
-    ? Math.max(0, limits.limit - limits.countFor(settings.accountId))
-    : null;
-  const acctBlocked = targetRemaining !== null && cloneDemand > targetRemaining;
-  const targetResetAt = isTargetAccount ? limits.resetAtFor(settings.accountId) : null;
   // Whoever is signed in — clone names default to end with " - <Username>".
   const me = user?.username ?? null;
+
+  // Catalog display names for a destination tuple.
+  const fanpageLabel = (pageId: string): string => fanpages?.find((o) => o.value === pageId)?.label || pageId;
+  const accountLabel = (accountId: string): string =>
+    accountId === SOURCE_ACCOUNT ? "From each source" : adAccounts?.find((a) => a.value === accountId)?.label || accountId;
+  const pixelLabel = (accountId: string, pixelId: string): string =>
+    pixelOptionsOf(adAccounts, accountId).find((p) => p.id === pixelId)?.name || pixelId;
 
   /** (Re)load real sources for a set of ids from Facebook. Used by the Retry button — an event
    *  handler, so the synchronous loading/error flips are fine here. */
@@ -323,7 +386,7 @@ function CloneInner({
       const ddmm = todayDDMM();
       loadCloneSources(ids, partnerId)
         .then((sources) => {
-          setRows(sources.map((s) => makeCloneRow(s, ddmm, `r${nextRowId.current++}`, me)));
+          setRows(sources.map((s) => seedRow(s, ddmm, `r${nextRowId.current++}`, me)));
           setPreviewed(false);
         })
         .catch((e) => {
@@ -342,7 +405,7 @@ function CloneInner({
     const ddmm = todayDDMM();
     loadSampleSources()
       .then((sources) => {
-        setRows(sources.map((s) => makeCloneRow(s, ddmm, `r${nextRowId.current++}`, me)));
+        setRows(sources.map((s) => seedRow(s, ddmm, `r${nextRowId.current++}`, me)));
         setPreviewed(false);
       })
       .finally(() => setLoading(false));
@@ -358,7 +421,7 @@ function CloneInner({
     loadCloneSources(initialIds, partnerId)
       .then((sources) => {
         if (!alive) return;
-        setRows(sources.map((s) => makeCloneRow(s, ddmm, `r${nextRowId.current++}`, me)));
+        setRows(sources.map((s) => seedRow(s, ddmm, `r${nextRowId.current++}`, me)));
         setPreviewed(false);
       })
       .catch((e) => {
@@ -400,13 +463,17 @@ function CloneInner({
 
   const preview = flattenPreview(rows, settings.copies);
 
-  /** Queue each clone (rows × copies) into the Task Manager, which builds them one at a time
-   *  (ACTIVE since 08-11) with live stages / errors / retry — the same queue and pipeline as launches. */
+  /** Queue each clone (rows × the row's copies) into the Task Manager, which builds them one at
+   *  a time (ACTIVE since 08-11) with live stages / errors / retry — the same queue and pipeline
+   *  as launches. Each clone carries ITS row's destination (own or the batch defaults). */
   const duplicate = () => {
     if (destinationMissing || acctBlocked || fankaOver || bidMissingCount > 0 || signerMissing || limits.staleBuild) return; // the button is disabled too — belt and suspenders
-    const total = Math.max(1, Math.floor(settings.copies) || 1);
     let queued = 0;
     for (const r of rows) {
+      const d = destOf(r);
+      const target = isTargetFor(d);
+      const stale = pixelStaleFor(d);
+      const total = copiesOf(r);
       for (let k = 1; k <= total; k++) {
         // Soc-class signers stamp the SOC marker into the name (server re-ensures it — this
         // keeps the queue rows/previews honest); system-class signers (Spencermo) go unmarked.
@@ -426,14 +493,14 @@ function CloneInner({
           placement: r.placement,
           ageMin: r.ageMin,
           userOs: settings.userOs,
-          pageId: settings.pageId,
+          pageId: d.pageId,
           // Target account+pixel only for a concrete account; SOURCE_ACCOUNT (an explicit pick
           // too) omits them = each clone builds in its source's own account. AIF sends the pick
           // too (09-02) — an empty one auto-derives server-side (click sources stay pixel-less).
-          ...(isTargetAccount
+          ...(target
             ? // Belt: a stale pick (no longer among the account's pixels) must never ride the
               // POST even if some path skips the destinationMissing gate.
-              { accountId: settings.accountId, pixelId: pixelStale ? "" : settings.pixelId }
+              { accountId: d.accountId, pixelId: stale ? "" : d.pixelId }
             : {}),
         };
         enqueueClone({
@@ -458,6 +525,7 @@ function CloneInner({
 
   const targetingRow = rows.find((r) => r.id === targetingRowId) ?? null;
   const highOfferRow = rows.find((r) => r.id === highOfferRowId) ?? null;
+  const destRow = rows.find((r) => r.id === destRowId) ?? null;
 
   return (
     <>
@@ -469,6 +537,9 @@ function CloneInner({
                — without its own scroll the Duplicate button pins out of reach. */}
           <section className="flex min-w-0 flex-col gap-4 lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto lg:overscroll-contain">
             <SectionHeading>Settings</SectionHeading>
+            <p className="-mt-2 text-[10.5px] leading-snug text-faint">
+              Batch defaults — every row rides these unless it sets its own Destination in the table.
+            </p>
 
             {/* MO signer — the soc token that reads the catalogs below AND signs every clone
                 (the system token is retired). Shared pick with the launcher board. */}
@@ -486,9 +557,9 @@ function CloneInner({
                 {partner.fanpagesFromToken ? (
                   <div className="flex flex-col gap-1 px-1.5 py-1">
                     <span
-                      className={`text-[10px] font-medium uppercase tracking-[0.14em] ${fanpageMissing ? "text-warn" : "text-faint"}`}
+                      className={`text-[10px] font-medium uppercase tracking-[0.14em] ${fanpageMissing && defaultsUsed ? "text-warn" : "text-faint"}`}
                     >
-                      Fanpage{pageStale ? " — re-pick (not on this signer)" : fanpageMissing ? " — required" : ""}
+                      Fanpage{pageStale ? " — re-pick (not on this signer)" : fanpageMissing && defaultsUsed ? " — required" : ""}
                     </span>
                     <SearchSelect
                       value={settings.pageId}
@@ -497,15 +568,15 @@ function CloneInner({
                       placeholder={partner.pagePlaceholder}
                       emptyHint={fanpages ? "No fanpages on the token" : "Loading fanpages…"}
                       metaWhenClosed
-                      warn={fanpageMissing}
+                      warn={fanpageMissing && defaultsUsed}
                     />
-                    {/* Live fill of the picked fanka vs what THIS batch adds (1 ad per clone) —
-                        red when it won't fit; Duplicate locks on the same flag. */}
+                    {/* Live fill of the picked fanka vs what the rows bound to it add (1 ad per
+                        clone) — red when it won't fit; Duplicate locks on the same flag. */}
                     {fankaStats ? (
                       <p
                         className={
                           "px-0.5 font-mono text-[10.5px] tabular-nums " +
-                          (fankaOver
+                          (defaultFankaOver
                             ? "font-semibold text-danger"
                             : fankaStats.limit > 0 && fankaStats.used / fankaStats.limit >= 0.8
                               ? "text-warn"
@@ -513,7 +584,7 @@ function CloneInner({
                         }
                       >
                         {fankaStats.used}/{fankaStats.limit} ads · {fankaStats.free} free
-                        {rows.length > 0 ? ` · batch adds ${cloneDemand}` : ""}
+                        {defaultFankaDemand > 0 ? ` · batch adds ${defaultFankaDemand}` : ""}
                       </p>
                     ) : null}
                   </div>
@@ -522,9 +593,9 @@ function CloneInner({
                   <>
                     <div className="flex flex-col gap-1 px-1.5 py-1">
                       <span
-                        className={`text-[10px] font-medium uppercase tracking-[0.14em] ${accountMissing ? "text-warn" : "text-faint"}`}
+                        className={`text-[10px] font-medium uppercase tracking-[0.14em] ${accountMissing && defaultsUsed ? "text-warn" : "text-faint"}`}
                       >
-                        Account{accountStale ? " — re-pick (not on this signer)" : accountMissing ? " — required" : ""}
+                        Account{accountStale ? " — re-pick (not on this signer)" : accountMissing && defaultsUsed ? " — required" : ""}
                       </span>
                       <SearchSelect
                         value={settings.accountId}
@@ -548,15 +619,15 @@ function CloneInner({
                         ]}
                         placeholder="Select account"
                         emptyHint={adAccounts ? "No accounts on the token" : "Loading accounts…"}
-                        warn={accountMissing}
+                        warn={accountMissing && defaultsUsed}
                       />
                     </div>
                     {isTargetAccount ? (
                       <div className="flex flex-col gap-1 px-1.5 py-1">
                         <span
-                          className={`text-[10px] font-medium uppercase tracking-[0.14em] ${pixelMissing ? "text-warn" : "text-faint"}`}
+                          className={`text-[10px] font-medium uppercase tracking-[0.14em] ${pixelMissing && defaultsUsed ? "text-warn" : "text-faint"}`}
                         >
-                          Pixel{pixelMissing ? " — required" : ""}
+                          Pixel{pixelMissing && defaultsUsed ? " — required" : ""}
                         </span>
                         <SearchSelect
                           value={settings.pixelId}
@@ -571,7 +642,7 @@ function CloneInner({
                               : "Loading pixels…"
                           }
                           metaWhenClosed
-                          warn={pixelMissing}
+                          warn={pixelMissing && defaultsUsed}
                         />
                       </div>
                     ) : settings.accountId === SOURCE_ACCOUNT ? (
@@ -587,10 +658,10 @@ function CloneInner({
               </div>
               <p className="px-0.5 text-[10.5px] leading-relaxed text-faint">
                 {accountMissing
-                  ? "Pick the destination explicitly: the fanpage and the account. “From each source” keeps every clone in its source campaign’s own account; a concrete account re-builds the whole batch there."
+                  ? "Pick the destination explicitly: the fanpage and the account. “From each source” keeps every clone in its source campaign’s own account; a concrete account re-builds the whole batch there. Any row can override these with its own Destination."
                   : isTargetAccount
-                    ? "Every clone in the batch is re-built in the picked account: the source video/image is re-uploaded there (adds a “Migrating media” step) and conversion clones optimize for the picked pixel."
-                    : "Each clone is created in its source campaign’s own ad account (its video/image lives there), with the source’s pixel. Only the fanpage applies to every clone in the batch."}
+                    ? "Rows on the defaults are re-built in the picked account: the source video/image is re-uploaded there (adds a “Migrating media” step) and conversion clones optimize for the picked pixel."
+                    : "Rows on the defaults are created in their source campaign’s own ad account (its video/image lives there), with the source’s pixel. Only the fanpage applies to them."}
               </p>
             </div>
 
@@ -623,7 +694,7 @@ function CloneInner({
                   onChange={(e) => {
                     const raw = e.target.value.replace(/[^\d]/g, "").slice(0, 3);
                     setCopiesDraft(raw);
-                    if (raw !== "") patchSettings({ copies: Math.max(1, Math.min(100, Number(raw))) });
+                    if (raw !== "") patchSettings({ copies: Math.max(1, Math.min(MAX_CLONE_COPIES, Number(raw))) });
                   }}
                   onBlur={() => setCopiesDraft(null)}
                   className="w-full min-w-0 border-x border-line bg-transparent text-center font-mono text-[13px] tabular-nums text-ink outline-none focus:bg-surface2/60"
@@ -632,13 +703,13 @@ function CloneInner({
                   type="button"
                   aria-label="More copies"
                   onClick={() => setCopies(settings.copies + 1)}
-                  disabled={settings.copies >= 100}
+                  disabled={settings.copies >= MAX_CLONE_COPIES}
                   className="flex w-9 shrink-0 items-center justify-center text-[17px] leading-none text-dim transition-colors hover:bg-raise hover:text-ink disabled:opacity-30 disabled:hover:bg-transparent"
                 >
                   +
                 </button>
               </div>
-              <p className="text-[11px] leading-snug text-faint">Each campaign is duplicated this many times.</p>
+              <p className="text-[11px] leading-snug text-faint">Default for every campaign — a row can set its own copies.</p>
             </div>
 
             <div className="flex flex-col gap-2 pt-1">
@@ -676,36 +747,50 @@ function CloneInner({
 
               {previewed && rows.length > 0 && destinationMissing ? (
                 <div className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11.5px] leading-relaxed text-warn">
-                  Duplicate is locked — set in Destination:{" "}
-                  <span className="font-semibold">
-                    {[
-                      fanpageMissing ? "Fanpage" : null,
-                      accountMissing ? "Account" : null,
-                      pixelMissing ? "Pixel" : null,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  </span>
+                  {rowsMissing.every((r) => !r.dest) ? (
+                    <>
+                      Duplicate is locked — set in Destination:{" "}
+                      <span className="font-semibold">
+                        {[
+                          fanpageMissing ? "Fanpage" : null,
+                          accountMissing ? "Account" : null,
+                          pixelMissing ? "Pixel" : null,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </span>
+                      {rowsMissing.length < rows.length ? ` (${rowsMissing.length} of ${rows.length} rows ride the defaults)` : ""}
+                    </>
+                  ) : (
+                    <>
+                      Duplicate is locked — <span className="font-semibold">{rowsMissing.length}</span> row
+                      {rowsMissing.length === 1 ? " has" : "s have"} an incomplete Destination (see the amber
+                      chips in the table).
+                    </>
+                  )}
                 </div>
               ) : null}
 
-              {previewed && rows.length > 0 && !destinationMissing && acctBlocked ? (
-                <div className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11.5px] leading-relaxed text-warn">
-                  Account limit — only <span className="font-semibold">{targetRemaining}</span> of{" "}
-                  <span className="font-semibold">{cloneDemand}</span> clones fit this account&apos;s
-                  30-min window
-                  {targetResetAt ? (
-                    <>
-                      {" "}
-                      · resets in{" "}
-                      <span className="font-mono font-semibold">
-                        {fmtCountdown(targetResetAt, limits.skew)}
-                      </span>
-                    </>
-                  ) : null}
-                  . Trim copies or pick another account.
-                </div>
-              ) : null}
+              {previewed && rows.length > 0 && !destinationMissing && acctBlocked
+                ? acctShort.map((x) => (
+                    <div
+                      key={x.accountId}
+                      className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11.5px] leading-relaxed text-warn"
+                    >
+                      Account limit — <span className="font-semibold">{accountLabel(x.accountId)}</span>: only{" "}
+                      <span className="font-semibold">{x.remaining}</span> of{" "}
+                      <span className="font-semibold">{x.need}</span> clones fit its 30-min window
+                      {x.resetAt ? (
+                        <>
+                          {" "}
+                          · resets in{" "}
+                          <span className="font-mono font-semibold">{fmtCountdown(x.resetAt, limits.skew)}</span>
+                        </>
+                      ) : null}
+                      . Trim copies or pick another account.
+                    </div>
+                  ))
+                : null}
 
               {previewed && rows.length > 0 && signerMissing ? (
                 <div className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11.5px] leading-relaxed text-warn">
@@ -723,21 +808,26 @@ function CloneInner({
                 </div>
               ) : null}
 
-              {previewed && rows.length > 0 && !destinationMissing && fankaOver && fankaStats ? (
-                <div className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11.5px] leading-relaxed text-warn">
-                  Fanpage full — the batch adds <span className="font-semibold">{cloneDemand}</span>{" "}
-                  ads but this fanpage has only{" "}
-                  <span className="font-semibold">{fankaStats.free}</span> free (
-                  <span className="font-mono">
-                    {fankaStats.used}/{fankaStats.limit}
-                  </span>
-                  ). Trim copies or pick another fanpage.
-                </div>
-              ) : null}
+              {previewed && rows.length > 0 && !destinationMissing && fankaOver
+                ? fankaShort.map((x) => (
+                    <div
+                      key={x.pageId}
+                      className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11.5px] leading-relaxed text-warn"
+                    >
+                      Fanpage full — <span className="font-semibold">{x.st.name}</span>: the batch adds{" "}
+                      <span className="font-semibold">{x.need}</span> ads but it has only{" "}
+                      <span className="font-semibold">{x.st.free}</span> free (
+                      <span className="font-mono">
+                        {x.st.used}/{x.st.limit}
+                      </span>
+                      ). Trim copies or pick another fanpage.
+                    </div>
+                  ))
+                : null}
 
               {previewed ? (
                 <p className="text-center text-[11px] text-faint">
-                  {rows.length} {rows.length === 1 ? "campaign" : "campaigns"} × {settings.copies} ={" "}
+                  {rows.length} {rows.length === 1 ? "campaign" : "campaigns"} ={" "}
                   <span className="font-mono text-dim">{preview.length}</span> clones · created live
                 </p>
               ) : null}
@@ -820,20 +910,25 @@ function CloneInner({
               // into ONE stacked column and hide below xl; the redirect config chip lives in the
               // name cell. The min-w only guards true mobile (wrapper scrolls there).
               <div className="overflow-x-auto rounded-2xl border border-line">
-                <table className="w-full min-w-[620px] table-fixed border-collapse text-left">
+                <table className="w-full min-w-[760px] table-fixed border-collapse text-left">
                   <thead>
                     <tr className="border-b border-line bg-surface2/40 text-[10px] font-semibold uppercase tracking-[0.1em] text-faint">
                       <th className="w-[34px] px-1.5 py-2.5 text-center">#</th>
                       <th className="px-3 py-2.5">Campaign name</th>
                       <th className="w-[122px] px-2 py-2.5">Geo</th>
+                      <th className="w-[168px] px-2 py-2.5">Destination · copies</th>
                       <th className="hidden w-[110px] px-2 py-2.5 xl:table-cell">Source $ · bid</th>
                       <th className="w-[150px] border-l border-line px-2 py-2.5">Strategy · Bid</th>
-                      <th className="w-[88px] px-2 py-2.5">Budget</th>
+                      <th className="w-[92px] px-2 py-2.5">Budget</th>
                       <th className="w-[40px] px-1 py-2.5" />
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.map((r, i) => (
+                    {rows.map((r, i) => {
+                      const d = destOf(r);
+                      const own = r.dest !== null;
+                      const missing = destMissingFor(d);
+                      return (
                       <tr
                         key={r.id}
                         className="border-b border-line align-middle transition-colors last:border-b-0 hover:bg-raise/25"
@@ -904,6 +999,85 @@ function CloneInner({
                           </div>
                         </td>
 
+                        {/* The row's destination (owner ask 09-08): its own tuple or the batch
+                            defaults, + its copies. Incomplete picks are flagged here and lock
+                            Duplicate. */}
+                        <td className="px-2 py-3.5 text-[11px]">
+                          <div className="flex flex-col gap-1">
+                            <div className="flex flex-wrap items-center gap-1">
+                              {own ? (
+                                <span
+                                  className="rounded border border-accent/40 bg-accent/10 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-[#9db8ff]"
+                                  title="This row carries its own destination — the batch defaults don't apply to it"
+                                >
+                                  own
+                                </span>
+                              ) : (
+                                <span
+                                  className="rounded border border-line bg-surface2 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-faint"
+                                  title="Rides the batch defaults from Settings"
+                                >
+                                  defaults
+                                </span>
+                              )}
+                              {missing ? (
+                                <span className="text-[10px] font-semibold text-warn" title="Fanpage · account · pixel not all picked (or no longer on this signer)">
+                                  incomplete
+                                </span>
+                              ) : null}
+                            </div>
+                            {partner.fanpagesFromToken ? (
+                              <span
+                                className={"truncate " + (d.pageId ? "text-dim" : "text-faint")}
+                                title={d.pageId ? `${fanpageLabel(d.pageId)} · ${d.pageId}` : undefined}
+                              >
+                                {d.pageId ? fanpageLabel(d.pageId) : "— fanpage"}
+                              </span>
+                            ) : null}
+                            <span
+                              className={"truncate " + (d.accountId ? "text-faint" : "text-faint")}
+                              title={d.accountId && d.accountId !== SOURCE_ACCOUNT ? `${accountLabel(d.accountId)} · ${d.accountId}` : undefined}
+                            >
+                              {partner.accountsFromToken ? (d.accountId ? accountLabel(d.accountId) : "— account") : "From each source"}
+                            </span>
+                            {isTargetFor(d) ? (
+                              <span className="truncate font-mono text-[10px] text-faint" title={d.pixelId ? `pixel ${d.pixelId}` : undefined}>
+                                {d.pixelId ? pixelLabel(d.accountId, d.pixelId) : "— pixel"}
+                              </span>
+                            ) : null}
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-mono text-[10.5px] text-faint" title="Copies of this row">
+                                ×
+                              </span>
+                              <input
+                                value={r.copies != null ? String(r.copies) : ""}
+                                onChange={(e) => {
+                                  const raw = e.target.value.replace(/\D/g, "").slice(0, 3);
+                                  patchRow(r.id, {
+                                    copies: raw === "" ? null : Math.max(1, Math.min(MAX_CLONE_COPIES, Number(raw))),
+                                  });
+                                }}
+                                inputMode="numeric"
+                                placeholder={String(settings.copies)}
+                                aria-label="Copies for this row"
+                                title={`Copies of this row · empty = the batch default (${settings.copies}) · max ${MAX_CLONE_COPIES}`}
+                                className={
+                                  "h-6 w-10 rounded border border-line bg-surface2 px-1 text-center font-mono text-[11px] tabular-nums outline-none transition-colors hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 " +
+                                  (r.copies != null ? "text-[#9db8ff]" : "text-dim")
+                                }
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setDestRowId(r.id)}
+                                className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-dim transition-colors hover:bg-accent/10 hover:text-[#9db8ff] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                              >
+                                <TargetIcon className="h-3 w-3" />
+                                Destination
+                              </button>
+                            </div>
+                          </div>
+                        </td>
+
                         {/* Source facts, one stacked read-only cell (was three columns): budget +
                             creative count on top, the bid — marked by HOW it bids (blue ROAS tag /
                             amber CAP tag / "auto") — under. Hidden below xl; the Preview repeats
@@ -930,9 +1104,9 @@ function CloneInner({
                         </td>
 
                         {/* clone settings (editable) — money-sanitized like the launcher's fields
-                            (ROAS = cash-register mode, budget = limitMoney) so garbage can't reach
-                            CloneEdit.roasGoal/budget → money()=0 → an ad set Meta rejects
-                            (orphan + burnt gcm). */}
+                            (ROAS = cash-register mode, budget = cash-register too since 09-08) so
+                            garbage can't reach CloneEdit.roasGoal/budget → money()=0 → an ad set
+                            Meta rejects (orphan + burnt gcm). */}
                         <td className="border-l border-line px-2 py-3.5">
                           {/* The CLONE's strategy — switchable per row (ROAS ↔ cap ↔ lowest,
                               owner ask 09-01; the token rail rebuilds the ad set, so any
@@ -1033,10 +1207,18 @@ function CloneInner({
                             </span>
                             <input
                               value={r.budget}
-                              onChange={(e) => patchRow(r.id, { budget: limitMoney(e.target.value, 10000) })}
+                              // Cash-register entry like the ROAS/bid field (owner ask 09-08): the
+                              // cents are always visible and typed digits fill them from the right
+                              // — 1000 → 10,00 · 1250 → 12,50.
+                              onChange={(e) => patchRow(r.id, { budget: limitMoneyCents(e.target.value, 10000) })}
                               inputMode="decimal"
+                              placeholder="10,00"
                               aria-label="Daily budget"
-                              className={`${cellInput} pl-5`}
+                              title="Daily budget in $ — digits fill cents, 1000 → 10,00"
+                              className={
+                                `${cellInput} pl-5` +
+                                (parseMoney(r.budget) < 1 ? " border-warn/60 focus:border-warn focus:ring-warn/15" : "")
+                              }
                             />
                           </div>
                         </td>
@@ -1055,7 +1237,8 @@ function CloneInner({
                           </div>
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1074,7 +1257,10 @@ function CloneInner({
                   Preview · clones to create
                 </SectionHeading>
                 <div className="flex flex-col gap-1.5">
-                  {preview.map((p) => (
+                  {preview.map((p) => {
+                    const r = rows.find((x) => x.id === p.rowId);
+                    const d = r ? destOf(r) : null;
+                    return (
                     <div
                       key={p.key}
                       className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-surface2/40 px-3 py-2"
@@ -1091,8 +1277,19 @@ function CloneInner({
                             : "bid auto"}
                       </span>
                       <span className="shrink-0 font-mono text-[11px] text-dim">${moneyLabel(p.budget)}/day</span>
+                      {d ? (
+                        <span
+                          className={"shrink-0 truncate text-[11px] " + (r?.dest ? "text-[#9db8ff]" : "text-faint")}
+                          title={`${partner.fanpagesFromToken ? `fanpage ${fanpageLabel(d.pageId)} · ` : ""}${accountLabel(d.accountId)}${isTargetFor(d) && d.pixelId ? ` · pixel ${pixelLabel(d.accountId, d.pixelId)}` : ""}`}
+                        >
+                          → {partner.fanpagesFromToken ? fanpageLabel(d.pageId) : ""}
+                          {partner.accountsFromToken ? ` · ${accountLabel(d.accountId)}` : ""}
+                          {r?.dest ? " (own)" : ""}
+                        </span>
+                      ) : null}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             ) : null}
@@ -1113,6 +1310,28 @@ function CloneInner({
           row={highOfferRow}
           onClose={() => setHighOfferRowId(null)}
           onApply={(highOffer: HighOfferConfig) => patchRow(highOfferRow.id, { highOffer })}
+        />
+      ) : null}
+      {destRow ? (
+        <CloneDestinationModal
+          title={fullCloneName(destRow)}
+          partner={partner}
+          aifMode={aifMode}
+          fanpages={fanpages}
+          adAccounts={adAccounts}
+          limits={limits}
+          initial={destOf(destRow)}
+          initialCopies={destRow.copies}
+          defaultCopies={settings.copies}
+          hasOverride={destRow.dest !== null}
+          rowCount={rows.length}
+          onClose={() => setDestRowId(null)}
+          onApply={(dest, copies) => patchRow(destRow.id, { dest, copies })}
+          onApplyAll={(dest, copies) => {
+            setRows((rs) => rs.map((x) => ({ ...x, dest: { ...dest }, copies })));
+            setPreviewed(false);
+          }}
+          onUseDefaults={() => patchRow(destRow.id, { dest: null, copies: null })}
         />
       ) : null}
     </>

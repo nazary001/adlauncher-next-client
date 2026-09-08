@@ -29,6 +29,7 @@ import {
   lionSetCampaignStatus,
 } from "@/lib/lion";
 import { type GeoOverride, parseGeoOverride } from "@/lib/targeting-override";
+import { type ShotBinds, acctLimitRefusal, bindsKey, demandByAccount, distinctBy, resolveShotBinds } from "@/lib/hs-shot-binds";
 
 export const runtime = "nodejs";
 // Same fire-and-forget pump shape as /api/hs/duplicate: the response returns at once and an
@@ -68,16 +69,17 @@ async function validateBinds(
     const lionSide = e instanceof LionError && (e.status === undefined || e.status < 500);
     return { error: bad(lionSide ? "profile_invalid" : `lion_unreachable: ${(e as Error).message}`, lionSide ? 400 : 502) };
   }
+  // Per-row destinations (09-08): the refusal names the ids so the buyer knows WHICH row is off.
   const acct = data.accounts.find((a) => a.id === account);
-  if (!acct) return { error: bad("account_not_on_profile") };
-  if (acct.status !== 1) return { error: bad("account_disabled") };
+  if (!acct) return { error: bad(`account_not_on_profile — ${account} is not on ${profile}`) };
+  if (acct.status !== 1) return { error: bad(`account_disabled — ${account}`) };
   let pixels;
   try {
     pixels = await lionAccountPixels(profile, account);
   } catch (e) {
     return { error: bad(`lion_unreachable: ${(e as Error).message}`, 502) };
   }
-  if (!pixels.some((p) => p.id === pixel)) return { error: bad("pixel_not_on_account") };
+  if (!pixels.some((p) => p.id === pixel)) return { error: bad(`pixel_not_on_account — pixel ${pixel} is not on ${account}`) };
   return {
     currency: acct.currency || "USD",
     accountName: acct.name || "",
@@ -96,6 +98,12 @@ type JuroShot = {
   label: string;
   taskId: string;
   override: GeoOverride | null;
+  /** This shot's OWN destination (per-row binds, 09-08; page always "" — JURO binds none) and
+   *  the catalog facts of ITS profile/account, filled by validation. */
+  binds: ShotBinds;
+  accountName: string;
+  profilePages: Set<string>;
+  localeNames: Map<number, string>;
   lionTaskId?: string;
   cloneId?: string;
   settled?: boolean;
@@ -131,6 +139,10 @@ export async function POST(req: Request): Promise<NextResponse> {
       label?: string;
       countries?: string[];
       locales?: string[];
+      /** Per-shot destination (09-08) — any field absent rides the wave-level one. */
+      profile?: string;
+      account?: string;
+      pixel?: string;
     }[];
   };
   try {
@@ -139,12 +151,12 @@ export async function POST(req: Request): Promise<NextResponse> {
     return bad("bad_json");
   }
 
-  const profile = String(body.profile ?? "").trim();
-  const account = String(body.account ?? "").trim();
-  const pixel = String(body.pixel ?? "").trim();
-  if (!profile) return bad("profile_required");
-  if (!account) return bad("account_required");
-  if (!pixel) return bad("pixel_required");
+  // Wave-level binds = the DEFAULTS for shots that carry none (per-row destinations, 09-08).
+  const waveBinds = {
+    profile: String(body.profile ?? "").trim(),
+    account: String(body.account ?? "").trim(),
+    pixel: String(body.pixel ?? "").trim(),
+  };
   if (!Array.isArray(body.shots) || body.shots.length === 0) return bad("shots_required");
   if (body.shots.length > MAX_SHOTS) return bad(`too_many_shots_max_${MAX_SHOTS}`);
 
@@ -164,6 +176,9 @@ export async function POST(req: Request): Promise<NextResponse> {
     }
     const override = parseGeoOverride(raw?.countries, raw?.locales);
     if (override && "error" in override) return bad(`targeting_override_${override.error}`);
+    // The shot's own destination over the wave defaults (per-row binds, 09-08; no page on JURO).
+    const shotBinds = resolveShotBinds(raw, waveBinds, false);
+    if ("error" in shotBinds) return bad(shotBinds.error);
     shots.push({
       campaignId,
       budget,
@@ -174,13 +189,38 @@ export async function POST(req: Request): Promise<NextResponse> {
       label: String(raw?.label ?? "").trim().slice(0, 200),
       override,
       taskId: `hsj-${waveId}-${String(shots.length).padStart(2, "0")}`,
+      binds: shotBinds,
+      accountName: "",
+      profilePages: new Set(),
+      localeNames: new Map(),
     });
   }
 
-  // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST.
-  if (!(await accountAllowedFor(session, account))) return bad(ACCOUNT_NOT_ASSIGNED_MSG, 403);
-  const binds = await validateBinds(profile, account, pixel);
-  if ("error" in binds) return binds.error;
+  // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST
+  // — for EVERY account the wave targets.
+  for (const acct of distinctBy(shots, (s) => s.binds.account)) {
+    if (!(await accountAllowedFor(session, acct))) return bad(`${ACCOUNT_NOT_ASSIGNED_MSG} (${acct})`, 403);
+  }
+  // Catalog validation ONCE per distinct bind tuple; each shot keeps ITS profile's page catalog
+  // and locale names (the pump pre-checks the source posts' pages against them).
+  const validated = new Map<
+    string,
+    { currency: string; accountName: string; profilePages: Set<string>; localeNames: Map<number, string> }
+  >();
+  for (const s of shots) {
+    const key = bindsKey(s.binds);
+    let v = validated.get(key);
+    if (!v) {
+      const r = await validateBinds(s.binds.profile, s.binds.account, s.binds.pixel);
+      if ("error" in r) return r.error;
+      v = r;
+      validated.set(key, v);
+    }
+    s.accountName = v.accountName;
+    s.profilePages = v.profilePages;
+    s.localeNames = v.localeNames;
+  }
+  const currency = validated.values().next().value?.currency ?? "USD";
 
   const alreadyAccepted = () =>
     NextResponse.json({
@@ -188,7 +228,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       queued: shots.length,
       alreadyAccepted: true,
       rows: shots.map((s) => ({ taskId: s.taskId })),
-      currency: binds.currency,
+      currency,
     });
 
   const waveKey = `hs-wave:${waveId}`;
@@ -199,7 +239,8 @@ export async function POST(req: Request): Promise<NextResponse> {
     return alreadyAccepted();
   }
 
-  // ---- account launch-limit precheck (same contract as /api/hs/duplicate) ----
+  // ---- account launch-limit precheck (same contract as /api/hs/duplicate): EVERY account the
+  // wave targets must take its share (per-row destinations, 09-08) ----
   {
     let snap;
     try {
@@ -207,16 +248,14 @@ export async function POST(req: Request): Promise<NextResponse> {
     } catch {
       return bad("acct_limit_unavailable — wave blocked (launch registry unreachable)", 503);
     }
-    const info = snap.accounts[acctKey(account)];
-    const remaining = ACCT_LIMIT - (info?.count ?? 0);
-    if (info && remaining <= 0) return bad(acctLimitMessage(info.resetAt), 429);
-    if (shots.length > remaining) {
-      const tail = info ? ` — ${acctLimitMessage(info.resetAt)}` : "";
-      return bad(
-        `account_limit — only ${Math.max(0, remaining)} of ${shots.length} JURO copies fit this account's 30-min window${tail}`,
-        429,
-      );
-    }
+    const refusal = acctLimitRefusal(
+      demandByAccount(shots, (s) => s.binds.account),
+      snap.accounts,
+      ACCT_LIMIT,
+      acctLimitMessage,
+      "JURO copies",
+    );
+    if (refusal) return bad(refusal.error, refusal.status);
   }
 
   // Rows land in the shared store BEFORE the claim and the response (durability contract —
@@ -248,27 +287,13 @@ export async function POST(req: Request): Promise<NextResponse> {
 
   const user = session.username;
   const deadline = startedAt + PUMP_BUDGET_MS;
-  after(() =>
-    pumpJuro(
-      user,
-      {
-        profile,
-        account,
-        pixel,
-        accountName: binds.accountName,
-        profilePages: binds.profilePages,
-        localeNames: binds.localeNames,
-      },
-      shots,
-      deadline,
-    ),
-  );
+  after(() => pumpJuro(user, shots, deadline));
 
   return NextResponse.json({
     ok: true,
     queued: shots.length,
     rows: shots.map((s) => ({ taskId: s.taskId })),
-    currency: binds.currency,
+    currency,
   });
 }
 
@@ -364,19 +389,7 @@ function resolveShotWire(
  * Non-transient Meta walls (account certification, verified-advertiser, DSA beneficiary) settle
  * shots early with the actionable reason instead of spinning on LION's retry loop.
  */
-async function pumpJuro(
-  user: string,
-  binds: {
-    profile: string;
-    account: string;
-    pixel: string;
-    accountName?: string;
-    profilePages: Set<string>;
-    localeNames: Map<number, string>;
-  },
-  shots: JuroShot[],
-  deadline: number,
-): Promise<void> {
+async function pumpJuro(user: string, shots: JuroShot[], deadline: number): Promise<void> {
   try {
     // ---- phase 0: one batched source read for the whole wave ----
     let sources: Record<string, LionJuroSource>;
@@ -409,18 +422,33 @@ async function pumpJuro(
         break;
       }
       const s = shots[i];
-      if (familyFailed.has(s.campaignId)) {
+      // Family failures are keyed per source AND profile: the same source may be fine on a row
+      // bound to another profile (per-row destinations, 09-08).
+      const familyKey = `${s.campaignId}|${s.binds.profile}`;
+      if (familyFailed.has(familyKey)) {
         s.settled = true;
         await rowWrite(user, s.taskId, {
           status: "error",
-          error: familyFailed.get(s.campaignId),
+          error: familyFailed.get(familyKey),
           finished_at: Date.now(),
         });
         continue;
       }
+      // THIS shot's destination (per-row binds, 09-08): its profile's page catalog / locale
+      // names resolve the wire, its account takes the launch slot, its binds ride to LION.
+      const binds = {
+        profile: s.binds.profile,
+        account: s.binds.account,
+        pixel: s.binds.pixel,
+        accountName: s.accountName,
+        profilePages: s.profilePages,
+        localeNames: s.localeNames,
+      };
       const wire = resolveShotWire(s, sources[s.campaignId], binds);
       if (typeof wire === "string") {
-        familyFailed.set(s.campaignId, wire);
+        // A page/geo/bid refusal is a fact of the SOURCE for this profile — copies of the source
+        // bound to the same profile refuse identically; other rows may carry another profile.
+        familyFailed.set(`${s.campaignId}|${s.binds.profile}`, wire);
         s.settled = true;
         await rowWrite(user, s.taskId, { status: "error", error: wire, finished_at: Date.now() });
         continue;
@@ -459,20 +487,27 @@ async function pumpJuro(
         } else {
           await releaseAcctSlot(slotDoc);
           const reason = result.reason || result.message || `LION rejected the jurar (${result.result ?? "no result"})`;
-          familyFailed.set(s.campaignId, reason);
+          familyFailed.set(familyKey, reason);
           s.settled = true;
           await rowWrite(user, s.taskId, { status: "error", error: reason, finished_at: Date.now() });
         }
       } catch (e) {
+        // Window full: every later shot into the SAME account hits it too — those settle with
+        // the countdown and are skipped, other accounts' shots keep going (per-row destinations,
+        // 09-08). Registry down settles the whole rest of the wave.
         if (e instanceof AcctLimitedError || /acct_limit_unavailable/.test(String((e as Error).message ?? ""))) {
           const msg = (e as Error).message ?? String(e);
+          const registryDown = !(e instanceof AcctLimitedError);
           for (let j = i; j < shots.length; j++) {
             const rest = shots[j];
             if (rest.settled || rest.lionTaskId) continue;
+            if (!registryDown && j > i && acctKey(rest.binds.account) !== acctKey(s.binds.account)) continue;
             rest.settled = true;
             await rowWrite(user, rest.taskId, { status: "error", error: msg, finished_at: Date.now() });
           }
-          break;
+          if (registryDown) break;
+          if (i < shots.length - 1) await sleep(jitter());
+          continue;
         }
         // Clean 4xx = LION refused, nothing was created (slot back, family settles). Anything
         // else (5xx/transport/timeout) is AMBIGUOUS — and unlike duplicate's PAUSED births, a
@@ -483,7 +518,7 @@ async function pumpJuro(
           ? `lion_jurar_failed: ${(e as Error).message ?? e}`
           : `lion_jurar_failed (AMBIGUOUS — a JURO campaign MAY have been created and born ACTIVE; check LION/Ads Manager before re-firing): ${(e as Error).message ?? e}`;
         if (clean4xx) {
-          familyFailed.set(s.campaignId, msg);
+          familyFailed.set(familyKey, msg);
           await releaseAcctSlot(slotDoc);
         }
         s.settled = true;

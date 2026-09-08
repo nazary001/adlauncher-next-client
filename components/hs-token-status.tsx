@@ -32,6 +32,17 @@ const POLL_MS = 60_000;
 export const hsTokensAllDown = (tokens: HsTokenRow[], loaded: boolean): boolean =>
   loaded && tokens.length > 0 && tokens.every((t) => t.state !== "ok");
 
+/** EVERY bearer the LION-rail geo-override patch could sign with — the launch pool AND the
+ *  dedicated duplicate/JURO signer — is burned/dead right now (owner ask 2026-09-08: one live
+ *  bearer anywhere keeps override waves firing on the LION rail; the JURO switch is the
+ *  LION-native way out when none is). A non-dedicated `dup` mirrors the pool's active token,
+ *  so only a dedicated one adds a bearer to the count. */
+export const hsAllBearersDown = (tokens: HsTokenRow[], dup: HsDupTokenRow | null, loaded: boolean): boolean => {
+  if (!loaded) return false;
+  const all = [...tokens, ...(dup?.dedicated ? [dup] : [])];
+  return all.length > 0 && all.every((t) => t.state !== "ok");
+};
+
 export function useHsTokenStatus(enabled = true): { tokens: TokenRow[]; dup: HsDupTokenRow | null; loaded: boolean } {
   const [tokens, setTokens] = useState<TokenRow[]>([]);
   const [dup, setDup] = useState<HsDupTokenRow | null>(null);

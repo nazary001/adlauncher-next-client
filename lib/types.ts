@@ -154,6 +154,20 @@ export function limitMoneyCents(raw: string, max: number): string {
   return `${s.slice(0, -2)},${s.slice(-2)}`;
 }
 
+/** Cash-register DISPLAY of a money value — always two decimals, comma separator: "10" → "10,00",
+ *  "0,5" → "0,50", 12.5 → "12,50". The clone boards' budget cells run in limitMoneyCents mode
+ *  (owner ask 2026-09-08 — the same entry as the ROAS/bid fields, cents always visible), so
+ *  every value SEEDED into them (defaults, a source's own budget) must already carry the cents:
+ *  a bare "10" would re-read as 0,10 on the first keystroke. Empty/unknown stays "" (the field
+ *  shows its placeholder and the $1 floor blocks the row, instead of a fake "0,00"). */
+export function moneyCentsLabel(v: string | number): string {
+  if (typeof v === "string" && v.trim() === "") return "";
+  const n = typeof v === "number" ? v : parseMoney(v);
+  if (!Number.isFinite(n)) return "";
+  const s = String(Math.max(0, Math.round(n * 100))).padStart(3, "0");
+  return `${s.slice(0, -2)},${s.slice(-2)}`;
+}
+
 /** Bid semantics per strategy: `cap` takes a money amount (cents at FB), `roas` takes a ROAS
  *  decimal (1,20 = 120%; event forced to PURCHASE, optimization goal VALUE), `none` bids
  *  automatically. Shared by MO (Graph API) and HS (LION) — a strategy means the same on both

@@ -41,6 +41,7 @@ import {
   claimAcctSlot,
   releaseAcctSlot,
 } from "@/lib/acct-limit";
+import { type ShotBinds, acctLimitRefusal, bindsKey, demandByAccount, distinctBy, resolveShotBinds } from "@/lib/hs-shot-binds";
 
 export const runtime = "nodejs";
 // Fire-and-forget like the other HS wave routes: the response returns at once and an after()
@@ -82,16 +83,17 @@ async function validateBinds(
     const lionSide = e instanceof LionError && (e.status === undefined || e.status < 500);
     return { error: bad(lionSide ? "profile_invalid" : `lion_unreachable: ${(e as Error).message}`, lionSide ? 400 : 502) };
   }
+  // Per-row destinations (09-08): the refusal names the ids so the buyer knows WHICH row is off.
   const acct = data.accounts.find((a) => a.id === account);
-  if (!acct) return { error: bad("account_not_on_profile") };
-  if (acct.status !== 1) return { error: bad("account_disabled") };
+  if (!acct) return { error: bad(`account_not_on_profile — ${account} is not on ${profile}`) };
+  if (acct.status !== 1) return { error: bad(`account_disabled — ${account}`) };
   let pixels;
   try {
     pixels = await lionAccountPixels(profile, account);
   } catch (e) {
     return { error: bad(`lion_unreachable: ${(e as Error).message}`, 502) };
   }
-  if (!pixels.some((p) => p.id === pixel)) return { error: bad("pixel_not_on_account") };
+  if (!pixels.some((p) => p.id === pixel)) return { error: bad(`pixel_not_on_account — pixel ${pixel} is not on ${account}`) };
   return { currency: acct.currency || "USD", accountName: acct.name || "" };
 }
 
@@ -100,6 +102,10 @@ type TokenJuroShot = {
   budget: number;
   budgetRaw: string;
   bid: number | null;
+  /** This shot's OWN destination (per-row binds, 09-08; no page — JURO ads live on the post's
+   *  page) + the account's name from validation. */
+  binds: ShotBinds;
+  accountName: string;
   /** TARGET bid strategy (per-row ROAS ↔ cap ↔ lowest switch, owner ask 09-01) — this rail
    *  builds a fresh ad set, so it can re-bid it. "" = ride the source's strategy. */
   bidStrategyOverride: string;
@@ -149,6 +155,10 @@ export async function POST(req: Request): Promise<NextResponse> {
       label?: string;
       countries?: string[];
       locales?: string[];
+      /** Per-shot destination (09-08) — any field absent rides the wave-level one. */
+      profile?: string;
+      account?: string;
+      pixel?: string;
     }[];
   };
   try {
@@ -157,12 +167,12 @@ export async function POST(req: Request): Promise<NextResponse> {
     return bad("bad_json");
   }
 
-  const profile = String(body.profile ?? "").trim();
-  const account = String(body.account ?? "").trim();
-  const pixel = String(body.pixel ?? "").trim();
-  if (!profile) return bad("profile_required");
-  if (!account) return bad("account_required");
-  if (!pixel) return bad("pixel_required");
+  // Wave-level binds = the DEFAULTS for shots that carry none (per-row destinations, 09-08).
+  const waveBinds = {
+    profile: String(body.profile ?? "").trim(),
+    account: String(body.account ?? "").trim(),
+    pixel: String(body.pixel ?? "").trim(),
+  };
   if (!Array.isArray(body.shots) || body.shots.length === 0) return bad("shots_required");
   if (body.shots.length > MAX_TOKEN_SHOTS) return bad(`too_many_shots_max_${MAX_TOKEN_SHOTS}`);
 
@@ -185,6 +195,9 @@ export async function POST(req: Request): Promise<NextResponse> {
     if (override && "error" in override) return bad(`targeting_override_${override.error}`);
     const strategyOverride = String(raw?.bidStrategyOverride ?? "").trim();
     if (strategyOverride && !SUPPORTED_BID_STRATEGIES.has(strategyOverride)) return bad("bid_strategy_invalid");
+    // The shot's own destination over the wave defaults (per-row binds, 09-08; no page on JURO).
+    const shotBinds = resolveShotBinds(raw, waveBinds, false);
+    if ("error" in shotBinds) return bad(shotBinds.error);
     shots.push({
       campaignId,
       budget,
@@ -196,27 +209,47 @@ export async function POST(req: Request): Promise<NextResponse> {
       label: String(raw?.label ?? "").trim().slice(0, 200),
       override,
       taskId: `hsjt-${waveId}-${String(shots.length).padStart(2, "0")}`,
+      binds: shotBinds,
+      accountName: "",
     });
   }
 
-  // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST.
-  if (!(await accountAllowedFor(session, account))) return bad(ACCOUNT_NOT_ASSIGNED_MSG, 403);
-  const binds = await validateBinds(profile, account, pixel);
-  if ("error" in binds) return binds.error;
+  // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST
+  // — for EVERY account the wave targets.
+  const accounts = distinctBy(shots, (s) => s.binds.account);
+  for (const acct of accounts) {
+    if (!(await accountAllowedFor(session, acct))) return bad(`${ACCOUNT_NOT_ASSIGNED_MSG} (${acct})`, 403);
+  }
+  // Catalog validation ONCE per distinct bind tuple (the whole wave used to share one).
+  const validated = new Map<string, { currency: string; accountName: string }>();
+  for (const s of shots) {
+    const key = bindsKey(s.binds);
+    let v = validated.get(key);
+    if (!v) {
+      const r = await validateBinds(s.binds.profile, s.binds.account, s.binds.pixel);
+      if ("error" in r) return r.error;
+      v = r;
+      validated.set(key, v);
+    }
+    s.accountName = v.accountName;
+  }
+  const currency = validated.values().next().value?.currency ?? "USD";
 
-  // The TARGET must be visible to our token (LION binds cover segments the token was never
+  // Every TARGET must be visible to our token (LION binds cover segments the token was never
   // granted — aleph, 08-19). A failed sweep (null) falls OPEN; an unreadable SOURCE still fails
   // per shot inside the pump with its own actionable reason.
   {
     const visible = await hsDupTokenAccountIds();
-    if (visible && !visible.has(acctKey(account))) {
+    const blind = visible ? accounts.filter((a) => !visible.has(acctKey(a))) : [];
+    if (blind.length > 0) {
       return bad(
-        "account_not_visible_to_fb_token — our FB token was never granted this ad account; run JURO on the LION API rail (or pick a token-visible account)",
+        `account_not_visible_to_fb_token — our FB token was never granted ${blind.join(", ")}; run those rows' JURO on the LION API rail (or pick a token-visible account)`,
       );
     }
   }
 
-  // Account launch-limit precheck — the wave lands in ONE account (same rule as the LION rail).
+  // Account launch-limit precheck — EVERY account the wave targets must take its share (same
+  // rule as the LION rail; per-row destinations 09-08).
   {
     let snap;
     try {
@@ -224,16 +257,14 @@ export async function POST(req: Request): Promise<NextResponse> {
     } catch {
       return bad("acct_limit_unavailable — wave blocked (launch registry unreachable)", 503);
     }
-    const info = snap.accounts[acctKey(account)];
-    const remaining = ACCT_LIMIT - (info?.count ?? 0);
-    if (info && remaining <= 0) return bad(acctLimitMessage(info.resetAt), 429);
-    if (shots.length > remaining) {
-      const tail = info ? ` — ${acctLimitMessage(info.resetAt)}` : "";
-      return bad(
-        `account_limit — only ${Math.max(0, remaining)} of ${shots.length} JURO copies fit this account's 30-min window${tail}`,
-        429,
-      );
-    }
+    const refusal = acctLimitRefusal(
+      demandByAccount(shots, (s) => s.binds.account),
+      snap.accounts,
+      ACCT_LIMIT,
+      acctLimitMessage,
+      "JURO copies",
+    );
+    if (refusal) return bad(refusal.error, refusal.status);
   }
 
   const alreadyAccepted = () =>
@@ -242,7 +273,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       queued: shots.length,
       alreadyAccepted: true,
       rows: shots.map((s) => ({ taskId: s.taskId })),
-      currency: binds.currency,
+      currency,
     });
 
   const waveKey = `hs-wave:${waveId}`;
@@ -292,17 +323,13 @@ export async function POST(req: Request): Promise<NextResponse> {
   const deadline = startedAt + PUMP_BUDGET_MS;
   // The whole pump runs under the FB retry budget (AsyncLocalStorage): mid-wave throttles wait
   // out Meta's regain estimate instead of failing shots — never past the pump's own deadline.
-  after(() =>
-    withFbBudget({ deadlineAt: deadline, retries: 8 }, () =>
-      pumpTokenJuro(user, { account: acctKey(account), pixel, accountName: binds.accountName }, shots, deadline),
-    ),
-  );
+  after(() => withFbBudget({ deadlineAt: deadline, retries: 8 }, () => pumpTokenJuro(user, shots, deadline)));
 
   return NextResponse.json({
     ok: true,
     queued: shots.length,
     rows: shots.map((s) => ({ taskId: s.taskId })),
-    currency: binds.currency,
+    currency,
   });
 }
 
@@ -470,12 +497,7 @@ async function juroPageName(pageId: string, cache: Map<string, string>): Promise
  * the non-transient Meta walls (account certification / verified-advertiser) settle the rest of
  * the wave/family early instead of building more trees into the same wall.
  */
-async function pumpTokenJuro(
-  user: string,
-  binds: { account: string; pixel: string; accountName: string },
-  shots: TokenJuroShot[],
-  deadline: number,
-): Promise<void> {
+async function pumpTokenJuro(user: string, shots: TokenJuroShot[], deadline: number): Promise<void> {
   try {
     const treeCache = new Map<string, JuroTree>();
     const pageNameCache = new Map<string, string>();
@@ -501,6 +523,8 @@ async function pumpTokenJuro(
         await rowWrite(user, s.taskId, { status: "error", error: familyFailed.get(s.campaignId), finished_at: Date.now() });
         continue;
       }
+      // THIS shot's destination (per-row binds, 09-08) — every Graph path below builds here.
+      const binds = { account: acctKey(s.binds.account), pixel: s.binds.pixel, accountName: s.accountName };
 
       let acctSlot: { documentId: string } | null = null;
       const created: Json = {};
@@ -641,15 +665,21 @@ async function pumpTokenJuro(
       } catch (e) {
         const err = e as FbError;
         if (acctSlot && !created.campaign_id) await releaseAcctSlot(acctSlot.documentId);
-        // Window full / registry down stops the whole wave (one account) — same as the LION pump.
+        // Window full: every later shot into the SAME account hits it too — those settle with
+        // the countdown and are skipped, other accounts' shots keep building (per-row
+        // destinations, 09-08). Registry down stops the whole rest of the wave.
         if (e instanceof AcctLimitedError || /acct_limit_unavailable/.test(String(err.message ?? ""))) {
+          const registryDown = !(e instanceof AcctLimitedError);
           for (let j = i; j < shots.length; j++) {
             const rest = shots[j];
             if (rest.settled) continue;
+            if (!registryDown && j > i && acctKey(rest.binds.account) !== binds.account) continue;
             rest.settled = true;
             await rowWrite(user, rest.taskId, { status: "error", error: err.message, finished_at: Date.now() });
           }
-          break;
+          if (registryDown) break;
+          if (i < shots.length - 1) await sleep(jitter());
+          continue;
         }
         // The tree is born ACTIVE with only the +30 min start gap between a partial failure and
         // unattended delivery — pause the campaign (bounded) and put the confirmed state into

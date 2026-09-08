@@ -45,7 +45,13 @@ export type HighOfferConfig = {
   share: string;
 };
 
-/** The editable clone config layered on a source. Number of copies is global (settings). */
+/** A row's OWN destination on the MO/AIF clone board (owner ask 2026-09-08): the fanpage, the
+ *  account (SOURCE_ACCOUNT = "keep it in the source's own account") and, for a concrete
+ *  account, that account's pixel — the same three picks the batch Settings carry, per row. */
+export type CloneRowDest = { pageId: string; accountId: string; pixelId: string };
+
+/** The editable clone config layered on a source. Copies and the destination default to the
+ *  batch settings; a row may carry its own (`dest`, `copies`). */
 export type CloneRow = {
   id: string; // local row id (not a FB id)
   source: CloneSource;
@@ -63,7 +69,30 @@ export type CloneRow = {
   budget: string; // target daily budget, display string
   redirectType: string;
   highOffer: HighOfferConfig;
+  /** The row's OWN destination — null = the batch settings' fanpage / account / pixel. */
+  dest: CloneRowDest | null;
+  /** The row's OWN number of copies — null = the batch settings' copies. */
+  copies: number | null;
 };
+
+/** Copies bound: 1..100 (the batch field's own clamp). */
+export const MAX_CLONE_COPIES = 100;
+const clampCopies = (n: number): number => Math.max(1, Math.min(MAX_CLONE_COPIES, Math.floor(n) || 1));
+
+/** A row's EFFECTIVE destination: its own tuple, else the batch settings. */
+export function rowDestination(
+  row: Pick<CloneRow, "dest">,
+  settings: Pick<CloneSettings, "pageId" | "accountId" | "pixelId">,
+): CloneRowDest {
+  return row.dest
+    ? { pageId: row.dest.pageId, accountId: row.dest.accountId, pixelId: row.dest.pixelId }
+    : { pageId: settings.pageId, accountId: settings.accountId, pixelId: settings.pixelId };
+}
+
+/** A row's EFFECTIVE number of copies: its own (clamped), else the batch settings' (clamped). */
+export function rowCopiesOf(row: Pick<CloneRow, "copies">, settings: Pick<CloneSettings, "copies">): number {
+  return clampCopies(row.copies != null && row.copies >= 1 ? row.copies : settings.copies);
+}
 
 /** One clone to create, sent from the board to /api/clone/run (rows × copies flattened). Client-safe
  *  (no server deps) so both the board and the server builder share the shape. */
@@ -187,6 +216,8 @@ export function makeCloneRow(
     budget: source.originalBudget,
     redirectType: source.redirectType,
     highOffer: { enabled: source.redirectType === "HIGH ADX", offerId: "", share: "" },
+    dest: null,
+    copies: null,
   };
 }
 
@@ -204,11 +235,12 @@ export type ClonePreviewItem = {
   countries: string[];
 };
 
-/** Expand the rows into the flat list of clones a Duplicate run would create. */
+/** Expand the rows into the flat list of clones a Duplicate run would create — each row with
+ *  ITS effective copies (its own, else the batch `copies`). */
 export function flattenPreview(rows: CloneRow[], copies: number): ClonePreviewItem[] {
-  const total = Math.max(1, Math.floor(copies) || 1);
   const out: ClonePreviewItem[] = [];
   for (const r of rows) {
+    const total = rowCopiesOf(r, { copies });
     for (let k = 1; k <= total; k++) {
       out.push({
         key: `${r.id}-${k}`,

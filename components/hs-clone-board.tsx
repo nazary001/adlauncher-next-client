@@ -1,21 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Header } from "./header";
 import { AutoTextarea, BidKindTag, Field } from "./ui";
 import { SearchSelect } from "./search-select";
 import { useHs } from "./use-hs";
 import { useHsTaskManager } from "./hs-task-manager";
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
-import { bidKind, limitMoney, limitMoneyCents, moneyLabel, parseMoney } from "@/lib/types";
+import { bidKind, limitMoneyCents, moneyCentsLabel, moneyLabel, parseMoney } from "@/lib/types";
 import { BID_STRATEGIES, geoSummary } from "@/lib/catalog";
 import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { juroEnsureMark } from "@/lib/juro";
 import { relabelNameGeo } from "@/lib/targeting-override";
 import type { PartnerId } from "@/lib/partners";
-import { ChevronDownIcon, CopyIcon, EyeIcon, GlobeIcon, PlusIcon, RetryIcon, TrashIcon } from "./icons";
+import { ChevronDownIcon, CopyIcon, EyeIcon, GlobeIcon, PlusIcon, RetryIcon, TargetIcon, TrashIcon } from "./icons";
 import { HsTargetingModal } from "./hs-targeting-modal";
-import { hsTokensAllDown, useHsTokenStatus } from "./hs-token-status";
+import { HsDestinationModal, type HsRowDest } from "./hs-destination-modal";
+import { hsAllBearersDown, hsTokensAllDown, useHsTokenStatus } from "./hs-token-status";
 import type { SessionUser } from "./user-menu";
 
 const MAX_COPIES = 20;
@@ -44,12 +45,18 @@ type Row = {
    *  rails it may differ from the source's (ROAS ↔ cap ↔ lowest — owner ask 09-01, the rail
    *  rebuilds the ad set); LION rails always ride the source's — the select locks there. */
   bidStrategy: string;
-  budget: string; // editable, display string → cents on the wire
+  /** Editable daily budget — cash-register display ("10,00", digits fill cents) → cents on the wire. */
+  budget: string;
   suffix: string;
   /** Targeting override (modal): geo codes (["WW"] = worldwide) — empty = inherit the source's. */
   countries: string[];
   /** Targeting override: FB locale ids from the picked profile — empty = inherit the source's. */
   locales: string[];
+  /** The row's OWN destination (owner ask 09-08): profile / account / page / pixel of ITS clones —
+   *  null = the wave defaults in Settings. Edited in the Destination modal. */
+  dest: HsRowDest | null;
+  /** The row's OWN number of copies — "" = the wave default ("Number of copies" in Settings). */
+  copies: string;
   /** The LION facts read failed (network / HTTP) — the row offers a manual Retry instead of the
    *  fetch effect hammering a dead LION every debounce tick. The row can still fire "blind"
    *  (the duplicate weapon re-reads the source itself). */
@@ -128,10 +135,13 @@ const freshRow = (campaignId: string, n: number): Row => ({
   failed: false,
   bid: "",
   bidStrategy: "", // seeded with the source's strategy once the LION facts land
-  budget: "10",
+  // Cash-register seed (owner ask 09-08): the field always shows cents, digits fill from the right.
+  budget: moneyCentsLabel("10"),
   suffix: "", // becomes the source's old TAIL once LION answers — an editable replacement
   countries: [],
   locales: [],
+  dest: null,
+  copies: "",
   state: "idle",
 });
 
@@ -147,11 +157,14 @@ const overrideGeoLabel = (codes: string[]): string =>
 const juroPrefixPreview = (prefix: string): string => juroEnsureMark(prefix);
 
 /**
- * HS duplicator, structured like LION's own duplicator UI: a Settings column (destination binds
- * + global copies + Preview→Duplicate) and a Selected Campaigns table whose rows show the REAL
- * source facts read from LION (name, countries, original budget/bid, creatives) next to the
- * editable Bid/Budget/Suffix overrides. Submits go through /api/hs/duplicate; successful tasks
- * land in the HS Task Manager already "submitted" and auto-activate after COMPLETED.
+ * HS duplicator, structured like LION's own duplicator UI: a Settings column (the wave's DEFAULT
+ * destination binds + default copies + Preview→Duplicate) and a Selected Campaigns table whose
+ * rows show the REAL source facts read from LION (name, countries, original budget/bid,
+ * creatives) next to the editable Bid/Budget/Suffix overrides — and, since 09-08, each row's OWN
+ * destination (profile / account / page / pixel / copies) that overrides the wave defaults, so
+ * one wave fans out across accounts and fankas. Submits go through the mode's route with per-shot
+ * binds; successful tasks land in the HS Task Manager already "submitted" and auto-activate after
+ * COMPLETED.
  */
 export function HsCloneBoard({
   user,
@@ -178,7 +191,8 @@ export function HsCloneBoard({
   const [firing, setFiring] = useState(false);
   // Pre-fire refusal (token pool down / wave over the per-fire cap) — an inline warn box under
   // the fire button instead of a blocking alert() dialog. Cleared on the next preview/gate pass.
-  const [fireNote, setFireNote] = useState<string | null>(null);
+  // `juro` = the refusal has a LION-native way out: the note offers the one-click JURO switch.
+  const [fireNote, setFireNote] = useState<{ text: string; juro?: boolean } | null>(null);
   // Board mode: the CLONER (duplicate an existing tree) vs JURO (new campaign from the source's
   // page POSTS — no page bind). Each mode carries its own LION-vs-FB-token channel pair (owner
   // ask 08-26): the cloner pair fires /api/hs/duplicate | /api/hs/token-duplicate, the JURO pair
@@ -236,6 +250,7 @@ export function HsCloneBoard({
   };
   const [draftId, setDraftId] = useState("");
   const [targetingRowId, setTargetingRowId] = useState<string | null>(null);
+  const [destRowId, setDestRowId] = useState<string | null>(null);
   const counter = useRef(1);
   // One waveId per PREPARED wave (same binds + same shots): a retry-click after a lost answer
   // re-sends the same id, and the server's wave claim makes the re-POST a no-op instead of a
@@ -297,10 +312,11 @@ export function HsCloneBoard({
     if (profile && id) hs.ensurePixels(profile, id);
   };
 
-  const patchRow = useCallback(
-    (id: string, p: Partial<Row>) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p } : r))),
-    [],
-  );
+  // No manual useCallback: the React Compiler memoizes it itself, and its inference of the
+  // setter dependency no longer matched the empty manual list (lint react-hooks/preserve-
+  // manual-memoization) once the board gained the per-row destination effects.
+  const patchRow = (id: string, p: Partial<Row>) =>
+    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p } : r)));
   const addSources = () => {
     const ids = [...new Set(draftId.split(/[\s,;]+/).map((x) => x.trim()).filter((x) => /^\d{5,}$/.test(x)))];
     if (ids.length === 0) return;
@@ -402,8 +418,51 @@ export function HsCloneBoard({
     return () => clearTimeout(timer);
   }, [rows, user?.username]);
 
-  const bindsReady = Boolean(profile && account && (page || !needsPage) && effectivePixel);
+  // Rows with their OWN destination may name a profile/account the Settings column never
+  // loaded — the idempotent loaders fetch what those rows show (names, pixels, token sweeps).
+  useEffect(() => {
+    for (const r of rows) {
+      if (!r.dest) continue;
+      if (r.dest.profile) hs.ensureProfile(r.dest.profile);
+      if (r.dest.profile && r.dest.account) hs.ensurePixels(r.dest.profile, r.dest.account);
+    }
+  }, [rows, hs]);
+
+  // ---- per-row destination (owner ask 09-08) ------------------------------------------------
+  // A row rides the wave defaults (Settings) unless it carries its own tuple; copies likewise.
+  // Every wave number below (demand per account / per fanka, the fire cap, the shots) is built
+  // from these EFFECTIVE values, never from the Settings column alone.
   const copiesN = Math.min(MAX_COPIES, Math.max(1, Math.round(Number(copies) || 1)));
+  /** A one-pixel account derives its pixel once the page step is done — same rule as the
+   *  Settings column, read from the catalog of the ROW's own profile/account. */
+  const lonePixelFor = (prof: string, acct: string, pageDone: boolean): string => {
+    if (!prof || !acct || !pageDone) return "";
+    const list = hs.pixelsFor(prof, acct);
+    return Array.isArray(list) && list.length === 1 ? list[0].id : "";
+  };
+  const rowBinds = (r: Row): HsRowDest =>
+    r.dest
+      ? {
+          ...r.dest,
+          page: needsPage ? r.dest.page : "",
+          pixel: r.dest.pixel || lonePixelFor(r.dest.profile, r.dest.account, Boolean(r.dest.page) || !needsPage),
+        }
+      : { profile, account, page: needsPage ? page : "", pixel: effectivePixel };
+  const bindsComplete = (b: HsRowDest): boolean =>
+    Boolean(b.profile && b.account && (b.page || !needsPage) && b.pixel);
+  const rowCopies = (r: Row): number => {
+    const n = Number(r.copies);
+    return r.copies !== "" && Number.isFinite(n) && n >= 1 ? Math.min(MAX_COPIES, Math.round(n)) : copiesN;
+  };
+  // Catalog display names for a row's binds (its own profile's catalog — not the Settings one).
+  const accountLabel = (prof: string, id: string): string =>
+    hs.dataFor(prof)?.accounts.find((a) => a.value === id)?.label || id;
+  const pageLabelOf = (prof: string, id: string): string =>
+    hs.dataFor(prof)?.pages.find((p) => p.value === id)?.label || id;
+  const pixelLabelOf = (prof: string, acct: string, id: string): string =>
+    (hs.pixelsFor(prof, acct) ?? []).find((p) => p.id === id)?.name || id;
+
+  const defaultsReady = Boolean(profile && account && (page || !needsPage) && effectivePixel);
   // Fireable rows only: a real id, a ≥$1 budget AND not UNREADABLE — an unreadable source's
   // duplicate dies the same way (LION can't read it), so firing it only burns wave slots and the
   // account's 30-min window. Every wave number (totalClones, acct gate, fanka demand) counts the
@@ -422,33 +481,63 @@ export function HsCloneBoard({
       r.info?.status !== "UNREADABLE" &&
       parseMoney(r.budget) < 1,
   ).length;
-  const totalClones = validRows.length * copiesN;
-  // Account launch limit (5 campaigns / 30 min): the wave binds ONE account, so an over-capacity
-  // fire is blocked here with the countdown (the server precheck would 429 it anyway).
+  /** Rows whose EFFECTIVE destination is incomplete (an own tuple missing a pick, or the wave
+   *  defaults still unpicked) — the wave can't fire until every row resolves. */
+  const incompleteRows = validRows.filter((r) => !bindsComplete(rowBinds(r)));
+  const bindsReady = validRows.length > 0 && incompleteRows.length === 0;
+  const totalClones = validRows.reduce((s, r) => s + rowCopies(r), 0);
+
+  // Account launch limit (5 campaigns / 30 min): EVERY account the wave targets must take its
+  // share — an over-capacity account blocks the fire here with the countdown (the server
+  // precheck would 429 it anyway).
   const limits = useAcctLimits();
-  const acctRemaining = account ? Math.max(0, limits.limit - limits.countFor(account)) : null;
-  const acctOver = acctRemaining !== null && totalClones > acctRemaining;
-  const acctResetAt = account ? limits.resetAtFor(account) : null;
+  const acctDemand = new Map<string, number>();
+  for (const r of validRows) {
+    const a = rowBinds(r).account;
+    if (a) acctDemand.set(a, (acctDemand.get(a) ?? 0) + rowCopies(r));
+  }
+  const acctShort = [...acctDemand.entries()]
+    .map(([acct, need]) => ({
+      acct,
+      need,
+      remaining: Math.max(0, limits.limit - limits.countFor(acct)),
+      resetAt: limits.resetAtFor(acct),
+    }))
+    .filter((x) => x.need > x.remaining);
+  const acctOver = acctShort.length > 0;
 
   // ---- fanka capacity (Meta's per-page ad limit, /api/hs/page-volume meter) -------------------
-  // Cloner: every clone rebuilds the source's ads on the ONE bound page — the whole wave must fit
-  // its free slots. Unloaded rows count 0 (best-effort lower bound); readable sources count at
-  // least 1 ad (the duplicate rails ledger the same floor). Unknown meter = fail open, exactly
-  // like the pickers (never block on numbers nobody has read).
+  // Cloner: every clone rebuilds the source's ads on ITS bound page — demand is summed PER PAGE
+  // across the wave (rows may bind different fankas), and every page must fit its free slots.
+  // Unloaded rows count 0 (best-effort lower bound); readable sources count at least 1 ad (the
+  // duplicate rails ledger the same floor). Unknown meter = fail open, exactly like the pickers
+  // (never block on numbers nobody has read).
+  const pageDemand = new Map<string, number>();
+  if (needsPage) {
+    for (const r of validRows) {
+      const p = rowBinds(r).page;
+      if (!p) continue;
+      const ads = r.info && r.info.status !== "UNREADABLE" ? Math.max(r.info.adsCount, 1) : 0;
+      pageDemand.set(p, (pageDemand.get(p) ?? 0) + ads * rowCopies(r));
+    }
+  }
+  const pageShort = [...pageDemand.entries()]
+    .map(([pageId, need]) => ({ pageId, need, st: hs.pageStats(pageId) }))
+    .filter((x): x is { pageId: string; need: number; st: NonNullable<ReturnType<typeof hs.pageStats>> } =>
+      x.st !== null && x.need > x.st.free,
+    );
+  const pageOver = pageShort.length > 0;
+  /** The Settings (default) page's own meter + what the wave adds THERE (rows bound to it). */
   const boundPageStats = needsPage && page ? hs.pageStats(page) : null;
-  const pageAdsDemand =
-    validRows.reduce(
-      (s, r) => s + (r.info && r.info.status !== "UNREADABLE" ? Math.max(r.info.adsCount, 1) : 0),
-      0,
-    ) * copiesN;
-  const pageOver = boundPageStats !== null && pageAdsDemand > boundPageStats.free;
+  const pageAdsDemand = page ? (pageDemand.get(page) ?? 0) : 0;
+  const defaultPageOver = pageShort.some((x) => x.pageId === page);
   // JURO: ads land on each source's OWN page(s) — demand is summed PER PAGE across the whole
   // wave (two rows on one fanka charge it together), and every page must fit its free slots.
   const juroPageDemand = new Map<string, number>();
   if (mode === "juro") {
     for (const r of validRows) {
       for (const p of r.info?.pages ?? []) {
-        juroPageDemand.set(p.pageId, (juroPageDemand.get(p.pageId) ?? 0) + p.ads * copiesN);
+        juroPageDemand.set(p.pageId, (juroPageDemand.get(p.pageId) ?? 0) + p.ads * rowCopies(r));
       }
     }
   }
@@ -499,6 +588,12 @@ export function HsCloneBoard({
       ? dupSigner.state !== "ok"
       : hsTokensAllDown(tokenStatus.tokens, tokenStatus.loaded)
     : false;
+  // The LION rail's geo-override patch signs with ANY bearer (launch pool or the duplicate
+  // signer — server-side since 09-08), so only EVERY bearer being down blocks override waves
+  // there; JURO on LION API is the token-free way out (its wire carries the geo natively).
+  const bearersDown = hsAllBearersDown(tokenStatus.tokens, tokenStatus.dup, tokenStatus.loaded);
+  const overrideRows = validRows.filter((r) => r.countries.length > 0 || r.locales.length > 0);
+  const lionOverrideBlocked = effDupChannel === "lion" && overrideRows.length > 0 && bearersDown;
 
   // "Signs as Peter5gc (Peter 5 GC Acc)" — the owner-visible truth of WHO builds token-rail
   // waves (ask 09-03: entering the cloner must show the new token). Falls back honestly while
@@ -511,6 +606,11 @@ export function HsCloneBoard({
   // accs vs the pool's 379 as of 09-03) — LION binds cover segments a token was never granted
   // (aleph, 08-19), and a build there dies on the first Graph POST. null sweep → no filtering
   // (fail open; the server guard still answers with the actionable error).
+  const visibleFor = (prof: string): ReadonlySet<string> | null => {
+    if (!tokenRail) return null;
+    const d = hs.dataFor(prof);
+    return d?.dupTokenAccounts ?? d?.tokenAccounts ?? null;
+  };
   const tokenVisible = tokenRail ? (data?.dupTokenAccounts ?? data?.tokenAccounts ?? null) : null;
   const accountOptions =
     tokenVisible !== null ? (data?.accounts ?? []).filter((a) => tokenVisible.has(a.value)) : (data?.accounts ?? []);
@@ -525,31 +625,61 @@ export function HsCloneBoard({
     setPixel("");
     setPreviewed(false);
   }, [accountHidden]);
+  /** A row's OWN account the token rail can't act on — flagged on the row, blocks the fire
+   *  (the wave-default pick self-heals above; an own pick stays visible so the buyer re-picks). */
+  const rowAccountHidden = (r: Row): boolean => {
+    if (!r.dest || !r.dest.account) return false;
+    const v = visibleFor(r.dest.profile);
+    return v !== null && !v.has(r.dest.account);
+  };
+  const hiddenRows = validRows.filter(rowAccountHidden).length;
+
+  const fireBlocked =
+    !bindsReady ||
+    firing ||
+    acctOver ||
+    fankaOver ||
+    strategyBidMissing > 0 ||
+    hiddenRows > 0 ||
+    limits.staleBuild;
+
+  const switchToJuro = () => {
+    changeMode("juro");
+    changeJuroChannel("lion");
+    setFireNote(null);
+  };
 
   async function duplicateAll() {
-    if (!bindsReady || validRows.length === 0 || firing || acctOver || fankaOver || strategyBidMissing > 0 || limits.staleBuild) return;
+    if (fireBlocked) return;
     // Token-rail wave while the whole pool is burned → honest local stop (the server gate would
-    // refuse it with the same message anyway). Geo-override LION waves need a live token too —
-    // LION JURO doesn't: its geo/locales ride natively in the jurar wire, no Graph patch involved.
-    if (
-      tokensDown &&
-      (tokenRail ||
-        (effDupChannel === "lion" && validRows.some((r) => r.countries.length > 0 || r.locales.length > 0)))
-    ) {
-      setFireNote(
-        "All FB launch tokens are rate-limited right now — " +
-          (tokenRail
-            ? "the FB Token rail is blocked until a cooldown lifts. Fire on the LION API rail or wait (see the Tokens widget)."
-            : "Targeting-override clones need a live token for the Graph patch. Clear the overrides or wait (see the Tokens widget)."),
-      );
+    // refuse it with the same message anyway).
+    if (tokenRail && tokensDown) {
+      setFireNote({
+        text:
+          "All FB launch tokens are rate-limited right now — the FB Token rail is blocked until a cooldown lifts. " +
+          "Fire on the LION API rail or wait (see the Tokens widget).",
+      });
+      return;
+    }
+    // Geo-override LION waves need ONE live bearer for the Graph patch (any of them since
+    // 09-08). None left → the LION-native way is JURO: /jurar/ takes the geo in its own wire.
+    if (lionOverrideBlocked) {
+      setFireNote({
+        text:
+          "Every FB bearer (launch pool + duplicate signer) is rate-limited/dead right now — targeting-override " +
+          "clones on the LION API rail need one for the Graph patch. JURO on the LION API rail applies the geo " +
+          "natively without any token: switch these rows to JURO, or clear the overrides, or wait (see the Tokens widget).",
+        juro: true,
+      });
       return;
     }
     const cap = tokenRail ? MAX_TOKEN_SHOTS_PER_FIRE : MAX_SHOTS_PER_FIRE;
     if (totalClones > cap) {
-      setFireNote(
-        `That's ${totalClones} clones — the ${tokenRail ? "FB Token rail builds" : "server fires"} at most ${cap} per wave. ` +
+      setFireNote({
+        text:
+          `That's ${totalClones} clones — the ${tokenRail ? "FB Token rail builds" : "server fires"} at most ${cap} per wave. ` +
           "Lower the copies or remove some rows and fire in waves.",
-      );
+      });
       return;
     }
     setFireNote(null);
@@ -557,8 +687,12 @@ export function HsCloneBoard({
     // ONE batch POST: the server stamps every row into the shared store, answers immediately and
     // keeps working in the background — jittered single-copy submits, status polling and clone
     // activation all happen server-side, so the tab may be closed right after this resolves.
+    // Every shot carries ITS row's destination (per-row binds, 09-08); the wave-level binds in
+    // the body are the defaults the server falls back to for bind-less shots (old contract).
     const shots = validRows.flatMap((r) => {
       const cid = r.campaignId.trim();
+      const b = rowBinds(r);
+      const n = rowCopies(r);
       const overridden = r.countries.length > 0;
       const geo = overridden
         ? overrideGeoLabel(r.countries)
@@ -577,7 +711,7 @@ export function HsCloneBoard({
       // (the server ensures it too), LION waves stay unmarked — splitLionName already stripped
       // any marker the SOURCE was born with.
       const mark = effDupChannel === "token" ? HS_TOKEN_MARK : "";
-      return Array.from({ length: copiesN }, (_, copy) => ({
+      return Array.from({ length: n }, (_, copy) => ({
         campaignId: cid,
         budget: r.budget,
         bid: r.bid.trim(),
@@ -603,13 +737,25 @@ export function HsCloneBoard({
         // the clone (token rail: before creating the ad set; LION rail: Graph after birth).
         ...(overridden ? { countries: r.countries } : {}),
         ...(r.locales.length ? { locales: r.locales } : {}),
-        label: copiesN > 1 ? `${label} · copy ${copy + 1}/${copiesN}` : label,
+        // The row's destination — its own tuple or the wave defaults, resolved here so the
+        // server never has to guess which rows were overridden.
+        profile: b.profile,
+        account: b.account,
+        ...(needsPage ? { page: b.page } : {}),
+        pixel: b.pixel,
+        label: n > 1 ? `${label} · copy ${copy + 1}/${n}` : label,
       }));
     });
+    // Wave-level defaults for the body: the Settings picks when complete, else the first shot's
+    // own tuple (a fully per-row wave may leave Settings blank — old servers still need them).
+    const first = shots[0];
+    const waveBinds = defaultsReady
+      ? { profile, account, page: needsPage ? page : "", pixel: effectivePixel }
+      : { profile: first.profile, account: first.account, page: first.page ?? "", pixel: first.pixel };
     validRows.forEach((r) => patchRow(r.id, { state: "sending", msg: "queuing on server…" }));
     // The channel is part of the wave's identity — a LION wave retried on the token rail (or
     // vice versa) is a DIFFERENT wave and must not be swallowed by the idempotency claim.
-    const sig = JSON.stringify({ channel: effDupChannel, profile, account, page, pixel: effectivePixel, shots });
+    const sig = JSON.stringify({ channel: effDupChannel, ...waveBinds, shots });
     if (!waveRef.current || waveRef.current.sig !== sig) {
       waveRef.current = { sig, id: crypto.randomUUID() };
     }
@@ -626,11 +772,11 @@ export function HsCloneBoard({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          profile,
-          account,
+          profile: waveBinds.profile,
+          account: waveBinds.account,
           // JURO has no page bind — the ads live on the source post's own fanpage.
-          ...(needsPage ? { page } : {}),
-          pixel: effectivePixel,
+          ...(needsPage ? { page: waveBinds.page } : {}),
+          pixel: waveBinds.pixel,
           shots,
           waveId: waveRef.current.id,
         }),
@@ -641,7 +787,7 @@ export function HsCloneBoard({
         // Preflight answers now land on the task rows (shared store), not here — the drawer is
         // the place to watch; the board rows just confirm the hand-off.
         validRows.forEach((r) =>
-          patchRow(r.id, { state: "ok", msg: `${copiesN}/${copiesN} queued — safe to close the tab` }),
+          patchRow(r.id, { state: "ok", msg: `${rowCopies(r)}/${rowCopies(r)} queued — safe to close the tab` }),
         );
         setOpen(true); // the drawer mirrors the server's progress from the shared store
       } else {
@@ -663,6 +809,19 @@ export function HsCloneBoard({
     window.location.assign(url.toString());
   };
 
+  /** Preview footer: the wave's clones grouped by destination (one line per distinct tuple). */
+  const destSummary = (() => {
+    const m = new Map<string, { b: HsRowDest; n: number }>();
+    for (const r of validRows) {
+      const b = rowBinds(r);
+      const key = `${b.profile}|${b.account}|${b.page}|${b.pixel}`;
+      const cur = m.get(key);
+      if (cur) cur.n += rowCopies(r);
+      else m.set(key, { b, n: rowCopies(r) });
+    }
+    return [...m.values()];
+  })();
+
   return (
     <>
       <Header partner={partner} onPartnerChange={changePartner} user={user} />
@@ -674,9 +833,14 @@ export function HsCloneBoard({
                be pinned out of reach. */}
           <aside className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto lg:overscroll-contain">
             <div className="flex flex-col gap-3 rounded-2xl border border-line bg-surface p-4">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-faint">
-                Settings
-              </span>
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-faint">
+                  Settings
+                </span>
+                <span className="text-[10.5px] leading-snug text-faint">
+                  Wave defaults — every row rides these unless it sets its own Destination in the table.
+                </span>
+              </div>
 
               {/* board mode (cloner vs JURO), then the mode's own LION-vs-FB-token channel pair —
                   FIRST in the card: the mode decides which binds below even exist (JURO has no
@@ -806,19 +970,19 @@ export function HsCloneBoard({
               {needsPage ? (
                 <Field
                   label="Page"
-                  // Live fanka meter for the picked page: fill + free slots vs what THIS wave
-                  // adds. Turns into the blocking error when the wave doesn't fit (the fire
+                  // Live fanka meter for the picked page: fill + free slots vs what the rows
+                  // bound to it add. Turns into the blocking error when they don't fit (the fire
                   // button locks on the same flag). Unknown meter → no line, no gate; "~" marks
                   // the LION-tally estimate (registry never read this page).
                   hint={
-                    page && boundPageStats && !pageOver
+                    page && boundPageStats && !defaultPageOver
                       ? `${boundPageStats.approx ? "~" : ""}${boundPageStats.used}/${boundPageStats.limit} ads on this page · ${boundPageStats.approx ? "~" : ""}${boundPageStats.free} free` +
                         (pageAdsDemand > 0 ? ` · wave adds ${pageAdsDemand}` : "")
                       : undefined
                   }
                   error={
-                    page && boundPageStats && pageOver
-                      ? `Won't fit — the wave adds ${pageAdsDemand} ads, only ${boundPageStats.approx ? "~" : ""}${boundPageStats.free} free here (${boundPageStats.approx ? "~" : ""}${boundPageStats.used}/${boundPageStats.limit}). Trim copies/rows or pick another page.`
+                    page && boundPageStats && defaultPageOver
+                      ? `Won't fit — the wave adds ${pageAdsDemand} ads here, only ${boundPageStats.approx ? "~" : ""}${boundPageStats.free} free (${boundPageStats.approx ? "~" : ""}${boundPageStats.used}/${boundPageStats.limit}). Trim copies/rows or pick another page.`
                       : undefined
                   }
                 >
@@ -900,7 +1064,7 @@ export function HsCloneBoard({
                   emptyHint={!account ? "Pick an account first" : pixels ? "No pixels on this account" : "Loading…"}
                 />
               </Field>
-              <Field label="Number of copies" hint={`per source campaign · max ${MAX_COPIES}`}>
+              <Field label="Number of copies" hint={`default per source campaign · max ${MAX_COPIES} · a row can set its own`}>
                 <input
                   value={copies}
                   onChange={(e) => {
@@ -925,7 +1089,7 @@ export function HsCloneBoard({
                   setPreviewed(true);
                   setFireNote(null);
                 }}
-                disabled={!bindsReady || validRows.length === 0}
+                disabled={!bindsReady}
                 className={
                   "mt-1 flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-accent/40 " +
                   "bg-accent/10 text-[13px] font-semibold text-[#9db8ff] transition-all duration-150 " +
@@ -941,7 +1105,7 @@ export function HsCloneBoard({
                 <button
                   type="button"
                   onClick={() => void duplicateAll()}
-                  disabled={!bindsReady || validRows.length === 0 || firing || acctOver || fankaOver || strategyBidMissing > 0 || limits.staleBuild}
+                  disabled={fireBlocked}
                   className={
                     "animate-pop-in flex h-11 w-full items-center justify-center gap-2 rounded-xl " +
                     "bg-gradient-to-b from-launch2 to-launch text-[13.5px] font-bold text-[#032e20] " +
@@ -960,28 +1124,46 @@ export function HsCloneBoard({
                 </button>
               ) : null}
               {fireNote ? (
-                <div className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11px] leading-relaxed text-warn">
-                  {fireNote}
+                <div className="animate-pop-in flex flex-col gap-2 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11px] leading-relaxed text-warn">
+                  <span>{fireNote.text}</span>
+                  {fireNote.juro ? (
+                    <button
+                      type="button"
+                      onClick={switchToJuro}
+                      className="mx-auto rounded-md border border-accent/40 bg-accent/15 px-2.5 py-1 text-[11.5px] font-semibold text-[#9db8ff] transition-colors hover:bg-accent/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    >
+                      Switch to JURO (LION API) — geo without a token
+                    </button>
+                  ) : null}
                 </div>
               ) : null}
-              {bindsReady && acctOver ? (
+              {incompleteRows.length > 0 && validRows.length > 0 ? (
                 <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
-                  Account limit — only {acctRemaining} of {totalClones} clones fit this
-                  account&apos;s 30-min window
-                  {acctResetAt ? ` · resets in ${fmtCountdown(acctResetAt, limits.skew)}` : ""}.
-                  Trim copies/rows or pick another account.
+                  {incompleteRows.length === validRows.length && !defaultsReady && incompleteRows.every((r) => !r.dest)
+                    ? `Pick the wave defaults (profile · account${needsPage ? " · page" : ""} · pixel) — or set each row's own Destination.`
+                    : `${incompleteRows.length} row${incompleteRows.length === 1 ? " has" : "s have"} an incomplete destination — open Destination on ${incompleteRows.length === 1 ? "that row" : "those rows"} (or fill the wave defaults).`}
                 </p>
               ) : null}
-              {mode !== "juro" && pageOver && boundPageStats ? (
-                <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
-                  Fanpage full — the wave adds {pageAdsDemand} ads but this page has only{" "}
-                  {boundPageStats.approx ? "~" : ""}
-                  {boundPageStats.free} free slot{boundPageStats.free === 1 ? "" : "s"} (
-                  {boundPageStats.approx ? "~" : ""}
-                  {boundPageStats.used}/{boundPageStats.limit}). Trim copies/rows or pick another
-                  page.
-                </p>
-              ) : null}
+              {acctOver
+                ? acctShort.map((x) => (
+                    <p key={x.acct} className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
+                      Account limit — {accountLabel(rowBinds(validRows.find((r) => rowBinds(r).account === x.acct) ?? validRows[0]).profile, x.acct)}: only {x.remaining} of {x.need} clones fit
+                      its 30-min window
+                      {x.resetAt ? ` · resets in ${fmtCountdown(x.resetAt, limits.skew)}` : ""}.
+                      Trim copies/rows or pick another account.
+                    </p>
+                  ))
+                : null}
+              {mode !== "juro" && pageOver
+                ? pageShort.map((x) => (
+                    <p key={x.pageId} className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
+                      Fanpage full — {x.st.name || x.pageId}: the wave adds {x.need} ads but it has only{" "}
+                      {x.st.approx ? "~" : ""}
+                      {x.st.free} free slot{x.st.free === 1 ? "" : "s"} ({x.st.approx ? "~" : ""}
+                      {x.st.used}/{x.st.limit}). Trim copies/rows or pick another page.
+                    </p>
+                  ))
+                : null}
               {mode === "juro" && juroBlockedCount > 0 ? (
                 <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
                   {juroBlockedCount} source{juroBlockedCount === 1 ? "" : "s"} won&apos;t fit{" "}
@@ -997,6 +1179,13 @@ export function HsCloneBoard({
                   doesn&apos;t carry across strategies).
                 </p>
               ) : null}
+              {hiddenRows > 0 ? (
+                <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
+                  {hiddenRows} row{hiddenRows === 1 ? " targets" : "s target"} an account our FB token
+                  can&apos;t act on — pick another account on {hiddenRows === 1 ? "that row" : "those rows"} or
+                  fire on the LION API rail.
+                </p>
+              ) : null}
               <p className="text-center text-[10.5px] leading-relaxed text-faint">
                 {bindsReady
                   ? previewed
@@ -1004,9 +1193,11 @@ export function HsCloneBoard({
                       ? "Builds over our FB token · born ACTIVE, starts +30 min"
                       : "Submits to LION · clones activate automatically"
                     : "Preview first, then duplicate"
-                  : needsPage
-                    ? "Pick profile · account · page · pixel"
-                    : "Pick profile · account · pixel"}
+                  : validRows.length === 0
+                    ? "Add source campaigns below"
+                    : needsPage
+                      ? "Pick profile · account · page · pixel (wave defaults) — or a Destination per row"
+                      : "Pick profile · account · pixel (wave defaults) — or a Destination per row"}
               </p>
             </div>
           </aside>
@@ -1036,16 +1227,17 @@ export function HsCloneBoard({
                 xl (the sidebar meters and the Preview carry the same numbers); the min-w only
                 guards true mobile, where the wrapper scrolls as the last resort. */}
             <div className="overflow-x-auto rounded-2xl border border-line bg-surface">
-              <table className="w-full min-w-[620px] table-fixed text-left">
+              <table className="w-full min-w-[760px] table-fixed text-left">
                 <thead>
                   <tr className="border-b border-line text-[10px] font-semibold uppercase tracking-[0.1em] text-faint">
                     <th className="w-[34px] px-2 py-2 font-semibold">#</th>
                     <th className="px-2 py-2 font-semibold">Name (fixed) + suffix · status</th>
                     <th className="w-[122px] px-2 py-2 font-semibold">Countries</th>
+                    <th className="w-[168px] px-2 py-2 font-semibold">Destination · copies</th>
                     <th className="hidden w-[142px] px-2 py-2 font-semibold xl:table-cell">Source page</th>
                     <th className="hidden w-[110px] px-2 py-2 font-semibold xl:table-cell">Source $ · bid</th>
                     <th className="w-[150px] px-2 py-2 font-semibold">Strategy · Bid</th>
-                    <th className="w-[88px] px-2 py-2 font-semibold">Budget $</th>
+                    <th className="w-[92px] px-2 py-2 font-semibold">Budget $</th>
                     <th className="w-[36px] px-1 py-2" />
                   </tr>
                 </thead>
@@ -1054,6 +1246,10 @@ export function HsCloneBoard({
                     const unreadableRow = r.info?.status === "UNREADABLE";
                     const lowBudget =
                       /^\d{5,}$/.test(r.campaignId.trim()) && !unreadableRow && parseMoney(r.budget) < 1;
+                    const binds = rowBinds(r);
+                    const own = r.dest !== null;
+                    const complete = bindsComplete(binds);
+                    const hidden = rowAccountHidden(r);
                     return (
                     <tr
                       key={r.id}
@@ -1158,6 +1354,14 @@ export function HsCloneBoard({
                                   : "—"}
                             </span>
                           )}
+                          {effDupChannel === "lion" && (r.countries.length > 0 || r.locales.length > 0) && bearersDown ? (
+                            <span
+                              className="text-[10px] font-semibold leading-snug text-warn"
+                              title="The LION rail patches the geo through our FB token after LION builds the clone — every bearer is down right now. JURO (LION API) carries the geo natively."
+                            >
+                              needs an FB token — or JURO
+                            </span>
+                          ) : null}
                           <button
                             type="button"
                             onClick={() => setTargetingRowId(r.id)}
@@ -1168,10 +1372,98 @@ export function HsCloneBoard({
                           </button>
                         </div>
                       </td>
+                      {/* The row's destination (owner ask 09-08): its own tuple or the wave
+                          defaults, + its copies. Names come from the catalog of the ROW's profile.
+                          Incomplete / token-blind picks are flagged here and block the fire. */}
+                      <td className="px-2 py-2.5 text-[11px]">
+                        <div className="flex flex-col gap-1">
+                          <div className="flex flex-wrap items-center gap-1">
+                            {own ? (
+                              <span
+                                className="rounded border border-accent/40 bg-accent/10 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-[#9db8ff]"
+                                title="This row carries its own destination — the wave defaults don't apply to it"
+                              >
+                                own
+                              </span>
+                            ) : (
+                              <span
+                                className="rounded border border-line bg-surface2 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-faint"
+                                title="Rides the wave defaults from Settings"
+                              >
+                                defaults
+                              </span>
+                            )}
+                            {!complete ? (
+                              <span className="text-[10px] font-semibold text-warn" title="Profile · account · page · pixel not all picked yet">
+                                incomplete
+                              </span>
+                            ) : null}
+                            {hidden ? (
+                              <span className="text-[10px] font-semibold text-danger" title="Our FB token was never granted this account — pick another or fire on LION API">
+                                not on token
+                              </span>
+                            ) : null}
+                          </div>
+                          <span
+                            className={"truncate " + (binds.account ? "text-dim" : "text-faint")}
+                            title={binds.account ? `${accountLabel(binds.profile, binds.account)} · ${binds.account} · ${binds.profile}` : undefined}
+                          >
+                            {binds.account ? accountLabel(binds.profile, binds.account) : "— account"}
+                          </span>
+                          {needsPage ? (
+                            <span
+                              className={"truncate " + (binds.page ? "text-faint" : "text-faint")}
+                              title={binds.page ? `${pageLabelOf(binds.profile, binds.page)} · ${binds.page}` : undefined}
+                            >
+                              {binds.page ? pageLabelOf(binds.profile, binds.page) : "— page"}
+                            </span>
+                          ) : null}
+                          <span
+                            className="truncate font-mono text-[10px] text-faint"
+                            title={binds.pixel ? `pixel ${binds.pixel}` : undefined}
+                          >
+                            {binds.pixel ? pixelLabelOf(binds.profile, binds.account, binds.pixel) : "— pixel"}
+                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-mono text-[10.5px] text-faint" title="Copies of this row">
+                              ×
+                            </span>
+                            <input
+                              value={r.copies}
+                              onChange={(e) => {
+                                const raw = e.target.value.replace(/\D/g, "").slice(0, 2);
+                                patchRow(r.id, { copies: raw !== "" && Number(raw) > MAX_COPIES ? String(MAX_COPIES) : raw });
+                                setPreviewed(false);
+                              }}
+                              onBlur={() => {
+                                if (r.copies !== "" && Number(r.copies) < 1) patchRow(r.id, { copies: "" });
+                              }}
+                              inputMode="numeric"
+                              placeholder={String(copiesN)}
+                              aria-label="Copies for this row"
+                              title={`Copies of this row · empty = the wave default (${copiesN}) · max ${MAX_COPIES}`}
+                              disabled={unreadableRow}
+                              className={
+                                "h-6 w-10 rounded border border-line bg-surface2 px-1 text-center font-mono text-[11px] tabular-nums outline-none transition-colors hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15 " +
+                                (r.copies ? "text-[#9db8ff]" : "text-dim")
+                              }
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setDestRowId(r.id)}
+                              disabled={unreadableRow}
+                              className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-dim transition-colors hover:bg-accent/10 hover:text-[#9db8ff] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                            >
+                              <TargetIcon className="h-3 w-3" />
+                              Destination
+                            </button>
+                          </div>
+                        </div>
+                      </td>
                       {/* Source fanka(s) + live fill meter. In JURO mode the copies LAND here, so
                           each page also shows what this row's wave needs — red when it won't fit
                           (the fire button locks on the same check). Cloner mode: info only (the
-                          clones go to the bound Page in Settings, metered there). */}
+                          clones go to the row's bound Page, metered there). */}
                       <td className="hidden px-2 py-3 text-[11px] xl:table-cell">
                         {r.info && r.info.pages.length > 0 ? (
                           <div className="flex flex-col gap-1">
@@ -1180,7 +1472,7 @@ export function HsCloneBoard({
                               const name =
                                 data?.pages.find((o) => o.value === p.pageId)?.label || st?.name || undefined;
                               // JURO charges the page with the WHOLE wave's ads on it (all rows).
-                              const need = juroPageDemand.get(p.pageId) ?? p.ads * copiesN;
+                              const need = juroPageDemand.get(p.pageId) ?? p.ads * rowCopies(r);
                               const over = mode === "juro" && juroPageOver(p.pageId);
                               return (
                                 <div key={p.pageId} className="flex flex-col">
@@ -1354,17 +1646,32 @@ export function HsCloneBoard({
                         </div>
                       </td>
                       <td className="px-2 py-2.5">
-                        <input
-                          value={r.budget}
-                          onChange={(e) => patchRow(r.id, { budget: limitMoney(e.target.value, 10000) })}
-                          disabled={unreadableRow}
-                          aria-label="Daily budget"
-                          title={lowBudget ? "Min $1/day — this row won't fire until the budget is raised" : undefined}
-                          className={
-                            cellInput +
-                            (lowBudget ? " border-warn/60 focus:border-warn focus:ring-warn/15" : "")
-                          }
-                        />
+                        <div className="relative">
+                          <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[12px] text-faint">
+                            $
+                          </span>
+                          <input
+                            value={r.budget}
+                            // Cash-register entry like the ROAS/bid field (owner ask 09-08): the
+                            // cents are always visible and typed digits fill them from the right
+                            // — 1000 → 10,00 · 1250 → 12,50. Cents ride to the wire as-is.
+                            onChange={(e) => patchRow(r.id, { budget: limitMoneyCents(e.target.value, 10000) })}
+                            disabled={unreadableRow}
+                            inputMode="decimal"
+                            placeholder="10,00"
+                            aria-label="Daily budget"
+                            title={
+                              lowBudget
+                                ? "Min $1/day — this row won't fire until the budget is raised"
+                                : "Daily budget in $ — digits fill cents, 1000 → 10,00"
+                            }
+                            className={
+                              cellInput +
+                              " pl-5" +
+                              (lowBudget ? " border-warn/60 focus:border-warn focus:ring-warn/15" : "")
+                            }
+                          />
+                        </div>
                       </td>
                       <td className="px-1 py-2.5 text-center">
                         <button
@@ -1411,7 +1718,7 @@ export function HsCloneBoard({
                 ) : null}
               </div>
               <p className="min-w-0 text-[10.5px] text-faint">
-                Empty Bid = inherits the source’s · MIN_ROAS sources take a ROAS decimal (0,34 = 34%), cap sources $ · targeting & creatives inherit
+                Empty Bid = inherits the source’s · MIN_ROAS sources take a ROAS decimal (0,34 = 34%), cap sources $ · budget digits fill cents (1000 → 10,00) · Destination per row overrides the wave defaults · targeting & creatives inherit
               </p>
             </div>
 
@@ -1420,7 +1727,10 @@ export function HsCloneBoard({
               <div className="animate-pop-in rounded-2xl border border-line bg-surface p-4">
                 <p className="pb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-faint">Preview</p>
                 <div className="flex flex-col gap-1.5">
-                  {validRows.map((r) => (
+                  {validRows.map((r) => {
+                    const b = rowBinds(r);
+                    const n = rowCopies(r);
+                    return (
                     <p key={r.id} className="text-[12px] text-dim">
                       <span className="text-ink">
                         {r.info?.name
@@ -1432,7 +1742,7 @@ export function HsCloneBoard({
                             ).slice(0, 110)
                           : `#${r.campaignId}`}
                       </span>{" "}
-                      → {copiesN} cop{copiesN === 1 ? "y" : "ies"} @ ${moneyLabel(r.budget)}/day
+                      → {n} cop{n === 1 ? "y" : "ies"} @ ${moneyLabel(r.budget)}/day
                       {rowSwitched(r) ? (
                         <span className="text-[#9db8ff]">
                           {" "}
@@ -1450,12 +1760,25 @@ export function HsCloneBoard({
                         <span className="text-[#9db8ff]"> · geo → {overrideGeoLabel(r.countries)}</span>
                       ) : null}
                       {r.locales.length > 0 ? <span className="text-[#9db8ff]"> · {r.locales.length} lang</span> : null}
+                      <span className={r.dest ? "text-[#9db8ff]" : "text-faint"}>
+                        {" "}
+                        · → {accountLabel(b.profile, b.account)}
+                        {needsPage && b.page ? ` · ${pageLabelOf(b.profile, b.page)}` : ""}
+                        {r.dest ? " (own)" : ""}
+                      </span>
                     </p>
-                  ))}
-                  <p className="mt-1 border-t border-line pt-2 text-[12px] text-ink">
-                    {totalClones} clone{totalClones === 1 ? "" : "s"} → {account}
-                    {needsPage ? ` · page ${page}` : " · ads on the source posts' pages"} · pixel {effectivePixel}
-                  </p>
+                    );
+                  })}
+                  <div className="mt-1 flex flex-col gap-0.5 border-t border-line pt-2 text-[12px] text-ink">
+                    {destSummary.map(({ b, n }) => (
+                      <p key={`${b.profile}|${b.account}|${b.page}|${b.pixel}`}>
+                        {n} clone{n === 1 ? "" : "s"} → {accountLabel(b.profile, b.account)}{" "}
+                        <span className="font-mono text-[11px] text-dim">{b.account}</span>
+                        {needsPage ? ` · page ${pageLabelOf(b.profile, b.page)}` : " · ads on the source posts' pages"} · pixel{" "}
+                        {pixelLabelOf(b.profile, b.account, b.pixel)} · profile {b.profile}
+                      </p>
+                    ))}
+                  </div>
                 </div>
               </div>
             ) : null}
@@ -1466,7 +1789,9 @@ export function HsCloneBoard({
       {(() => {
         const r = targetingRowId ? rows.find((x) => x.id === targetingRowId) : null;
         if (!r) return null;
-        const locales = (profile ? (hs.dataFor(profile)?.locales ?? []) : []).map((l) => ({
+        // Languages come from the ROW's effective profile (its own or the wave default).
+        const prof = rowBinds(r).profile;
+        const locales = (prof ? (hs.dataFor(prof)?.locales ?? []) : []).map((l) => ({
           value: l.id,
           label: l.name,
         }));
@@ -1480,6 +1805,38 @@ export function HsCloneBoard({
             onApply={(patch) => {
               patchRow(r.id, patch);
               setPreviewed(false); // the wave changed — re-preview before firing
+            }}
+          />
+        );
+      })()}
+      {(() => {
+        const r = destRowId ? rows.find((x) => x.id === destRowId) : null;
+        if (!r) return null;
+        return (
+          <HsDestinationModal
+            title={r.info?.name || `#${r.campaignId}`}
+            hs={hs}
+            limits={limits}
+            needsPage={needsPage}
+            tokenRail={tokenRail}
+            maxCopies={MAX_COPIES}
+            initial={rowBinds(r)}
+            initialCopies={r.copies}
+            defaultCopies={copiesN}
+            hasOverride={r.dest !== null}
+            rowCount={rows.length}
+            onClose={() => setDestRowId(null)}
+            onApply={(dest, c) => {
+              patchRow(r.id, { dest, copies: c });
+              setPreviewed(false);
+            }}
+            onApplyAll={(dest, c) => {
+              setRows((rs) => rs.map((x) => ({ ...x, dest: { ...dest }, copies: c })));
+              setPreviewed(false);
+            }}
+            onUseDefaults={() => {
+              patchRow(r.id, { dest: null, copies: "" });
+              setPreviewed(false);
             }}
           />
         );

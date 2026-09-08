@@ -27,7 +27,8 @@ import {
   lionProfileData,
   lionSetCampaignStatus,
 } from "@/lib/lion";
-import { hsFbGet, hsFbPost, hsTokenAccountIds, hsTokenConfigured, hsTokenGate } from "@/lib/hs-token-launch";
+import { hsAnyFbGet, hsAnyFbPost, hsAnyTokenAccountIds, hsAnyTokenConfigured, hsAnyTokenGate } from "@/lib/hs-token-launch";
+import { type ShotBinds, acctLimitRefusal, bindsKey, demandByAccount, distinctBy, resolveShotBinds } from "@/lib/hs-shot-binds";
 import {
   type GeoOverride,
   applyGeoOverride,
@@ -82,18 +83,20 @@ async function validateBinds(
     const lionSide = e instanceof LionError && (e.status === undefined || e.status < 500);
     return { error: bad(lionSide ? "profile_invalid" : `lion_unreachable: ${(e as Error).message}`, lionSide ? 400 : 502) };
   }
+  // Per-row destinations (09-08) mean one wave can carry several tuples — the refusal names the
+  // ids so the buyer knows WHICH row's pick is off.
   const acct = data.accounts.find((a) => a.id === account);
-  if (!acct) return { error: bad("account_not_on_profile") };
-  if (acct.status !== 1) return { error: bad("account_disabled") };
+  if (!acct) return { error: bad(`account_not_on_profile — ${account} is not on ${profile}`) };
+  if (acct.status !== 1) return { error: bad(`account_disabled — ${account}`) };
   const pageRow = data.pages.find((p) => p.id === page);
-  if (!pageRow) return { error: bad("page_not_on_profile") };
+  if (!pageRow) return { error: bad(`page_not_on_profile — page ${page} is not on ${profile}`) };
   let pixels;
   try {
     pixels = await lionAccountPixels(profile, account);
   } catch (e) {
     return { error: bad(`lion_unreachable: ${(e as Error).message}`, 502) };
   }
-  if (!pixels.some((p) => p.id === pixel)) return { error: bad("pixel_not_on_account") };
+  if (!pixels.some((p) => p.id === pixel)) return { error: bad(`pixel_not_on_account — pixel ${pixel} is not on ${account}`) };
   // pageName feeds the geo-override patch's DSA declaration (EU-reaching overrides).
   return { currency: acct.currency || "USD", accountName: acct.name || "", pageName: pageRow.name || "" };
 }
@@ -108,6 +111,14 @@ type BatchShot = {
   geo: string;
   label: string;
   taskId: string;
+  /** This shot's OWN destination (owner ask 09-08: rows may bind different profiles / accounts
+   *  / pages / pixels in one wave) — the shot's fields over the wave-level ones, validated
+   *  against LION's catalog like any bind. */
+  binds: ShotBinds;
+  /** Catalog facts of `binds` (filled by validation): the account's name for the launch-limit
+   *  ledger, the page's name for the geo-override patch's DSA declaration. */
+  accountName: string;
+  pageName: string;
   /** Geo/locales override (Targeting modal). LION's duplicate/ IGNORES targeting fields (probed
    *  live 08-20), so the pump patches the born clone's ad set through the Graph instead — which
    *  is why override shots demand a token-visible target account. */
@@ -164,6 +175,11 @@ export async function POST(req: Request): Promise<NextResponse> {
       label?: string;
       countries?: string[];
       locales?: string[];
+      /** Per-shot destination (09-08) — any field absent rides the wave-level one. */
+      profile?: string;
+      account?: string;
+      page?: string;
+      pixel?: string;
     }[];
     // ---- legacy single-shot shape ----
     campaignId?: string;
@@ -185,10 +201,9 @@ export async function POST(req: Request): Promise<NextResponse> {
   const account = String(body.account ?? "").trim();
   const page = String(body.page ?? "").trim();
   const pixel = String(body.pixel ?? "").trim();
-  if (!profile) return bad("profile_required");
-  if (!account) return bad("account_required");
-  if (!page) return bad("page_required");
-  if (!pixel) return bad("pixel_required");
+  // Wave-level binds are the DEFAULTS for shots that carry none (batch shape) and the only
+  // binds of the legacy shape — each shape checks completeness where it resolves them.
+  const waveBinds = { profile, account, page, pixel };
 
   // ================= batch (fire-and-forget) =================
   if (Array.isArray(body.shots)) {
@@ -215,6 +230,9 @@ export async function POST(req: Request): Promise<NextResponse> {
       }
       const override = parseGeoOverride(raw?.countries, raw?.locales);
       if (override && "error" in override) return bad(`targeting_override_${override.error}`);
+      // The shot's own destination over the wave defaults (per-row binds, 09-08).
+      const shotBinds = resolveShotBinds(raw, waveBinds, true);
+      if ("error" in shotBinds) return bad(shotBinds.error);
       shots.push({
         campaignId,
         budget,
@@ -228,25 +246,53 @@ export async function POST(req: Request): Promise<NextResponse> {
         // Zero-padded index: the drawer breaks queued_at ties by STRING id, so "-10" must not
         // sort between "-01" and "-02" (waves share one stamp timestamp).
         taskId: `hsd-${waveId}-${String(shots.length).padStart(2, "0")}`,
+        binds: shotBinds,
+        accountName: "",
+        pageName: "",
       });
     }
-    // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST.
-    if (!(await accountAllowedFor(session, account))) return bad(ACCOUNT_NOT_ASSIGNED_MSG, 403);
-    const binds = await validateBinds(profile, account, page, pixel);
-    if ("error" in binds) return binds.error;
+    // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST
+    // — for EVERY account the wave targets.
+    for (const acct of distinctBy(shots, (s) => s.binds.account)) {
+      if (!(await accountAllowedFor(session, acct))) return bad(`${ACCOUNT_NOT_ASSIGNED_MSG} (${acct})`, 403);
+    }
+    // Catalog validation ONCE per distinct bind tuple (the whole wave used to share one).
+    const validated = new Map<string, { currency: string; accountName: string; pageName: string }>();
+    for (const s of shots) {
+      const key = bindsKey(s.binds);
+      let v = validated.get(key);
+      if (!v) {
+        const r = await validateBinds(s.binds.profile, s.binds.account, s.binds.page, s.binds.pixel);
+        if ("error" in r) return r.error;
+        v = r;
+        validated.set(key, v);
+      }
+      s.accountName = v.accountName;
+      s.pageName = v.pageName;
+    }
+    const currency = validated.values().next().value?.currency ?? "USD";
 
     // Geo-override clones are patched THROUGH the Graph after LION births them (LION's own
-    // duplicate/ ignores targeting fields) — that needs our partner-side token to see the target
-    // account. Refuse up front, mirroring the token rail's guard; a failed sweep (null) falls
-    // OPEN and the patch phase itself becomes the backstop.
-    if (shots.some((s) => s.override)) {
-      if (!hsTokenConfigured()) {
-        return bad("targeting_override_needs_fb_token — set FB_HS_LAUNCH_TOKEN/FB_HS_VOLUME_TOKEN");
-      }
-      const visible = await hsTokenAccountIds();
-      if (visible && !visible.has(account.replace(/^act_/, ""))) {
+    // duplicate/ ignores targeting fields) — that needs one of our partner-side bearers to see
+    // the target account (ANY of them since 09-08: the launch pool or the dedicated duplicate
+    // signer). Refuse up front, mirroring the token rail's guard; a failed sweep (null) falls
+    // OPEN and the patch phase itself becomes the backstop. When no bearer can do it, JURO on
+    // the LION API rail is the token-free way: /jurar/ takes the geo natively.
+    const overrideAccts = distinctBy(
+      shots.filter((s) => s.override),
+      (s) => s.binds.account,
+    );
+    if (overrideAccts.length > 0) {
+      if (!hsAnyTokenConfigured()) {
         return bad(
-          "targeting_override_account_not_visible — geo overrides are applied via our FB token after LION builds the clone, and that token was never granted this ad account; pick a token-visible account or clear the Targeting override",
+          "targeting_override_needs_fb_token — set FB_HS_DUP_TOKEN or FB_HS_LAUNCH_TOKEN; or run these rows on JURO (LION API applies the geo natively, no token needed)",
+        );
+      }
+      const visible = await hsAnyTokenAccountIds();
+      const blind = visible ? overrideAccts.filter((a) => !visible.has(acctKey(a))) : [];
+      if (blind.length > 0) {
+        return bad(
+          `targeting_override_account_not_visible — geo overrides are applied via our FB tokens after LION builds the clone, and no token was granted ${blind.join(", ")}; pick a token-visible account, clear the Targeting override on those rows, or run them on JURO (LION API)`,
         );
       }
     }
@@ -257,7 +303,7 @@ export async function POST(req: Request): Promise<NextResponse> {
         queued: shots.length,
         alreadyAccepted: true,
         rows: shots.map((s) => ({ taskId: s.taskId })),
-        currency: binds.currency,
+        currency,
       });
 
     const waveKey = `hs-wave:${waveId}`;
@@ -270,18 +316,24 @@ export async function POST(req: Request): Promise<NextResponse> {
 
     // Geo-override waves also need a live bearer for the Graph patch — checked AFTER the
     // idempotency answers above (a re-POST of an accepted wave must say alreadyAccepted, not
-    // 429 off a pool its own patches burned); with the whole pool down the clones would be born
+    // 429 off a pool its own patches burned); with EVERY bearer down the clones would be born
     // stuck on the source geo, so refuse before any row is stamped (review find 08-24).
     if (shots.some((s) => s.override)) {
-      const gate = await hsTokenGate();
-      if (!gate.ok) return bad(`targeting_override_blocked — ${gate.error}`, 429);
+      const gate = await hsAnyTokenGate();
+      if (!gate.ok) {
+        return bad(
+          `targeting_override_blocked — ${gate.error}. Token-free alternative: run these rows on JURO (LION API) — /jurar/ applies the geo natively`,
+          429,
+        );
+      }
     }
 
     // ---- account launch-limit precheck (5 campaigns / 30 min per ad account, owner rule
-    // 2026-08-18): the whole wave lands in ONE account, so an over-capacity wave is refused up
-    // front with the countdown instead of stamping rows destined to fail. Runs AFTER the wave-
-    // idempotency checks (a re-POST of an already-pumped wave must answer alreadyAccepted, not
-    // 429 off its own consumed slots). The per-shot claim in the pump stays the authority.
+    // 2026-08-18): EVERY account the wave targets must take its share (per-row destinations,
+    // 09-08), else the wave is refused up front with the countdown instead of stamping rows
+    // destined to fail. Runs AFTER the wave-idempotency checks (a re-POST of an already-pumped
+    // wave must answer alreadyAccepted, not 429 off its own consumed slots). The per-shot claim
+    // in the pump stays the authority.
     {
       let snap;
       try {
@@ -289,16 +341,13 @@ export async function POST(req: Request): Promise<NextResponse> {
       } catch {
         return bad("acct_limit_unavailable — wave blocked (launch registry unreachable)", 503);
       }
-      const info = snap.accounts[acctKey(account)];
-      const remaining = ACCT_LIMIT - (info?.count ?? 0);
-      if (info && remaining <= 0) return bad(acctLimitMessage(info.resetAt), 429);
-      if (shots.length > remaining) {
-        const tail = info ? ` — ${acctLimitMessage(info.resetAt)}` : "";
-        return bad(
-          `account_limit — only ${Math.max(0, remaining)} of ${shots.length} clones fit this account's 30-min window${tail}`,
-          429,
-        );
-      }
+      const refusal = acctLimitRefusal(
+        demandByAccount(shots, (s) => s.binds.account),
+        snap.accounts,
+        ACCT_LIMIT,
+        acctLimitMessage,
+      );
+      if (refusal) return bad(refusal.error, refusal.status);
     }
 
     // Rows land in the shared store BEFORE the claim and the response: the team (and this
@@ -344,24 +393,21 @@ export async function POST(req: Request): Promise<NextResponse> {
 
     const user = session.username;
     const deadline = startedAt + PUMP_BUDGET_MS;
-    after(() =>
-      pumpBatch(
-        user,
-        { profile, account, page, pixel, accountName: binds.accountName, pageName: binds.pageName },
-        shots,
-        deadline,
-      ),
-    );
+    after(() => pumpBatch(user, shots, deadline));
 
     return NextResponse.json({
       ok: true,
       queued: shots.length,
       rows: shots.map((s) => ({ taskId: s.taskId })),
-      currency: binds.currency,
+      currency,
     });
   }
 
   // ================= legacy single shot =================
+  if (!profile) return bad("profile_required");
+  if (!account) return bad("account_required");
+  if (!page) return bad("page_required");
+  if (!pixel) return bad("pixel_required");
   const campaignId = String(body.campaignId ?? "").trim();
   const copies = Number(body.copies ?? 1);
   const nameSuffix = String(body.nameSuffix ?? "").trim().slice(0, 80);
@@ -518,12 +564,7 @@ const rowWrite = (user: string, taskId: string, fields: Record<string, unknown>)
  * adlauncher tab's poller (or a retried wave) finishes the bookkeeping; the campaigns themselves
  * are safe on LION either way.
  */
-async function pumpBatch(
-  user: string,
-  binds: { profile: string; account: string; page: string; pixel: string; accountName?: string; pageName?: string },
-  shots: BatchShot[],
-  deadline: number,
-): Promise<void> {
+async function pumpBatch(user: string, shots: BatchShot[], deadline: number): Promise<void> {
   try {
     const strategyCache = new Map<string, string>();
     const adsCountCache = new Map<string, number>();
@@ -583,19 +624,19 @@ async function pumpBatch(
         // submit; released on a clean preflight rejection below, KEPT on ambiguous outcomes
         // (the clone may exist on LION). A full window stops the whole wave in the catch.
         slotDoc = (
-          await claimAcctSlot(acctKey(binds.account), {
+          await claimAcctSlot(acctKey(s.binds.account), {
             user,
             partner: "br",
             channel: "hs-dup",
             name: s.name || s.label || `Clone of ${s.campaignId}`,
-            accountName: binds.accountName || "",
+            accountName: s.accountName || "",
           })
         ).documentId;
         const result = await lionDuplicate({
-          profile_slug: binds.profile,
-          account_id: binds.account,
-          page_id: binds.page,
-          pixel_id: binds.pixel,
+          profile_slug: s.binds.profile,
+          account_id: s.binds.account,
+          page_id: s.binds.page,
+          pixel_id: s.binds.pixel,
           campaign_id: s.campaignId,
           starting_budget: Math.round(s.budget * 100),
           number_of_copies: 1, // single-copy shots → controllable pacing, gentler on the profile
@@ -616,7 +657,7 @@ async function pumpBatch(
             srcAds = await sourceAdsCount(s.campaignId);
             adsCountCache.set(s.campaignId, srcAds);
           }
-          await reportPagesUsed("br", [{ pageId: binds.page, delta: srcAds }]);
+          await reportPagesUsed("br", [{ pageId: s.binds.page, delta: srcAds }]);
         } else {
           // Preflight rejection kills the whole family (object-story creatives, dead source…).
           // No clone was created → the account slot goes back to the pool.
@@ -627,18 +668,32 @@ async function pumpBatch(
           await rowWrite(user, s.taskId, { status: "error", error: reason, finished_at: Date.now() });
         }
       } catch (e) {
-        // Account window full / limit registry down: every later shot targets the SAME account,
-        // so settle them all with the countdown message and stop submitting (deterministic —
-        // the pump's whole budget fits inside one 30-min window).
+        // Account window full: every later shot into the SAME account hits it too (the pump's
+        // whole budget fits inside one 30-min window), so those settle with the countdown and
+        // are skipped — other accounts' shots keep going (per-row destinations, 09-08). A
+        // registry outage settles the whole rest of the wave.
         if (e instanceof AcctLimitedError || /acct_limit_unavailable/.test(String((e as Error).message ?? ""))) {
           const msg = (e as Error).message ?? String(e);
-          for (let j = i; j < shots.length; j++) {
+          const registryDown = !(e instanceof AcctLimitedError);
+          if (registryDown) {
+            for (let j = i; j < shots.length; j++) {
+              const rest = shots[j];
+              if (rest.settled || rest.lionTaskId) continue;
+              rest.settled = true;
+              await rowWrite(user, rest.taskId, { status: "error", error: msg, finished_at: Date.now() });
+            }
+            break;
+          }
+          s.settled = true;
+          await rowWrite(user, s.taskId, { status: "error", error: msg, finished_at: Date.now() });
+          for (let j = i + 1; j < shots.length; j++) {
             const rest = shots[j];
-            if (rest.settled || rest.lionTaskId) continue;
+            if (rest.settled || rest.lionTaskId || acctKey(rest.binds.account) !== acctKey(s.binds.account)) continue;
             rest.settled = true;
             await rowWrite(user, rest.taskId, { status: "error", error: msg, finished_at: Date.now() });
           }
-          break;
+          if (i < shots.length - 1) await sleep(jitter());
+          continue;
         }
         const msg = `lion_duplicate_failed: ${(e as Error).message ?? e}`;
         // 4xx = LION-side semantic answer (page/pixel not in account data…) — deterministic for
@@ -709,7 +764,7 @@ async function pumpBatch(
               if (paused.ok) s.hardPaused = true;
             }
             try {
-              await patchCloneTargeting(s.cloneId, s.override, binds.pageName ?? "", s.name);
+              await patchCloneTargeting(s.cloneId, s.override, s.pageName, s.name, s.binds.account);
               s.patched = true;
               // "patched" lifts the geo gate — /api/hs/activate and the client poller may flip
               // the clone from here on (finalize below normally does it first).
@@ -771,9 +826,10 @@ async function pumpBatch(
 }
 
 /**
- * Apply a geo override to a freshly-born LION clone THROUGH the Graph (partner-side token):
- * patch the ad set's targeting (+ WW universal-ads declarations + the DSA beneficiary/payor
- * LION's duplicate never sets), rename the campaign to the board's relabeled name (LION ignores
+ * Apply a geo override to a freshly-born LION clone THROUGH the Graph — signed by whichever of
+ * our partner-side bearers can (launch pool or the dedicated duplicate signer, 09-08): patch the
+ * ad set's targeting (+ WW universal-ads declarations + the DSA beneficiary/payor LION's
+ * duplicate never sets), rename the campaign to the board's relabeled name (LION ignores
  * duplicate `name` — probed live 08-20), and VERIFY the stored geo before reporting success.
  * Throws on any miss; the pump's poll loop retries and every step is idempotent.
  */
@@ -782,26 +838,31 @@ async function patchCloneTargeting(
   o: GeoOverride,
   pageName: string,
   newName: string,
+  accountId: string,
 ): Promise<void> {
   type Json = Record<string, unknown>;
-  const camp = await hsFbGet(`${campaignId}?fields=name,adsets{id}`);
+  const camp = await hsAnyFbGet(`${campaignId}?fields=name,adsets{id}`, accountId);
   const adsetId = String((camp.adsets as { data?: { id?: string }[] } | undefined)?.data?.[0]?.id ?? "");
   if (!adsetId) throw new Error("adset_not_born_yet");
-  const cur = await hsFbGet(`${adsetId}?fields=targeting`);
+  const cur = await hsAnyFbGet(`${adsetId}?fields=targeting`, accountId);
   const patched = applyGeoOverride((cur.targeting ?? {}) as Json, o);
   const cats = geoOverrideRegionalCategories(o);
-  await hsFbPost(adsetId, {
-    targeting: patched,
-    ...(cats.length ? { regional_regulated_categories: cats } : {}),
-    ...(pageName ? { dsa_beneficiary: pageName, dsa_payor: pageName } : {}),
-  });
+  await hsAnyFbPost(
+    adsetId,
+    {
+      targeting: patched,
+      ...(cats.length ? { regional_regulated_categories: cats } : {}),
+      ...(pageName ? { dsa_beneficiary: pageName, dsa_payor: pageName } : {}),
+    },
+    accountId,
+  );
   // Rename: the board's relabeled name when it sent one; otherwise re-derive the geo label from
   // LION's auto-name server-side — the [CODES] group their ecosystem parses geo from must never
   // keep the SOURCE's countries on a clone that now targets the override (review find 08-24).
   const rename = newName || relabelNameGeo(String(camp.name ?? ""), o.countries);
-  if (rename && rename !== String(camp.name ?? "")) await hsFbPost(campaignId, { name: rename });
+  if (rename && rename !== String(camp.name ?? "")) await hsAnyFbPost(campaignId, { name: rename }, accountId);
   if (o.countries.length) {
-    const ver = await hsFbGet(`${adsetId}?fields=targeting`);
+    const ver = await hsAnyFbGet(`${adsetId}?fields=targeting`, accountId);
     const geo = ((ver.targeting as Json | undefined)?.geo_locations ?? {}) as Json;
     const ww = o.countries.includes("WW");
     const got = (ww ? geo.country_groups : geo.countries) as string[] | undefined;

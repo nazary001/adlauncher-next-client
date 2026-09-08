@@ -1,7 +1,7 @@
 // Node's built-in runner (v24 strips types natively): `node --test tests/types.test.ts`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bidAmountMissing, normalizeRoasGoal, parseMoney } from "../lib/types.ts";
+import { bidAmountMissing, limitMoneyCents, moneyCentsLabel, normalizeRoasGoal, parseMoney } from "../lib/types.ts";
 
 type BidShape = { bidStrategy: string; bidCap: string };
 const c = (bidStrategy: string, bidCap: string) => ({ bidStrategy, bidCap }) as BidShape as never;
@@ -47,4 +47,26 @@ test("normalizeRoasGoal: 10–20 is null, 2–10 divides by 10, ≥20 divides by
   assert.equal(normalizeRoasGoal(3), 0.3);
   assert.equal(normalizeRoasGoal(30), 0.3);
   assert.equal(normalizeRoasGoal(0.3), 0.3);
+});
+
+// ---- moneyCentsLabel: the seed format of cash-register budget cells --------------------------
+
+test("moneyCentsLabel always shows two decimals with a comma", () => {
+  assert.equal(moneyCentsLabel("10"), "10,00");
+  assert.equal(moneyCentsLabel("0,5"), "0,50");
+  assert.equal(moneyCentsLabel(12.5), "12,50");
+  assert.equal(moneyCentsLabel("7"), "7,00");
+  assert.equal(moneyCentsLabel("1,234.56"), "1234,56");
+});
+
+test("moneyCentsLabel keeps an unknown/empty budget empty", () => {
+  assert.equal(moneyCentsLabel(""), "");
+  assert.equal(moneyCentsLabel("  "), "");
+  assert.equal(moneyCentsLabel(Number.NaN), "");
+});
+
+test("moneyCentsLabel round-trips through limitMoneyCents (digits fill cents)", () => {
+  assert.equal(limitMoneyCents(moneyCentsLabel("10"), 10000), "10,00");
+  assert.equal(limitMoneyCents("1000", 10000), "10,00");
+  assert.equal(limitMoneyCents("100050", 10000), "1000,50");
 });

@@ -193,7 +193,13 @@ const isDeadTokenErr = (e: unknown): boolean =>
  * and propagates untouched (failing over would just repeat it). A token that answers fine while
  * still inside a cooldown mark heals the mark early.
  */
-async function poolCall<T>(fn: (token: string) => Promise<T>, pool: HsPoolToken[] = POOL): Promise<T> {
+async function poolCall<T>(
+  fn: (token: string) => Promise<T>,
+  pool: HsPoolToken[] = POOL,
+  /** Extra per-call failover trigger (no health mark): the any-bearer helpers pass the
+   *  permission-class predicate — a DIFFERENT user's bearer may hold the grant this one lacks. */
+  alsoFailOver?: (e: unknown) => boolean,
+): Promise<T> {
   const order = await orderedPool(pool);
   if (order.length === 0) throw new FbError("no_hs_token", null, 500);
   let lastErr: unknown = null;
@@ -215,6 +221,10 @@ async function poolCall<T>(fn: (token: string) => Promise<T>, pool: HsPoolToken[
       if (isDeadTokenErr(e)) {
         await hsMarkTokenLimited(t.fp, `token dead: ${(e as FbError).message || "OAuth 190"}`, DEAD_COOLDOWN_MS);
         lastErr = e;
+        continue;
+      }
+      if (alsoFailOver?.(e)) {
+        lastErr = e; // this bearer lacks the grant — the next user's may hold it (no mark)
         continue;
       }
       throw e;
@@ -257,7 +267,10 @@ async function tokenGate(pool: HsPoolToken[]): Promise<{ ok: true } | { ok: fals
   const now = Date.now();
   const { row } = await readHealth();
   if (pool.some((t) => (row.health[t.fp]?.limitedUntil ?? 0) <= now)) return { ok: true };
-  await hsProbeTokenHealth(); // maybe a limit already lifted — the probe clears healed marks
+  // Maybe a limit already lifted — the probes clear healed marks. Each bearer class has its own
+  // prober (both 30s-cached): the pool's, and the dedicated signer's when the gate covers it.
+  if (pool.some((t) => POOL.includes(t))) await hsProbeTokenHealth();
+  if (pool.some((t) => DUP_POOL.includes(t))) await hsProbeDupToken();
   const { row: after } = await readHealth();
   if (pool.some((t) => (after.health[t.fp]?.limitedUntil ?? 0) <= Date.now())) return { ok: true };
   const retryAt = Math.min(...pool.map((t) => after.health[t.fp]?.limitedUntil ?? Date.now()));
@@ -409,6 +422,71 @@ export const hsDupFbPost = (path: string, params: Json): Promise<Json> =>
 export const hsDupCreateAdset = (path: string, payload: Json): Promise<Json> =>
   poolCall((tok) => createAdsetSelfHealing(path, payload, tok), dupPool());
 
+// ---- any-bearer helpers (the LION cloner's geo-override patch, owner ask 2026-09-08) -----------
+// The LION rail applies a geo override THROUGH the Graph after LION births the clone (LION's
+// own duplicate/ ignores targeting fields). That patch used to ride the launch pool alone, so a
+// burned pool blocked every override wave even while the dedicated duplicate signer sat healthy
+// — and the board's gate judged by the dedicated signer alone, blocking the other way round.
+// These helpers run over EVERY configured bearer: the dedicated signer first (the cloner's own,
+// same one that builds token waves), then the pool; bearers whose account sweep provably can't
+// see the target are tried last; and a per-account permission miss fails over to the next user
+// (the two users hold different grants — what one can't see the other may).
+const anyPool = (): HsPoolToken[] => {
+  const seen = new Set<string>();
+  return [...DUP_POOL, ...POOL].filter((t) => !seen.has(t.fp) && seen.add(t.fp));
+};
+export const hsAnyTokenConfigured = (): boolean => anyPool().length > 0;
+
+/** Gate over EVERY bearer: open while at least one is unmarked (or heals on probe). */
+export async function hsAnyTokenGate(): Promise<{ ok: true } | { ok: false; error: string; retryAt: number }> {
+  return tokenGate(anyPool());
+}
+
+/** Union of the bearers' account sweeps (what ANY of them can act on); null = no sweep at all. */
+export async function hsAnyTokenAccountIds(): Promise<Set<string> | null> {
+  const [main, dup] = await Promise.all([
+    POOL.length > 0 ? hsTokenAccountIds() : Promise.resolve<Set<string> | null>(null),
+    DUP_POOL.length > 0 ? hsDupTokenAccountIds() : Promise.resolve<Set<string> | null>(null),
+  ]);
+  if (!main && !dup) return null;
+  return new Set([...(main ?? []), ...(dup ?? [])]);
+}
+
+/** Permission-class Graph errors a DIFFERENT user's bearer may not hit: (#200) permission
+ *  denied, (#10) app/user permission, (#803) unknown alias/object, (#100) sub 33 "Unsupported
+ *  request … missing permissions". Plain (#100) validation errors are the call's own problem. */
+const isPermissionErr = (e: unknown): boolean => {
+  if (!(e instanceof FbError)) return false;
+  const err = (e.detail as { error?: { code?: number; error_subcode?: number } } | null)?.error;
+  const code = err?.code;
+  return code === 200 || code === 10 || code === 803 || (code === 100 && err?.error_subcode === 33);
+};
+
+async function anyCall<T>(fn: (token: string) => Promise<T>, accountId?: string): Promise<T> {
+  let pool = anyPool();
+  if (accountId && pool.length > 1) {
+    const acct = String(accountId).replace(/^act_/, "");
+    const [main, dup] = await Promise.all([
+      POOL.length > 0 ? hsTokenAccountIds() : Promise.resolve<Set<string> | null>(null),
+      DUP_POOL.length > 0 ? hsDupTokenAccountIds() : Promise.resolve<Set<string> | null>(null),
+    ]);
+    const sees = (t: HsPoolToken): boolean => {
+      const ids = DUP_POOL.includes(t) ? dup : main;
+      return ids === null || ids.has(acct); // unknown sweep keeps the bearer (fail open)
+    };
+    const seeing = pool.filter(sees);
+    // Provably-blind bearers go LAST rather than out: a stale sweep must not strand the patch.
+    if (seeing.length > 0) pool = [...seeing, ...pool.filter((t) => !seeing.includes(t))];
+  }
+  return poolCall(fn, pool, isPermissionErr);
+}
+
+/** Graph reads/writes signed by whichever bearer can — for the LION rail's geo-override patch. */
+export const hsAnyFbGet = (path: string, accountId?: string): Promise<Json> =>
+  anyCall((tok) => fbGet(path, tok), accountId);
+export const hsAnyFbPost = (path: string, params: Json, accountId?: string): Promise<Json> =>
+  anyCall((tok) => fbPost(path, params, tok), accountId);
+
 /**
  * Best-effort bounded pause of a token-rail campaign whose build just failed: the tree is born
  * ACTIVE with only the +30 min start gap between a partial failure and unattended delivery.
@@ -468,9 +546,17 @@ export function hsDupTokenAccountIds(): Promise<Set<string> | null> {
   return tokenAccountIds(hsDupTokenDedicated() ? "dup" : "main", hsDupFbGet);
 }
 
+// A failed sweep is remembered briefly: the any-bearer patch consults both sweeps on EVERY
+// override tick (10s), and re-running a doomed pagination against a burned pool each time would
+// only add latency (and calls) to the very throttle that failed it.
+const ACCT_FAIL_CACHE_MS = 60_000;
+const acctFailedAt = new Map<string, number>();
+
 function tokenAccountIds(cacheKey: string, get: (path: string) => Promise<Json>): Promise<Set<string> | null> {
   const cached = acctCaches.get(cacheKey);
   if (cached && Date.now() - cached.at < ACCT_CACHE_MS) return Promise.resolve(cached.ids);
+  const failedAt = acctFailedAt.get(cacheKey);
+  if (failedAt && Date.now() - failedAt < ACCT_FAIL_CACHE_MS) return Promise.resolve(null);
   const inflight = acctInflights.get(cacheKey);
   if (inflight) return inflight;
   const p = (async () => {
@@ -487,9 +573,11 @@ function tokenAccountIds(cacheKey: string, get: (path: string) => Promise<Json>)
         if (!after) break;
       }
       acctCaches.set(cacheKey, { at: Date.now(), ids });
+      acctFailedAt.delete(cacheKey);
       return ids;
     } catch {
-      return null; // transient Graph failure — no negative cache, next caller retries
+      acctFailedAt.set(cacheKey, Date.now()); // transient Graph failure — short negative cache
+      return null;
     } finally {
       acctInflights.delete(cacheKey);
     }
