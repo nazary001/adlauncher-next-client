@@ -146,21 +146,30 @@ const MKLEARN_LANDINGS: Landing[] = [
   { slug: "por-que-ves-11-11", title: "Por qué ves 11:11", lang: "ES", niche: "Self-Discovery" },
 ];
 
-// Indians defaults: the token sees the ACTIVE GC-Magicoffers-BR-* accounts — the ACCOUNT is
-// picked per campaign (/api/adaccounts), defaulting to BR-1500. Pixel policy (owner, 2026-08-11):
-// bid/lowest launches keep a free pixel CHOICE but default to "GC for MO Pixel" (shared to every
-// account; the buy link carries &pixel=<id> so the funnel fires whichever is picked), while
-// min-ROAS is PINNED to ROAS_PIXEL below. HS-Pixel-FARM-1 (the funnel's original tracking pixel,
-// BR-1500 only) stays selectable by hand.
-const MAGICOFFERS_ACCOUNT: Bound = { id: "1297336295903991", name: "GC-Magicoffers-BR-1500" };
-const MO_DEFAULT_PIXEL: Bound = { id: "3075610185982313", name: "GC for MO Pixel" };
+// The VD-C1 partner's value pixel «VD-C1-HS-11»: the ONE pixel the VD-C1 admin shares to every
+// MO cabinet (all 16 GC-Magicoffers-BR-* as of 09-08) and to all 12 AIF cabinets (09-02). Both
+// rails pin their min-ROAS to it and default their conversion launches to it; the MK Learn funnel
+// fires it (browser + CAPI, signer = the MO launch soc) when the buy link carries &pixel=<id>.
+const VD_C1_HS_11: Bound = { id: "1363973565348799", name: "VD-C1-HS-11" };
 
-/** The ONLY pixel MO min-ROAS launches may optimize on (owner rule 2026-08-11): the partner's
- *  HS value pixel — real purchase-value history, shared to every MO account and live-probed
- *  VO-eligible on 08-11. Everything else (never-fired GC-for-MO, FARM-1) is rejected for ROAS
- *  even where technically eligible. Enforced in the card (pin + readiness), /api/launch and
- *  /api/clone/run. The AIF rail pins its own sibling value pixel instead — AIF_VALUE_PIXEL. */
-export const ROAS_PIXEL: Bound = { id: "4367956310124642", name: "VD-C1-HS-1" };
+// Indians defaults: the token sees the ACTIVE GC-Magicoffers-BR-* accounts — the ACCOUNT is
+// picked per campaign (/api/adaccounts), defaulting to BR-1500. Pixel policy: bid/lowest launches
+// keep a free pixel CHOICE but default to the value pixel VD-C1-HS-11 (the buy link carries
+// &pixel=<id> so the funnel fires whichever is picked), while min-ROAS is PINNED to ROAS_PIXEL
+// below. HS-Pixel-FARM-1 (the funnel's original tracking pixel, BR-1500 only) stays selectable by
+// hand. History: the old default «GC for MO Pixel» (3075610185982313) went is_unavailable on
+// 08-28 and was unshared from every MO cabinet by 09-02 — it is never offered again.
+const MAGICOFFERS_ACCOUNT: Bound = { id: "1297336295903991", name: "GC-Magicoffers-BR-1500" };
+const MO_DEFAULT_PIXEL: Bound = VD_C1_HS_11;
+
+/** The ONLY pixel MO min-ROAS launches may optimize on: the partner's value pixel with real
+ *  purchase-value history. Owner rule 2026-08-11 pinned VD-C1-HS-1 (4367956310124642); that pixel
+ *  was unshared from every MO cabinet by 09-02, so on 09-08 the pin moved to its sibling
+ *  VD-C1-HS-11 (the one shared everywhere; validate_only VALUE + roas_average_floor probes on
+ *  BR-1500/BR-1499 accepted it that day). Everything else (FARM-1, retired GC-for-MO) is rejected
+ *  for ROAS even where technically eligible. Enforced in the card (pin + readiness), /api/launch
+ *  and /api/clone/run. The AIF rail's pin — AIF_VALUE_PIXEL — is the same pixel. */
+export const ROAS_PIXEL: Bound = VD_C1_HS_11;
 
 // ---- AIF (Airfind "Google Rewarded Web") ----------------------------------------------------
 // Link contract from the partner's implementation guide (GC-coding/AIF, 2026-08): traffic goes to
@@ -174,7 +183,7 @@ export const AIF_CLIENT_ID = "52105";
  *  on 09-02 (the rail's sibling of MO's VD-C1-HS-1), and a validate_only probe the same day
  *  confirmed it VO-ELIGIBLE (VALUE + roas_average_floor accepted) → min-ROAS pins THIS pixel
  *  on AIF. Conversions default to it too (pickAifPixel). */
-export const AIF_VALUE_PIXEL: Bound = { id: "1363973565348799", name: "VD-C1-HS-11" };
+export const AIF_VALUE_PIXEL: Bound = VD_C1_HS_11;
 
 /** Pixels RETIRED from the AIF rail (owner call 09-02 pt3): the legacy «GC for AIF» postback
  *  pixel and MO's default «GC for MO Pixel» are never offered, never auto-picked and never
