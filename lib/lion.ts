@@ -2,6 +2,7 @@
 // the bearer token, the retry policy and the read caches — routes stay thin.
 
 import { juroStoryPages } from "./juro";
+import { activateRetryDelay } from "./activate-retry";
 
 const BASE = (process.env.LION_BASE || "https://lion.highstakes.tech").replace(/\/+$/, "");
 const TOKEN = process.env.LION_TOKEN ?? "";
@@ -233,6 +234,11 @@ export type LionDuplicationResult = {
   task_ids?: string[];
   reason?: string;
   campaign_id?: string;
+  /** v2 (partner docs 09-09): LION's RESOLVED bidding — read back to catch unit/strategy slips
+   *  before a clone is activated (lib/lion-dup-bid dupBiddingMismatch). */
+  bidding?: { bid_strategy?: string; conversion_event?: string; roas_goal?: number; starting_bid?: number };
+  /** v2 advisories (e.g. value/currency on ROAS) — never block the task. */
+  warnings?: string[];
 };
 
 /**
@@ -254,12 +260,20 @@ export async function lionDuplicate(args: {
   starting_budget: number;
   number_of_copies: number;
   name_suffix: string;
-  /** META-NATIVE integer, forwarded to the Graph verbatim (same passthrough as create's `bid`,
-   *  see lib/hs-launch hsWireBid): CENTS for cap sources, ROAS floor × 10000 for MIN_ROAS
-   *  sources (0,34 → 3400). A human decimal here wedges the task at CREATING_ADSET (Meta
-   *  "roas_average_floor … not valid" retry loop — live 08-10). Omitted = inherit the source's
-   *  bid (the safe default). */
+  /** Duplicate v2 (partner docs 09-09): target strategy — omitted = the source's (COST_CAP
+   *  included; a provided starting_bid no longer implies bid cap). Switching to a capped
+   *  strategy REQUIRES starting_bid / roas_goal, lowest cost takes neither. */
+  bid_strategy?: string;
+  /** Integer Meta account units of the DESTINATION currency for bid cap / cost cap (150 = $1.50
+   *  or R$1,50). Legacy ROAS reading (strategy omitted on a ROAS source: goal ×100) still works
+   *  but new ROAS values ride as `roas_goal` — with an EXPLICIT ROAS strategy LION reads
+   *  starting_bid as a decimal multiplier, so a ×100 value would land as 90×. Omitted = inherit
+   *  (LION rejects inheriting a monetary bid across account currencies). */
   starting_bid?: number;
+  /** Minimum-ROAS multiplier 0.01–1000 (1.2 = 120%), never together with starting_bid. */
+  roas_goal?: number;
+  /** Event override (PURCHASE / CONTENT_VIEW / …) — omitted = the source's event. */
+  conversion_event?: string;
 }): Promise<LionDuplicationResult> {
   const body = (await lionPostOnce("/api/facebook/campaigns/duplicate/", {
     profile_slug: args.profile_slug,
@@ -272,7 +286,10 @@ export async function lionDuplicate(args: {
         starting_budget: args.starting_budget,
         number_of_copies: args.number_of_copies,
         name_suffix: args.name_suffix,
+        ...(args.bid_strategy ? { bid_strategy: args.bid_strategy } : {}),
         ...(args.starting_bid != null ? { starting_bid: args.starting_bid } : {}),
+        ...(args.roas_goal != null ? { roas_goal: args.roas_goal } : {}),
+        ...(args.conversion_event ? { conversion_event: args.conversion_event } : {}),
       },
     ],
   })) as Record<string, unknown> | null;
@@ -469,6 +486,27 @@ export async function lionSetCampaignStatus(
   }
 }
 
+/**
+ * Activate a campaign LION has just born, retrying the one refusal that heals by waiting:
+ * `{id}/status/` answers "Campaign not found" until LION's own store syncs the newborn (seconds
+ * to a minute — live 09-09 on a JURO clone WITH ads; the 09-08 duplicate "activate race" left a
+ * born-PAUSED clone paused forever under a green row after a single attempt). Policy in
+ * lib/activate-retry (tested); every other answer returns at once.
+ */
+export async function lionActivateWithRetry(
+  campaignId: string,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<{ ok: boolean; alreadyActive?: boolean; message?: string; attempts: number }> {
+  let attempt = 0;
+  for (;;) {
+    attempt++;
+    const r = await lionSetCampaignStatus(campaignId, "ACTIVE");
+    const wait = activateRetryDelay(r, attempt);
+    if (wait == null) return { ...r, attempts: attempt };
+    await sleep(wait);
+  }
+}
+
 /** Today in LION's timezone (America/Sao_Paulo) as YYYY-MM-DD — the metrics date param. */
 const saoPauloToday = (): string =>
   new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" }).format(
@@ -546,6 +584,9 @@ export type LionSourceInfo = {
   bid: number | null;
   /** Campaign-level bid strategy (details/ carries it) — names the empty-bid case. */
   bidStrategy: string;
+  /** The source account's REAL billing currency (details/ account_currency; "" = unknown) —
+   *  duplicate v2 refuses to inherit a monetary bid into an account of another currency. */
+  currency: string;
   adsCount: number;
   countries: string[];
   /** Fanpage(s) the source's ads live on, tallied per page from the ads' story ids (one JURO ad
@@ -569,6 +610,8 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
     error?: string;
     bid_strategy?: string;
     campaign_budget?: number;
+    /** The account's real billing currency (partner docs: details/ account_currency). */
+    account_currency?: string;
     adsets?: Array<{
       bid_amount?: number;
       adset_bid?: number;
@@ -593,7 +636,7 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
   const rows = campaignIds.map((cid) => {
     const d = byId.get(cid);
     if (!d || d.error) {
-      return { campaignId: cid, name: "", status: "UNREADABLE", budget: null, bid: null, bidStrategy: "", adsCount: 0, countries: geoById.get(cid) ?? [], pages: [] as { pageId: string; ads: number }[] };
+      return { campaignId: cid, name: "", status: "UNREADABLE", budget: null, bid: null, bidStrategy: "", currency: "", adsCount: 0, countries: geoById.get(cid) ?? [], pages: [] as { pageId: string; ads: number }[] };
     }
     const adsets = Array.isArray(d.adsets) ? d.adsets : [];
     const ads = adsets.flatMap((a) => (Array.isArray(a.ads) ? a.ads : []));
@@ -609,6 +652,7 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
       budget: typeof d.campaign_budget === "number" ? d.campaign_budget : null,
       bid: typeof bidRaw === "number" ? bidRaw : null,
       bidStrategy: String(d.bid_strategy ?? ""),
+      currency: String(d.account_currency ?? ""),
       adsCount: ads.length,
       countries: geoById.get(cid) ?? [],
       pages,
@@ -632,22 +676,23 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
   return rows;
 }
 
-/** The one fact the duplicate route needs about a source before scaling a bid override: its
- *  bid strategy (campaign-level, details/ carries it). "" = source unreadable right now
- *  ("Campaign data not found" — known LION lag on fresh campaigns). Uncached: one submit-time
- *  read, and a stale answer here would mis-scale a bid 100×/10000×. */
-export async function lionBidStrategy(campaignId: string): Promise<string> {
+/** The two facts the duplicate route needs about a source before deciding its bid wire: the
+ *  campaign-level bid strategy and the source account's billing currency (details/ carries
+ *  both). "" = source unreadable right now ("Campaign data not found" — known LION lag on fresh
+ *  campaigns). Uncached: one submit-time read, and a stale answer here would mis-scale a bid or
+ *  let a cross-currency inherit reach LION's rejection. */
+export async function lionSourceBidFacts(campaignId: string): Promise<{ bidStrategy: string; currency: string }> {
   try {
     const body = (await lionPost("/api/facebook/campaigns/details/", {
       campaign_ids: [campaignId],
     })) as Record<string, unknown> | null;
     const rows = Array.isArray(body?.campaignsData)
-      ? (body!.campaignsData as Array<{ campaign_id?: string | number; bid_strategy?: string }>)
+      ? (body!.campaignsData as Array<{ campaign_id?: string | number; bid_strategy?: string; account_currency?: string }>)
       : [];
     const row = rows.find((r) => String(r.campaign_id ?? "") === campaignId);
-    return String(row?.bid_strategy ?? "");
+    return { bidStrategy: String(row?.bid_strategy ?? ""), currency: String(row?.account_currency ?? "") };
   } catch {
-    return "";
+    return { bidStrategy: "", currency: "" };
   }
 }
 

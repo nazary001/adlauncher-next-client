@@ -69,6 +69,14 @@ test("WW override → LION's WORLD token", () => {
   assert.deepEqual(juroWireCountries({ countries: ["WW"], localeIds: [] }, ["US"]), ["WORLD"]);
 });
 
+test("a [WORLD]-labelled source whose targeting read is empty → LION's WORLD token (live 09-09: every WORLD-broad source refused JURO)", () => {
+  assert.deepEqual(juroWireCountries(null, [], "[05/09] (GLO-01) API - (#ADX [HIGH]) - [WORLD] - AGE-GATE - Digital-marketing en"), ["WORLD"]);
+  // explicit countries still win over the label; an unlabelled empty read stays undecidable
+  assert.deepEqual(juroWireCountries(null, ["MX"], "[05/09] (GLO-01) API - (#ADX [HIGH]) - [WORLD] - x"), ["MX"]);
+  assert.deepEqual(juroWireCountries(null, [], "[05/09] (GLO-01) API - (#ADX [HIGH]) - [LATAM] - x"), []);
+  assert.deepEqual(juroWireCountries({ countries: ["BR"], localeIds: [] } as never, [], "… - [WORLD] - x"), ["BR"]);
+});
+
 test("no override → source countries; nothing resolvable → empty (caller refuses)", () => {
   assert.deepEqual(juroWireCountries(null, ["MX"]), ["MX"]);
   assert.deepEqual(juroWireCountries(null, []), []);
@@ -87,6 +95,12 @@ test("certification wall → account scope (live 08-25: [MX]-only shot hit it to
 test("verified-advertiser / beneficiary walls → family scope", () => {
   assert.equal(juroBlockingError("Provide a verified advertiser to run ads here")?.scope, "family");
   assert.equal(juroBlockingError("Enter the person or organization being promoted by an ad")?.scope, "family");
+});
+
+test("min-ROAS eligibility rejection (subcode 2446671, partner docs 09-09) → family scope", () => {
+  const wall = juroBlockingError("(#100) Minimum ROAS Isn't Available (code 100, subcode 2446671)");
+  assert.equal(wall?.scope, "family");
+  assert.match(String(wall?.reason), /min ROAS/i);
 });
 
 test("transient noise → null", () => {

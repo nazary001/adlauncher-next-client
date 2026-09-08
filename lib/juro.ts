@@ -112,13 +112,19 @@ export function juroBidPlan(args: {
 }
 
 /** Countries for the jurar wire: the override wins (WW → LION's "WORLD" token), else the
- *  source's targeting. Empty = undecidable — the caller refuses the shot rather than guessing
- *  (jurar has no inheritance: whatever is sent IS the new campaign's geo). */
-export function juroWireCountries(override: GeoOverride | null, sourceCountries: string[]): string[] {
+ *  source's targeting. A worldwide source reads as NO countries from LION's targeting/ (the
+ *  country group has no codes) — its `[WORLD]` name label is the only signal, so a labelled
+ *  source with an empty read rides LION's WORLD token (live 09-09: every WORLD-broad MIN_ROAS
+ *  source — the team's core — refused JURO with "geo unreadable"). Empty = undecidable — the
+ *  caller refuses the shot rather than guessing (jurar has no inheritance: whatever is sent IS
+ *  the new campaign's geo). */
+export function juroWireCountries(override: GeoOverride | null, sourceCountries: string[], sourceName = ""): string[] {
   if (override && override.countries.length > 0) {
     return override.countries.includes("WW") ? ["WORLD"] : override.countries;
   }
-  return sourceCountries.filter(Boolean);
+  const codes = sourceCountries.filter(Boolean);
+  if (codes.length === 0 && /\[WORLD\]/i.test(sourceName)) return ["WORLD"];
+  return codes;
 }
 
 /**
@@ -211,6 +217,16 @@ export function juroBlockingError(message: string | undefined | null): { reason:
   }
   if (/person or organization being promoted/i.test(msg)) {
     return { reason: "Meta wall: EU DSA beneficiary required — jurar can't set it via API.", scope: "family" };
+  }
+  if (/2446671|Minimum ROAS Isn.?t Available/i.test(msg)) {
+    // Partner docs 09-09: code 100 / subcode 2446671 — the destination business isn't eligible
+    // for minimum ROAS; LION keeps retrying the requested strategy, never launches another.
+    // (Same match as lib/lion-dup-bid lionRoasWall — both leaves, duplicated on purpose.)
+    return {
+      reason:
+        "Meta: min ROAS isn't available for the destination business/account (subcode 2446671) — LION keeps the task on the requested strategy; re-fire with bid cap / lowest cost or pick another account.",
+      scope: "family",
+    };
   }
   return null;
 }

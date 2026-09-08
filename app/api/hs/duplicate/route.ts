@@ -1,7 +1,9 @@
 import { NextResponse, after } from "next/server";
-import { bidKind, parseMoney } from "@/lib/types";
+import { bidKind, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { LION_NAME_SUFFIX_MAX } from "@/lib/hs-clone-name";
+import { SUPPORTED_BID_STRATEGIES } from "@/lib/fb-launch";
 import { hsWireBid } from "@/lib/hs-launch";
+import { dupBidPlan, dupBiddingMismatch, lionRoasWall } from "@/lib/lion-dup-bid";
 import { overrideDeadlineError } from "@/lib/launch-guards";
 import { hsPageRefusal, reportPagesUsed } from "@/lib/hs-pages";
 import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
@@ -20,13 +22,14 @@ import { stampHsTaskRow, upsertTaskRow } from "@/lib/task-store";
 import {
   LionError,
   lionAccountPixels,
-  lionBidStrategy,
+  lionActivateWithRetry,
   lionCampaignAds,
   lionConfigured,
   lionCreationStatus,
   lionDuplicate,
   lionProfileData,
   lionSetCampaignStatus,
+  lionSourceBidFacts,
 } from "@/lib/lion";
 import { hsAnyFbGet, hsAnyFbPost, hsAnyTokenAccountIds, hsAnyTokenConfigured, hsAnyTokenGate } from "@/lib/hs-token-launch";
 import { type ShotBinds, acctLimitRefusal, bindsKey, demandByAccount, distinctBy, resolveShotBinds } from "@/lib/hs-shot-binds";
@@ -112,6 +115,14 @@ type BatchShot = {
   budgetRaw: string;
   bid: number | null;
   bidStrategy: string;
+  /** Per-row strategy switch ("" = the source's) — LION duplicate v2 takes bid_strategy. */
+  bidStrategyOverride: string;
+  /** Destination account currency (LION catalog, filled by validation) — the currency the
+   *  wire's monetary values are in, and the cross-currency inherit guard's other half. */
+  currency: string;
+  /** LION's resolved `bidding` differed from what we asked (dupBiddingMismatch) — the clone is
+   *  parked PAUSED at finalize with this reason instead of being activated. */
+  biddingMismatch?: string;
   name: string;
   /** LION `name_suffix` for this shot (see the wire type above). */
   suffix: string;
@@ -171,10 +182,15 @@ export async function POST(req: Request): Promise<NextResponse> {
     shots?: {
       campaignId?: string;
       budget?: string;
-      /** Optional bid override in HUMAN units — scaled to the wire in the pump by the SOURCE's
-       *  re-read strategy (the client's bidStrategy is only the unreadable-source fallback). */
+      /** Optional bid override in HUMAN units — scaled to the wire in the pump by the clone's
+       *  EFFECTIVE strategy (the source's re-read one, or the row's switch; the client's
+       *  bidStrategy is only the unreadable-source fallback). */
       bid?: string;
       bidStrategy?: string;
+      /** Per-row strategy switch (owner ask 09-09, LION duplicate v2): any of the four
+       *  strategies — ROAS ↔ cap ↔ cost cap ↔ lowest. "" = the source's. A switched cap/ROAS row
+       *  must carry a typed `bid` (nothing inherits across strategies). */
+      bidStrategyOverride?: string;
       /** Full clone name (fixed grammar prefix + edited tail) — the row title and the geo-override
        *  Graph rename. LION's duplicate/ never reads it (not in its contract). */
       name?: string;
@@ -241,6 +257,10 @@ export async function POST(req: Request): Promise<NextResponse> {
       }
       const override = parseGeoOverride(raw?.countries, raw?.locales);
       if (override && "error" in override) return bad(`targeting_override_${override.error}`);
+      // The strategy switch is validated against the four strategies LION's duplicate v2 (and
+      // our payload builders) support — junk would only die inside LION's task.
+      const strategyOverride = String(raw?.bidStrategyOverride ?? "").trim();
+      if (strategyOverride && !SUPPORTED_BID_STRATEGIES.has(strategyOverride)) return bad("bid_strategy_invalid");
       // The shot's own destination over the wave defaults (per-row binds, 09-08).
       const shotBinds = resolveShotBinds(raw, waveBinds, true);
       if ("error" in shotBinds) return bad(shotBinds.error);
@@ -250,6 +270,8 @@ export async function POST(req: Request): Promise<NextResponse> {
         budgetRaw: String(raw?.budget ?? ""),
         bid,
         bidStrategy: String(raw?.bidStrategy ?? "").trim(),
+        bidStrategyOverride: strategyOverride,
+        currency: "",
         name: String(raw?.name ?? "").trim().slice(0, 200),
         suffix: String(raw?.suffix ?? "").trim().slice(0, LION_NAME_SUFFIX_MAX),
         geo: String(raw?.geo ?? "").slice(0, 40) || "inherited",
@@ -281,6 +303,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       }
       s.accountName = v.accountName;
       s.pageName = v.pageName;
+      s.currency = v.currency;
     }
     const currency = validated.values().next().value?.currency ?? "USD";
 
@@ -452,7 +475,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   let startingBid: number | undefined;
   if (bid != null) {
     const clientStrategy = String(body.bidStrategy ?? "").trim();
-    const strategy = (await lionBidStrategy(campaignId)) || clientStrategy;
+    const strategy = (await lionSourceBidFacts(campaignId)).bidStrategy || clientStrategy;
     if (!strategy) return bad("bid_strategy_unresolved_clear_bid_to_inherit");
     const kind = bidKind(strategy);
     if (kind === "none") return bad("bid_not_applicable_to_lowest_cost_source");
@@ -577,7 +600,7 @@ const rowWrite = (user: string, taskId: string, fields: Record<string, unknown>)
  */
 async function pumpBatch(user: string, shots: BatchShot[], deadline: number): Promise<void> {
   try {
-    const strategyCache = new Map<string, string>();
+    const factsCache = new Map<string, { bidStrategy: string; currency: string }>();
     const adsCountCache = new Map<string, number>();
     const familyFailed = new Map<string, string>();
 
@@ -611,25 +634,53 @@ async function pumpBatch(user: string, shots: BatchShot[], deadline: number): Pr
       }
       let slotDoc: string | null = null;
       try {
+        // ---- bidding (LION duplicate v2, partner docs 09-09) ----
+        // The SOURCE's strategy + account currency are re-read from LION (authoritative; the
+        // board's snapshot only covers the "source unreadable right now" lag), then the plan
+        // decides what rides: a per-row switch (explicit bid_strategy + a typed value + the
+        // re-paired event), a typed value alone (strategy omitted = the source's), or nothing
+        // (inherit). ROAS values ride as `roas_goal` (multiplier), NEVER as starting_bid — with
+        // an explicit ROAS strategy LION reads starting_bid as a decimal multiplier, so the old
+        // ×100 wire would land as 90×. Cap values are Meta account units of the DESTINATION.
+        let facts = factsCache.get(s.campaignId);
+        if (facts === undefined) {
+          facts = await lionSourceBidFacts(s.campaignId);
+          factsCache.set(s.campaignId, facts);
+        }
+        const plan = dupBidPlan({
+          sourceStrategy: facts.bidStrategy || s.bidStrategy,
+          override: s.bidStrategyOverride,
+          typedBid: s.bid,
+          sourceCurrency: facts.currency,
+          destCurrency: s.currency,
+        });
+        if ("refusal" in plan) {
+          // A bid/currency refusal is a fact of this source × this destination — settled here
+          // without a LION call or a slot (rows bound elsewhere may still be fine).
+          s.settled = true;
+          await rowWrite(user, s.taskId, { status: "error", error: plan.refusal, finished_at: Date.now() });
+          continue;
+        }
         let startingBid: number | undefined;
-        if (s.bid != null) {
-          let strategy = strategyCache.get(s.campaignId);
-          if (strategy === undefined) {
-            strategy = (await lionBidStrategy(s.campaignId)) || s.bidStrategy;
-            strategyCache.set(s.campaignId, strategy);
+        let roasGoal: number | undefined;
+        if (plan.human != null) {
+          if (plan.kind === "roas") {
+            // Percent-form / ×10-slip entries normalize to the real goal (30 → 0,30); the
+            // ambiguous 10–20 band is refused like on every other wire.
+            const goal = normalizeRoasGoal(plan.human);
+            if (goal == null) {
+              s.settled = true;
+              await rowWrite(user, s.taskId, {
+                status: "error",
+                error: "roas goal ambiguous — type the decimal goal (0,30 = 30%)",
+                finished_at: Date.now(),
+              });
+              continue;
+            }
+            roasGoal = goal;
+          } else {
+            startingBid = Math.round(plan.human * 100);
           }
-          const kind = strategy ? bidKind(strategy) : "none";
-          const wire =
-            strategy && kind !== "none" && !(kind === "roas" && s.bid > 100) ? hsWireBid(s.bid, strategy, "lion") : null;
-          if (wire == null) {
-            // Deterministic per source — the same bid re-fails every copy.
-            const reason = "bid not applicable/resolvable for this source — clear the Bid to inherit";
-            familyFailed.set(s.campaignId, reason);
-            s.settled = true;
-            await rowWrite(user, s.taskId, { status: "error", error: reason, finished_at: Date.now() });
-            continue;
-          }
-          startingBid = wire;
         }
         // Account launch slot (5 campaigns / 30 min per ad account) — claimed right before the
         // submit; released on a clean preflight rejection below, KEPT on ambiguous outcomes
@@ -656,11 +707,25 @@ async function pumpBatch(user: string, shots: BatchShot[], deadline: number): Pr
           // The composed `name` stays on the row and drives the geo-override Graph rename — LION
           // never read it, which is how every clone 08-14→09-08 lost its "- <buyer>" tail.
           name_suffix: s.suffix,
+          ...(plan.wireStrategy ? { bid_strategy: plan.wireStrategy } : {}),
           ...(startingBid != null ? { starting_bid: startingBid } : {}),
+          ...(roasGoal != null ? { roas_goal: roasGoal } : {}),
+          ...(plan.conversionEvent ? { conversion_event: plan.conversionEvent } : {}),
         });
         const lionTaskId = (result.task_ids ?? []).map(String).filter(Boolean)[0];
         if (lionTaskId) {
           s.lionTaskId = lionTaskId;
+          // Read back LION's RESOLVED bidding (v2): a unit slip or a strategy LION quietly
+          // changed must never reach an ACTIVE clone — a mismatch parks the clone PAUSED at
+          // finalize with the difference named. Advisories (value/currency on ROAS) only log.
+          const mismatch = dupBiddingMismatch(
+            { strategy: plan.wireStrategy ?? (plan.human != null ? plan.strategy : undefined), roasGoal, startingBid },
+            result.bidding,
+          );
+          if (mismatch) s.biddingMismatch = mismatch;
+          if (result.warnings?.length) {
+            console.warn(`[hs-duplicate] LION warnings for ${s.campaignId} (${lionTaskId}): ${result.warnings.join(" | ")}`);
+          }
           // started_at = the REAL submit moment (rows are stamped minutes earlier): the drawer's
           // elapsed timer and the 3h cap then measure time ON LION, not time in our queue.
           await rowWrite(user, s.taskId, { link: lionTaskId, started_at: Date.now() });
@@ -727,10 +792,27 @@ async function pumpBatch(user: string, shots: BatchShot[], deadline: number): Pr
     const activated = new Set<string>();
     const finalize = async (s: BatchShot, cloneId: string, adCount: number) => {
       s.settled = true;
+      if (s.biddingMismatch) {
+        // LION resolved other bidding than requested (read back at submit): the clone stays
+        // PAUSED (its birth status) and the row names the difference — the buyer verifies the
+        // ad set in LION / Ads Manager before activating by hand. Never activated from here.
+        await lionSetCampaignStatus(cloneId, "PAUSED").catch(() => {});
+        await rowWrite(user, s.taskId, {
+          status: "error",
+          error: `${s.biddingMismatch} — clone left PAUSED; verify its bidding in LION / Ads Manager before activating`,
+          campaign_id: cloneId,
+          ad_id: String(adCount),
+          finished_at: Date.now(),
+        });
+        return;
+      }
       if (!activated.has(cloneId)) {
         activated.add(cloneId);
         // "does not have permission" = already active = success (playbook) — helper handles it.
-        await lionSetCampaignStatus(cloneId, "ACTIVE").catch(() => {});
+        // "Campaign not found" = LION's store hasn't synced the newborn yet (the 09-08 activate
+        // race) — retried by the helper so a born-PAUSED clone can't stay paused under a green row.
+        const act = await lionActivateWithRetry(cloneId).catch((e) => ({ ok: false, message: String((e as Error).message ?? e), attempts: 0 }));
+        if (!act.ok) console.warn(`[hs-duplicate] activate ${cloneId} failed after ${act.attempts} attempt(s): ${act.message ?? ""}`);
       }
       await rowWrite(user, s.taskId, {
         status: "done",
@@ -763,6 +845,21 @@ async function pumpBatch(user: string, shots: BatchShot[], deadline: number): Pr
               // row must see the clone is still unpatched (belt over the stamp-time mark).
               ...(s.override && !s.patched ? { stage: "geo-gate" } : {}),
             });
+          }
+          // Meta's min-ROAS eligibility rejection (code 100 / subcode 2446671, partner docs
+          // 09-09): LION retries the requested strategy forever and never launches another —
+          // settle now with the reason; a born shell stays PAUSED (best-effort pause rides along).
+          const wall = lionRoasWall(r.error?.message);
+          if (wall) {
+            s.settled = true;
+            if (s.cloneId) await lionSetCampaignStatus(s.cloneId, "PAUSED").catch(() => {});
+            await rowWrite(user, s.taskId, {
+              status: "error",
+              error: wall,
+              ...(s.cloneId ? { campaign_id: s.cloneId } : {}),
+              finished_at: Date.now(),
+            });
+            continue;
           }
           // Geo override: patch the born clone's ad set through the Graph BEFORE any finalize —
           // an override shot must never go ACTIVE on the source's geo. The adset exists while

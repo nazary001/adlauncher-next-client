@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Campaign, FileItem } from "@/lib/types";
-import { bidKind, firstMedia, fullName, isLaunchable, makeCampaign, moEnsureSocMark } from "@/lib/types";
+import { bidKind, firstMedia, fullName, isLaunchable, makeCampaign, moEnsureSocMark, todayPrefixDDMM } from "@/lib/types";
 import { geoSummary } from "@/lib/catalog";
 import {
   GCM_POOL_MAX,
@@ -52,11 +52,11 @@ function cloneCardFrom(src: Campaign, id: string): Campaign {
   };
 }
 
-/** Today as DD.MM for the campaign-name prefix. Runs client-side (and on the local dev server). */
-function todayDDMM(): string {
-  const d = new Date();
-  return `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}`;
-}
+/** Today as DD.MM for the campaign-name prefix — the team's (Kyiv) calendar day (lib/types
+ *  todayPrefixDDMM), identical on the server render and the client hydration. The old
+ *  renderer-clock version differed between Vercel (UTC) and the buyer's zone for hours every
+ *  night → React #418 on every board open + zone-dependent born-dates (live 09-09). */
+const todayDDMM = (): string => todayPrefixDDMM();
 
 /** Free-pool warning threshold: at or below this many free gcm codes the board shows the early
  *  amber banner, so designers know BEFORE building a wave that it may not fit. 0 = hard block. */

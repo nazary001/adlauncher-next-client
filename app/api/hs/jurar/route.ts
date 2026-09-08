@@ -27,6 +27,7 @@ import {
   LionError,
   type LionJuroSource,
   lionAccountPixels,
+  lionActivateWithRetry,
   lionCampaignAds,
   lionConfigured,
   lionCreationStatus,
@@ -355,7 +356,9 @@ function resolveShotWire(
       return `source page ${p.pageId} is not on the picked profile — pick a profile that carries this fanpage`;
     }
   }
-  const countries = juroWireCountries(s.override, src.countries);
+  // A [WORLD]-labelled source reads as no countries from targeting/ — the label rides as LION's
+  // WORLD token (live 09-09); anything else empty is undecidable → refuse.
+  const countries = juroWireCountries(s.override, src.countries, src.name);
   if (countries.length === 0) {
     return "source geo unreadable — set a Targeting override on this row";
   }
@@ -556,8 +559,9 @@ async function pumpJuro(user: string, shots: JuroShot[], deadline: number): Prom
     // ---- phase 2: poll + finish rows ----
     const finalize = async (s: JuroShot, cloneId: string, adCount: number) => {
       s.settled = true;
-      // Born ACTIVE (live 08-25) — this is a belt for a PAUSED birth; "already active" = success.
-      await lionSetCampaignStatus(cloneId, "ACTIVE").catch(() => {});
+      // Born ACTIVE (live 08-25) — this is a belt for a PAUSED birth; "already active" = success,
+      // "Campaign not found" (LION's store lagging the newborn, live 09-09) is retried by the helper.
+      await lionActivateWithRetry(cloneId).catch(() => {});
       await rowWrite(user, s.taskId, {
         status: "done",
         stage: "ads",
