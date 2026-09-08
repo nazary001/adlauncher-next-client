@@ -365,8 +365,8 @@ export function launchReadyOpts(p: PartnerConfig): {
     // LION builds ads from the typed destination link + title/copy — all hard-required by create/.
     link: Boolean(p.lionLaunch),
     adText: Boolean(p.lionLaunch),
-    // Min-ROAS pins the partner's value pixel: MO → VD-C1-HS-1 (08-11), AIF → VD-C1-HS-11
-    // (09-02, VO-probed); LION partners validate pixels their own way.
+    // Min-ROAS pins the partner's value pixel VD-C1-HS-11 on both rails (AIF since 09-02, MO
+    // since 09-08 — both VO-probed); LION partners validate pixels their own way.
     roasPixel: p.aifLaunch ? AIF_VALUE_PIXEL.id : p.accountsFromToken ? ROAS_PIXEL.id : "",
   };
 }

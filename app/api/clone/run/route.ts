@@ -407,12 +407,15 @@ export async function POST(req: Request) {
               throw new FbError("roas_goal_ambiguous — type the decimal goal (0,30 = 30%) on the clone row", { campaignId: edit.campaignId });
             }
           }
-          // Owner rule (2026-08-11): MO min-ROAS optimizes ONLY on the partner's value pixel
-          // VD-C1-HS-1. PIN it (launcher-card parity — same-account clones have no pixel
-          // picker, and a row switched to ROAS needs it regardless of what the source promoted)
-          // after verifying the build account carries the shared pixel; the link rewrite below
-          // then fires it too. AIF rows pinned their own value pixel above.
-          if (!aif && bidKind(campaign.bidStrategy) === "roas" && editBinds.pixelId !== ROAS_PIXEL.id) {
+          // Owner rule (2026-08-11, re-pinned 09-08): MO min-ROAS optimizes ONLY on the partner's
+          // value pixel ROAS_PIXEL (VD-C1-HS-11). PIN it (launcher-card parity — same-account
+          // clones have no pixel picker, and a row switched to ROAS needs it regardless of what
+          // the source promoted) after verifying the build account STILL carries the shared pixel
+          // — checked even when the source already promoted it: the admin can unshare a pixel
+          // between the source launch and the clone (09-02 precedent), and this must fail BEFORE
+          // any gcm claim/write, not at adset-create. The link rewrite below then fires it too.
+          // AIF rows pinned their own value pixel above.
+          if (!aif && bidKind(campaign.bidStrategy) === "roas") {
             const pixels = await pixelsOf(binds.accountId);
             if (!pixels.some((p) => p.id === ROAS_PIXEL.id)) {
               throw new FbError(
