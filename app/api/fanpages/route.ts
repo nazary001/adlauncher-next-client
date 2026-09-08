@@ -24,7 +24,8 @@ const MO_PAGE_ALLOWLIST = new Set([
  * in afterwards. The launch/clone routes validate the picked id against the same page list.
  * Gated by the proxy (session required).
  *
- * `channel` picks the signer the page catalog is read from: absent/system = the MO system-user
+ * `channel` picks the signer the page catalog is read from: absent/system = the DEFAULT soc
+ * (Spencermo — the MO system user is dead, owner rule 09-08; the system token only when no soc is provisioned),
  * token, `soc:<name>` = that personal token from FB_MO_SOC_TOKENS (its me/accounts — the pages
  * that соц manages with the ADVERTISE task; own cache identity).
  *

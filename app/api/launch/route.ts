@@ -160,7 +160,9 @@ export async function POST(req: Request) {
   // different signer. An unknown/de-provisioned soc is a CLEAN config error, never a silent fall
   // back to the system token: the wave was aimed at the soc (e.g. routing around a business
   // restriction that hits system users), and falling back would launch it straight into it.
-  const channel = resolveMoChannel(channelRaw);
+  // MO (gcm partner): a channel-less wave signs as the DEFAULT soc (Spencermo — the system
+  // user is dead, owner rule 09-08); other partners keep the legacy system meaning.
+  const channel = resolveMoChannel(channelRaw, { defaultToSoc: Boolean(partner.usesGcm) });
   if (!channel) {
     return NextResponse.json(
       { ok: false, stage: "config", error: "soc_channel_unknown — this soc is not provisioned on the server (FB_MO_SOC_TOKENS)" },

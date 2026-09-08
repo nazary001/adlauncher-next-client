@@ -16,7 +16,8 @@ export const maxDuration = 60;
  * picker (and its per-account pixel picker) on the launcher. The launch route validates the
  * picked account/pixel against the same server-cached data. Gated by the proxy.
  *
- * `channel` picks the signer the catalog is read from: absent/system = the MO system-user
+ * `channel` picks the signer the catalog is read from: absent/system = the DEFAULT soc (Spencermo
+ * — the MO system user is dead, owner rule 09-08; the system token only when no soc is provisioned),
  * token, `soc:<name>` = that personal token from FB_MO_SOC_TOKENS (own cache identity —
  * a soc may see a different account set than the system user).
  *

@@ -105,20 +105,57 @@ export type MoChannel =
   | { kind: "system" }
   | { kind: "soc"; name: string; token: string; sys: boolean; cat: TokenCatalog };
 
+// Own cache identity per soc: its me/accounts + me/adaccounts catalogs must never bleed into
+// the system token's (same discipline as the AIF catalog in lib/fb-graph).
+const toChannel = (e: SocEntry): MoChannel => ({
+  kind: "soc",
+  name: e.name,
+  token: e.token,
+  sys: e.system,
+  cat: { token: e.token, cacheKey: `mo-soc-${e.name}` },
+});
+
+/**
+ * The MO signer a request that names NONE gets (owner rule 2026-09-08: the MO system user
+ * gcformo is DEAD — "Spencermo везде по MO"): the system-class entry (Spencermo, the partner-BM
+ * system user that dodges the ward on ours) when provisioned, else the first soc. null = no
+ * soc provisioned at all (legacy env) — only then does anything still touch FB_LAUNCH_TOKEN.
+ */
+export function moDefaultSoc(): { name: string; system: boolean } | null {
+  const e = SOCS.find((s) => s.system) ?? SOCS[0];
+  return e ? { name: e.name, system: e.system } : null;
+}
+
+/** The default signer's bearer ("" when no soc is provisioned) — for the routes that hit the
+ *  Graph outside the catalog helpers (ads_volume reads). Tokens never leave the server. */
+export function moDefaultToken(): string {
+  return (SOCS.find((s) => s.system) ?? SOCS[0])?.token ?? "";
+}
+
+/** The default signer's catalog identity for the fb-graph helpers (undefined = none provisioned). */
+export function moDefaultCatalog(): TokenCatalog | undefined {
+  const e = SOCS.find((s) => s.system) ?? SOCS[0];
+  return e ? { token: e.token, cacheKey: `mo-soc-${e.name}` } : undefined;
+}
+
 /**
  * Resolve the wire channel value ("" / "system" / "soc:<name>") to a launch channel.
- * null = the client named a soc this server doesn't carry (stale tab, mid-deploy env change) —
- * callers surface that as a config error rather than guessing a token. `sys` mirrors the
- * entry's `system` flag (alternate system user: no SOC name marker, `sys:` registry note).
+ * An ABSENT/"system" value resolves to the DEFAULT soc (moDefaultSoc) whenever one is
+ * provisioned — the retired system token is never picked by default any more (owner rule
+ * 09-08); `defaultToSoc: false` keeps the legacy system meaning for non-MO callers. null = the
+ * client named a soc this server doesn't carry (stale tab, mid-deploy env change) — callers
+ * surface that as a config error rather than guessing a token. `sys` mirrors the entry's
+ * `system` flag (alternate system user: no SOC name marker, `sys:` registry note).
  */
-export function resolveMoChannel(raw: unknown): MoChannel | null {
+export function resolveMoChannel(raw: unknown, opts: { defaultToSoc?: boolean } = {}): MoChannel | null {
   const v = String(raw ?? "").trim();
-  if (!v || v === "system") return { kind: "system" };
+  if (!v || v === "system") {
+    const d = opts.defaultToSoc === false ? undefined : (SOCS.find((s) => s.system) ?? SOCS[0]);
+    return d ? toChannel(d) : { kind: "system" };
+  }
   const m = /^soc:(.+)$/.exec(v);
   if (!m) return null;
   const e = SOCS.find((s) => s.name === m[1]);
   if (!e) return null;
-  // Own cache identity per soc: its me/accounts + me/adaccounts catalogs must never bleed into
-  // the system token's (same discipline as the AIF catalog in lib/fb-graph).
-  return { kind: "soc", name: e.name, token: e.token, sys: e.system, cat: { token: e.token, cacheKey: `mo-soc-${e.name}` } };
+  return toChannel(e);
 }

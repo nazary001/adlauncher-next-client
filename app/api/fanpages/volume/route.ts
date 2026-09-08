@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { FbError, advertisablePages, hasFbToken, pageAdCounts } from "@/lib/fb-graph";
 import { hsPagesConfigured, hsToolsPageStats } from "@/lib/hs-pages";
+import { moDefaultCatalog } from "@/lib/mo-soc";
 import { partnerConfig } from "@/lib/partners";
 import { sessionFromCookieHeader } from "@/lib/session";
 
@@ -45,15 +46,18 @@ export async function GET(req: Request) {
     }
   }
 
-  if (!hasFbToken()) return NextResponse.json({ ok: false, reason: "no_token", counts: {} });
+  // Legacy sweep signs as the DEFAULT MO soc (Spencermo — the system user is dead, owner rule
+  // 09-08); the launch token only when no soc is provisioned at all.
+  const cat = moDefaultCatalog();
+  if (!cat && !hasFbToken()) return NextResponse.json({ ok: false, reason: "no_token", counts: {} });
   try {
-    const pages = await advertisablePages();
+    const pages = await advertisablePages(cat);
     // The count is the page's CROSS-account total, so any token account works for the sweep — use
     // the partner's default account. (Was lockedAccount, removed in the 08-08 account-picker
     // migration → this route silently returned no_account and killed every fill badge.)
     const accountId = (partnerConfig("in").defaultAccount?.id ?? "").replace(/^act_/, "");
     if (!accountId) return NextResponse.json({ ok: false, reason: "no_account", counts: {} });
-    const counts = await pageAdCounts(accountId, pages.map((p) => p.id));
+    const counts = await pageAdCounts(accountId, pages.map((p) => p.id), cat);
     return NextResponse.json({ ok: true, mode: "legacy", counts: Object.fromEntries(counts) });
   } catch (e) {
     const err = e as FbError;

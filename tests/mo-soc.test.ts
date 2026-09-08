@@ -30,10 +30,18 @@ test("resolveMoChannel: system default, provisioned soc, system-class entry, unk
     { name: "bad name!", token: "x" }, // invalid label → dropped
     { name: "aleph", token: "dup" }, // duplicate → dropped
   ]);
-  const { moSocNames, resolveMoChannel } = await import("../lib/mo-soc.ts");
+  const { moDefaultSoc, moSocNames, resolveMoChannel } = await import("../lib/mo-soc.ts");
   assert.deepEqual(moSocNames(), ["aleph", "Spencermo"]);
-  assert.deepEqual(resolveMoChannel(undefined), { kind: "system" });
-  assert.deepEqual(resolveMoChannel("system"), { kind: "system" });
+  // Owner rule 09-08: the MO system user is dead — a channel-less request signs as the DEFAULT
+  // soc, the system-class entry (Spencermo) first; the legacy "system" meaning survives only
+  // for callers that opt out (non-MO partners) or when no soc is provisioned at all.
+  assert.deepEqual(moDefaultSoc(), { name: "Spencermo", system: true });
+  const dflt = resolveMoChannel(undefined);
+  assert.equal(dflt?.kind, "soc");
+  if (dflt?.kind === "soc") assert.equal(dflt.name, "Spencermo");
+  assert.equal(resolveMoChannel("system")?.kind, "soc");
+  assert.deepEqual(resolveMoChannel(undefined, { defaultToSoc: false }), { kind: "system" });
+  assert.deepEqual(resolveMoChannel("system", { defaultToSoc: false }), { kind: "system" });
   const soc = resolveMoChannel("soc:aleph");
   assert.equal(soc?.kind, "soc");
   if (soc?.kind === "soc") {

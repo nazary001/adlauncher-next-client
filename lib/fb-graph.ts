@@ -481,7 +481,12 @@ const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
  *  it would stretch the sweep past the function timeout; a missing count is decoration).
  *  ABORTS on the first rate-limit error: once the account is throttled every remaining call
  *  would fail too, and burning them only postpones the quota's recovery. */
-async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<Map<string, number | null>> {
+async function sweepPageAdCounts(
+  accountId: string,
+  pageIds: string[],
+  cat?: TokenCatalog,
+): Promise<Map<string, number | null>> {
+  const token = cat?.token ?? TOKEN;
   const counts = new Map<string, number | null>();
   let next = 0;
   let throttled = false;
@@ -493,7 +498,7 @@ async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<
       try {
         const res = await fetch(
           `${FB}/act_${accountId}/ads_volume?page_id=${id}&fields=ads_running_or_in_review_count`,
-          { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store", signal: AbortSignal.timeout(30_000) },
+          { headers: { Authorization: `Bearer ${token}` }, cache: "no-store", signal: AbortSignal.timeout(30_000) },
         );
         const body = (await res.json().catch(() => ({}))) as Json;
         const err = body.error as { code?: number } | undefined;
@@ -518,7 +523,7 @@ async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<
   // Reality cross-check (see TALLY_STATUSES note): lift every swept page to at least its real
   // running/in-review ad count. Filling a null hole with a tally number is deliberate — the tally
   // DID verify the page token-wide, and the full sweep re-runs each TTL anyway.
-  const tally = await tallyRunningAdsByPage();
+  const tally = await tallyRunningAdsByPage(cat);
   if (tally) {
     for (const id of pageIds) {
       const real = tally.get(id) ?? 0;
@@ -534,10 +539,11 @@ async function sweepPageAdCounts(accountId: string, pageIds: string[]): Promise<
  *  only: it sees just this token's accounts, never other Businesses advertising the same page.
  *  Single-shot per hop like the volume sweep (no retry ladder), aborts on the first rate-limit
  *  answer, one broken account doesn't sink the rest. null = tally unusable (no account covered). */
-async function tallyRunningAdsByPage(): Promise<Map<string, number> | null> {
+async function tallyRunningAdsByPage(cat?: TokenCatalog): Promise<Map<string, number> | null> {
+  const token = cat?.token ?? TOKEN;
   let accounts: TokenAdAccount[];
   try {
-    accounts = await tokenAdAccounts();
+    accounts = await tokenAdAccounts(cat);
   } catch {
     return null;
   }
@@ -555,7 +561,7 @@ async function tallyRunningAdsByPage(): Promise<Map<string, number> | null> {
         for (let hop = 0; hop < 10; hop++) {
           const res = await fetch(
             `${FB}/act_${accounts[i].id}/ads?fields=effective_status,creative{object_story_spec{page_id},object_story_id}&limit=200${after ? `&after=${encodeURIComponent(after)}` : ""}`,
-            { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store", signal: AbortSignal.timeout(30_000) },
+            { headers: { Authorization: `Bearer ${token}` }, cache: "no-store", signal: AbortSignal.timeout(30_000) },
           );
           const body = (await res.json().catch(() => ({}))) as Json;
           const err = body.error as { code?: number } | undefined;
@@ -608,7 +614,13 @@ function setVolumeL1(key: string, state: VolumeState, hasL2: boolean): void {
  * holey state re-sweeps ONLY its null slots (≤ once per minute); a total failure backs off for
  * 5 minutes; previous numbers survive failed refreshes (stale beats empty).
  */
-export async function pageAdCounts(accountId: string, pageIds: string[]): Promise<Map<string, number | null>> {
+export async function pageAdCounts(
+  accountId: string,
+  pageIds: string[],
+  /** The signer's catalog (default: the legacy MO launch token) — the ads_volume reads and the
+   *  tally's account list run on it. */
+  cat?: TokenCatalog,
+): Promise<Map<string, number | null>> {
   // v2: key bumped when the tally cross-check shipped, so rows of trusted all-zeros written by the
   // pre-fix sweep (Meta counter outage) expire out of the picture instead of being served on.
   const key = `fanpage-volume:v2:${accountId}`;
@@ -625,7 +637,7 @@ export async function pageAdCounts(accountId: string, pageIds: string[]): Promis
   }
 
   if (volumeInflight && volumeInflight.key === key) return volumeInflight.promise;
-  const promise = resolveVolume(key, accountId, pageIds).finally(() => {
+  const promise = resolveVolume(key, accountId, pageIds, cat).finally(() => {
     volumeInflight = null;
   });
   volumeInflight = { key, promise };
@@ -636,6 +648,7 @@ async function resolveVolume(
   key: string,
   accountId: string,
   pageIds: string[],
+  cat?: TokenCatalog,
 ): Promise<Map<string, number | null>> {
   const now = Date.now();
   const row = await readAppCache<VolumeState>(key);
@@ -649,7 +662,7 @@ async function resolveVolume(
     if (holes.length > 0 && now >= shared.healAt) {
       shared.healAt = now + VOLUME_HEAL_MS; // claim the heal window before sweeping
       await writeAppCache(key, shared, docId);
-      const part = await sweepPageAdCounts(accountId, holes);
+      const part = await sweepPageAdCounts(accountId, holes, cat);
       let healed = 0;
       for (const [id, v] of part) {
         if (typeof v === "number") {
@@ -675,7 +688,7 @@ async function resolveVolume(
   };
   const claimedId = (await writeAppCache(key, base, docId)) ?? docId;
 
-  const swept = await sweepPageAdCounts(accountId, pageIds);
+  const swept = await sweepPageAdCounts(accountId, pageIds, cat);
   const counts: Record<string, number | null> = {};
   let live = 0;
   for (const id of pageIds) {

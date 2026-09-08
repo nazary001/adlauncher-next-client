@@ -1,12 +1,15 @@
 import { NextResponse } from "next/server";
+import { moDefaultToken } from "@/lib/mo-soc";
 import { sessionFromCookieHeader } from "@/lib/session";
 
 export const runtime = "nodejs";
 // One 15s-bounded Graph read — the function itself gets a matching hard cap.
 export const maxDuration = 30;
 
-// Server-only: the FB launch token never reaches the browser.
-const TOKEN = process.env.FB_LAUNCH_TOKEN ?? "";
+// Server-only: the bearer never reaches the browser. The DEFAULT MO signer's token (Spencermo —
+// the system user gcformo is dead, owner rule 09-08); the legacy launch token only when no soc
+// is provisioned at all.
+const TOKEN = moDefaultToken() || (process.env.FB_LAUNCH_TOKEN ?? "");
 const VER = "v21.0";
 
 /**
