@@ -438,8 +438,13 @@ export function AccountAccessBoard({
     setHs(null);
     try {
       const pr = await fetch("/api/hs/profiles");
-      const pd = (await pr.json().catch(() => ({}))) as { ok?: boolean; profiles?: string[] };
-      const profiles = pr.ok && pd.ok && Array.isArray(pd.profiles) ? pd.profiles : [];
+      const pd = (await pr.json().catch(() => ({}))) as { ok?: boolean; profiles?: Array<string | { slug?: string }> };
+      // /api/hs/profiles answers {slug,label,name} rows since 09-01 (plain slugs before) — read
+      // both; the object form used to make every slug "[object Object]" here (audit 09-09).
+      const profiles =
+        pr.ok && pd.ok && Array.isArray(pd.profiles)
+          ? pd.profiles.map((p) => (typeof p === "string" ? p : String(p?.slug ?? ""))).filter(Boolean)
+          : [];
       // Main pool = the first non-FARM profile (slugs arrive sorted; FARM mirrors carry the
       // side segment, not the 318 VD-C1 accounts the owner splits).
       const slug = profiles.find((p) => !/farm/i.test(p)) ?? profiles[0];

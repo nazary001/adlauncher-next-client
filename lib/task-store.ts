@@ -110,7 +110,7 @@ export function pickTaskFields(body: Record<string, unknown>): TaskRowData {
   return out;
 }
 
-type FoundTaskRow = { documentId: string; owner: string | null; status: string | null };
+type FoundTaskRow = { documentId: string; owner: string | null; status: string | null; stage: string | null };
 
 /**
  * Find one row by task_id. `strict` distinguishes "confirmed absent" (null) from "store failed"
@@ -126,7 +126,7 @@ type FoundTaskRow = { documentId: string; owner: string | null; status: string |
  */
 export async function findTaskRow(taskId: string, strict = false): Promise<FoundTaskRow | null> {
   const res = await strapiFetch(
-    `${STRAPI}/api/launch-tasks?filters[task_id][$eq]=${encodeURIComponent(taskId)}&fields[0]=task_id&fields[1]=owner&fields[2]=status&pagination[pageSize]=1`,
+    `${STRAPI}/api/launch-tasks?filters[task_id][$eq]=${encodeURIComponent(taskId)}&fields[0]=task_id&fields[1]=owner&fields[2]=status&fields[3]=stage&pagination[pageSize]=1`,
     { headers: H(), cache: "no-store" },
   );
   if (!res.ok) {
@@ -140,6 +140,7 @@ export async function findTaskRow(taskId: string, strict = false): Promise<Found
         documentId: row.documentId,
         owner: row.owner ? String(row.owner) : null,
         status: row.status ? String(row.status) : null,
+        stage: row.stage ? String(row.stage) : null,
       }
     : null;
 }

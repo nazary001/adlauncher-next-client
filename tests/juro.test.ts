@@ -278,8 +278,17 @@ test("switched to lowest cost rides an EXPLICIT strategy on the wire; a typed bi
   assert.match((refused as { refusal: string }).refusal, /switched to lowest cost.*clear the Bid/);
 });
 
+test("a COST_CAP source (unswitched) is refused — LION's jurar has no cost cap (audit 09-09)", () => {
+  const refused = juroBidPlan({ sourceStrategy: "COST_CAP", override: "", typedBid: 0.5, sourceBid: 0.5 });
+  assert.match((refused as { refusal: string }).refusal, /COST_CAP.*switch/);
+  // switching such a source to bid cap is the way out
+  const switched = juroBidPlan({ sourceStrategy: "COST_CAP", override: CAP, typedBid: 0.5, sourceBid: 0.5 });
+  assert.equal("refusal" in switched, false);
+});
+
 test("the plan's bid kind agrees with lib/types bidKind for every strategy", () => {
-  for (const s of [LOWEST, CAP, "COST_CAP", ROAS, "", "SOME_EXOTIC_STRATEGY"]) {
+  // COST_CAP is refused up front on this rail (LION's jurar has no cost cap) — pinned above.
+  for (const s of [LOWEST, CAP, ROAS, "", "SOME_EXOTIC_STRATEGY"]) {
     const plan = juroBidPlan({ sourceStrategy: s, override: "", typedBid: null, sourceBid: 1 });
     assert.equal((plan as { kind: string }).kind, bidKind(s), s);
   }

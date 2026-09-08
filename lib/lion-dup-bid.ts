@@ -54,12 +54,21 @@ export function dupBidPlan(args: {
   /** "" = ride the source's strategy. */
   override: string;
   typedBid: number | null;
+  /** The source's OWN bid in human units (LION details, major) — the board prefills the Bid
+   *  field with it, so a "typed" value equal to it is really an inherit in disguise. */
+  sourceBid?: number | null;
   sourceCurrency: string;
   destCurrency: string;
 }): DupBidPlan {
   const strategy = args.override || args.sourceStrategy;
   const switched = Boolean(args.override) && args.override !== args.sourceStrategy;
   const kind = dupBidKind(strategy);
+  if (!strategy && args.typedBid != null) {
+    // LION can't read the source right now (fresh-campaign lag) and the client sent no fallback
+    // — a bid can't be scaled against an unknown strategy (audit 09-09: the old text blamed
+    // "lowest-cost" for what is a read lag).
+    return { refusal: "source strategy unreadable right now (LION lag) — clear the Bid to inherit, or retry in a minute" };
+  }
   if (kind === "none") {
     if (args.typedBid != null) {
       return {
@@ -91,6 +100,22 @@ export function dupBidPlan(args: {
     return { strategy, switched, kind, human: null, wireStrategy: undefined, conversionEvent: undefined };
   }
   if (kind === "roas" && args.typedBid > 100) return { refusal: "roas_goal_invalid" };
+  if (
+    kind === "cap" &&
+    !switched &&
+    args.sourceBid != null &&
+    args.typedBid === args.sourceBid &&
+    args.sourceCurrency &&
+    args.destCurrency &&
+    args.sourceCurrency !== args.destCurrency
+  ) {
+    // The board prefills the Bid with the source's own cap — sent unchanged into an account of
+    // another currency it would ride as that NUMBER in the destination units (audit 09-09:
+    // R$2,45 → $2.45, ~5×). Only a value the buyer actually changed is a destination cap.
+    return {
+      refusal: `source bids ${args.sourceBid} in ${args.sourceCurrency}, the destination account is ${args.destCurrency} — that is the source's own cap, not a ${args.destCurrency} amount; retype the Bid in ${args.destCurrency}`,
+    };
+  }
   return {
     strategy,
     switched,

@@ -102,12 +102,16 @@ export async function POST(req: Request) {
         items.slice(i, i + 8).map(async (item) => {
           const fields = pickTaskFields(item);
           const incoming = String(fields.status ?? "");
+          // STRICT read: a Strapi blip must not read as "row absent" — the zombie-guard below
+          // would swallow a terminal error-write while answering ok:true, and the client never
+          // retries a claimed success. A store failure throws instead → the batch answers 502
+          // below and the client's next save retries it.
+          const existing = await findTaskRow(String(item.task_id), true);
+          // A row the server pump parked on the BID GATE (LION resolved other bidding than the
+          // buyer asked — the clone stays PAUSED) is the pump's verdict: no client poll may flip
+          // it "done"/"running" (audit 09-09 — the read-back guard otherwise leaked through here).
+          if (existing?.status === "error" && existing.stage === "bid-gate") return { ok: true as const };
           if (incoming !== "done") {
-            // STRICT read: a Strapi blip must not read as "row absent" — the zombie-guard on the
-            // next line would swallow a terminal error-write while answering ok:true, and the
-            // client never retries a claimed success. A store failure throws instead → the batch
-            // answers 502 below and the client's next save retries it.
-            const existing = await findTaskRow(String(item.task_id), true);
             if (!existing && failureStates.has(incoming)) return { ok: true as const };
             // done is TERMINAL: a stale tab's heartbeat, 60-min cap or late error must never
             // demote a row that already recorded the real completion (live 08-13: tasks the

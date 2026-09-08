@@ -7,6 +7,13 @@
 
 import type { PartnerId } from "./partners";
 
+/** Money/goal text in the board's cash-register spelling ("1,2" | "1.2" | 1.2 → "1,20"); empty or
+ *  non-positive input stays "" (no goal). Kept import-free — this module is a leaf for node --test. */
+export function twoDecimals(v: string | number | null | undefined): string {
+  const n = Number(String(v ?? "").trim().replace(",", "."));
+  return Number.isFinite(n) && n > 0 ? n.toFixed(2).replace(".", ",") : "";
+}
+
 /** One creative on the source campaign. Clones reuse it by `videoId` (no re-upload). */
 export type CloneCreative = {
   videoId: string;
@@ -226,7 +233,9 @@ export function makeCloneRow(
     placement: source.placement,
     ageMin: source.ageMin,
     bidStrategy: source.bidStrategy,
-    roasGoal: source.originalRoas,
+    // Two-decimal spelling on purpose: the board's field is cash-register (digits fill cents), so
+    // a "1,2" seed read back as 0,12 after one Backspace (audit 09-09); "1,20" is the stable form.
+    roasGoal: twoDecimals(source.originalRoas),
     budget: source.originalBudget,
     redirectType: source.redirectType,
     highOffer: { enabled: source.redirectType === "HIGH ADX", offerId: "", share: "" },

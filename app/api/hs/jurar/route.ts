@@ -477,7 +477,7 @@ async function pumpJuro(user: string, shots: JuroShot[], deadline: number): Prom
       // hs-tools like any picked page (family-scoped: every copy of this source refuses alike).
       const fankaRefusal = await hsPageRefusal("br", wire.pages.map((p) => ({ id: p.pageId })));
       if (fankaRefusal) {
-        familyFailed.set(s.campaignId, fankaRefusal.error);
+        familyFailed.set(familyKey, fankaRefusal.error);
         s.settled = true;
         await rowWrite(user, s.taskId, { status: "error", error: fankaRefusal.error, finished_at: Date.now() });
         continue;
@@ -600,6 +600,7 @@ async function pumpJuro(user: string, shots: JuroShot[], deadline: number): Prom
         const tasks = await lionCreationStatus([...new Set(pending.map((s) => s.lionTaskId as string))]);
         const byId = new Map(tasks.map((t) => [String(t.task_id ?? ""), t]));
         let accountWall: string | null = null;
+        let accountWallAcct = "";
         for (const s of pending) {
           // A family-wall sweep below may have settled this shot within the same pass.
           if (s.settled) continue;
@@ -630,6 +631,7 @@ async function pumpJuro(user: string, shots: JuroShot[], deadline: number): Prom
             await settleWall(s, wall.reason);
             if (wall.scope === "account") {
               accountWall = wall.reason;
+              accountWallAcct = acctKey(s.binds.account);
             } else {
               // Family wall (geo-bound): the source's other pending copies hit it identically —
               // settle them now instead of letting them spin on LION's retry loop.
@@ -640,9 +642,12 @@ async function pumpJuro(user: string, shots: JuroShot[], deadline: number): Prom
           }
         }
         if (accountWall) {
-          // One wave = one target account — the wall deterministically kills every other shot.
-          for (const s of shots.filter((x) => !x.settled)) await settleWall(s, accountWall);
-          break;
+          // An account wall (certification) kills every shot bound to THAT account — rows on
+          // other destinations keep going (per-row destinations 09-08; audit 09-09 found the
+          // old whole-wave sweep pausing healthy clones elsewhere).
+          const hit = shots.filter((x) => !x.settled && acctKey(x.binds.account) === accountWallAcct);
+          for (const s of hit) await settleWall(s, accountWall);
+          if (!shots.some((x) => x.lionTaskId && !x.settled)) break;
         }
         if (Date.now() - lastReality > 40_000) {
           lastReality = Date.now();

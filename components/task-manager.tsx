@@ -369,7 +369,8 @@ function TaskManagerCore({
   /** Pull the whole team's tasks and merge them in. My in-session tasks stay authoritative; every
    *  other row mirrors the fetch (so a teammate's dismiss disappears here too). */
   const loadRemote = useCallback(() => {
-    fetch(scope.api)
+    // Bounded like the HS drawer's poll (20s): a hung Strapi read must not pile up open polls.
+    fetch(scope.api, { signal: AbortSignal.timeout(20_000) })
       .then(async (r) => {
         if (r.status === 401) {
           // Session died — stop hammering; the next focus/visibility re-arms polling.
