@@ -165,6 +165,33 @@ async function readRow(ckey: string): Promise<Row | null> {
   return shapeRow((body.data?.[0] ?? {}) as { documentId?: unknown; ckey?: unknown; cvalue?: unknown });
 }
 
+/**
+ * Read the window anchor for a ckey, HEALING any duplicate rows a past race left behind. Strapi's
+ * unique ckey has a proven TOCTOU hole (two concurrent POSTs can both 2xx — see wonRow), and the
+ * window POST has no wonRow dedup like the slot claim does, so two anchors can coexist. A duplicate
+ * is doubly harmful: it splits slot counting (deriveSnapshot keys slots off ONE anchor's ws), and
+ * it makes the expiry anchor-move PUT collide on the unique ckey — the "put 400" that fails the
+ * whole launch closed. Keep the earliest row (createdAt asc, the same "earliest wins" rule wonRow
+ * uses), delete the rest best-effort, return the survivor. */
+async function readWindow(ckey: string): Promise<Row | null> {
+  const res = await strapiFetch(
+    `${STRAPI}/api/app-caches?filters[ckey][$eq]=${encodeURIComponent(ckey)}` +
+      `&sort[0]=createdAt:asc&sort[1]=documentId:asc&fields[0]=ckey&fields[1]=cvalue&pagination[pageSize]=10`,
+    { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
+  ).catch((e) => {
+    throw storeDown(String(e));
+  });
+  if (!res.ok) throw storeDown(`read ${res.status}`);
+  const body = (await res.json().catch(() => ({}))) as { data?: unknown[] };
+  const rows = (body.data ?? [])
+    .map((r) => shapeRow(r as { documentId?: unknown; ckey?: unknown; cvalue?: unknown }))
+    .filter((r): r is Row => r !== null);
+  if (rows.length === 0) return null;
+  const [keep, ...extra] = rows;
+  for (const dup of extra) await deleteRow(dup.documentId); // best-effort heal
+  return keep;
+}
+
 /** POST a row. `{unique:true}` on a 400 (ckey taken — the atomic signal); throws when the store
  *  itself fails. */
 async function postRow(
@@ -186,11 +213,14 @@ async function postRow(
   return { documentId };
 }
 
-async function putRow(documentId: string, ckey: string, cvalue: unknown): Promise<void> {
+async function putRow(documentId: string, cvalue: unknown): Promise<void> {
+  // Deliberately WITHOUT ckey: it is immutable, so an update never needs it, and re-sending it
+  // re-runs Strapi's unique check — which 400s if a duplicate anchor exists (the exact "put 400"
+  // fail-closed that killed launches). Omitting ckey leaves it untouched (partial update).
   const res = await strapiFetch(`${STRAPI}/api/app-caches/${documentId}`, {
     method: "PUT",
     headers: HEADERS(),
-    body: JSON.stringify({ data: { ckey, cvalue, refreshed_at: Date.now() } }),
+    body: JSON.stringify({ data: { cvalue, refreshed_at: Date.now() } }),
   }).catch((e) => {
     throw storeDown(String(e));
   });
@@ -256,7 +286,7 @@ export async function claimAcctSlot(
 
   for (let attempt = 0; attempt < 3; attempt++) {
     const now = Date.now();
-    let wrow = await readRow(wkey);
+    let wrow = await readWindow(wkey);
     if (!wrow) {
       const res = await postRow(wkey, { ws: now });
       wrow = "documentId" in res ? { documentId: res.documentId, ckey: wkey, value: { ws: now } } : await readRow(wkey);
@@ -266,7 +296,7 @@ export async function claimAcctSlot(
     if (!windowActive(ws, now)) {
       // Expired (or garbage) anchor → move it, then ADOPT whatever concurrent writers settled on:
       // last-write-wins converges, and every claimant keys its slots off the stored value.
-      await putRow(wrow.documentId, wkey, { ws: now });
+      await putRow(wrow.documentId, { ws: now });
       const re = await readRow(wkey);
       if (!re) continue;
       wrow = re;
