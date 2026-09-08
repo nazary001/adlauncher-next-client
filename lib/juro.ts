@@ -90,6 +90,13 @@ export function juroBidPlan(args: {
   const strategy = args.override || args.sourceStrategy;
   const switched = Boolean(args.override) && args.override !== args.sourceStrategy;
   const kind = juroBidKind(strategy);
+  if (kind !== "none" && !juroLionStrategyAccepted(strategy)) {
+    // An unswitched COST_CAP source would ride `bid_strategy: COST_CAP` onto a wire LION's
+    // jurar doesn't document (audit 09-09) — the shot would die inside LION with no reason.
+    return {
+      refusal: `source bids ${strategy} — LION's jurar takes lowest cost / bid cap / min ROAS only; switch the row's strategy`,
+    };
+  }
   if (kind === "none") {
     if (args.typedBid != null) {
       return {

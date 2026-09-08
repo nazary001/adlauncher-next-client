@@ -52,6 +52,22 @@ test("cap source, no bid, different destination currency → refusal naming both
   assert.match((refused as { refusal: string }).refusal, /BRL.*USD.*type a Bid in USD/);
 });
 
+test("a PREFILLED source bid (typed == source's own) across currencies is refused like an inherit (audit 09-09: R$2,45 rode as $2.45)", () => {
+  const refused = dupBidPlan({ sourceStrategy: CAP, override: "", typedBid: 2.45, sourceBid: 2.45, sourceCurrency: "BRL", destCurrency: "USD" });
+  assert.match((refused as { refusal: string }).refusal, /BRL.*USD.*retype the Bid in USD/);
+  // a genuinely different typed value is the buyer's own destination-currency cap → rides
+  const typed = dupBidPlan({ sourceStrategy: CAP, override: "", typedBid: 0.5, sourceBid: 2.45, sourceCurrency: "BRL", destCurrency: "USD" });
+  assert.equal("refusal" in typed, false);
+  // same currency → the prefilled value is simply the source's cap, fine
+  const same = dupBidPlan({ sourceStrategy: CAP, override: "", typedBid: 2.45, sourceBid: 2.45, sourceCurrency: "USD", destCurrency: "USD" });
+  assert.equal("refusal" in same, false);
+});
+
+test("unreadable source strategy (LION lag) with a typed bid → names the lag, not 'lowest-cost'", () => {
+  const refused = dupBidPlan({ sourceStrategy: "", override: "", typedBid: 0.5, sourceCurrency: "", destCurrency: "USD" });
+  assert.match((refused as { refusal: string }).refusal, /source strategy unreadable/);
+});
+
 test("ROAS goals are multipliers — inheriting across currencies is fine; unknown currencies never block", () => {
   const roas = dupBidPlan({ sourceStrategy: ROAS, override: "", typedBid: null, sourceCurrency: "BRL", destCurrency: "USD" });
   assert.equal("refusal" in roas, false);

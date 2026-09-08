@@ -600,7 +600,7 @@ const rowWrite = (user: string, taskId: string, fields: Record<string, unknown>)
  */
 async function pumpBatch(user: string, shots: BatchShot[], deadline: number): Promise<void> {
   try {
-    const factsCache = new Map<string, { bidStrategy: string; currency: string }>();
+    const factsCache = new Map<string, { bidStrategy: string; currency: string; bid: number | null }>();
     const adsCountCache = new Map<string, number>();
     const familyFailed = new Map<string, string>();
 
@@ -651,6 +651,7 @@ async function pumpBatch(user: string, shots: BatchShot[], deadline: number): Pr
           sourceStrategy: facts.bidStrategy || s.bidStrategy,
           override: s.bidStrategyOverride,
           typedBid: s.bid,
+          sourceBid: facts.bid,
           sourceCurrency: facts.currency,
           destCurrency: s.currency,
         });
@@ -722,7 +723,20 @@ async function pumpBatch(user: string, shots: BatchShot[], deadline: number): Pr
             { strategy: plan.wireStrategy ?? (plan.human != null ? plan.strategy : undefined), roasGoal, startingBid },
             result.bidding,
           );
-          if (mismatch) s.biddingMismatch = mismatch;
+          if (mismatch) {
+            s.biddingMismatch = mismatch;
+            // Park the row on the BID GATE right now, not at finalize: the owner's open tab polls
+            // the same LION task and would activate the clone on COMPLETED (and the pump may die
+            // at its deadline before finalize) — an error row with stage "bid-gate" is neither
+            // polled nor activated by the client, /api/hs/activate refuses it, and /api/hs-tasks
+            // keeps it (audit 09-09). finalize adds the campaign id and re-pauses the clone.
+            await rowWrite(user, s.taskId, {
+              status: "error",
+              stage: "bid-gate",
+              error: `${mismatch} — the clone will be left PAUSED; verify its bidding in LION / Ads Manager before activating`,
+              finished_at: Date.now(),
+            });
+          }
           if (result.warnings?.length) {
             console.warn(`[hs-duplicate] LION warnings for ${s.campaignId} (${lionTaskId}): ${result.warnings.join(" | ")}`);
           }
@@ -849,7 +863,9 @@ async function pumpBatch(user: string, shots: BatchShot[], deadline: number): Pr
           // Meta's min-ROAS eligibility rejection (code 100 / subcode 2446671, partner docs
           // 09-09): LION retries the requested strategy forever and never launches another —
           // settle now with the reason; a born shell stays PAUSED (best-effort pause rides along).
-          const wall = lionRoasWall(r.error?.message);
+          // (A COMPLETED task may still carry its LAST error text — only an in-progress task is a
+          // wall; the COMPLETED branch below wins, as in the JURO pump.)
+          const wall = r.status === "COMPLETED" ? null : lionRoasWall(r.error?.message);
           if (wall) {
             s.settled = true;
             if (s.cloneId) await lionSetCampaignStatus(s.cloneId, "PAUSED").catch(() => {});

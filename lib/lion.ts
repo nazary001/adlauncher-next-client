@@ -443,7 +443,9 @@ export async function lionJuroSources(campaignIds: string[]): Promise<Record<str
       locales,
       adsCount: ads.length,
       bidStrategy: String(d.bid_strategy ?? ""),
-      bid: typeof bidRaw === "number" ? bidRaw : null,
+      // A numeric 0 (lowest-cost sources on some reads) is "no bid", not a cap of 0,00 — the
+      // board would prefill "0,00" into a disabled field and the wave die on bid_invalid (audit 09-09).
+      bid: typeof bidRaw === "number" && bidRaw > 0 ? bidRaw : null,
     };
   }
   // MIN_ROAS goals never appear in details/ — metrics is the only read that has them (same
@@ -650,7 +652,9 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
       name: String(d.campaign_name ?? ""),
       status: String(d.campaign_status ?? ""),
       budget: typeof d.campaign_budget === "number" ? d.campaign_budget : null,
-      bid: typeof bidRaw === "number" ? bidRaw : null,
+      // A numeric 0 (lowest-cost sources on some reads) is "no bid", not a cap of 0,00 — the
+      // board would prefill "0,00" into a disabled field and the wave die on bid_invalid (audit 09-09).
+      bid: typeof bidRaw === "number" && bidRaw > 0 ? bidRaw : null,
       bidStrategy: String(d.bid_strategy ?? ""),
       currency: String(d.account_currency ?? ""),
       adsCount: ads.length,
@@ -681,18 +685,30 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
  *  both). "" = source unreadable right now ("Campaign data not found" — known LION lag on fresh
  *  campaigns). Uncached: one submit-time read, and a stale answer here would mis-scale a bid or
  *  let a cross-currency inherit reach LION's rejection. */
-export async function lionSourceBidFacts(campaignId: string): Promise<{ bidStrategy: string; currency: string }> {
+export async function lionSourceBidFacts(campaignId: string): Promise<{ bidStrategy: string; currency: string; bid: number | null }> {
   try {
     const body = (await lionPost("/api/facebook/campaigns/details/", {
       campaign_ids: [campaignId],
     })) as Record<string, unknown> | null;
     const rows = Array.isArray(body?.campaignsData)
-      ? (body!.campaignsData as Array<{ campaign_id?: string | number; bid_strategy?: string; account_currency?: string }>)
+      ? (body!.campaignsData as Array<{
+          campaign_id?: string | number;
+          bid_strategy?: string;
+          account_currency?: string;
+          adsets?: Array<{ bid_amount?: number; adset_bid?: number }>;
+        }>)
       : [];
     const row = rows.find((r) => String(r.campaign_id ?? "") === campaignId);
-    return { bidStrategy: String(row?.bid_strategy ?? ""), currency: String(row?.account_currency ?? "") };
+    // The source's own cap (major, as LION reads) — the board prefills the Bid with it, and the
+    // plan must tell that prefill from a value the buyer typed (cross-currency guard, audit 09-09).
+    const bidRaw = row?.adsets?.[0]?.bid_amount ?? row?.adsets?.[0]?.adset_bid;
+    return {
+      bidStrategy: String(row?.bid_strategy ?? ""),
+      currency: String(row?.account_currency ?? ""),
+      bid: typeof bidRaw === "number" && bidRaw > 0 ? bidRaw : null,
+    };
   } catch {
-    return { bidStrategy: "", currency: "" };
+    return { bidStrategy: "", currency: "", bid: null };
   }
 }
 

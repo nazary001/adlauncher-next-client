@@ -20,19 +20,22 @@ const bad = (error: string, status = 400) => NextResponse.json({ ok: false, erro
  * Fail-open on a store blip: ordinary duplicates must still activate, and the pump + client
  * belts keep gated clones paused regardless.
  */
-async function overrideGated(campaignId: string): Promise<boolean> {
-  if (!STRAPI || !STRAPI_TOKEN) return false;
+async function overrideGated(campaignId: string): Promise<"" | "geo-gate" | "bid-gate"> {
+  if (!STRAPI || !STRAPI_TOKEN) return "";
   try {
     const res = await strapiFetch(
       `${STRAPI}/api/launch-tasks?filters[campaign_id][$eq]=${encodeURIComponent(campaignId)}` +
         `&filters[partner][$eq]=br&sort[0]=updatedAt:desc&fields[0]=stage&pagination[pageSize]=1`,
       { headers: { Authorization: `Bearer ${STRAPI_TOKEN}` }, cache: "no-store" },
     );
-    if (!res.ok) return false;
+    if (!res.ok) return "";
     const body = (await res.json().catch(() => null)) as { data?: Array<{ stage?: unknown }> } | null;
-    return String(body?.data?.[0]?.stage ?? "") === "geo-gate";
+    const stage = String(body?.data?.[0]?.stage ?? "");
+    // geo-gate: the override patch hasn't landed; bid-gate: LION resolved other bidding than
+    // requested (duplicate v2 read-back) — both keep the clone PAUSED until a human looks.
+    return stage === "geo-gate" || stage === "bid-gate" ? stage : "";
   } catch {
-    return false;
+    return "";
   }
 }
 
@@ -57,9 +60,16 @@ export async function POST(req: Request): Promise<NextResponse> {
   const campaignId = String(body.campaignId ?? "").trim();
   if (!/^\d{5,}$/.test(campaignId)) return bad("campaign_id_invalid");
 
-  if (await overrideGated(campaignId)) {
+  const gate = await overrideGated(campaignId);
+  if (gate === "geo-gate") {
     return bad(
       "override_not_patched — this clone's geo override has not landed yet; it stays PAUSED (the pump activates it after the patch, or set the targeting in Ads Manager and activate there)",
+      409,
+    );
+  }
+  if (gate === "bid-gate") {
+    return bad(
+      "bid_gate — LION resolved other bidding than requested for this clone; it stays PAUSED until its bid strategy / goal is verified in LION or Ads Manager and activated there",
       409,
     );
   }

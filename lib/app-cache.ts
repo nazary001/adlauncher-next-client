@@ -57,17 +57,20 @@ export async function writeAppCache<T>(
   documentId?: string | null,
 ): Promise<string | null> {
   if (!STRAPI || !TOKEN) return null;
-  const payload = JSON.stringify({ data: { ckey: key, cvalue: value, refreshed_at: Date.now() } });
   const headers = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
   try {
     if (documentId) {
+      // PUT carries NO ckey: re-sending the unique key on an update trips Strapi's uniqueness
+      // check whenever a duplicate row exists ("put 400", the class e7ef117 fixed for acct-limit)
+      // — and a failed PUT must NOT fall through to a POST of the same ckey (one more duplicate).
       const res = await strapiFetch(`${STRAPI}/api/app-caches/${documentId}`, {
         method: "PUT",
         headers,
-        body: payload,
+        body: JSON.stringify({ data: { cvalue: value, refreshed_at: Date.now() } }),
       });
-      if (res.ok) return documentId;
+      return res.ok ? documentId : null;
     }
+    const payload = JSON.stringify({ data: { ckey: key, cvalue: value, refreshed_at: Date.now() } });
     const res = await strapiFetch(`${STRAPI}/api/app-caches`, { method: "POST", headers, body: payload });
     if (!res.ok) return null;
     const body = (await res.json().catch(() => ({}))) as { data?: { documentId?: string } };

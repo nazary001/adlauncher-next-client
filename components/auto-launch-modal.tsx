@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Campaign } from "@/lib/types";
+import { limitMoney, parseMoney } from "@/lib/types";
 import type { AutoLandingJob } from "@/lib/auto-landings";
 
 type Prepared = {
@@ -21,9 +22,9 @@ type Page = { id: string; name: string };
 type Pixel = { id: string; name: string };
 type Account = { id: string; name: string; pixels: Pixel[] };
 
-const FIRE_STAGES = ["gcm", "processing", "campaign", "adset", "creative", "ad"] as const;
+const FIRE_STAGES = ["gcm", "video", "processing", "campaign", "adset", "creative", "ad"] as const;
 const STAGE_LABEL: Record<string, string> = {
-  gcm: "Reserving code", processing: "Preparing creative", campaign: "Creating campaign",
+  gcm: "Reserving code", video: "Uploading creative", processing: "Preparing creative", campaign: "Creating campaign",
   adset: "Creating ad set", creative: "Building creative", ad: "Publishing ad",
 };
 const newTaskId = () => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
@@ -141,7 +142,9 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
     setPixelId((cur) => (cur && acct.pixels.some((p) => p.id === cur) ? cur : acct.pixels[0]?.id ?? ""));
   }, [acct]);
 
-  const canFire = Boolean(prep && channel && pageId && accountId && pixelId && Number(budget) >= 1 && !firing && !result?.ok);
+  // parseMoney reads the board's comma money ("12,50") — Number() would read it as NaN and a
+  // stripped "1250" as $1250 (audit 09-09).
+  const canFire = Boolean(prep && channel && pageId && accountId && pixelId && parseMoney(budget) >= 1 && !firing && !result?.ok);
 
   const fire = useCallback(async () => {
     if (!prep || !canFire) return;
@@ -299,7 +302,15 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
               </div>
               <div className="flex flex-col gap-1">
                 <span className={label}>Daily budget $</span>
-                <input className={sel} value={budget} inputMode="decimal" onChange={(e) => setBudget(e.target.value.replace(/[^\d.]/g, ""))} />
+                <input
+                  className={sel}
+                  value={budget}
+                  inputMode="decimal"
+                  // Same money sanitizer as the campaign card: digits + ONE separator (comma or
+                  // dot). The old digits-and-dot strip turned the board-convention "12,50" into
+                  // 1250 → $1250/day on an ACTIVE-born launch (audit 09-09).
+                  onChange={(e) => setBudget(limitMoney(e.target.value, 10000))}
+                />
               </div>
               <div className="flex flex-col gap-1">
                 <span className={label}>Bid</span>

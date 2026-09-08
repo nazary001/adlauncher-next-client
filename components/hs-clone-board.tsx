@@ -12,6 +12,7 @@ import { lionNameSuffix } from "@/lib/hs-clone-name";
 import { BID_STRATEGIES, geoSummary } from "@/lib/catalog";
 import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { juroEnsureMark, juroLionStrategyAccepted } from "@/lib/juro";
+import { makeGate } from "@/lib/launch-guards";
 import { relabelNameGeo } from "@/lib/targeting-override";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import type { PartnerId } from "@/lib/partners";
@@ -207,6 +208,8 @@ export function HsCloneBoard({
   const [copies, setCopies] = useState("1");
   const [previewed, setPreviewed] = useState(false);
   const [firing, setFiring] = useState(false);
+  /** Synchronous double-click latch for the fire button (the React state above re-renders too late). */
+  const fireGate = useRef(makeGate());
   // Pre-fire refusal (token pool down / wave over the per-fire cap) — an inline warn box under
   // the fire button instead of a blocking alert() dialog. Cleared on the next preview/gate pass.
   // `juro` = the refusal has a LION-native way out: the note offers the one-click JURO switch.
@@ -393,7 +396,15 @@ export function HsCloneBoard({
     setPreviewed(false);
   };
   const removeRow = (id: string) => {
-    setRows((rs) => rs.filter((r) => r.id !== id));
+    setRows((rs) => {
+      const gone = rs.find((r) => r.id === id);
+      const next = rs.filter((r) => r.id !== id);
+      // Free the fetch claim when no other row carries this id — a re-added id must be read
+      // again (audit 09-09: it stayed claimed → factless row, no Retry, fired blind).
+      const cid = gone?.campaignId.trim();
+      if (cid && !next.some((r) => r.campaignId.trim() === cid)) fetchedRef.current.delete(cid);
+      return next;
+    });
     setPreviewed(false);
   };
   /** Re-arm one failed LION read: free the fetch claim and clear the flag — the sources effect
@@ -730,8 +741,18 @@ export function HsCloneBoard({
     const dest = rowDestCurrency(r);
     return dest && dest !== r.info.currency ? { src: r.info.currency, dest } : null;
   };
-  const currencyBidMissing = validRows.filter((r) => rowCurrencyGap(r) !== null && !r.bid.trim()).length;
-  const currencyRetype = validRows.filter((r) => rowCurrencyGap(r) !== null && r.bid.trim()).length;
+  /** The Bid field is PREFILLED with the source's own cap (same spelling) — across currencies
+   *  that value is the source's amount, not a destination cap, so it counts as "not typed"
+   *  (audit 09-09: R$2,45 would ride as $2.45); the server refuses the same shape. */
+  const bidIsSourcePrefill = (r: Row): boolean =>
+    r.info?.bid != null && r.bid.trim() === r.info.bid.toFixed(2).replace(".", ",");
+  const currencyBidMissing = validRows.filter((r) => rowCurrencyGap(r) !== null && (!r.bid.trim() || bidIsSourcePrefill(r))).length;
+  const currencyRetype = validRows.filter((r) => rowCurrencyGap(r) !== null && r.bid.trim() && !bidIsSourcePrefill(r)).length;
+  /** A strategy picked on another rail that THIS rail can't take (LION's jurar has no cost cap)
+   *  — the select keeps it visible as the "exotic" option, so the fire must block instead of the
+   *  whole wave dying on bid_strategy_invalid (audit 09-09). */
+  const strategyUnsupported =
+    effDupChannel === "juro" ? validRows.filter((r) => rowSwitched(r) && !juroLionStrategyAccepted(r.bidStrategy)).length : 0;
 
   // The server pump takes the whole wave in ONE call and paces/polls/activates it after the
   // response (fire-and-forget, owner ask 08-14) — its shot cap must fit the pump's time budget.
@@ -791,6 +812,7 @@ export function HsCloneBoard({
     fankaOver ||
     strategyBidMissing > 0 ||
     currencyBidMissing > 0 ||
+    strategyUnsupported > 0 ||
     hiddenRows > 0 ||
     limits.staleBuild;
 
@@ -833,6 +855,9 @@ export function HsCloneBoard({
       });
       return;
     }
+    // Synchronous latch UNDER the React `firing` state: a second click before the re-render
+    // would otherwise POST the same wave twice (two pumps → every clone doubled, audit 09-09).
+    if (!fireGate.current.enter()) return;
     setFireNote(null);
     setFiring(true);
     // ONE batch POST: the server stamps every row into the shared store, answers immediately and
@@ -947,6 +972,9 @@ export function HsCloneBoard({
       const d = (await res.json().catch(() => ({}))) as { ok?: boolean; queued?: number; error?: string };
       if (d?.ok) {
         waveRef.current = null; // accepted — the next wave is a new wave
+        // Re-arm the Preview step: a second click on the same button must not be a second,
+        // identical wave (the MO board re-arms the same way — audit 09-09).
+        setPreviewed(false);
         // Preflight answers now land on the task rows (shared store), not here — the drawer is
         // the place to watch; the board rows just confirm the hand-off.
         validRows.forEach((r) =>
@@ -962,6 +990,7 @@ export function HsCloneBoard({
       validRows.forEach((r) => patchRow(r.id, { state: "error", msg }));
     } finally {
       setFiring(false);
+      fireGate.current.exit();
     }
   }
 
@@ -1390,6 +1419,13 @@ export function HsCloneBoard({
                   {currencyRetype} row{currencyRetype === 1 ? "" : "s"}: the source bids in another currency than the
                   destination account — the Bid rides in the destination currency (0,50 BRL ≠ 0,50 USD), retype it
                   if needed.
+                </p>
+              ) : null}
+              {strategyUnsupported > 0 ? (
+                <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
+                  {strategyUnsupported} row{strategyUnsupported === 1 ? " is" : "s are"} switched to a strategy LION&apos;s
+                  JURO can&apos;t take (no cost cap there) — pick bid cap / min ROAS / lowest cost on{" "}
+                  {strategyUnsupported === 1 ? "that row" : "those rows"}.
                 </p>
               ) : null}
               {hiddenRows > 0 ? (

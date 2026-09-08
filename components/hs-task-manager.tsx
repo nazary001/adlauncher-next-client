@@ -121,7 +121,10 @@ function humaniseLionNote(raw: string): string {
  *  ROAS floors wedged CREATING_ADSET indefinitely). Scoped to the bid-constraint class only:
  *  broader "invalid …" texts can be transient (e.g. the campaign-id replication race). */
 function isPermanentLionError(raw: string): boolean {
-  return /roas.?average.?floor|bid constraint/i.test(raw);
+  // + Meta's min-ROAS eligibility rejection (code 100 / subcode 2446671, partner docs 09-09):
+  // LION keeps the task on the requested strategy forever — the server pumps settle it, and
+  // this keeps the client poll from flipping that settled row back to "running" (audit 09-09).
+  return /roas.?average.?floor|bid constraint|2446671|Minimum ROAS Isn.?t Available/i.test(raw);
 }
 
 /** LION creation-status → local stage key + human label. */
@@ -955,7 +958,9 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         // it from here would put spend on the SOURCE geo (review find 08-24). The guard sits
         // BEFORE the once-marker so the task can still activate later, once the stage changes.
         const gated = tasksRef.current.find((x) => x.id === taskId);
-        if (gated?.stage === "geo-gate") return;
+        // Any "*-gate" stage is a server verdict: geo-gate (override patch pending) and bid-gate
+        // (LION resolved other bidding than requested — duplicate v2 read-back, audit 09-09).
+        if (gated?.stage && /-gate$/.test(gated.stage)) return;
         if (activatedRef.current.has(taskId)) return;
         activatedRef.current.add(taskId);
         void fetch("/api/hs/activate", {

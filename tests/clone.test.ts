@@ -11,6 +11,7 @@ import {
   normalizeRowDest,
   rowDestination,
   splitCloneName,
+  twoDecimals,
 } from "../lib/clone.ts";
 
 const src: CloneSource = {
@@ -105,4 +106,15 @@ test("splitCloneName re-dates and marks the prefix (unchanged contract)", () => 
     prefix: "[06/08] (CLONE) - (t1) - ",
     name: "[ES] - X",
   });
+});
+
+// ---- twoDecimals: the ROAS/cap seed must be cash-register spelling (audit 09-09: "1,2" → 0,12) ----
+
+test("twoDecimals: board spelling with two decimals; empty / non-positive → empty", () => {
+  assert.equal(twoDecimals("1,2"), "1,20");
+  assert.equal(twoDecimals("0.5"), "0,50");
+  assert.equal(twoDecimals(2), "2,00");
+  assert.equal(twoDecimals(""), "");
+  assert.equal(twoDecimals("0"), "");
+  assert.equal(twoDecimals(undefined), "");
 });

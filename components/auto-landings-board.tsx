@@ -934,7 +934,11 @@ export function AutoLandingsBoard({ user }: { user: SessionUser }) {
                 </p>
               ) : null}
 
-              {jobs === null ? (
+              {loadError && jobs === null ? (
+                // The error branch must come BEFORE the skeleton: with the old order a failed
+                // first load showed the skeleton forever (audit 09-09).
+                <p className="px-4 py-6 text-center text-[12px] text-danger">Queue unavailable: {loadError}</p>
+              ) : jobs === null ? (
                 <div className="flex flex-col">
                   {Array.from({ length: 4 }, (_, i) => (
                     <div key={i} className="flex animate-pulse items-center gap-3 border-b border-line/60 px-4 py-3.5 last:border-b-0">
@@ -944,8 +948,6 @@ export function AutoLandingsBoard({ user }: { user: SessionUser }) {
                     </div>
                   ))}
                 </div>
-              ) : loadError && jobs === null ? (
-                <p className="px-4 py-6 text-center text-[12px] text-danger">Queue unavailable: {loadError}</p>
               ) : shown.length === 0 ? (
                 <p className="px-4 py-8 text-center text-[12px] text-faint">
                   {jobs.length === 0
