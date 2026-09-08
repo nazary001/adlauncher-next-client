@@ -2,6 +2,7 @@
 // the bearer token, the retry policy and the read caches — routes stay thin.
 
 import { juroStoryPages } from "./juro";
+import { activateRetryDelay } from "./activate-retry";
 
 const BASE = (process.env.LION_BASE || "https://lion.highstakes.tech").replace(/\/+$/, "");
 const TOKEN = process.env.LION_TOKEN ?? "";
@@ -482,6 +483,27 @@ export async function lionSetCampaignStatus(
     // geo (review find 08-24) — a false "not confirmed" retry is the safe direction there.
     if (status === "ACTIVE" && /does not have permission/i.test(msg)) return { ok: true, alreadyActive: true };
     return { ok: false, message: msg };
+  }
+}
+
+/**
+ * Activate a campaign LION has just born, retrying the one refusal that heals by waiting:
+ * `{id}/status/` answers "Campaign not found" until LION's own store syncs the newborn (seconds
+ * to a minute — live 09-09 on a JURO clone WITH ads; the 09-08 duplicate "activate race" left a
+ * born-PAUSED clone paused forever under a green row after a single attempt). Policy in
+ * lib/activate-retry (tested); every other answer returns at once.
+ */
+export async function lionActivateWithRetry(
+  campaignId: string,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<{ ok: boolean; alreadyActive?: boolean; message?: string; attempts: number }> {
+  let attempt = 0;
+  for (;;) {
+    attempt++;
+    const r = await lionSetCampaignStatus(campaignId, "ACTIVE");
+    const wait = activateRetryDelay(r, attempt);
+    if (wait == null) return { ...r, attempts: attempt };
+    await sleep(wait);
   }
 }
 

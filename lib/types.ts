@@ -195,6 +195,22 @@ export function bidKind(strategy: string): "none" | "cap" | "roas" {
  *   10 < goal < 20 → ambiguous (1,2? 0,12?) → null = refuse, the buyer must retype.
  * Rounded to 4 decimals — the Meta wire unit is the floor × 10000 integer.
  */
+/**
+ * The MO/AIF `[DD/MM]` born-prefix date of a campaign name as `DD.MM` — ALWAYS the team's
+ * (Kyiv) calendar day, the zone the auto-landings prepare-launch route stamps too (HS names keep
+ * LION's São Paulo day through hs-launch todaySaoPauloDDMM). Never the renderer's clock: the
+ * boards are server-rendered on Vercel (UTC) and hydrated in the buyer's zone, and a clock-local
+ * date differed between the two for hours every night (React #418 hydration error on every
+ * board open, live 09-09) and stamped zone-dependent born-dates across the team. Deterministic
+ * for a given instant on server and client alike.
+ */
+export function todayPrefixDDMM(now: Date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Kyiv", day: "2-digit", month: "2-digit" }).formatToParts(now);
+  const day = parts.find((p) => p.type === "day")?.value ?? "01";
+  const month = parts.find((p) => p.type === "month")?.value ?? "01";
+  return `${day}.${month}`;
+}
+
 export function normalizeRoasGoal(goal: number): number | null {
   if (!Number.isFinite(goal) || goal <= 0) return null;
   if (goal < 2) return goal;

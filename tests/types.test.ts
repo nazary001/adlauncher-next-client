@@ -1,7 +1,22 @@
 // Node's built-in runner (v24 strips types natively): `node --test tests/types.test.ts`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bidAmountMissing, limitMoneyCents, moneyCentsLabel, normalizeRoasGoal, parseMoney } from "../lib/types.ts";
+import { bidAmountMissing, limitMoneyCents, moneyCentsLabel, normalizeRoasGoal, parseMoney, todayPrefixDDMM } from "../lib/types.ts";
+
+// ---- todayPrefixDDMM: the MO/AIF [DD/MM] born-prefix date is the team's (Kyiv) calendar day ----
+// (live 09-09: the launcher/clone boards computed it from the RENDERER's clock — Vercel's UTC on
+// the server, the buyer's zone in the browser — so every night the server HTML said [08/09] and
+// the client [09/09] → React #418 hydration error on every board open, and buyers in different
+// zones stamped different born-dates. Kyiv is the team's zone — the same one the auto-landings
+// prepare-launch route stamps; HS keeps São Paulo through hs-launch todaySaoPauloDDMM.)
+
+test("prefix date is Kyiv's calendar day, DD.MM — identical on server and client", () => {
+  assert.equal(todayPrefixDDMM(new Date("2026-09-08T20:59:00Z")), "08.09"); // 23:59 in Kyiv (UTC+3)
+  assert.equal(todayPrefixDDMM(new Date("2026-09-08T21:00:00Z")), "09.09"); // midnight rolls over
+  assert.equal(todayPrefixDDMM(new Date("2026-09-08T23:30:00Z")), "09.09"); // 02:30 in Kyiv
+  assert.equal(todayPrefixDDMM(new Date("2025-12-31T21:59:00Z")), "31.12"); // winter (UTC+2), year boundary
+  assert.equal(todayPrefixDDMM(new Date("2025-12-31T22:00:00Z")), "01.01");
+});
 
 type BidShape = { bidStrategy: string; bidCap: string };
 const c = (bidStrategy: string, bidCap: string) => ({ bidStrategy, bidCap }) as BidShape as never;

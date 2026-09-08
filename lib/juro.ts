@@ -112,13 +112,19 @@ export function juroBidPlan(args: {
 }
 
 /** Countries for the jurar wire: the override wins (WW → LION's "WORLD" token), else the
- *  source's targeting. Empty = undecidable — the caller refuses the shot rather than guessing
- *  (jurar has no inheritance: whatever is sent IS the new campaign's geo). */
-export function juroWireCountries(override: GeoOverride | null, sourceCountries: string[]): string[] {
+ *  source's targeting. A worldwide source reads as NO countries from LION's targeting/ (the
+ *  country group has no codes) — its `[WORLD]` name label is the only signal, so a labelled
+ *  source with an empty read rides LION's WORLD token (live 09-09: every WORLD-broad MIN_ROAS
+ *  source — the team's core — refused JURO with "geo unreadable"). Empty = undecidable — the
+ *  caller refuses the shot rather than guessing (jurar has no inheritance: whatever is sent IS
+ *  the new campaign's geo). */
+export function juroWireCountries(override: GeoOverride | null, sourceCountries: string[], sourceName = ""): string[] {
   if (override && override.countries.length > 0) {
     return override.countries.includes("WW") ? ["WORLD"] : override.countries;
   }
-  return sourceCountries.filter(Boolean);
+  const codes = sourceCountries.filter(Boolean);
+  if (codes.length === 0 && /\[WORLD\]/i.test(sourceName)) return ["WORLD"];
+  return codes;
 }
 
 /**

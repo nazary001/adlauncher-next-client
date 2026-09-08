@@ -27,6 +27,7 @@ import {
   moneyLabel,
   normalizeRoasGoal,
   parseMoney,
+  todayPrefixDDMM,
 } from "@/lib/types";
 import { BID_STRATEGIES, OS_OPTIONS, countryName, geoSummary } from "@/lib/catalog";
 import { AIF_VALUE_PIXEL, type PartnerId, aifOfferablePixels, partnerConfig, pickAifPixel } from "@/lib/partners";
@@ -61,11 +62,10 @@ import { defaultPixelFor, pixelOptionsOf, useAdAccounts } from "./use-adaccounts
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
 import type { SessionUser } from "./user-menu";
 
-/** Today as DD.MM for clone-name date stamping (client-side). */
-function todayDDMM(): string {
-  const d = new Date();
-  return `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}`;
-}
+/** Today as DD.MM for clone-name date stamping — the team's (Kyiv) calendar day (lib/types
+ *  todayPrefixDDMM), identical on the server render and the client hydration (the old
+ *  renderer-clock version caused React #418 on every board open for hours every night, live 09-09). */
+const todayDDMM = (): string => todayPrefixDDMM();
 
 const cellInput =
   "h-8 w-full rounded-md border border-line bg-surface2 px-2 text-[12px] font-mono tabular-nums text-ink " +

@@ -22,6 +22,7 @@ import { stampHsTaskRow, upsertTaskRow } from "@/lib/task-store";
 import {
   LionError,
   lionAccountPixels,
+  lionActivateWithRetry,
   lionCampaignAds,
   lionConfigured,
   lionCreationStatus,
@@ -808,7 +809,10 @@ async function pumpBatch(user: string, shots: BatchShot[], deadline: number): Pr
       if (!activated.has(cloneId)) {
         activated.add(cloneId);
         // "does not have permission" = already active = success (playbook) — helper handles it.
-        await lionSetCampaignStatus(cloneId, "ACTIVE").catch(() => {});
+        // "Campaign not found" = LION's store hasn't synced the newborn yet (the 09-08 activate
+        // race) — retried by the helper so a born-PAUSED clone can't stay paused under a green row.
+        const act = await lionActivateWithRetry(cloneId).catch((e) => ({ ok: false, message: String((e as Error).message ?? e), attempts: 0 }));
+        if (!act.ok) console.warn(`[hs-duplicate] activate ${cloneId} failed after ${act.attempts} attempt(s): ${act.message ?? ""}`);
       }
       await rowWrite(user, s.taskId, {
         status: "done",
