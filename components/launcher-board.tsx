@@ -898,6 +898,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
             onMoChannel={changeMoChannel}
             previewed={previewed}
             justQueued={justQueued}
+            inFlight={partner.lionLaunch ? hsTasks.counts.inFlight : partner.aifLaunch ? aifTm.counts.inFlight : teamTm.counts.inFlight}
             heldBack={heldBack}
             poolFree={poolFree}
             onJump={jumpTo}

@@ -51,6 +51,7 @@ import {
 } from "./icons";
 import { Header } from "./header";
 import { useAifTaskManager, useTaskManager } from "./task-manager";
+import { UploadingNotice } from "./upload-guard";
 import { CloneTargetingModal } from "./clone-targeting-modal";
 import { CloneHighOfferModal } from "./clone-high-offer-modal";
 import { CloneDestinationModal } from "./clone-destination-modal";
@@ -179,7 +180,8 @@ function CloneInner({
   // launcher board.
   const teamTm = useTaskManager();
   const aifTm = useAifTaskManager();
-  const { enqueueClone, setOpen } = partnerConfig(partnerId).aifLaunch ? aifTm : teamTm;
+  const cloneTm = partnerConfig(partnerId).aifLaunch ? aifTm : teamTm;
+  const { enqueueClone, setOpen } = cloneTm;
   const [settings, setSettings] = useState<CloneSettings>(() => defaultSettings());
   const [rows, setRows] = useState<CloneRow[]>([]);
   const [loading, setLoading] = useState<boolean>(initialIds.length > 0);
@@ -936,6 +938,9 @@ function CloneInner({
                   {justQueued} {justQueued === 1 ? "clone" : "clones"} queued — building in the Task Manager.
                 </p>
               ) : null}
+              {/* Clones build FROM THIS TAB (Graph rail) — the warning stays by the button while any
+                  are in flight (owner ask 09-09). */}
+              <UploadingNotice n={cloneTm.counts.inFlight} compact />
             </div>
           </section>
 

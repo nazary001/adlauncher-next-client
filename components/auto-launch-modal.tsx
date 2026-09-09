@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Campaign } from "@/lib/types";
 import { limitMoney, parseMoney } from "@/lib/types";
+import { UploadingNotice, useUnloadGuard } from "./upload-guard";
 import type { AutoLandingJob } from "@/lib/auto-landings";
 
 type Prepared = {
@@ -45,6 +46,8 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
 
   const [firing, setFiring] = useState(false);
   const [stage, setStage] = useState<string | null>(null);
+  // The launch streams from this tab — closing the window mid-way kills it (owner ask 09-09).
+  useUnloadGuard(firing);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -323,9 +326,12 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
                 {result.ok ? "✅ Campaign is live. " : "❌ "}{result.text}
               </div>
             ) : firing ? (
-              <div className="flex items-center gap-2 rounded-xl border border-accent/30 bg-accent/10 px-3 py-2 text-[12px] text-[#9db8ff]">
-                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent/40 border-t-accent" />
-                {FIRE_STAGES.indexOf((stage as (typeof FIRE_STAGES)[number]) ?? "gcm") + 1}/{FIRE_STAGES.length} · {STAGE_LABEL[stage ?? "gcm"] ?? stage}
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2 rounded-xl border border-accent/30 bg-accent/10 px-3 py-2 text-[12px] text-[#9db8ff]">
+                  <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent/40 border-t-accent" />
+                  {FIRE_STAGES.indexOf((stage as (typeof FIRE_STAGES)[number]) ?? "gcm") + 1}/{FIRE_STAGES.length} · {STAGE_LABEL[stage ?? "gcm"] ?? stage}
+                </div>
+                <UploadingNotice n={1} compact />
               </div>
             ) : null}
 

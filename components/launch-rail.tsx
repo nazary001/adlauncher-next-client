@@ -2,6 +2,7 @@
 
 import type { Campaign } from "@/lib/types";
 import { fullName, isLaunchable, moEnsureSocMark, moneyLabel, parseMoney } from "@/lib/types";
+import { UploadingNotice } from "./upload-guard";
 import { CONVERSION_EVENTS, geoSummary } from "@/lib/catalog";
 import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { type PartnerConfig, launchReadyOpts, markerPool } from "@/lib/partners";
@@ -24,6 +25,7 @@ export function LaunchRail({
   onMoChannel,
   previewed,
   justQueued,
+  inFlight = 0,
   heldBack = 0,
   poolFree,
   onJump,
@@ -53,6 +55,9 @@ export function LaunchRail({
   previewed: boolean;
   /** Count just sent to the Task Manager — shows a brief confirmation; campaigns stay on the board. */
   justQueued: number;
+  /** Launches still uploading FROM THIS TAB (the partner's Task Manager `counts.inFlight`) — the
+   *  rail shows the "do not close this window" notice while any are (owner ask 09-09). */
+  inFlight?: number;
   /** Cards held on the board by the account launch limit during the last Launch click. */
   heldBack?: number;
   /** Free gcm codes left in the registry pool (null while loading). 0 → launching hard-blocked. */
@@ -282,6 +287,10 @@ export function LaunchRail({
             <EyeIcon className="h-4 w-4" />
             Generate preview
           </button>
+
+          {/* Client-side uploads die with the page — the warning sits right by the Launch button
+              for as long as any launch is still in flight (owner ask 09-09). */}
+          <UploadingNotice n={inFlight} compact />
 
           {previewed ? (
             <button
