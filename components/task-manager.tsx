@@ -10,6 +10,7 @@ import {
   useState,
 } from "react";
 import { readCreative, safeBlobName, uploadCreativeFile } from "./blob-uploader";
+import { UploadingNotice, uploadingLabel, useUnloadGuard } from "./upload-guard";
 import { type Campaign, moneyLabel } from "@/lib/types";
 import { type PartnerId, partnerConfig } from "@/lib/partners";
 import type { CloneEdit } from "@/lib/clone";
@@ -1101,15 +1102,7 @@ function TaskManagerCore({
   // pill. Registered only while something is actually in flight, so normal navigation stays
   // silent the rest of the time. (Same guard the HS Task Manager ships — owner ask 08-18:
   // every partner's queue holds the page.)
-  useEffect(() => {
-    if (counts.inFlight === 0) return;
-    const guard = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = ""; // legacy field — without it some Chromium builds skip the dialog
-    };
-    window.addEventListener("beforeunload", guard);
-    return () => window.removeEventListener("beforeunload", guard);
-  }, [counts.inFlight]);
+  useUnloadGuard(counts.inFlight > 0);
 
   const value: TaskManagerValue = {
     tasks: view,
@@ -1157,8 +1150,8 @@ function LaunchingBanner({ n, bottom, onOpen }: { n: number; bottom: string; onO
         <span className="absolute inset-0 animate-ping rounded-full bg-warn/50" />
       </span>
       <span className="whitespace-nowrap text-[12.5px] font-semibold text-warn">
-        {n === 1 ? "1 campaign is still launching" : `${n} campaigns are still launching`}
-        <span className="font-medium text-dim"> · keep this page open</span>
+        Do not close this window
+        <span className="font-medium text-dim"> · {uploadingLabel(n)}</span>
       </span>
       <span className="ml-1 shrink-0 rounded-full border border-line bg-surface2 px-2 py-0.5 text-[10.5px] font-medium text-dim">
         View
@@ -1319,6 +1312,14 @@ function TaskManagerPanel({ tm, scope }: { tm: TaskManagerValue; scope: TmScope 
             <XIcon className="h-4 w-4" />
           </button>
         </div>
+
+        {/* client-side uploads die with the page — say so INSIDE the drawer too (the floating
+            pill only shows while it is closed; owner ask 09-09) */}
+        {counts.inFlight > 0 ? (
+          <div className="border-b border-line px-3 py-2">
+            <UploadingNotice n={counts.inFlight} />
+          </div>
+        ) : null}
 
         {/* split — New launches vs Duplicates */}
         <div className="flex items-center gap-1 border-b border-line px-3 py-2.5">
