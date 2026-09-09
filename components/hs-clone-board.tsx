@@ -6,6 +6,7 @@ import { AutoTextarea, BidKindTag, Field } from "./ui";
 import { SearchSelect } from "./search-select";
 import { useHs } from "./use-hs";
 import { useHsTaskManager } from "./hs-task-manager";
+import { UploadingNotice } from "./upload-guard";
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
 import { bidKind, limitMoneyCents, moneyCentsLabel, moneyLabel, parseMoney } from "@/lib/types";
 import { lionWireSuffix } from "@/lib/hs-clone-name";
@@ -199,7 +200,7 @@ export function HsCloneBoard({
   initialMode?: "clone" | "juro";
 }) {
   const hs = useHs(true);
-  const { setOpen } = useHsTaskManager();
+  const { setOpen, counts: hsCounts } = useHsTaskManager();
 
   const [profile, setProfile] = useState("");
   const [account, setAccount] = useState("");
@@ -1453,6 +1454,10 @@ export function HsCloneBoard({
                       ? "Pick profile · account · page · pixel (wave defaults) — or a Destination per row"
                       : "Pick profile · account · pixel (wave defaults) — or a Destination per row"}
               </p>
+              {/* Token rails build FROM THIS TAB and LION rows are driven from it — the warning stays
+                  by the button while any of this buyer's clones are in flight (owner ask 09-09), the
+                  same as the MO/AIF clone board. */}
+              <UploadingNotice n={hsCounts.inFlight} compact />
             </div>
           </aside>
 
