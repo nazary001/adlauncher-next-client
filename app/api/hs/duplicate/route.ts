@@ -31,7 +31,8 @@ import {
   lionSetCampaignStatus,
   lionSourceBidFacts,
 } from "@/lib/lion";
-import { hsAnyFbGet, hsAnyFbPost, hsAnyTokenAccountIds, hsAnyTokenConfigured, hsAnyTokenGate } from "@/lib/hs-token-launch";
+import { hsAnyFbGet, hsAnyFbPost, hsAnyTokenAccountIds, hsAnyTokenConfigured, hsAnyTokenGate, hsRenameCampaign } from "@/lib/hs-token-launch";
+import { isTransientGraphError } from "@/lib/graph-retry";
 import { type ShotBinds, acctLimitRefusal, bindsKey, demandByAccount, distinctBy, resolveShotBinds } from "@/lib/hs-shot-binds";
 import {
   type GeoOverride,
@@ -123,6 +124,9 @@ type BatchShot = {
   /** LION's resolved `bidding` differed from what we asked (dupBiddingMismatch) — the clone is
    *  parked PAUSED at finalize with this reason instead of being activated. */
   biddingMismatch?: string;
+  /** The board's exact `name` landed on the clone (campaign-level Graph write) — or the rename
+   *  hit a final wall and was given up (LION's own name stays). Once per shot. */
+  renamed?: boolean;
   name: string;
   /** LION `name_suffix` for this shot (see the wire type above). */
   suffix: string;
@@ -859,6 +863,24 @@ async function pumpBatch(user: string, shots: BatchShot[], deadline: number): Pr
               // row must see the clone is still unpatched (belt over the stamp-time mark).
               ...(s.override && !s.patched ? { stage: "geo-gate" } : {}),
             });
+          }
+          // The board's EXACT name onto the born clone (owner ask 09-09: LION rebuilds the name
+          // from its own registry and drops the source tail's tags). A campaign-level Graph
+          // write — allowed under the VD-C1 ad-set ward, verified live 09-08/09-09 — signed by
+          // whichever bearer sees the account; LION syncs it into its lists within ~15-20 min.
+          // Geo-override shots keep renaming inside their patch (a name must not claim a geo
+          // that never landed). Transient misses retry next tick, final walls give up quietly.
+          if (s.cloneId && s.name && !s.override && !s.renamed) {
+            try {
+              await hsRenameCampaign(s.cloneId, s.name, s.binds.account);
+              s.renamed = true;
+            } catch (e) {
+              const msg = String((e as Error).message ?? e);
+              if (!isTransientGraphError(msg)) {
+                s.renamed = true;
+                console.warn(`[hs-duplicate] rename ${s.cloneId} kept LION's name: ${msg.slice(0, 160)}`);
+              }
+            }
           }
           // Meta's min-ROAS eligibility rejection (code 100 / subcode 2446671, partner docs
           // 09-09): LION retries the requested strategy forever and never launches another —
