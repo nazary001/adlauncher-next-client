@@ -37,6 +37,8 @@ import {
   lionSetCampaignStatus,
 } from "@/lib/lion";
 import { type GeoOverride, parseGeoOverride } from "@/lib/targeting-override";
+import { hsRenameCampaign } from "@/lib/hs-token-launch";
+import { isTransientGraphError } from "@/lib/graph-retry";
 import { type ShotBinds, acctLimitRefusal, bindsKey, demandByAccount, distinctBy, resolveShotBinds } from "@/lib/hs-shot-binds";
 
 export const runtime = "nodejs";
@@ -104,6 +106,10 @@ type JuroShot = {
   /** Per-row strategy switch ("" = the source's) — LION's /jurar/ takes bid_strategy natively. */
   bidStrategyOverride: string;
   suffix: string;
+  /** The board's exact name for the post-birth Graph rename ("" = keep LION's own). */
+  name: string;
+  /** Rename landed, or hit a final wall and was given up. Once per shot. */
+  renamed?: boolean;
   geo: string;
   label: string;
   taskId: string;
@@ -149,6 +155,10 @@ export async function POST(req: Request): Promise<NextResponse> {
       bidStrategyOverride?: string;
       /** Buyer tail — LION builds the JURO name itself and appends this as name_suffix. */
       suffix?: string;
+      /** The board's exact name — put on the born campaign through a campaign-level Graph write
+       *  (owner ask 09-09); LION's own JURO name keeps its family word and geo list until it
+       *  syncs the Facebook name back. */
+      name?: string;
       geo?: string;
       label?: string;
       countries?: string[];
@@ -206,6 +216,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       bid,
       bidStrategyOverride: strategyOverride,
       suffix: String(raw?.suffix ?? "").trim().slice(0, 80),
+      name: String(raw?.name ?? "").trim().slice(0, 200),
       geo: String(raw?.geo ?? "").slice(0, 40) || "inherited",
       label: String(raw?.label ?? "").trim().slice(0, 200),
       override,
@@ -609,6 +620,21 @@ async function pumpJuro(user: string, shots: JuroShot[], deadline: number): Prom
           if (r.campaign_id && !s.cloneId) {
             s.cloneId = String(r.campaign_id);
             await rowWrite(user, s.taskId, { campaign_id: s.cloneId });
+          }
+          // The board's EXACT name onto the born campaign (owner ask 09-09) — a campaign-level
+          // Graph write signed by whichever bearer sees the account (allowed under the VD-C1
+          // ad-set ward); transient misses retry next tick, final walls give up quietly.
+          if (s.cloneId && s.name && !s.renamed) {
+            try {
+              await hsRenameCampaign(s.cloneId, s.name, s.binds.account);
+              s.renamed = true;
+            } catch (e) {
+              const msg = String((e as Error).message ?? e);
+              if (!isTransientGraphError(msg)) {
+                s.renamed = true;
+                console.warn(`[hs-jurar] rename ${s.cloneId} kept LION's name: ${msg.slice(0, 160)}`);
+              }
+            }
           }
           if (r.status === "COMPLETED" && r.campaign_id) {
             await finalize(s, String(r.campaign_id), (r.ad_ids ?? []).length || 1);

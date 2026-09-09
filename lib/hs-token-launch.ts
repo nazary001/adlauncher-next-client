@@ -487,6 +487,19 @@ export const hsAnyFbGet = (path: string, accountId?: string): Promise<Json> =>
 export const hsAnyFbPost = (path: string, params: Json, accountId?: string): Promise<Json> =>
   anyCall((tok) => fbPost(path, params, tok), accountId);
 
+/** Put the board's exact name on a LION-born campaign — a campaign-level Graph write, allowed
+ *  even where Meta's business restriction refuses ad-set edits (verified live 09-08 / 09-09).
+ *  Idempotent: reads the current name first, writes only when it differs. Throws on any miss
+ *  (the caller decides whether the error is worth another poll tick — lib/graph-retry). */
+export async function hsRenameCampaign(campaignId: string, name: string, accountId?: string): Promise<boolean> {
+  const wanted = name.trim();
+  if (!wanted) return false;
+  const camp = await hsAnyFbGet(`${campaignId}?fields=name`, accountId);
+  if (String(camp.name ?? "") === wanted) return false;
+  await hsAnyFbPost(campaignId, { name: wanted }, accountId);
+  return true;
+}
+
 /**
  * Best-effort bounded pause of a token-rail campaign whose build just failed: the tree is born
  * ACTIVE with only the +30 min start gap between a partial failure and unattended delivery.

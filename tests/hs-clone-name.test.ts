@@ -1,42 +1,25 @@
 // Node's built-in runner: `node --test tests/hs-clone-name.test.ts`.
+// LION's /duplicate/ rebuilds the clone's name itself and honours only `name_suffix`; the board's
+// WHOLE edited tail rides there (owner report 09-09: the addition-only wire dropped "Alex-Tima"
+// and every other source-tail tag from LION's name), and the pump then puts the board's exact
+// name on the campaign through the Graph.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lionNameSuffix } from "../lib/hs-clone-name.ts";
+import { LION_NAME_SUFFIX_MAX, lionWireSuffix } from "../lib/hs-clone-name.ts";
 
-const SRC = "AGE-GATE - Digital-marketing en qTnTL";
-
-test("default tail (source tail + owner) → only the owner rides as LION name_suffix", () => {
-  assert.equal(lionNameSuffix(`${SRC} - Taras`, SRC), "Taras");
+test("the whole edited tail rides as LION name_suffix — nothing is stripped", () => {
+  assert.equal(lionWireSuffix("MKDIGITAL - Alex-Tima - CREO - Fonu h5rlU - Nazar"), "MKDIGITAL - Alex-Tima - CREO - Fonu h5rlU - Nazar");
 });
 
-test("multi-part addition keeps its own dashes", () => {
-  assert.equal(lionNameSuffix(`${SRC} - Mykola - ANIME - Alex`, SRC), "Mykola - ANIME - Alex");
+test("whitespace is squashed and trimmed", () => {
+  assert.equal(lionWireSuffix("  AGE-GATE  -  Digital-marketing en   qTnTL - Taras  "), "AGE-GATE - Digital-marketing en qTnTL - Taras");
 });
 
-test("source-tail match is case-insensitive and whitespace-tolerant", () => {
-  assert.equal(lionNameSuffix(`  age-gate - digital-marketing EN qtntl - Taras `, SRC), "Taras");
+test("empty tail → empty suffix", () => {
+  assert.equal(lionWireSuffix(""), "");
+  assert.equal(lionWireSuffix("   "), "");
 });
 
-test("addition glued without a dash separator still strips the source tail", () => {
-  assert.equal(lionNameSuffix(`${SRC} Taras`, SRC), "Taras");
-});
-
-test("tail rewritten wholesale → sent as typed", () => {
-  assert.equal(lionNameSuffix("Anime - Taras", SRC), "Anime - Taras");
-});
-
-test("tail equal to the source tail (owner removed) → nothing to append", () => {
-  assert.equal(lionNameSuffix(SRC, SRC), "");
-  assert.equal(lionNameSuffix(`${SRC} - `, SRC), "");
-});
-
-test("empty tail → empty suffix; empty source tail → tail as typed", () => {
-  assert.equal(lionNameSuffix("", SRC), "");
-  assert.equal(lionNameSuffix("   ", SRC), "");
-  assert.equal(lionNameSuffix("Taras", ""), "Taras");
-});
-
-test("suffix is capped to LION's 80-char wire limit", () => {
-  const long = "x".repeat(120);
-  assert.equal(lionNameSuffix(`${SRC} - ${long}`, SRC).length, 80);
+test("suffix is capped to LION's wire limit", () => {
+  assert.equal(lionWireSuffix("x".repeat(200)).length, LION_NAME_SUFFIX_MAX);
 });

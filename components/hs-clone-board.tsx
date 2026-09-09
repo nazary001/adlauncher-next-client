@@ -8,7 +8,7 @@ import { useHs } from "./use-hs";
 import { useHsTaskManager } from "./hs-task-manager";
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
 import { bidKind, limitMoneyCents, moneyCentsLabel, moneyLabel, parseMoney } from "@/lib/types";
-import { lionNameSuffix } from "@/lib/hs-clone-name";
+import { lionWireSuffix } from "@/lib/hs-clone-name";
 import { BID_STRATEGIES, geoSummary } from "@/lib/catalog";
 import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { juroEnsureMark, juroLionStrategyAccepted } from "@/lib/juro";
@@ -903,7 +903,12 @@ export function HsCloneBoard({
         // marker + tail (the server re-ensures both markers). Cloner rails: fixed grammar prefix
         // + channel marker + tail.
         ...(effDupChannel === "juro"
-          ? { suffix: r.suffix.trim() }
+          ? {
+              suffix: r.suffix.trim(),
+              // The exact board name for the pump's post-birth Graph rename (LION's own JURO
+              // name keeps ITS family word and geo list — owner ask 09-09: the full typed name).
+              ...(r.info?.name ? { name: `${juroPrefixPreview(prefix)}${r.suffix.trim()}`.trim() } : {}),
+            }
           : effDupChannel === "juro-token"
             ? { name: r.info?.name ? `${juroPrefixPreview(prefix)}${HS_TOKEN_MARK}${r.suffix.trim()}`.trim() : r.suffix.trim() }
             : effDupChannel === "token"
@@ -915,10 +920,10 @@ export function HsCloneBoard({
                   // name_suffix (partner docs 09-08), so the wire carries the buyer's ADDITION
                   // beyond the source tail (default tail = source tail + owner → just the owner).
                   // The composed name still rides for the row title + geo-override rename.
-                  suffix: lionNameSuffix(
-                    r.suffix,
-                    r.info?.name ? splitLionName(r.info.name, todaySaoPauloDDMM()).tail : "",
-                  ),
+                  // The WHOLE edited tail rides (owner report 09-09: the addition-only wire
+                  // dropped every source-tail tag from LION's name); the exact board `name`
+                  // lands on the campaign through the pump's Graph rename right after birth.
+                  suffix: lionWireSuffix(r.suffix),
                   ...(r.info?.name ? { name: `${prefix}${r.suffix.trim()}`.trim() } : {}),
                 }),
         // Targeting override — JURO sends it natively in the jurar wire; the other rails patch
@@ -2092,7 +2097,7 @@ export function HsCloneBoard({
                                 ? `${juroPrefixPreview(relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries))}${HS_TOKEN_MARK}${r.suffix.trim()}`
                                 : effDupChannel === "token"
                                   ? `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}${HS_TOKEN_MARK}${r.suffix.trim()}`
-                                  : `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}… ${lionNameSuffix(r.suffix, splitLionName(r.info.name, todaySaoPauloDDMM()).tail)}`
+                                  : `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}… ${lionWireSuffix(r.suffix)}`
                             ).slice(0, 110)
                           : `#${r.campaignId}`}
                       </span>{" "}
