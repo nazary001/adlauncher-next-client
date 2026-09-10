@@ -5,15 +5,13 @@ import { sessionFromCookieHeader } from "@/lib/session";
 
 export const runtime = "nodejs";
 
-/** The ONLY fankas MO launches/clones may pick right now (owner ask 09-01): the token's other
- *  pages are advertising-restricted or reserved — hiding them here trims every MO picker at the
- *  source (launcher + clone board share this route). Empty the set to lift the allowlist. */
-const MO_PAGE_ALLOWLIST = new Set([
-  "108537119019318", // Vinn Kora
-  "115090404871945", // Victoria Martin
-  "115569628163613", // Andrea Smith
-  "156589310871497", // Len Lei
-]);
+/** MO fanka allowlist — LIFTED 2026-09-10 (owner ask). The MO signer rotated to the Harvmo
+ *  system user, whose assigned pages are a DIFFERENT pool than the four vetted 09-01 (Vinn Kora
+ *  108537119019318 / Victoria Martin 115090404871945 / Andrea Smith 115569628163613 / Len Lei
+ *  156589310871497 — none of which are assigned to Harvmo), so the filtered picker came back
+ *  empty. An empty set = NO filter: every page the launch token carries the ADVERTISE task on is
+ *  offered (launcher + clone board share this route). Re-add ids here to re-narrow the picker. */
+const MO_PAGE_ALLOWLIST = new Set<string>([]);
 
 /**
  * GET /api/fanpages[?channel=soc:<name>]
