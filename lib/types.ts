@@ -67,7 +67,7 @@ export function makeCampaign(id: string, namePrefix = "", name = ""): Campaign {
     bidStrategy: "LOWEST_COST_WITHOUT_CAP",
     conversionEvent: "PURCHASE",
     optimization: "conversions",
-    budget: "7",
+    budget: LAUNCH_DEFAULT_BUDGET,
     bidCap: "",
     title: "",
     copy: "",
@@ -180,6 +180,33 @@ export function bidKind(strategy: string): "none" | "cap" | "roas" {
   if (strategy === "LOWEST_COST_WITH_MIN_ROAS") return "roas";
   if (strategy === "LOWEST_COST_WITH_BID_CAP" || strategy === "COST_CAP") return "cap";
   return "none";
+}
+
+/** Daily-budget defaults in major units, plain spelling (cash-register cells wrap them in
+ *  moneyCentsLabel). Owner rules: launch small — a blank launcher card starts at $7, a clone at
+ *  $10 — and scale winners; EXCEPT min-ROAS runs, which default to $50/day (owner ask 2026-09-11):
+ *  a ROAS floor needs enough daily spend to get out of learning, $10 starves it. */
+export const LAUNCH_DEFAULT_BUDGET = "7";
+export const CLONE_DEFAULT_BUDGET = "10";
+export const ROAS_DEFAULT_BUDGET = "50";
+
+/** The budget a launch/clone DEFAULTS to under `strategy`: $50 on min ROAS, otherwise `base` —
+ *  the surface's own default (the blank card's $7, the clone boards' $10, a source's own budget). */
+export function defaultBudgetFor(strategy: string, base: string): string {
+  return bidKind(strategy) === "roas" ? ROAS_DEFAULT_BUDGET : base;
+}
+
+/** The budget a row should carry after its strategy moves `prev` → `next`: an UNTOUCHED default
+ *  (the value equals what `prev` defaulted to — any spelling, "10" or "10,00") follows the new
+ *  strategy's default; anything the buyer typed (or cleared) stays. When both strategies default
+ *  to the same amount nothing moves. Spelling-agnostic on purpose — callers re-wrap the result in
+ *  their own cell format. */
+export function budgetOnStrategyChange(prev: string, next: string, current: string, base: string): string {
+  const from = defaultBudgetFor(prev, base);
+  const to = defaultBudgetFor(next, base);
+  if (parseMoney(from) === parseMoney(to)) return current;
+  const untouched = current.trim() !== "" && parseMoney(current) === parseMoney(from);
+  return untouched ? to : current;
 }
 
 /**

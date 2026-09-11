@@ -8,7 +8,7 @@ import { useHs } from "./use-hs";
 import { useHsTaskManager } from "./hs-task-manager";
 import { UploadingNotice } from "./upload-guard";
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
-import { bidKind, limitMoneyCents, moneyCentsLabel, moneyLabel, parseMoney } from "@/lib/types";
+import { CLONE_DEFAULT_BUDGET, bidKind, budgetOnStrategyChange, limitMoneyCents, moneyCentsLabel, moneyLabel, parseMoney } from "@/lib/types";
 import { lionWireSuffix } from "@/lib/hs-clone-name";
 import { BID_STRATEGIES, geoSummary } from "@/lib/catalog";
 import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from "@/lib/hs-launch";
@@ -156,7 +156,8 @@ const freshRow = (campaignId: string, n: number): Row => ({
   bid: "",
   bidStrategy: "", // seeded with the source's strategy once the LION facts land
   // Cash-register seed (owner ask 09-08): the field always shows cents, digits fill from the right.
-  budget: moneyCentsLabel("10"),
+  // $10 until LION says how the source bids — a min-ROAS source lifts it to $50 (owner rule 09-11).
+  budget: moneyCentsLabel(CLONE_DEFAULT_BUDGET),
   suffix: "", // becomes the source's old TAIL once LION answers — an editable replacement
   countries: [],
   locales: [],
@@ -476,6 +477,10 @@ export function HsCloneBoard({
                 bid: r.bid || (s.bid != null ? s.bid.toFixed(2).replace(".", ",") : ""),
                 // Seed the strategy pick with the source's (the select is locked until facts land).
                 bidStrategy: r.bidStrategy || s.bidStrategy,
+                // Owner rule 09-11: a clone that bids on min ROAS defaults to $50/day — the
+                // untouched $10 seed follows the source's strategy now that it is known; a
+                // budget the buyer already typed stays (idempotent across Retry).
+                budget: moneyCentsLabel(budgetOnStrategyChange("", r.bidStrategy || s.bidStrategy, r.budget, CLONE_DEFAULT_BUDGET)),
                 // Prefill the editable TAIL with the source's old one + the owner's name.
                 suffix: r.suffix || withOwner(splitLionName(s.name, todaySaoPauloDDMM()).tail, user?.username ?? ""),
               };
@@ -1868,7 +1873,10 @@ export function HsCloneBoard({
                                   : next === srcKind && r.info?.bid != null
                                     ? r.info.bid.toFixed(2).replace(".", ",")
                                     : "";
-                              patchRow(r.id, { bidStrategy, bid });
+                              // Owner rule 09-11: an untouched default budget follows the strategy
+                              // ($50 on min ROAS, $10 otherwise); a typed budget stays.
+                              const budget = moneyCentsLabel(budgetOnStrategyChange(strategy, bidStrategy, r.budget, CLONE_DEFAULT_BUDGET));
+                              patchRow(r.id, { bidStrategy, bid, budget });
                             }}
                             disabled={!r.info || unreadableRow}
                             aria-label="Clone bid strategy"

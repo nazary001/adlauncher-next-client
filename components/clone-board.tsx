@@ -21,6 +21,8 @@ import {
 } from "@/lib/clone";
 import {
   bidKind,
+  budgetOnStrategyChange,
+  defaultBudgetFor,
   limitMoneyCents,
   moEnsureSocMark,
   moneyCentsLabel,
@@ -88,10 +90,12 @@ function rowBidMissing(r: CloneRow): boolean {
 }
 
 /** A source row seeded for the board: makeCloneRow + the budget in the cash-register spelling
- *  the Budget cell runs in (owner ask 09-08 — "10" would re-read as 0,10 on the first keystroke). */
+ *  the Budget cell runs in (owner ask 09-08 — "10" would re-read as 0,10 on the first keystroke).
+ *  A source that bids on min ROAS seeds the $50 default instead of its own budget (owner rule
+ *  09-11); every other strategy keeps the source's. */
 function seedRow(...args: Parameters<typeof makeCloneRow>): CloneRow {
   const row = makeCloneRow(...args);
-  return { ...row, budget: moneyCentsLabel(row.budget) };
+  return { ...row, budget: moneyCentsLabel(defaultBudgetFor(row.bidStrategy, row.budget)) };
 }
 
 /** Column heading with the underline rule + an optional right-aligned count chip. */
@@ -1277,7 +1281,12 @@ function CloneInner({
                                     : next === bidKind(r.source.bidStrategy)
                                       ? r.source.originalRoas
                                       : "";
-                                patchRow(r.id, { bidStrategy, roasGoal });
+                                // Owner rule 09-11: an untouched default budget follows the strategy
+                                // ($50 on min ROAS, else the source's own); a typed budget stays.
+                                const budget = moneyCentsLabel(
+                                  budgetOnStrategyChange(r.bidStrategy, bidStrategy, r.budget, r.source.originalBudget),
+                                );
+                                patchRow(r.id, { bidStrategy, roasGoal, budget });
                               }}
                               aria-label="Clone bid strategy"
                               title={

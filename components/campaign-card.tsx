@@ -2,7 +2,7 @@
 
 import { memo, useEffect, useState } from "react";
 import type { Campaign } from "@/lib/types";
-import { MO_SOC_MARK, bidAmountMissing, bidKind, fullName, isHttpUrl, isLaunchable, limitMoney, limitMoneyCents, moEnsureSocMark, moneyLabel, normalizeRoasGoal, parseMoney } from "@/lib/types";
+import { LAUNCH_DEFAULT_BUDGET, MO_SOC_MARK, ROAS_DEFAULT_BUDGET, bidAmountMissing, bidKind, budgetOnStrategyChange, fullName, isHttpUrl, isLaunchable, limitMoney, limitMoneyCents, moEnsureSocMark, moneyLabel, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import {
   AGES,
   BID_STRATEGIES,
@@ -880,6 +880,10 @@ function CampaignCardBase({
                     value={c.bidStrategy}
                     onChange={(e) => {
                       const bidStrategy = e.target.value;
+                      // Owner rule 2026-09-11: a min-ROAS launch defaults to $50/day — an untouched
+                      // default budget follows the strategy (back to $7 when leaving ROAS); a
+                      // budget the buyer typed stays.
+                      const budget = budgetOnStrategyChange(c.bidStrategy, bidStrategy, c.budget, LAUNCH_DEFAULT_BUDGET);
                       // Min-ROAS optimizes purchase value — the event pins to Purchase, the
                       // optimization pins to conversions (MO's link keeps &fire=click), and the
                       // pixel pins to the rail's value pixel (MO → VD-C1-HS-1, AIF →
@@ -887,6 +891,7 @@ function CampaignCardBase({
                       if (bidKind(bidStrategy) === "roas") {
                         patch({
                           bidStrategy,
+                          budget,
                           conversionEvent: "PURCHASE",
                           optimization: "conversions",
                           ...(partner.accountsFromToken ? { pixel: roasPin.id } : {}),
@@ -897,6 +902,7 @@ function CampaignCardBase({
                         // pixel (the only offerable one).
                         patch({
                           bidStrategy,
+                          budget,
                           ...(kind === "roas" && partner.accountsFromToken
                             ? {
                                 pixel: aifMode
@@ -932,7 +938,7 @@ function CampaignCardBase({
                   <MoneyInput
                     value={c.budget}
                     onChange={(e) => patch({ budget: limitMoney(e.target.value, 10000) })}
-                    placeholder="7"
+                    placeholder={kind === "roas" ? ROAS_DEFAULT_BUDGET : LAUNCH_DEFAULT_BUDGET}
                     maxLength={8}
                   />
                 </Field>

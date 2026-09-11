@@ -236,6 +236,8 @@ export function makeCloneRow(
     // Two-decimal spelling on purpose: the board's field is cash-register (digits fill cents), so
     // a "1,2" seed read back as 0,12 after one Backspace (audit 09-09); "1,20" is the stable form.
     roasGoal: twoDecimals(source.originalRoas),
+    // The source's own budget; the board's seedRow lifts a min-ROAS source to the $50 default
+    // (owner rule 2026-09-11) — kept out of here so this module stays an import-free test leaf.
     budget: source.originalBudget,
     redirectType: source.redirectType,
     highOffer: { enabled: source.redirectType === "HIGH ADX", offerId: "", share: "" },
