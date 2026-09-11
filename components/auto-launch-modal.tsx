@@ -10,6 +10,7 @@ import type { Campaign } from "@/lib/types";
 import { limitMoney, parseMoney } from "@/lib/types";
 import { UploadingNotice, useUnloadGuard } from "./upload-guard";
 import type { AutoLandingJob } from "@/lib/auto-landings";
+import { drainNdjson, isLaunchStream, launchOutcome, parseEvent, type LaunchEvent } from "@/lib/launch-stream";
 
 type Prepared = {
   campaign: Campaign;
@@ -49,6 +50,11 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
   // The launch streams from this tab — closing the window mid-way kills it (owner ask 09-09).
   useUnloadGuard(firing);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  // The staged creative is single-use: the launch route drops it when a RUN finishes, success or
+  // not. After such a failure the same URL would only 404 (a pre-stream 400) — so the modal asks
+  // for a fresh prepare instead of re-firing. A pre-stream rejection leaves it in place (retry as is).
+  const [creativeConsumed, setCreativeConsumed] = useState(false);
+  const [prepNonce, setPrepNonce] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
 
   // 1) prepare (Gemini copy + creative). Runs once.
@@ -72,7 +78,7 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
     return () => {
       alive = false;
     };
-  }, [job.documentId]);
+  }, [job.documentId, prepNonce]);
 
   // 2) load signers + the next free gcm code once prep is in. The code shown here is the code the
   // fire will TRY to claim; /api/launch reserves it atomically (walking to the next free one if a
@@ -147,7 +153,7 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
 
   // parseMoney reads the board's comma money ("12,50") — Number() would read it as NaN and a
   // stripped "1250" as $1250 (audit 09-09).
-  const canFire = Boolean(prep && channel && pageId && accountId && pixelId && parseMoney(budget) >= 1 && !firing && !result?.ok);
+  const canFire = Boolean(prep && channel && pageId && accountId && pixelId && parseMoney(budget) >= 1 && !firing && !result?.ok && !creativeConsumed);
 
   const fire = useCallback(async () => {
     if (!prep || !canFire) return;
@@ -176,40 +182,51 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
         signal: ac.signal,
       });
       if (!res.body) throw new Error(`no stream (${res.status})`);
+      const streamed = isLaunchStream(res.headers.get("content-type"));
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = "";
-      let final: { ok?: boolean; stage?: string; error?: string; link?: string; gcm?: string } | null = null;
+      const acc: { final: LaunchEvent | null } = { final: null };
+      const take = (ev: LaunchEvent) => {
+        if (ev.stage && ev.ok === undefined) setStage(ev.stage);
+        if (ev.ok !== undefined) acc.final = ev;
+      };
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         buf += dec.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          let ev: { stage?: string; ok?: boolean; error?: string; link?: string; gcm?: string };
-          try {
-            ev = JSON.parse(line);
-          } catch {
-            continue;
-          }
-          if (ev.stage && ev.ok === undefined) setStage(ev.stage);
-          if (ev.ok !== undefined) final = ev;
-        }
+        const { events, rest } = drainNdjson(buf);
+        buf = rest;
+        events.forEach(take);
       }
-      if (final?.ok) {
-        setResult({ ok: true, text: `Live · gcm ${final.gcm}` });
-      } else {
-        setResult({ ok: false, text: final?.error || "launch failed (stream ended)" });
-      }
+      // Flush the decoder and parse the unterminated tail: a pre-stream rejection is exactly one
+      // JSON object with no newline — dropping it here is what showed every 4xx as "stream ended".
+      buf += dec.decode();
+      const tail = parseEvent(buf);
+      if (tail) take(tail);
+      const outcome = launchOutcome({ status: res.status, streamed, final: acc.final });
+      setCreativeConsumed(!outcome.ok && outcome.creativeConsumed);
+      setResult({ ok: outcome.ok, text: outcome.text });
     } catch (e) {
+      // Thrown = the reply never completed (network, abort). The run may still be going server-side
+      // and drops the creative when it ends → treat it as consumed (a fresh prepare is the safe path).
+      setCreativeConsumed(true);
       setResult({ ok: false, text: String((e as Error).message ?? e) });
     } finally {
       setFiring(false);
       setStage(null);
     }
   }, [prep, canFire, pageId, accountId, pixelId, budget, channel, gcmNext]);
+
+  // Fresh copy + creative for another attempt (the previous run dropped the staged one).
+  const regenerate = useCallback(() => {
+    setResult(null);
+    setCreativeConsumed(false);
+    setPrep(null);
+    setPrepErr(null);
+    setGcmNext(null);
+    setPrepNonce((n) => n + 1);
+  }, []);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -324,6 +341,9 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
             {result ? (
               <div className={`rounded-xl border px-3 py-2 text-[12px] ${result.ok ? "border-launch/40 bg-launch/10 text-launch2" : "border-danger/40 bg-danger/10 text-danger"}`}>
                 {result.ok ? "✅ Campaign is live. " : "❌ "}{result.text}
+                {!result.ok && creativeConsumed ? (
+                  <p className="mt-1 text-[11px] opacity-80">The staged creative was dropped with this attempt — regenerate it to launch again.</p>
+                ) : null}
               </div>
             ) : firing ? (
               <div className="flex flex-col gap-2">
@@ -339,7 +359,14 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
               <button onClick={onClose} className="h-9 rounded-lg border border-line bg-surface2 px-3 text-[12px] text-dim hover:text-ink">
                 {result?.ok ? "Close" : "Cancel"}
               </button>
-              {!result?.ok ? (
+              {result && !result.ok && creativeConsumed ? (
+                <button
+                  onClick={regenerate}
+                  className="h-9 rounded-lg border border-accent/50 bg-accent/15 px-4 text-[12px] font-semibold text-[#9db8ff] transition-colors hover:bg-accent/25"
+                >
+                  Regenerate creative & retry
+                </button>
+              ) : !result?.ok ? (
                 <button
                   onClick={() => void fire()}
                   disabled={!canFire}

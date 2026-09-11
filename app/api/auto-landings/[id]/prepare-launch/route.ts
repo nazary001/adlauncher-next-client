@@ -93,7 +93,9 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const pixelId = mo.preferredPixel?.id ?? "";
   const campaign = buildAutoCampaign(landing, copy, {
     ddmm,
-    nameSuffix: `auto ${landing.niche}`.toLowerCase(),
+    // Owner rule 2026-09-11: every auto-landing launch carries the "GC-Launcher Auto-landing" marker
+    // in its campaign name (the niche keeps the row readable on the board / in reports).
+    nameSuffix: `GC-Launcher Auto-landing - ${landing.niche.toLowerCase()}`,
     countries: defaultCountriesFor(landing.lang),
     budget: "10",
     accountId,
