@@ -105,8 +105,42 @@ test("normalize trims, defaults and de-dupes", () => {
   ]);
   assert.ok(res.ok);
   if (res.ok) {
-    assert.deepEqual(res.items[0], { title: "What Hotel Staff Never Tell Guests", lang: "es", niche: "Auto" });
-    assert.deepEqual(res.items[1], { title: "Second Fine Headline", lang: "en", niche: "Travel" });
+    assert.deepEqual(res.items[0], { title: "What Hotel Staff Never Tell Guests", lang: "es", niche: "Auto", format: "jobguide" });
+    assert.deepEqual(res.items[1], { title: "Second Fine Headline", lang: "en", niche: "Travel", format: "jobguide" });
+  }
+});
+
+test("normalize format: missing → jobguide, explicit classic kept, junk → jobguide", () => {
+  const res = normalizeDraftItems([
+    { title: "Headline Without A Format", lang: "en" },
+    { title: "Headline Marked Classic", lang: "en", format: "classic" },
+    { title: "Headline Marked Jobguide", lang: "en", format: "jobguide" },
+    { title: "Headline With Junk Format", lang: "en", format: "CLASSIC" },
+    { title: "Headline With Numeric Format", lang: "en", format: 7 },
+    { title: "Headline With Null Format", lang: "en", format: null },
+  ]);
+  assert.ok(res.ok);
+  if (res.ok) {
+    assert.deepEqual(
+      res.items.map((i) => i.format),
+      ["jobguide", "classic", "jobguide", "jobguide", "jobguide", "jobguide"],
+    );
+    // format never leaks other keys / never drops notes
+    assert.deepEqual(res.items[1], { title: "Headline Marked Classic", lang: "en", niche: "Auto", format: "classic" });
+  }
+});
+
+test("normalize keeps format alongside notes", () => {
+  const res = normalizeDraftItems([{ title: "Headline With Notes", lang: "es", niche: "Cars", format: "classic", notes: " keep it short " }]);
+  assert.ok(res.ok);
+  if (res.ok) {
+    assert.deepEqual(res.items[0], {
+      title: "Headline With Notes",
+      lang: "es",
+      niche: "Cars",
+      format: "classic",
+      notes: "keep it short",
+    });
   }
 });
 

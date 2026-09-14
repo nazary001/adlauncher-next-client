@@ -4,6 +4,7 @@
 // pin a route to its maxDuration.
 
 import type { Landing } from "@/lib/partners";
+import type { LandingFormat } from "@/lib/auto-landings-plan";
 import { strapiFetch } from "@/lib/task-store";
 
 const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
@@ -19,6 +20,8 @@ export type AutoLandingJob = {
   title: string;
   lang: "en" | "es";
   niche: string;
+  /** Page template (contract §7): rows created before the schema gained the field read as "classic". */
+  format: LandingFormat;
   notes: string;
   status: "scheduled" | "generating" | "published" | "failed" | "canceled";
   scheduledAt: number;
@@ -38,6 +41,7 @@ type StrapiJobRow = {
   title?: string;
   lang?: string;
   niche?: string;
+  format?: string;
   notes?: string;
   status?: string;
   scheduled_at?: unknown;
@@ -64,6 +68,7 @@ function formatJob(r: StrapiJobRow): AutoLandingJob | null {
     title: String(r.title),
     lang: r.lang === "es" ? "es" : "en",
     niche: String(r.niche ?? "") || "Auto",
+    format: r.format === "jobguide" ? "jobguide" : "classic",
     notes: String(r.notes ?? ""),
     status,
     scheduledAt: num(r.scheduled_at),
@@ -123,6 +128,7 @@ export type NewJob = {
   title: string;
   lang: "en" | "es";
   niche: string;
+  format: LandingFormat;
   notes?: string;
   scheduledAt: number;
   createdBy: string;
@@ -141,6 +147,7 @@ export async function createJob(j: NewJob): Promise<AutoLandingJob | null> {
           title: j.title,
           lang: j.lang,
           niche: j.niche,
+          format: j.format,
           notes: j.notes ?? "",
           status: "scheduled",
           scheduled_at: String(j.scheduledAt),

@@ -21,7 +21,17 @@ export type ScheduleSpec =
 
 export type LandingLang = "en" | "es";
 
-export type DraftItem = { title: string; lang: LandingLang; niche: string; notes?: string };
+/** Page template the worker renders: "jobguide" (quiz gate, pills, tables, steps, FAQ, sidebar +
+ *  one AI in-article image — the new standard) or the older "classic" hero-image guide. */
+export type LandingFormat = "jobguide" | "classic";
+
+export type DraftItem = {
+  title: string;
+  lang: LandingLang;
+  niche: string;
+  format: LandingFormat;
+  notes?: string;
+};
 
 const DAY_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
@@ -164,6 +174,8 @@ export function normalizeDraftItems(
     const o = (r ?? {}) as Record<string, unknown>;
     const title = String(o.title ?? "").replace(/\s+/g, " ").trim();
     const lang = o.lang === "es" ? "es" : "en";
+    // Contract §1: only an explicit "classic" opts out of the job-style template.
+    const format: LandingFormat = o.format === "classic" ? "classic" : "jobguide";
     const niche = String(o.niche ?? "").replace(/\s+/g, " ").trim().slice(0, NICHE_MAX);
     const notes = String(o.notes ?? "").trim().slice(0, NOTES_MAX);
     if (title.length < TITLE_MIN) return problems.push({ index, error: "title too short" }), undefined;
@@ -171,7 +183,7 @@ export function normalizeDraftItems(
     const key = `${lang}:${title.toLowerCase()}`;
     if (seen.has(key)) return problems.push({ index, error: "duplicate title in batch" }), undefined;
     seen.add(key);
-    items.push({ title, lang, niche: niche || "Auto", ...(notes ? { notes } : {}) });
+    items.push({ title, lang, niche: niche || "Auto", format, ...(notes ? { notes } : {}) });
   });
   return problems.length ? { ok: false, problems } : { ok: true, items };
 }

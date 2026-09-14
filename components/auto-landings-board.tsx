@@ -1,9 +1,10 @@
 "use client";
 
-// Owner console: Auto landings (MO / MK Learn). Compose a batch of article HEADLINES, pick
-// "generate now" or a smart schedule (specific weekdays × times, Kyiv wall clock), and the
-// gc-gemini-generator worker turns each into a full compliant guide landing on
-// finance.magicoffers.shop — banners, gate funnel, interlink ring, hero image, the lot.
+// Owner console: Auto landings (MO / MK Learn). Compose a batch of article HEADLINES, pick the
+// page template (job-style guide = default, or the classic hero guide), pick "generate now" or a
+// smart schedule (specific weekdays × times, Kyiv wall clock), and the gc-gemini-generator
+// worker turns each into a full compliant guide landing on finance.magicoffers.shop — banners,
+// gate funnel, interlink ring, AI image, the lot.
 // Published slugs surface in the MO landing picker automatically (~1 min), no code change.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -28,6 +29,7 @@ import {
   MAX_BATCH,
   SCHEDULE_TZ,
   type DraftItem,
+  type LandingFormat,
   type LandingLang,
   type ScheduleSpec,
   computeScheduleSlots,
@@ -67,6 +69,22 @@ const WEEKDAYS: { v: number; label: string }[] = [
 ];
 
 type ComposeRow = { key: string; title: string; lang: LandingLang; niche: string };
+
+// Batch-level template chooser (contract §7): the format rides on every item of the batch.
+const FORMAT_OPTIONS: { v: LandingFormat; label: string; desc: string }[] = [
+  {
+    v: "jobguide",
+    label: "Job-style guide",
+    desc: "quiz gate, job pills, overview & reference tables, numbered steps, FAQ, sticky sidebar + one AI in-article image",
+  },
+  {
+    v: "classic",
+    label: "Classic guide",
+    desc: "hero image, sections, FAQ, key takeaways",
+  },
+];
+
+const FORMAT_CHIP: Record<LandingFormat, string> = { jobguide: "Job guide", classic: "Classic" };
 
 let rowSeq = 0;
 const freshRow = (title = "", lang: LandingLang = "en", niche = ""): ComposeRow => ({
@@ -342,6 +360,7 @@ export function AutoLandingsBoard({ user }: { user: SessionUser }) {
 
   // ---- compose state -------------------------------------------------------------------------
   const [rows, setRows] = useState<ComposeRow[]>([freshRow()]);
+  const [format, setFormat] = useState<LandingFormat>("jobguide");
   const [batchNotes, setBatchNotes] = useState("");
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkText, setBulkText] = useState("");
@@ -392,9 +411,10 @@ export function AutoLandingsBoard({ user }: { user: SessionUser }) {
           title: r.title,
           lang: r.lang,
           niche: r.niche.trim() || "Auto",
+          format,
           ...(batchNotes.trim() ? { notes: batchNotes.trim() } : {}),
         })),
-    [rows, batchNotes],
+    [rows, format, batchNotes],
   );
 
   const spec: ScheduleSpec | null = useMemo(() => {
@@ -526,8 +546,11 @@ export function AutoLandingsBoard({ user }: { user: SessionUser }) {
               </h1>
               <p className="text-[11.5px] leading-relaxed text-faint">
                 Type headlines — the AI writer publishes full MK Learn guide articles for the MO
-                partner: both MagicAds banner slots, the entry gate, the interlink ring, an
-                AI hero image, FAQ and compliance notes. Generate now or put them on a timer.
+                partner. The default job-style template brings a quiz gate, job pills, overview
+                and reference tables, numbered steps, FAQ, a sticky sidebar and one extra
+                AI-generated in-article image — plus both MagicAds banner slots, the interlink
+                ring and compliance notes. The classic hero-image guide stays one click away.
+                Generate now or put them on a timer.
               </p>
             </div>
 
@@ -535,7 +558,7 @@ export function AutoLandingsBoard({ user }: { user: SessionUser }) {
               <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-faint">How it works</p>
               {[
                 "Each headline becomes one queue job below.",
-                "The generator picks jobs up every minute once due; writing one page takes ~1–3 min.",
+                "The generator picks jobs up every minute once due; writing one page (text + image) takes ~2–4 min.",
                 `The page goes live at ${LANDING_BASE.replace("https://", "")}/<slug>.`,
                 "It appears in the MO landing picker automatically — gcm claims on launch as usual.",
               ].map((t, i) => (
@@ -558,7 +581,7 @@ export function AutoLandingsBoard({ user }: { user: SessionUser }) {
                 "No personal-attribute callouts, no urgency or scarcity",
                 "Health & finance framed as education, never advice; disclaimers on-page",
                 "Balanced sections: benefits AND considerations",
-                "Hero image: no text, no logos, no body imagery",
+                "AI images (hero or in-article): no text, no logos, no body imagery",
               ].map((t) => (
                 <p key={t} className="flex items-start gap-2 text-[11px] leading-snug text-dim">
                   <CheckIcon className="mt-0.5 h-3 w-3 shrink-0 text-launch2" />
@@ -681,6 +704,46 @@ export function AutoLandingsBoard({ user }: { user: SessionUser }) {
                   <span className="text-[10.5px] text-faint">
                     {draftItems.length}/{MAX_BATCH}
                   </span>
+                </div>
+
+                <div className="mt-1 flex flex-col gap-1.5">
+                  <FieldLabel>Template · applies to this batch</FieldLabel>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {FORMAT_OPTIONS.map((o) => {
+                      const on = format === o.v;
+                      return (
+                        <button
+                          key={o.v}
+                          type="button"
+                          onClick={() => setFormat(o.v)}
+                          aria-pressed={on}
+                          className={
+                            "flex flex-col items-start gap-1 rounded-xl border p-3 text-left transition-colors " +
+                            (on
+                              ? "border-accent/50 bg-accent/15"
+                              : "border-line bg-surface2 hover:border-line2 hover:bg-raise/30")
+                          }
+                        >
+                          <span className="flex items-center gap-2">
+                            <span
+                              className={
+                                "h-2 w-2 shrink-0 rounded-full " + (on ? "bg-accent" : "border border-line2 bg-transparent")
+                              }
+                            />
+                            <span className={"text-[12.5px] font-semibold " + (on ? "text-[#9db8ff]" : "text-ink")}>
+                              {o.label}
+                            </span>
+                            {o.v === "jobguide" ? (
+                              <span className="rounded border border-line bg-surface px-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-faint">
+                                default
+                              </span>
+                            ) : null}
+                          </span>
+                          <span className={"text-[11px] leading-snug " + (on ? "text-dim" : "text-faint")}>{o.desc}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
 
                 <div className="mt-1 flex flex-col gap-1.5">
@@ -971,6 +1034,12 @@ export function AutoLandingsBoard({ user }: { user: SessionUser }) {
                             <span className="shrink-0 rounded border border-line bg-surface2 px-1 text-[9.5px] font-semibold uppercase text-faint">
                               {j.lang}
                             </span>
+                            <span
+                              className="shrink-0 rounded border border-line bg-surface2 px-1 text-[9.5px] font-semibold uppercase text-faint"
+                              title={j.format === "jobguide" ? FORMAT_OPTIONS[0].desc : FORMAT_OPTIONS[1].desc}
+                            >
+                              {FORMAT_CHIP[j.format]}
+                            </span>
                             <span className="shrink-0 text-[10.5px] text-faint">{j.niche}</span>
                           </p>
                           <p className="mt-0.5 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[10.5px] text-faint">
@@ -978,6 +1047,13 @@ export function AutoLandingsBoard({ user }: { user: SessionUser }) {
                               <>
                                 <span className="font-mono">{fmtKyiv(j.scheduledAt)}</span>
                                 <span className="text-[#9db8ff]">{countdown(j.scheduledAt, now)}</span>
+                                {j.error ? (
+                                  // The worker's deferral note (e.g. waiting for the MK Learn deploy) —
+                                  // informational, the row is still scheduled.
+                                  <span className="max-w-[360px] truncate text-faint/80 italic" title={j.error}>
+                                    {j.error}
+                                  </span>
+                                ) : null}
                               </>
                             ) : null}
                             {j.status === "generating" ? <span>writing since {fmtKyiv(j.startedAt || j.scheduledAt)}…</span> : null}
