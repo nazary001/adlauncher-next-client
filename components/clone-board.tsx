@@ -21,6 +21,7 @@ import {
 } from "@/lib/clone";
 import {
   bidKind,
+  bidTag,
   budgetOnStrategyChange,
   defaultBudgetFor,
   limitMoneyCents,
@@ -575,6 +576,9 @@ function CloneInner({
           name,
           geo: geoSummary(r.countries),
           budget: r.budget,
+          // Card tag: the row's picked strategy + its Bid value (cap/ROAS rows can't fire without
+          // one — rowBidMissing gates the button; lowest-cost reads "auto").
+          bid: bidTag(r.bidStrategy, edit.roasGoal) || undefined,
         });
         queued++;
       }

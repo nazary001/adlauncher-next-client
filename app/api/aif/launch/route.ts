@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { type Campaign, bidAmountMissing, bidKind, normalizeRoasGoal, parseMoney } from "@/lib/types";
+import { type Campaign, bidAmountMissing, bidKind, bidTag, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { AIF_VALUE_PIXEL, type PartnerId, aifOfferablePixels, fullLandingUrl, partnerConfig, pickAifPixel } from "@/lib/partners";
 import {
   type LaunchBinds,
@@ -358,7 +358,8 @@ export async function POST(req: Request) {
       // Mirror progress into the shared launch-task row — the team keeps seeing the truth even
       // if this browser dies mid-run. partner="us" on every write: the row must land in the AIF
       // drawer's scope even when this writer is the one that creates it.
-      const tw = taskWriter(session.username, taskId, { partner: "us" });
+      const bidLabel = bidTag(campaign.bidStrategy, campaign.bidCap);
+      const tw = taskWriter(session.username, taskId, { partner: "us", ...(bidLabel ? { bid: bidLabel } : {}) });
       let lastStage = "gcm";
       let settled = false; // set before the terminal write — the beat must never chain after it
       const progress = (stage: string) => {

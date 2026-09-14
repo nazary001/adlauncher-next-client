@@ -1,5 +1,5 @@
 import { NextResponse, after } from "next/server";
-import { bidKind, normalizeRoasGoal, parseMoney } from "@/lib/types";
+import { bidKind, bidTag, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { LION_NAME_SUFFIX_MAX } from "@/lib/hs-clone-name";
 import { SUPPORTED_BID_STRATEGIES } from "@/lib/fb-launch";
 import { hsWireBid } from "@/lib/hs-launch";
@@ -118,6 +118,9 @@ type BatchShot = {
   bidStrategy: string;
   /** Per-row strategy switch ("" = the source's) — LION duplicate v2 takes bid_strategy. */
   bidStrategyOverride: string;
+  /** Display-only "what it bids on" tag (bidTag), computed client-side and forwarded verbatim to
+   *  the task row so the monitor card shows the clone's bid/ROAS. */
+  bidLabel: string;
   /** Destination account currency (LION catalog, filled by validation) — the currency the
    *  wire's monetary values are in, and the cross-currency inherit guard's other half. */
   currency: string;
@@ -195,6 +198,8 @@ export async function POST(req: Request): Promise<NextResponse> {
        *  strategies — ROAS ↔ cap ↔ cost cap ↔ lowest. "" = the source's. A switched cap/ROAS row
        *  must carry a typed `bid` (nothing inherits across strategies). */
       bidStrategyOverride?: string;
+      /** Display-only bid/ROAS tag (bidTag) for the monitor card — forwarded verbatim to the row. */
+      bidLabel?: string;
       /** Full clone name (fixed grammar prefix + edited tail) — the row title and the geo-override
        *  Graph rename. LION's duplicate/ never reads it (not in its contract). */
       name?: string;
@@ -218,6 +223,7 @@ export async function POST(req: Request): Promise<NextResponse> {
     budget?: string;
     bid?: string;
     bidStrategy?: string;
+    bidLabel?: string;
     nameSuffix?: string;
     name?: string;
     geo?: string;
@@ -275,6 +281,7 @@ export async function POST(req: Request): Promise<NextResponse> {
         bid,
         bidStrategy: String(raw?.bidStrategy ?? "").trim(),
         bidStrategyOverride: strategyOverride,
+        bidLabel: String(raw?.bidLabel ?? "").trim().slice(0, 40),
         currency: "",
         name: String(raw?.name ?? "").trim().slice(0, 200),
         suffix: String(raw?.suffix ?? "").trim().slice(0, LION_NAME_SUFFIX_MAX),
@@ -400,6 +407,7 @@ export async function POST(req: Request): Promise<NextResponse> {
           name: s.name || s.label || `Clone of ${s.campaignId}`,
           geo: s.geo,
           budget: s.budgetRaw,
+          ...(s.bidLabel ? { bid: s.bidLabel } : {}),
           lionTaskId: "", // pending — the pump fills it as each shot lands on LION
           kind: "duplicate",
           // Override shots are born behind the geo gate: activate (server + client poller)
@@ -542,6 +550,9 @@ export async function POST(req: Request): Promise<NextResponse> {
             name: name || `Clone of ${campaignId}${rows.length > 1 ? ` · copy ${i + 1}/${rows.length}` : ""}`,
             geo: String(body.geo ?? "").slice(0, 40) || "inherited",
             budget: String(body.budget ?? ""),
+            bid: (String(body.bidLabel ?? "").trim() ||
+              bidTag(String(body.bidStrategy ?? "").trim(), String(body.bid ?? "").trim()) ||
+              "inherited").slice(0, 40),
             lionTaskId: r.lionTaskId,
             kind: "duplicate",
           }),

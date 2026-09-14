@@ -1,7 +1,7 @@
 // Node's built-in runner (v24 strips types natively): `node --test tests/types.test.ts`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bidAmountMissing, limitMoneyCents, moneyCentsLabel, normalizeRoasGoal, parseMoney, todayPrefixDDMM } from "../lib/types.ts";
+import { bidAmountMissing, bidTag, limitMoneyCents, moneyCentsLabel, normalizeRoasGoal, parseMoney, todayPrefixDDMM } from "../lib/types.ts";
 
 // ---- todayPrefixDDMM: the MO/AIF [DD/MM] born-prefix date is the team's (Kyiv) calendar day ----
 // (live 09-09: the launcher/clone boards computed it from the RENDERER's clock — Vercel's UTC on
@@ -20,6 +20,29 @@ test("prefix date is Kyiv's calendar day, DD.MM — identical on server and clie
 
 type BidShape = { bidStrategy: string; bidCap: string };
 const c = (bidStrategy: string, bidCap: string) => ({ bidStrategy, bidCap }) as BidShape as never;
+
+// ---- bidTag: the monitor-card "what it launched on" label ------------------------------------
+
+test("bidTag names the kind and amount the delivery fields show", () => {
+  assert.equal(bidTag("LOWEST_COST_WITH_MIN_ROAS", "0,3"), "ROAS 0,3");
+  assert.equal(bidTag("LOWEST_COST_WITH_BID_CAP", "0,50"), "bid $0,5");
+  assert.equal(bidTag("COST_CAP", "1,20"), "bid $1,2");
+  assert.equal(bidTag("LOWEST_COST_WITHOUT_CAP", ""), "auto");
+});
+
+test("bidTag drops the amount it does not know (inherited clone) but keeps the kind", () => {
+  assert.equal(bidTag("LOWEST_COST_WITH_MIN_ROAS", ""), "ROAS");
+  assert.equal(bidTag("LOWEST_COST_WITH_BID_CAP", null), "bid");
+  // A non-lowest strategy with neither amount nor kind = nothing to show (caller omits the segment).
+  assert.equal(bidTag("", ""), "");
+});
+
+test("bidTag shows the ROAS goal the wire sends, not the percent / ×10 form that was typed", () => {
+  assert.equal(bidTag("LOWEST_COST_WITH_MIN_ROAS", "30"), "ROAS 0,3"); // percent form
+  assert.equal(bidTag("LOWEST_COST_WITH_MIN_ROAS", "3"), "ROAS 0,3"); // ×10 slip
+  assert.equal(bidTag("LOWEST_COST_WITH_MIN_ROAS", 0.25), "ROAS 0,25");
+  assert.equal(bidTag("LOWEST_COST_WITH_MIN_ROAS", "15"), "ROAS 15"); // ambiguous band stays as typed
+});
 
 // ---- bidAmountMissing must agree with what the wire points accept ----------------------------
 

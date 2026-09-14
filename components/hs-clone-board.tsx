@@ -8,7 +8,7 @@ import { useHs } from "./use-hs";
 import { useHsTaskManager } from "./hs-task-manager";
 import { UploadingNotice } from "./upload-guard";
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
-import { CLONE_DEFAULT_BUDGET, bidKind, budgetOnStrategyChange, limitMoneyCents, moneyCentsLabel, moneyLabel, parseMoney } from "@/lib/types";
+import { CLONE_DEFAULT_BUDGET, bidKind, bidTag, budgetOnStrategyChange, limitMoneyCents, moneyCentsLabel, moneyLabel, parseMoney } from "@/lib/types";
 import { lionWireSuffix } from "@/lib/hs-clone-name";
 import { BID_STRATEGIES, geoSummary } from "@/lib/catalog";
 import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from "@/lib/hs-launch";
@@ -893,10 +893,16 @@ export function HsCloneBoard({
       // (the server ensures it too), LION waves stay unmarked — splitLionName already stripped
       // any marker the SOURCE was born with.
       const mark = effDupChannel === "token" ? HS_TOKEN_MARK : "";
+      // Display-only "what it bids on" tag for the monitor card (the server forwards it verbatim to
+      // the task row): the row's OWN typed bid when it has one, else the source's inherited bid;
+      // effective strategy = the switched one, else the source's. "" (nothing known yet) → the
+      // board's own "inherited" word, mirroring the geo slot.
+      const bidLabel = bidTag(rowStrategy(r), r.bid.trim() || r.info?.bid || "") || "inherited";
       return Array.from({ length: n }, (_, copy) => ({
         campaignId: cid,
         budget: r.budget,
         bid: r.bid.trim(),
+        bidLabel,
         // Fallback for the server's bid scaling (its own details/ re-read wins) — the bid
         // rides in HUMAN units and is scaled to LION's Meta-native wire unit server-side.
         ...(r.info?.bidStrategy ? { bidStrategy: r.info.bidStrategy } : {}),

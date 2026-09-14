@@ -100,6 +100,12 @@ export const TASK_FIELDS = [
   "queued_at",
   "started_at",
   "finished_at",
+  // Display-only "what it bids on" tag (bidTag: "ROAS 0,3" / "bid $0,5" / "auto") shown on the
+  // monitor cards — the `bid` string column (maxLength 40) exists on the shared `launch-task`
+  // Strapi collection since 2026-09-11. ⚠️ General rule: any NEW attribute needs its Strapi column
+  // FIRST — Strapi 400s a write carrying an undeclared attribute (the ad_id gotcha), which would
+  // wedge EVERY task save.
+  "bid",
 ] as const;
 
 export type TaskRowData = Record<string, unknown>;
@@ -107,6 +113,13 @@ export type TaskRowData = Record<string, unknown>;
 export function pickTaskFields(body: Record<string, unknown>): TaskRowData {
   const out: TaskRowData = {};
   for (const k of TASK_FIELDS) if (body[k] !== undefined) out[k] = body[k];
+  // `bid` is a display tag bounded by the column (maxLength 40): clamp it here so a stale/buggy
+  // client can never 400 the whole upsert; empty/non-string → omitted (the stored value stays).
+  if ("bid" in out) {
+    const b = typeof out.bid === "string" ? out.bid.trim().slice(0, 40) : "";
+    if (b) out.bid = b;
+    else delete out.bid;
+  }
   return out;
 }
 
@@ -251,6 +264,9 @@ export async function stampHsTaskRow(
     /** Override stamp: "geo-gate" marks a geo-override clone whose Graph patch has not landed —
      *  /api/hs/activate and the client poller refuse to flip such a row ACTIVE. */
     stage?: string;
+    /** Display-only "what it bids on" tag (bidTag) for the monitor card — the caller computes it
+     *  from the shot's effective strategy + bid; omitted when there is nothing to show. */
+    bid?: string;
   },
 ): Promise<void> {
   if (!storeConfigured()) return;
@@ -264,6 +280,7 @@ export async function stampHsTaskRow(
     stage: row.stage ?? "queue",
     link: row.lionTaskId,
     gcm: row.kind,
+    ...(row.bid ? { bid: row.bid } : {}),
     queued_at: now,
     started_at: now,
     ...(row.kind === "launch" ? { finished_at: now } : {}),

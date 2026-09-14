@@ -11,7 +11,7 @@ import {
 } from "react";
 import { readCreative, safeBlobName, uploadCreativeFile } from "./blob-uploader";
 import { UploadingNotice, uploadingLabel, useUnloadGuard } from "./upload-guard";
-import { type Campaign, moneyLabel } from "@/lib/types";
+import { type Campaign, bidTag, moneyLabel } from "@/lib/types";
 import { type PartnerId, partnerConfig } from "@/lib/partners";
 import type { CloneEdit } from "@/lib/clone";
 import {
@@ -173,6 +173,9 @@ export type CloneEnqueueArgs = {
   name: string;
   geo: string;
   budget: string;
+  /** Display-only bid/ROAS tag for the card (bidTag of the row's picked strategy + Bid value,
+   *  computed on the board); persisted with every save of the row. */
+  bid?: string;
 };
 
 type TaskManagerValue = {
@@ -939,6 +942,9 @@ function TaskManagerCore({
         mediaKind: args.mediaKind,
         ...(args.cover ? { cover: args.cover } : {}),
       });
+      // What this launch bids on — shown on the card and persisted with every save (meta) so it
+      // survives reload and reaches the team's restored rows too.
+      const bid = bidTag(args.campaign.bidStrategy, args.campaign.bidCap) || undefined;
       // static fields reused on every remote upsert for this task
       meta.current.set(id, {
         name: args.name,
@@ -946,6 +952,7 @@ function TaskManagerCore({
         gcm: args.gcm,
         geo: args.geo,
         budget: args.budget,
+        ...(bid ? { bid } : {}),
         queued_at: queuedAt,
       });
       setTasks((ts) => [
@@ -958,6 +965,7 @@ function TaskManagerCore({
           gcm: args.gcm,
           geo: args.geo,
           budget: args.budget,
+          ...(bid ? { bid } : {}),
           status: "queued" as const,
           stage: null,
           // Client-only: the launch-limit's optimistic demand (never persisted).
@@ -987,12 +995,14 @@ function TaskManagerCore({
         edit: args.edit,
         ...(args.channel ? { channel: args.channel } : {}),
       });
+      const bid = args.bid || undefined;
       meta.current.set(id, {
         name: args.name,
         partner: args.partnerId,
         gcm: "",
         geo: args.geo,
         budget: args.budget,
+        ...(bid ? { bid } : {}),
         queued_at: queuedAt,
       });
       setTasks((ts) => [
@@ -1005,6 +1015,7 @@ function TaskManagerCore({
           gcm: "",
           geo: args.geo,
           budget: args.budget,
+          ...(bid ? { bid } : {}),
           status: "queued" as const,
           stage: null,
           // Client-only demand key: the TARGET account when picked; from-each-source clones have
@@ -1502,7 +1513,8 @@ function TaskRow({
             {task.name || "Untitled campaign"}
           </p>
           <p className="mt-0.5 truncate font-mono text-[10.5px] text-faint">
-            {task.partner === "us" ? "brand" : "gcm"} {task.gcm || "—"} · {task.geo} · ${moneyLabel(task.budget)} ·{" "}
+            {task.partner === "us" ? "brand" : "gcm"} {task.gcm || "—"} · {task.geo} · ${moneyLabel(task.budget)}
+            {task.bid ? ` · ${task.bid}` : ""} ·{" "}
             <OwnerChip owner={task.owner} mine={mine} />
           </p>
         </div>

@@ -112,6 +112,8 @@ type TokenShot = {
   /** TARGET bid strategy (per-row ROAS ↔ cap ↔ lowest switch, owner ask 09-01) — this rail
    *  rebuilds the ad set, so it can re-bid it. "" = inherit the source's strategy verbatim. */
   bidStrategyOverride: string;
+  /** Display-only "what it bids on" tag (bidTag), computed client-side, stamped on the task row. */
+  bidLabel: string;
   name: string;
   geo: string;
   label: string;
@@ -150,6 +152,8 @@ export async function POST(req: Request): Promise<NextResponse> {
       bid?: string;
       bidStrategy?: string;
       bidStrategyOverride?: string;
+      /** Display-only bid/ROAS tag (bidTag) for the monitor card — forwarded verbatim to the row. */
+      bidLabel?: string;
       name?: string;
       geo?: string;
       label?: string;
@@ -207,6 +211,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       bid,
       bidStrategy: String(raw?.bidStrategy ?? "").trim(),
       bidStrategyOverride: strategyOverride,
+      bidLabel: String(raw?.bidLabel ?? "").trim().slice(0, 40),
       name: String(raw?.name ?? "").trim().slice(0, 200),
       geo: String(raw?.geo ?? "").slice(0, 40) || "inherited",
       label: String(raw?.label ?? "").trim().slice(0, 200),
@@ -308,6 +313,7 @@ export async function POST(req: Request): Promise<NextResponse> {
         name: hsEnsureTokenMark(s.name || s.label || `Clone of ${s.campaignId}`),
         geo: s.geo,
         budget: s.budgetRaw,
+        ...(s.bidLabel ? { bid: s.bidLabel } : {}),
         lionTaskId: "",
         kind: "duplicate",
       }),

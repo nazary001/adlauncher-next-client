@@ -20,6 +20,9 @@ export type LaunchTask = {
   gcm: string;
   geo: string;
   budget: string;
+  /** Display-only "what it bids on" tag (bidTag: "ROAS 0,3" / "bid $0,5" / "auto") — persisted in
+   *  the store's `bid` column so restored/foreign rows show it too. Older rows have none. */
+  bid?: string;
   status: TaskStatus;
   stage: string | null;
   result?: { campaignId?: string; adsetId?: string; adId?: string; gcm?: string; link?: string };
@@ -73,6 +76,7 @@ export function fromRemote(r: Record<string, unknown>): LaunchTask {
     gcm: s(r.gcm) ?? "",
     geo: s(r.geo) ?? "",
     budget: s(r.budget) ?? "",
+    bid: s(r.bid) || undefined,
     status,
     stage: s(r.stage) ?? null,
     result:

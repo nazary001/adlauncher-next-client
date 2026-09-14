@@ -26,7 +26,7 @@ import {
 } from "react";
 import { readCreative, safeBlobName, uploadCreativeFile } from "./blob-uploader";
 import { UploadingNotice, uploadingLabel, useUnloadGuard } from "./upload-guard";
-import { type Campaign, type FileItem, moneyLabel } from "@/lib/types";
+import { type Campaign, type FileItem, bidTag, moneyLabel } from "@/lib/types";
 import type { SessionUser } from "./user-menu";
 import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, XIcon } from "./icons";
 
@@ -65,6 +65,10 @@ export type HsTask = {
   campaignId?: string;
   adsetId?: string;
   adCount?: number;
+  /** Display-only "what it bids on" tag (bidTag: "ROAS 0,3" / "bid $0,5" / "auto") shown on the
+   *  card so a buyer sees at a glance what a launch/clone rode on. Persisted in the store's `bid`
+   *  column so it survives reload and shows on the team's restored rows too. */
+  bid?: string;
   error?: string;
   /** Target ad account id (client-only, set at enqueue — not persisted): launch-limit demand. */
   account?: string;
@@ -201,6 +205,7 @@ type HsRemoteRow = {
   campaignId: string | null;
   adsetId: string | null;
   adCount: number | null;
+  bid: string | null;
   error: string | null;
   queued_at: number | null;
   started_at: number | null;
@@ -238,6 +243,7 @@ function fromRemote(r: HsRemoteRow): HsTask {
     campaignId: r.campaignId || undefined,
     adsetId: r.adsetId || undefined,
     adCount: r.adCount ?? undefined,
+    bid: r.bid || undefined,
     error:
       r.error ||
       (raw === "interrupted" ? "Interrupted — the submitting session went offline" : undefined),
@@ -305,6 +311,8 @@ export type HsSubmittedRow = {
   profile: string;
   geo: string;
   budget: string;
+  /** Display-only bid/ROAS tag (bidTag) for the card, when the caller knows it. */
+  bid?: string;
   lionTaskId: string;
 };
 
@@ -443,6 +451,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       // wedges at its previous status (live 08-17: 4/4 token launches stuck "running"; the same
       // silent 400 hit duplicate done-writes since 08-12).
       ad_id: t.adCount != null ? String(t.adCount) : null,
+      ...(t.bid ? { bid: t.bid } : {}),
       error: t.error ?? t.lionNote ?? null,
       queued_at: t.queuedAt,
       started_at: t.submittedAt ?? t.startedAt ?? null,
@@ -1125,8 +1134,11 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       const now = Date.now();
       const channel: HsLaunchChannel = args.channel === "token" ? "token" : "lion";
       const kind = channel === "token" ? ("token" as const) : ("launch" as const);
+      // What this launch bids on — shown on the card and persisted (rides in `meta`, which is
+      // spread into every save) so it survives reload and reaches the team's restored rows too.
+      const bid = bidTag(args.campaign.bidStrategy, args.campaign.bidCap) || undefined;
       inputs.current.set(id, { campaign: args.campaign, files: args.files, channel });
-      meta.current.set(id, { name: args.name, geo: args.geo, budget: args.budget, gcm: kind });
+      meta.current.set(id, { name: args.name, geo: args.geo, budget: args.budget, gcm: kind, ...(bid ? { bid } : {}) });
       setTasks((ts) => [
         {
           id,
@@ -1139,6 +1151,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
           status: "queued" as const,
           stage: "upload",
           account: args.campaign.account || undefined,
+          ...(bid ? { bid } : {}),
           queuedAt: now,
           local: true,
         },
@@ -1163,13 +1176,14 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         const id =
           r.taskId ??
           (globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)) + now.toString(36) + i.toString(36);
-        meta.current.set(id, { name: r.name, geo: r.geo, budget: r.budget, gcm: "duplicate" });
+        meta.current.set(id, { name: r.name, geo: r.geo, budget: r.budget, gcm: "duplicate", ...(r.bid ? { bid: r.bid } : {}) });
         return {
           id,
           name: r.name,
           profile: r.profile,
           geo: r.geo,
           budget: r.budget,
+          ...(r.bid ? { bid: r.bid } : {}),
           owner: me,
           kind: "duplicate" as const,
           status: "submitted" as const,
@@ -1654,6 +1668,7 @@ function HsTaskRow({
             <HsOwnerChip owner={t.owner} mine={mine} />
             <span className="truncate">
               {(t.profile || "—").replace("globecoders-", "")} · {t.geo} · ${moneyLabel(t.budget)}
+              {t.bid ? ` · ${t.bid}` : ""}
             </span>
           </p>
         </div>

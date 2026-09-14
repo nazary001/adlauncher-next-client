@@ -41,6 +41,7 @@ function toClient(r: Row): Row {
     campaignId: r.campaign_id ?? null,
     adsetId: r.adset_id ?? null,
     adCount: num(r.ad_id) ?? null,
+    bid: r.bid ?? null,
     error: r.error ?? null,
     queued_at: num(r.queued_at) ?? null,
     started_at: num(r.started_at) ?? null,

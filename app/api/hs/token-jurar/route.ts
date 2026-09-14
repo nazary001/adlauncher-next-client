@@ -109,6 +109,8 @@ type TokenJuroShot = {
   /** TARGET bid strategy (per-row ROAS ↔ cap ↔ lowest switch, owner ask 09-01) — this rail
    *  builds a fresh ad set, so it can re-bid it. "" = ride the source's strategy. */
   bidStrategyOverride: string;
+  /** Display-only "what it bids on" tag (bidTag), computed client-side, stamped on the task row. */
+  bidLabel: string;
   /** Full campaign name built by the board (grammar prefix + JURO + TOKEN + tail); the pump
    *  re-ensures both markers server-side — client names are never the truth. */
   name: string;
@@ -150,6 +152,8 @@ export async function POST(req: Request): Promise<NextResponse> {
       bid?: string;
       /** Optional TARGET bid strategy (ROAS ↔ cap ↔ lowest) — empty rides the source's. */
       bidStrategyOverride?: string;
+      /** Display-only bid/ROAS tag (bidTag) for the monitor card — forwarded verbatim to the row. */
+      bidLabel?: string;
       name?: string;
       geo?: string;
       label?: string;
@@ -204,6 +208,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       budgetRaw: String(raw?.budget ?? ""),
       bid,
       bidStrategyOverride: strategyOverride,
+      bidLabel: String(raw?.bidLabel ?? "").trim().slice(0, 40),
       name: String(raw?.name ?? "").trim().slice(0, 200),
       geo: String(raw?.geo ?? "").slice(0, 40) || "inherited",
       label: String(raw?.label ?? "").trim().slice(0, 200),
@@ -301,6 +306,7 @@ export async function POST(req: Request): Promise<NextResponse> {
         name: hsEnsureTokenMark(juroEnsureMark(s.name || s.label || `copy of ${s.campaignId}`)),
         geo: s.geo,
         budget: s.budgetRaw,
+        ...(s.bidLabel ? { bid: s.bidLabel } : {}),
         lionTaskId: "",
         kind: "duplicate",
       }),

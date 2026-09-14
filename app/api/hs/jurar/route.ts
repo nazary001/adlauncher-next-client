@@ -105,6 +105,9 @@ type JuroShot = {
   bid: number | null;
   /** Per-row strategy switch ("" = the source's) — LION's /jurar/ takes bid_strategy natively. */
   bidStrategyOverride: string;
+  /** Display-only "what it bids on" tag (bidTag), computed client-side and forwarded verbatim to
+   *  the task row so the monitor card shows the JURO clone's bid/ROAS. */
+  bidLabel: string;
   suffix: string;
   /** The board's exact name for the post-birth Graph rename ("" = keep LION's own). */
   name: string;
@@ -153,6 +156,8 @@ export async function POST(req: Request): Promise<NextResponse> {
        *  ROAS ↔ cap ↔ lowest all reachable (/jurar/ builds a fresh campaign). "" = the source's.
        *  A switched cap/ROAS row must carry a typed `bid` (nothing inherits across strategies). */
       bidStrategyOverride?: string;
+      /** Display-only bid/ROAS tag (bidTag) for the monitor card — forwarded verbatim to the row. */
+      bidLabel?: string;
       /** Buyer tail — LION builds the JURO name itself and appends this as name_suffix. */
       suffix?: string;
       /** The board's exact name — put on the born campaign through a campaign-level Graph write
@@ -215,6 +220,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       budgetRaw: String(raw?.budget ?? ""),
       bid,
       bidStrategyOverride: strategyOverride,
+      bidLabel: String(raw?.bidLabel ?? "").trim().slice(0, 40),
       suffix: String(raw?.suffix ?? "").trim().slice(0, 80),
       name: String(raw?.name ?? "").trim().slice(0, 200),
       geo: String(raw?.geo ?? "").slice(0, 40) || "inherited",
@@ -299,6 +305,7 @@ export async function POST(req: Request): Promise<NextResponse> {
         name: s.label ? `JURO · ${s.label}` : `JURO copy of ${s.campaignId}`,
         geo: s.geo,
         budget: s.budgetRaw,
+        ...(s.bidLabel ? { bid: s.bidLabel } : {}),
         lionTaskId: "",
         kind: "duplicate",
       }),

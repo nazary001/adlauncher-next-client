@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { type Campaign, bidAmountMissing, bidKind, moEnsureSocMark, normalizeRoasGoal, parseMoney } from "@/lib/types";
+import { type Campaign, bidAmountMissing, bidKind, bidTag, moEnsureSocMark, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { conversionEventsFor } from "@/lib/catalog";
 import { ROAS_PIXEL, partnerConfig, fullLandingUrl, type PartnerId } from "@/lib/partners";
 import { resolveMoSigner } from "@/lib/mo-soc";
@@ -424,7 +424,10 @@ export async function POST(req: Request) {
       // shared Task Manager stays live for every account — including after this client is gone.
       // partner="in" on every write: if THIS writer creates the row (client's queued-save failed,
       // browser died), a null partner would match neither drawer scope — invisible team-wide.
-      const tw = taskWriter(session.username, taskId, { partner: "in" });
+      // `bid` rides on every write too: a row THIS writer creates (auto-launch modal, client
+      // died before its pre-save) still shows what it launched on in the drawer.
+      const bidLabel = bidTag(campaign.bidStrategy, campaign.bidCap);
+      const tw = taskWriter(session.username, taskId, { partner: "in", ...(bidLabel ? { bid: bidLabel } : {}) });
       let lastStage = "gcm";
       let settled = false; // set before the terminal write — the beat must never chain after it
       const progress = (stage: string) => {

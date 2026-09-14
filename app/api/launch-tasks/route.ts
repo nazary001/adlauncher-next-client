@@ -37,6 +37,7 @@ function toClient(r: Row): Row {
     gcm: r.gcm ?? "",
     geo: r.geo ?? "",
     budget: r.budget ?? "",
+    bid: r.bid ?? null,
     status: r.status ?? "queued",
     stage: r.stage ?? null,
     campaign_id: r.campaign_id ?? null,

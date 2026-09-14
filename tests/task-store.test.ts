@@ -2,7 +2,18 @@
 // Excluded from the app's tsconfig — the explicit .ts import below is a Node requirement.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readTeamTasks } from "../lib/task-store.ts";
+import { pickTaskFields, readTeamTasks } from "../lib/task-store.ts";
+
+// ---- pickTaskFields: the `bid` tag rides the whitelist, clamped to the column's 40 chars ----
+
+test("pickTaskFields keeps bid (clamped, trimmed) and drops junk keys / empty bids", () => {
+  assert.deepEqual(pickTaskFields({ task_id: "t", bid: " ROAS 0,3 ", junk: 1 }), { task_id: "t", bid: "ROAS 0,3" });
+  assert.deepEqual(pickTaskFields({ task_id: "t", bid: "x".repeat(60) }).bid, "x".repeat(40));
+  assert.deepEqual(pickTaskFields({ task_id: "t", bid: "" }), { task_id: "t" });
+  assert.deepEqual(pickTaskFields({ task_id: "t", bid: null }), { task_id: "t" });
+  assert.deepEqual(pickTaskFields({ task_id: "t", bid: 7 }), { task_id: "t" });
+  assert.deepEqual(pickTaskFields({ task_id: "t", status: "done" }), { task_id: "t", status: "done" });
+});
 
 type Handler = (url: string) => Response;
 

@@ -210,6 +210,31 @@ export function budgetOnStrategyChange(prev: string, next: string, current: stri
 }
 
 /**
+ * Compact "what it bids on" tag for the launch-monitor cards — the kind plus its amount, formatted
+ * the way the delivery fields show it: min-ROAS goal → "ROAS 0,3", bid/cost cap → "bid $0,5"
+ * (moneyLabel drops trailing zeros), lowest cost → "auto". `value` is the raw ROAS goal / bid-cap
+ * string (or number); a ROAS goal typed in percent / ×10 form is shown as the decimal the wire
+ * actually sends (normalizeRoasGoal), the ambiguous 10–20 band stays as typed. An empty value
+ * on a cap/roas strategy → the kind name alone ("ROAS" / "bid") — the amount is unknown right now
+ * (an inherited clone whose source bid LION hasn't reported yet). "" only when there is nothing to
+ * say (a non-lowest strategy with no amount and no kind), so callers can drop the segment cleanly.
+ */
+export function bidTag(strategy: string, value: string | number | null | undefined): string {
+  const v = value == null || value === "" ? "" : moneyLabel(value);
+  switch (bidKind(strategy)) {
+    case "roas": {
+      const goal = v ? normalizeRoasGoal(parseMoney(String(value))) : null;
+      const shown = goal != null ? moneyLabel(goal) : v;
+      return shown ? `ROAS ${shown}` : "ROAS";
+    }
+    case "cap":
+      return v ? `bid $${v}` : "bid";
+    default:
+      return strategy === "LOWEST_COST_WITHOUT_CAP" ? "auto" : v ? `$${v}` : "";
+  }
+}
+
+/**
  * Min-ROAS goals the team actually runs are decimals well under 2 (0,20–0,50 typical; the live
  * optimizer nudges floors ±0,01). Buyers still keep typing the PERCENT form (30 = 30%) or a ×10
  * slip (3 = 0,30) — exactly what put ×100/×10 floors on 1159 campaigns (mass ÷100 Graph fix
