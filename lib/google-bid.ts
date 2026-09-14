@@ -664,3 +664,16 @@ export function googleNameHeadPreview(args: { accountName: string; acr: string; 
   const offer = googleOfferFromLanding(args.landing);
   return `{HS-____} ${args.accountName || "<account>"} - (${acr}) #ADX [HIGH] - DEMANDA (YTB) - ${geo} - ${offer || "<offer>"} DIRETO`;
 }
+
+// ---------- account allowlist (owner rule 2026-09-14) ----------
+
+/** The LION MCC our Google launches live on (GLO-HS-00N accounts, BRL). */
+export const GOOGLE_LAUNCH_MCC = "2678500976";
+export const GOOGLE_LAUNCH_ACCOUNT_RE = /^GLO-HS-\d{3}$/i;
+
+/** Only the GLO-HS-001…010 accounts are offered and accepted for Google launches (owner rule
+ *  14.09: the suspended "Ads N" book, GC-Vis and the pixel-less GC-HS-Lion-BR-N stay hidden).
+ *  Name pattern + MCC, so a future GLO-HS-011 appears by itself. */
+export function isGoogleLaunchAccount(c: { name: string; mccId?: string }): boolean {
+  return GOOGLE_LAUNCH_ACCOUNT_RE.test(String(c.name ?? "").trim()) && (!c.mccId || c.mccId === GOOGLE_LAUNCH_MCC);
+}

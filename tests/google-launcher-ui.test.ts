@@ -9,6 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  isGoogleLaunchAccount,
   GOOGLE_LAUNCH_BID_STRATEGIES,
   GOOGLE_GEO_PRESETS,
   GOOGLE_LANGUAGES_FULL,
@@ -229,4 +230,17 @@ test("googleLaunchWire names the offending ad group when a later group is short 
   const built = googleLaunchWire(shot, { customerId: "5378080027", nameSuffix: "s" });
   assert.ok("refusal" in built);
   if ("refusal" in built) assert.match(built.refusal, /ad group 2/);
+});
+
+// ---- isGoogleLaunchAccount: the GLO-HS allowlist (owner rule 14.09) ----------------------------
+
+test("isGoogleLaunchAccount accepts GLO-HS-001…010 on the LION MCC and nothing else", () => {
+  assert.equal(isGoogleLaunchAccount({ name: "GLO-HS-001", mccId: "2678500976" }), true);
+  assert.equal(isGoogleLaunchAccount({ name: "GLO-HS-010", mccId: "2678500976" }), true);
+  assert.equal(isGoogleLaunchAccount({ name: "glo-hs-011" }), true); // a future account appears by itself
+  assert.equal(isGoogleLaunchAccount({ name: "GC-HS-Lion-BR-1", mccId: "2678500976" }), false);
+  assert.equal(isGoogleLaunchAccount({ name: "Ads 1", mccId: "4904785717" }), false);
+  assert.equal(isGoogleLaunchAccount({ name: "GC-Vis-2", mccId: "4904785717" }), false);
+  assert.equal(isGoogleLaunchAccount({ name: "GLO-HS-001", mccId: "4904785717" }), false); // right name, wrong MCC
+  assert.equal(isGoogleLaunchAccount({ name: "" }), false);
 });

@@ -22,7 +22,7 @@ import {
   type GoogleMode,
 } from "./google-bid";
 import { googleGeoFromName, splitGoogleName } from "./google-source";
-import { googleRailEnabled, googleWeaponConfigured, gwCustomers, type GwCloneBody, type GwCustomer, type GwJuroBody, type GwLaunchBody } from "./google-weapon";
+import { googleRailEnabled, googleWeaponConfigured, gwLaunchableCustomers, type GwCloneBody, type GwCustomer, type GwJuroBody, type GwLaunchBody } from "./google-weapon";
 import { lionConfigured } from "./lion";
 import { lionGoogleFindCampaigns } from "./lion-google";
 import { GOOGLE_PARTNER, GOOGLE_PUMP_BUDGET_MS, pumpGoogleWave, type GooglePumpShot } from "./google-pump";
@@ -100,7 +100,7 @@ export async function handleGoogleWave(req: Request, mode: GoogleMode): Promise<
   // ---- catalogs: customers (target validation) + LION metrics (names / geo / source accounts) --
   let customers: GwCustomer[];
   try {
-    customers = await gwCustomers();
+    customers = await gwLaunchableCustomers(); // GLO-HS allowlist — anything else is refused below
   } catch (e) {
     return bad(`google_weapon_unreachable: ${(e as Error).message}`, 502);
   }
@@ -139,7 +139,7 @@ export async function handleGoogleWave(req: Request, mode: GoogleMode): Promise<
       customerId = s(x.customer) || waveCustomer;
       if (!GOOGLE_CUSTOMER_ID_RE.test(customerId)) return bad(`${at}: target account is required`);
       target = customerById.get(customerId) ?? null;
-      if (!target) return bad(`${at}: target account ${customerId} is not launchable for the LION user`, 400, { customerId });
+      if (!target) return bad(`${at}: target account ${customerId} is not one of the GLO-HS launch accounts`, 400, { customerId });
     } else {
       // JURO always lands on the source's own account; we know it only through LION metrics.
       customerId = src?.accountId ?? s(x.sourceAccount);
@@ -279,7 +279,7 @@ export async function handleGoogleLaunch(req: Request): Promise<NextResponse> {
 
   let customers: GwCustomer[];
   try {
-    customers = await gwCustomers();
+    customers = await gwLaunchableCustomers(); // GLO-HS allowlist — anything else is refused below
   } catch (e) {
     return bad(`google_weapon_unreachable: ${(e as Error).message}`, 502);
   }
@@ -293,7 +293,7 @@ export async function handleGoogleLaunch(req: Request): Promise<NextResponse> {
     const customerId = s(x.customer);
     if (!GOOGLE_CUSTOMER_ID_RE.test(customerId)) return bad(`${at}: target account is required`);
     const target = customerById.get(customerId) ?? null;
-    if (!target) return bad(`${at}: target account ${customerId} is not launchable for the LION user`, 400, { customerId });
+    if (!target) return bad(`${at}: target account ${customerId} is not one of the GLO-HS launch accounts`, 400, { customerId });
     const px = resolvePixel(target, s(x.pixel));
     if ("error" in px) return bad(`${at}: ${px.error}`, 400, { availablePixels: target.pixels });
     const nameSuffix = googleNameSuffix({ mode: "launch", user, ddmm, tail: s(x.suffix) });

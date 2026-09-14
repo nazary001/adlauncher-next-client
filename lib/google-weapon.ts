@@ -4,7 +4,7 @@
 //
 // ⚠️ Every path ends with a trailing slash — a POST without it is a plain 404.
 
-import { googleWeaponErrorMessage, type GoogleLaunchWire } from "./google-bid";
+import { googleWeaponErrorMessage, isGoogleLaunchAccount, type GoogleLaunchWire } from "./google-bid";
 import { ensureGoogleDataset, type GoogleEnsureResult } from "./google-source";
 
 const BASE = (process.env.GOOGLE_WEAPON_BASE || "https://google-weapon.highstakes.tech").replace(/\/+$/, "");
@@ -160,6 +160,12 @@ export async function gwCustomers(): Promise<GwCustomer[]> {
     }
   })();
   return customersInflight;
+}
+
+/** The accounts the console OFFERS and ACCEPTS as launch targets — the GLO-HS allowlist over the
+ *  partner's full list (owner rule 14.09). Read-only lookups (a source's currency) keep gwCustomers. */
+export async function gwLaunchableCustomers(): Promise<GwCustomer[]> {
+  return (await gwCustomers()).filter(isGoogleLaunchAccount);
 }
 
 export async function gwCustomerById(customerId: string): Promise<GwCustomer | null> {

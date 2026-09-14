@@ -67,6 +67,11 @@ mode, added the same day after the owner asked why the launcher was missing.
   Long headlines · Descriptions, CTA, YouTube URLs one-per-line or Upload + Channel id, Logo
   preview/URL/Upload; Duplicate · Clear URLs · Clear All · delete) / Bulk Ad Groups (≤50 videos →
   ad groups of 5) / Autofill (N copies of card 1 with chosen fields). One shot = one card.
+- **Account allowlist (owner rule 14.09, local until the owner's prod call)**: only `GLO-HS-001…010`
+  (name `GLO-HS-\d{3}` on MCC 2678500976) are offered by `/api/google/customers` and accepted as
+  clone/launch targets (`gwLaunchableCustomers`, `isGoogleLaunchAccount`); any other customer id →
+  400 "not one of the GLO-HS launch accounts". Read-only lookups (a source's currency) keep the
+  full partner list.
 - **Accounts under our own MCC 4904785717** are all SUSPENDED except GC-Vis-1/2 (EUR) — Google Ads
   API read 14.09; a launch into a suspended account fails cleanly with
   `ACTION_NOT_PERMITTED_FOR_SUSPENDED_ACCOUNT`.
