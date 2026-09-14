@@ -5,9 +5,14 @@ import { PARTNERS, type PartnerId } from "@/lib/partners";
 export function PartnerSwitcher({
   value,
   onChange,
+  lockedNote,
 }: {
   value: PartnerId;
   onChange: (id: PartnerId) => void;
+  /** When set, the switcher is pinned to `value`: every OTHER partner renders as a disabled pill
+   *  carrying this note as its tip (same disabled styling as an in-development partner). Used by
+   *  the Google platform, whose only rail is LION (HS) — the buyer can't switch partners there. */
+  lockedNote?: string;
 }) {
   return (
     <div className="flex items-center gap-2.5">
@@ -21,16 +26,19 @@ export function PartnerSwitcher({
       >
         {PARTNERS.map(({ id, label, Flag, inDevelopment }) => {
           const active = id === value;
+          // Pinned by `lockedNote`: every partner but the current one is disabled (the rail can't
+          // switch here). Same disabled styling as an in-development partner; only the tip differs.
+          const locked = Boolean(lockedNote) && !active;
 
-          // Not built out yet — render disabled with the same "in development" cue as the platform tabs.
-          if (inDevelopment) {
+          // Not built out yet, or pinned away — render disabled with the "in development" cue.
+          if (inDevelopment || locked) {
             return (
               <button
                 key={id}
                 type="button"
                 aria-disabled="true"
                 tabIndex={-1}
-                data-tip={`${label} — in development`}
+                data-tip={locked ? lockedNote : `${label} — in development`}
                 className={
                   "tip tip-b relative flex h-9 cursor-not-allowed items-center gap-2 rounded-full border " +
                   "border-transparent px-3 text-[13px] font-medium text-faint opacity-60 " +

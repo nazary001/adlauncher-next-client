@@ -7,8 +7,11 @@ import { AcctLimitWidget } from "./acct-limit-widget";
 import { HsTokenStatusWidget } from "./hs-token-status";
 import { AifTaskManagerButton, TaskManagerButton } from "./task-manager";
 import { HsTaskManagerButton } from "./hs-task-manager";
+import { GoogleTaskManagerButton } from "./google-task-manager";
 import { UserMenu, type SessionUser } from "./user-menu";
-import { partnerConfig, type PartnerId } from "@/lib/partners";
+import { GOOGLE_ENABLED, partnerConfig, type PartnerId } from "@/lib/partners";
+
+type Platform = "facebook" | "google";
 
 function Logo() {
   return (
@@ -36,16 +39,30 @@ function Logo() {
   );
 }
 
-function PlatformTabs() {
+function PlatformTabs({ platform }: { platform: Platform }) {
   const base =
     "relative flex h-9 items-center gap-2 rounded-full px-3.5 text-[13px] font-medium " +
     "transition-all duration-200 sm:px-4";
+  // Inactive tab: a plain link that lights up on hover (same idiom as the partner switcher).
+  const inactive = "border border-transparent text-dim hover:bg-raise hover:text-ink";
+  // Facebook keeps its blue active pill; Google gets an analogous pill in the Google blue so it
+  // reads as a sibling, not a bolt-on.
+  const fbActive =
+    "border border-fb/40 bg-fb/15 text-[#85b3f5] shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_0_18px_rgba(24,119,242,0.18)]";
+  const googleActive =
+    "border border-[#4285F4]/40 bg-[#4285F4]/15 text-[#9cc0ff] shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_0_18px_rgba(66,133,244,0.18)]";
+  const onFacebook = platform === "facebook";
+  const onGoogle = platform === "google";
   return (
     <nav aria-label="Ad platform" className="flex items-center gap-1 rounded-full border border-line bg-surface p-1">
-      <button type="button" aria-current="page" className={`${base} border border-fb/40 bg-fb/15 text-[#85b3f5] shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_0_18px_rgba(24,119,242,0.18)]`}>
-        <FacebookMark className="h-4 w-4 text-[#5f9bf0]" />
+      <Link
+        href="/"
+        aria-current={onFacebook ? "page" : undefined}
+        className={`${base} ${onFacebook ? fbActive : inactive}`}
+      >
+        <FacebookMark className={`h-4 w-4 ${onFacebook ? "text-[#5f9bf0]" : ""}`} />
         <span className="hidden sm:inline">Facebook</span>
-      </button>
+      </Link>
 
       <button
         type="button"
@@ -59,17 +76,30 @@ function PlatformTabs() {
         <span className="animate-pulse-soft absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-warn" />
       </button>
 
-      <button
-        type="button"
-        aria-disabled="true"
-        tabIndex={-1}
-        data-tip="Google — in development"
-        className={`${base} tip tip-b cursor-not-allowed text-faint opacity-60 hover:opacity-80`}
-      >
-        <GoogleMark mono className="h-4 w-4" />
-        <span className="hidden sm:inline">Google</span>
-        <span className="animate-pulse-soft absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-warn" />
-      </button>
+      {GOOGLE_ENABLED ? (
+        // Real navigation target: full-colour Google mark, active pill when we're on /google.
+        <Link
+          href="/google"
+          aria-current={onGoogle ? "page" : undefined}
+          className={`${base} ${onGoogle ? googleActive : inactive}`}
+        >
+          <GoogleMark className="h-4 w-4" />
+          <span className="hidden sm:inline">Google</span>
+        </Link>
+      ) : (
+        // Dormant on prod (NEXT_PUBLIC_GOOGLE_ENABLED unset) → the same disabled "in development" cue.
+        <button
+          type="button"
+          aria-disabled="true"
+          tabIndex={-1}
+          data-tip="Google — in development"
+          className={`${base} tip tip-b cursor-not-allowed text-faint opacity-60 hover:opacity-80`}
+        >
+          <GoogleMark mono className="h-4 w-4" />
+          <span className="hidden sm:inline">Google</span>
+          <span className="animate-pulse-soft absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-warn" />
+        </button>
+      )}
     </nav>
   );
 }
@@ -78,37 +108,49 @@ export function Header({
   partner,
   onPartnerChange,
   user,
+  platform = "facebook",
 }: {
   partner: PartnerId;
   onPartnerChange: (id: PartnerId) => void;
   user?: SessionUser;
+  /** Which platform board this header sits on. On "google" the partner switcher is pinned to HS
+   *  and the FB-only widgets give way to the Google task manager. Default keeps FB behaviour. */
+  platform?: Platform;
 }) {
+  const isGoogle = platform === "google";
   return (
     <header className="sticky top-0 z-40 border-b border-line bg-bg/75 backdrop-blur-md">
       <div className="mx-auto grid h-16 w-full max-w-[1440px] grid-cols-[1fr_auto_1fr] items-center gap-3 px-4 sm:px-6">
         <div className="justify-self-start">
           <Logo />
         </div>
-        <PartnerSwitcher value={partner} onChange={onPartnerChange} />
+        {/* Google runs through LION (HS) only — the switcher is pinned, other partners disabled. */}
+        <PartnerSwitcher
+          value={partner}
+          onChange={onPartnerChange}
+          {...(isGoogle ? { lockedNote: "Google runs through LION (HS) only" } : {})}
+        />
         <div className="flex items-center gap-2.5 justify-self-end">
           {/* HS launch-token pool (T1→T2 failover) — health dots + which bearer is in use;
               keeping it on screen also keeps the shared failover state fresh (the status
-              endpoint's probe marks burned tokens for the whole fleet). */}
-          {partnerConfig(partner).lionLaunch ? <HsTokenStatusWidget /> : null}
-          {/* Per-account launch-limit timer (5 campaigns / 30 min) — visible on every partner
-              and both boards; the panel lists each account's live window. */}
-          <AcctLimitWidget />
-          {/* Only the active partner's queue button shows: HS (LION submits) has its own
-              independent manager, everyone else shares the team Tasks queue. Both providers stay
-              mounted in the app layout, so the hidden queue keeps working across the switch. */}
-          {partnerConfig(partner).lionLaunch ? (
+              endpoint's probe marks burned tokens for the whole fleet). FB rail only. */}
+          {!isGoogle && partnerConfig(partner).lionLaunch ? <HsTokenStatusWidget /> : null}
+          {/* Per-account launch-limit timer (5 campaigns / 30 min) — the FB rails' concern; the
+              Google rail has no such per-account window (LION owns pacing). */}
+          {!isGoogle ? <AcctLimitWidget /> : null}
+          {/* The active rail's queue button: Google has its own compact manager; on FB, HS (LION
+              submits) has its own manager, everyone else shares the team Tasks queue. Every
+              provider stays mounted in the app layout, so the hidden queue keeps working. */}
+          {isGoogle ? (
+            <GoogleTaskManagerButton />
+          ) : partnerConfig(partner).lionLaunch ? (
             <HsTaskManagerButton />
           ) : partnerConfig(partner).aifLaunch ? (
             <AifTaskManagerButton />
           ) : (
             <TaskManagerButton />
           )}
-          <PlatformTabs />
+          <PlatformTabs platform={platform} />
           {user ? <UserMenu user={user} /> : null}
         </div>
       </div>

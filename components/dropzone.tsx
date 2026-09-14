@@ -272,12 +272,22 @@ async function recodeImage(f: File): Promise<File | null> {
   return out.size < f.size || f.size > IMAGE_MAX_BYTES ? out : f;
 }
 
+/** What a zone takes: images only (a Google logo), videos only (Google video creatives), or both. */
+export type DropzoneAccept = "image" | "video" | "any";
+const ACCEPT_ATTR: Record<DropzoneAccept, string> = {
+  image: "image/png,image/jpeg,image/gif",
+  video: "video/mp4,video/quicktime,video/webm",
+  any: "image/*,video/*",
+};
+
 export function Dropzone({
   id,
   files,
   onChange,
   maxFiles,
   covers,
+  accept = "any",
+  compact = false,
 }: {
   id?: string;
   files: FileItem[];
@@ -286,6 +296,13 @@ export function Dropzone({
   maxFiles?: number;
   /** Offer a per-video custom cover picker (HS — the FB Token rail pins it as the thumbnail). */
   covers?: boolean;
+  /** Restrict the zone to one media kind: the picker's accept list AND dropped files are
+   *  filtered, and a wrong-kind file is refused with a named reason (Google's logo field takes
+   *  square PNG/JPG/GIF only, its video field mp4/mov/webm only). Default: images + videos. */
+  accept?: DropzoneAccept;
+  /** Dense zone for inline slots (the Google ad group's video / logo fields): ~120 px tall, a
+   *  smaller glyph and a one-line, kind-specific prompt instead of the launcher's 210 px hero. */
+  compact?: boolean;
 }) {
   const [dragging, setDragging] = useState(false);
   const [rejected, setRejected] = useState<string[]>([]);
@@ -301,6 +318,14 @@ export function Dropzone({
     for (const raw of Array.from(list)) {
       let f = raw;
       const kind = f.type.startsWith("image/") ? "image" : f.type.startsWith("video/") ? "video" : "other";
+      if (accept === "image" && (kind !== "image" || !/^image\/(png|jpe?g|gif)$/.test(f.type))) {
+        bad.push(`${f.name}: a logo must be a PNG, JPG or GIF image`);
+        continue;
+      }
+      if (accept === "video" && (kind !== "video" || !/^video\/(mp4|quicktime|webm)$/.test(f.type))) {
+        bad.push(`${f.name}: videos only here — MP4, MOV or WebM`);
+        continue;
+      }
       if (kind === "image") {
         const recoded = await recodeImage(f);
         if (recoded) {
@@ -344,7 +369,7 @@ export function Dropzone({
       ref={inputRef}
       type="file"
       multiple={maxFiles !== 1}
-      accept="image/*,video/*"
+      accept={ACCEPT_ATTR[accept]}
       className="sr-only"
       onChange={(e) => {
         void addFiles(e.target.files);
@@ -369,16 +394,19 @@ export function Dropzone({
     ) : null;
 
   // ---------- empty ----------
+  const prompt =
+    accept === "image" ? "Drop a square logo here" : accept === "video" ? `Drop videos here${maxFiles ? ` (up to ${maxFiles})` : ""}` : "Drop a creative here";
   if (files.length === 0) {
     return (
-      <div className="flex h-full min-h-[210px] flex-col">
+      <div className={"flex h-full flex-col " + (compact ? "min-h-[120px]" : "min-h-[210px]")}>
         {fileInput}
         <button
           type="button"
           onClick={browse}
           {...zoneEvents}
           className={
-            "group relative flex h-full w-full flex-col items-center justify-center gap-3 overflow-hidden rounded-xl " +
+            "group relative flex h-full w-full flex-col items-center justify-center overflow-hidden rounded-xl " +
+            (compact ? "gap-1.5 px-3 py-2 " : "gap-3 ") +
             "border border-dashed transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 " +
             "focus-visible:ring-accent/40 " +
             (dragging
@@ -389,21 +417,22 @@ export function Dropzone({
           <span className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_35%,rgba(61,127,255,0.08),transparent_60%)] opacity-0 transition-opacity duration-300 group-hover:opacity-100" />
           <span
             className={
-              "relative flex h-12 w-12 items-center justify-center rounded-2xl border border-line2 bg-surface2 " +
+              "relative flex items-center justify-center rounded-2xl border border-line2 bg-surface2 " +
+              (compact ? "h-9 w-9 " : "h-12 w-12 ") +
               "text-dim transition-all duration-200 group-hover:-translate-y-0.5 group-hover:border-accent/40 group-hover:text-[#9db8ff] " +
               (dragging ? "-translate-y-0.5 border-accent/50 text-[#9db8ff]" : "")
             }
           >
-            <UploadIcon className="h-5 w-5" />
+            <UploadIcon className={compact ? "h-4 w-4" : "h-5 w-5"} />
           </span>
-          <span className="relative flex flex-col items-center gap-1">
-            <span className="text-[13px] font-medium text-dim transition-colors group-hover:text-ink">
-              {dragging ? "Drop to add" : "Drop a creative here"}
+          <span className={"relative flex items-center gap-1 " + (compact ? "flex-row flex-wrap justify-center gap-x-1.5" : "flex-col")}>
+            <span className={(compact ? "text-[12px] " : "text-[13px] ") + "font-medium text-dim transition-colors group-hover:text-ink"}>
+              {dragging ? "Drop to add" : prompt}
             </span>
-            <span className="text-[11px] text-faint">or click to browse</span>
+            <span className="text-[11px] text-faint">{compact ? "· or click to browse" : "or click to browse"}</span>
           </span>
           <span className="relative flex items-center gap-1.5">
-            {["MP4", "JPG", "PNG"].map((ext) => (
+            {(accept === "image" ? ["PNG", "JPG", "GIF"] : accept === "video" ? ["MP4", "MOV", "WEBM"] : ["MP4", "JPG", "PNG"]).map((ext) => (
               <span
                 key={ext}
                 className="rounded-md border border-line bg-surface px-1.5 py-0.5 font-mono text-[9px] font-medium tracking-wide text-faint"
@@ -422,7 +451,7 @@ export function Dropzone({
 
   // ---------- filled ----------
   return (
-    <div className="flex h-full min-h-[210px] flex-col gap-2" {...zoneEvents}>
+    <div className={"flex h-full flex-col gap-2 " + (compact ? "min-h-[120px]" : "min-h-[210px]")} {...zoneEvents}>
       {fileInput}
 
       <div

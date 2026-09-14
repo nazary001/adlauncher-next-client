@@ -247,6 +247,12 @@ const AIF_LANDINGS: Landing[] = [
   { slug: "these-2026-bathroom-design-features-are-getting-attention", title: "2026 Bathroom Design Features", lang: "EN", niche: "Lifestyle" },
 ];
 
+/** Google is a PLATFORM tab (not a PartnerId): the console's Google rail runs entirely through
+ *  LION's google-weapon API, pinned to the HS partner. Built-time gate, same dormant-on-prod
+ *  pattern as HS/AIF — set NEXT_PUBLIC_GOOGLE_ENABLED=1 in .env.local (NOT on Vercel yet). It
+ *  unlocks the header's Google tab + the /google route; NEXT_PUBLIC_* is inlined at build time. */
+export const GOOGLE_ENABLED = process.env.NEXT_PUBLIC_GOOGLE_ENABLED === "1";
+
 export const PARTNERS: PartnerConfig[] = [
   {
     id: "br",
