@@ -70,7 +70,7 @@ const bad = (error: string, status = 400) => NextResponse.json({ ok: false, erro
 export async function POST(req: Request): Promise<Response> {
   const session = sessionFromCookieHeader(req.headers.get("cookie"));
   if (!session) return bad("unauthorized", 401);
-  if (!hsTokenConfigured()) {
+  if (!(await hsTokenConfigured())) {
     return bad("hs_fb_token_missing — set FB_HS_LAUNCH_TOKEN (or FB_HS_VOLUME_TOKEN) in the environment", 500);
   }
   // Both bearers burned → refuse BEFORE any work (no row, no campaign shell) with the retry ETA.

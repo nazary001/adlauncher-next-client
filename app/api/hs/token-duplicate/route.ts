@@ -133,7 +133,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   const startedAt = Date.now();
   const session = sessionFromCookieHeader(req.headers.get("cookie"));
   if (!session) return bad("unauthorized", 401);
-  if (!hsDupTokenConfigured()) {
+  if (!(await hsDupTokenConfigured())) {
     return bad("hs_fb_token_missing — set FB_HS_DUP_TOKEN (or FB_HS_LAUNCH_TOKEN) in the environment", 500);
   }
   if (!lionConfigured()) return bad("lion_not_configured", 500);

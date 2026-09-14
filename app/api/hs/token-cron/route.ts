@@ -28,7 +28,7 @@ export async function GET(req: Request) {
   if (!cronOk && !sessionOk) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  if (!hsTokenConfigured()) return NextResponse.json({ ok: true, tokens: [] });
+  if (!(await hsTokenConfigured())) return NextResponse.json({ ok: true, tokens: [] });
 
   try {
     const tokens = await hsProbeTokenHealth();

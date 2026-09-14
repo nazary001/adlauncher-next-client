@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { AIF_VALUE_PIXEL, ROAS_PIXEL, aifOfferablePixels, partnerConfig, pickAifPixel, type PartnerId } from "@/lib/partners";
-import { resolveMoChannel } from "@/lib/mo-soc";
+import { resolveMoSigner } from "@/lib/mo-soc";
 import { bidAmountMissing, bidKind, moEnsureSocMark, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
 import {
@@ -15,16 +15,7 @@ import {
   withFbBudget,
   withParentRetry,
 } from "@/lib/fb-graph";
-import {
-  aifAccountName,
-  aifAccountPixels,
-  aifAdvertisablePageName,
-  aifFbPost,
-  aifIsAdvertisablePage,
-  aifIsTokenAccount,
-  aifRawToken,
-  aifTokenConfigured,
-} from "@/lib/aif-launch";
+import { aifRail } from "@/lib/aif-launch";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import { backfillBrand, claimBrand, deleteBrand } from "@/lib/aif-claim";
 import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
@@ -109,12 +100,10 @@ export async function POST(req: Request) {
   let partnerId: PartnerId;
   let edits: CloneEdit[];
   let taskIds: (string | null)[] = [];
-  let channelRaw: unknown;
   try {
-    const j = (await req.json()) as { partnerId?: string; edits?: CloneEdit[]; taskIds?: unknown[]; channel?: string };
+    const j = (await req.json()) as { partnerId?: string; edits?: CloneEdit[]; taskIds?: unknown[]; /** legacy, ignored — the signer is the owner's pick on /tokens */ channel?: string };
     partnerId = String(j.partnerId ?? "in") as PartnerId;
     edits = Array.isArray(j.edits) ? j.edits : [];
-    channelRaw = j.channel;
     // Task Manager rows aligned with `edits` by index. When present, per-clone progress + the
     // terminal state are ALSO written to Strapi server-side (see /api/launch) so every account's
     // drawer tracks the run live, surviving the launching browser.
@@ -143,43 +132,32 @@ export async function POST(req: Request) {
   // brand-only link rewrite; everything else stays byte-identical to the MO flow (token default,
   // gcm registry, gcm+pixel link rewrite). One route, two claim/backfill/release bundles.
   const aif = Boolean(partner.aifLaunch);
-  if (aif && !aifTokenConfigured()) {
-    return NextResponse.json({ ok: false, error: "no_aif_token" }, { status: 500 });
+  // WHICH bearer builds is the OWNER'S pick on /tokens (clone slots; env defaults while
+  // unassigned) — the AIF rail on its token, the MO rail on the MO clone signer. A missing/
+  // unreadable token is a clean config error, never a silent fallback to another bearer. The
+  // legacy `channel` wire field (the retired per-buyer soc switch) is ignored.
+  const aifRes = aif ? await aifRail("clone") : null;
+  if (aif && !aifRes?.ok) {
+    return NextResponse.json({ ok: false, error: aifRes?.ok === false ? aifRes.error : "no_aif_token" }, { status: 400 });
   }
-  // MO clone signer: the system-user token is RETIRED (owner ask 09-01 — Meta's ward 2446325
-  // kills its adset-creates; a system clone would burn a gcm on an orphan shell). Every MO batch
-  // must name a provisioned soc; its bearer signs EVERY Graph call (source read, media
-  // migration, tree build) and its catalogs validate the picked page/account/pixel. AIF keeps
-  // its own token — channel is ignored there.
-  const channel = aif ? null : resolveMoChannel(channelRaw);
-  if (!aif) {
-    if (!channel) {
-      return NextResponse.json(
-        { ok: false, error: "soc_channel_unknown — this soc is not provisioned on the server (FB_MO_SOC_TOKENS)" },
-        { status: 400 },
-      );
-    }
-    if (channel.kind === "system") {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "mo_system_channel_retired — the system token no longer signs MO clones; pick a soc signer on the board (reload the tab if you don't see the Signer menu)",
-        },
-        { status: 400 },
-      );
-    }
+  const moRes = aif ? null : await resolveMoSigner("clone");
+  if (!aif && !moRes?.ok) {
+    return NextResponse.json({ ok: false, error: moRes?.ok === false ? moRes.error : "no_token" }, { status: 400 });
   }
-  const soc = channel && channel.kind === "soc" ? channel : null;
-  /** Catalog identity of the signer (undefined = AIF's own catalog helpers below). */
+  const rail = aifRes?.ok ? aifRes.rail : null;
+  /** The MO signer (null on the AIF rail) — its bearer signs EVERY Graph call (source read, media
+   *  migration, tree build) and its catalogs validate the picked page/account/pixel. */
+  const soc = moRes?.ok ? moRes.signer : null;
+  /** Catalog identity of the MO signer (undefined = the AIF rail's own catalog helpers below). */
   const cat = soc?.cat;
-  const railToken = aif ? aifRawToken() : soc?.token;
-  const pageOk = (p: string) => (aif ? aifIsAdvertisablePage(p) : isAdvertisablePage(p, cat));
-  const pageNameOf = (p: string) => (aif ? aifAdvertisablePageName(p) : advertisablePageName(p, cat));
-  const acctOk = (a: string) => (aif ? aifIsTokenAccount(a) : isTokenAccount(a, cat));
-  const pixelsOf = (a: string) => (aif ? aifAccountPixels(a) : accountPixels(a, cat));
-  const acctNameOf = (a: string) => (aif ? aifAccountName(a) : tokenAccountName(a, cat));
+  const railToken = aif ? rail?.token : soc?.token;
+  const pageOk = (p: string) => (aif ? rail!.isAdvertisablePage(p) : isAdvertisablePage(p, cat));
+  const pageNameOf = (p: string) => (aif ? rail!.advertisablePageName(p) : advertisablePageName(p, cat));
+  const acctOk = (a: string) => (aif ? rail!.isTokenAccount(a) : isTokenAccount(a, cat));
+  const pixelsOf = (a: string) => (aif ? rail!.accountPixels(a) : accountPixels(a, cat));
+  const acctNameOf = (a: string) => (aif ? rail!.accountName(a) : tokenAccountName(a, cat));
   const post: typeof fbPost = (path, params) =>
-    aif ? aifFbPost(path, params as Json) : fbPost(path, params, railToken);
+    aif ? rail!.fbPost(path, params as Json) : fbPost(path, params, railToken);
   // Default: a clone is built in its SOURCE's own account (media is account-local) with the
   // source's pixel. The buyer MAY pick a target account+pixel instead (cross-account, media
   // migrated). The fanka is always the buyer's pick. Every picked id is validated here against

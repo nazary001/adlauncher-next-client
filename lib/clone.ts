@@ -334,21 +334,21 @@ export type CloneSourceFailure = { id: string; error: string };
 /**
  * Fetch the source campaigns for the given ids from Facebook (via /api/clone/sources). Throws on
  * failure so the board can surface a proper error state — it never silently substitutes mock data.
- * `channel` = the MO signer (`soc:<name>`) whose token performs the read (the retired system
- * token can't see the campaigns any more — owner report 09-08); AIF passes none. When NOT ONE
+ * `rail` picks the signer whose token performs the read — the owner's clone (default) or launch
+ * token on /tokens (the clone board reads with the bearer that will build). When NOT ONE
  * id could be read the call throws with the per-id reasons, so the board shows an error + Retry
  * instead of an empty "No campaigns received"; partial failures come back in `failed`.
  */
 export async function loadCloneSources(
   ids: string[],
   partner: PartnerId,
-  channel?: string,
+  rail: "launch" | "clone" = "clone",
 ): Promise<{ sources: CloneSource[]; failed: CloneSourceFailure[] }> {
   const clean = ids.filter(Boolean);
   if (clean.length === 0) return { sources: [], failed: [] };
   const res = await fetch(
     `/api/clone/sources?partner=${encodeURIComponent(partner)}&ids=${encodeURIComponent(clean.join(","))}` +
-      (channel ? `&channel=${encodeURIComponent(channel)}` : ""),
+      `&rail=${rail}`,
     { cache: "no-store" },
   );
   const body = (await res.json().catch(() => ({}))) as {

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { type Campaign, bidAmountMissing, bidKind, moEnsureSocMark, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { conversionEventsFor } from "@/lib/catalog";
 import { ROAS_PIXEL, partnerConfig, fullLandingUrl, type PartnerId } from "@/lib/partners";
-import { resolveMoChannel } from "@/lib/mo-soc";
+import { resolveMoSigner } from "@/lib/mo-soc";
 import {
   type LaunchBinds,
   adPayload,
@@ -38,8 +38,6 @@ import { del } from "@vercel/blob";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
-
-const TOKEN = process.env.FB_LAUNCH_TOKEN ?? "";
 
 type Json = Record<string, unknown>;
 
@@ -109,13 +107,12 @@ export async function POST(req: Request) {
   /** Creatives of this launch (1..maxCreatives): own-Blob URLs; cover = video thumbnail image. */
   let medias: { url: string; kind: "video" | "image"; coverUrl: string }[] = [];
   let taskId: string | null = null;
-  let channelRaw: unknown;
   try {
     const j = (await req.json()) as {
       campaign?: Campaign;
       partnerId?: string;
-      /** Launch signer: absent/"system" = the MO system-user token, "soc:<name>" = that personal
-       *  token from FB_MO_SOC_TOKENS (the board's channel switch). */
+      /** Legacy wire field (the retired per-buyer soc switch) — IGNORED: the MO signer is the
+       *  owner's pick on /tokens (lib/fb-tokens), never what a tab remembered. */
       channel?: string;
       /** Multi-creative shape (5-creative MO, 08-20). */
       medias?: { url?: string; kind?: string; coverUrl?: string }[];
@@ -129,7 +126,6 @@ export async function POST(req: Request) {
     };
     campaign = (j.campaign ?? {}) as Campaign;
     partnerId = String(j.partnerId ?? "in") as PartnerId;
-    channelRaw = j.channel;
     if (Array.isArray(j.medias) && j.medias.length > 0) {
       medias = j.medias.slice(0, 10).map((m) => {
         const kind = m?.kind === "image" ? ("image" as const) : ("video" as const);
@@ -156,43 +152,22 @@ export async function POST(req: Request) {
   }
 
   const partner = partnerConfig(partnerId);
-  // Launch channel: the system-user token (default) or a personal "soc" token — same Graph tree,
-  // different signer. An unknown/de-provisioned soc is a CLEAN config error, never a silent fall
-  // back to the system token: the wave was aimed at the soc (e.g. routing around a business
-  // restriction that hits system users), and falling back would launch it straight into it.
-  // MO (gcm partner): a channel-less wave signs as the DEFAULT soc (Spencermo — the system
-  // user is dead, owner rule 09-08); other partners keep the legacy system meaning.
-  const channel = resolveMoChannel(channelRaw, { defaultToSoc: Boolean(partner.usesGcm) });
-  if (!channel) {
-    return NextResponse.json(
-      { ok: false, stage: "config", error: "soc_channel_unknown — this soc is not provisioned on the server (FB_MO_SOC_TOKENS)" },
-      { status: 400 },
-    );
+  // This route is the MO direct-Graph rail only (HS → /api/hs/launch, AIF → /api/aif/launch).
+  if (!partner.usesGcm) {
+    return NextResponse.json({ ok: false, stage: "config", error: "partner_not_launchable" }, { status: 400 });
   }
-  if (channel.kind === "soc" && !partner.usesGcm) {
-    return NextResponse.json(
-      { ok: false, stage: "config", error: "soc_channel_unsupported — soc launches exist on the MO rail only" },
-      { status: 400 },
-    );
+  // The MO launch signer is the OWNER'S pick on /tokens (mo.launch slot; env default while
+  // unassigned). A missing/unreadable token is a CLEAN config error, never a silent fallback to
+  // another bearer — the wave was aimed at the owner's choice.
+  const signerRes = await resolveMoSigner("launch");
+  if (!signerRes.ok) {
+    return NextResponse.json({ ok: false, stage: "config", error: signerRes.error }, { status: 400 });
   }
-  // The system-user token is RETIRED on MO (owner ask 09-01: Meta's ward 2446325 kills its
-  // adset-creates — a system launch burns a gcm on an orphan shell). Every MO wave must name a
-  // provisioned soc signer; a stale tab that still sends none gets this instead of the burn.
-  if (channel.kind === "system" && partner.usesGcm) {
-    return NextResponse.json(
-      {
-        ok: false,
-        stage: "config",
-        error: "mo_system_channel_retired — the system token no longer signs MO launches; pick a soc signer on the board (reload the tab if you don't see the Signer menu)",
-      },
-      { status: 400 },
-    );
-  }
-  /** Catalog identity of the signer — undefined = the shared MO system-token catalogs. */
-  const cat = channel.kind === "soc" ? channel.cat : undefined;
+  const signer = signerRes.signer;
+  /** Catalog identity of the signer — its own account/page/pixel caches. */
+  const cat = signer.cat;
   /** The bearer that signs EVERY Graph call of this launch (uploads, tree, failure pause). */
-  const chToken = channel.kind === "soc" ? channel.token : TOKEN;
-  if (!chToken) return NextResponse.json({ ok: false, stage: "config", error: "no_fb_token" }, { status: 500 });
+  const chToken = signer.token;
   // The account, fanka and pixel are the buyer's PICKS, but every id is validated against the
   // launch token's own data server-side — the client can't smuggle in arbitrary destinations.
   const pickedPage = partner.fanpagesFromToken ? String(campaign.page ?? "").trim() : "";
@@ -429,7 +404,7 @@ export async function POST(req: Request) {
   // client may send an unmarked one), mirroring the HS token rail's ` TOKEN - ` convention.
   // Alternate SYSTEM users (entry.system) are system-class signers, not соцы — no marker.
   const baseName = `${campaign.namePrefix}${campaign.name}`.trim();
-  const name = channel.kind === "soc" && !channel.sys ? moEnsureSocMark(baseName) : baseName;
+  const name = !signer.sys ? moEnsureSocMark(baseName) : baseName;
   // &fire=click follows the optimization — and min-ROAS ALWAYS optimizes purchase value, so the
   // funnel must fire Purchase on click regardless of what optimization the client sent (the UI
   // pins it, but the server is the truth: a stale/edited draft could still say "clicks", which
@@ -485,10 +460,7 @@ export async function POST(req: Request) {
         claim = await claimGcm(campaign.gcm, {
           campaign_name: name,
           landing: campaign.landing || null,
-          notes:
-            channel.kind === "soc"
-              ? `claimed via adlauncher launch (${channel.sys ? "sys" : "soc"}:${channel.name})`
-              : "claimed via adlauncher launch",
+          notes: `claimed via adlauncher launch (${signer.sys ? "sys" : "soc"}:${signer.name})`,
         });
         const gcm = claim.gcm;
         // The link carries the campaign's chosen pixel (binds.pixelId, already validated) so the

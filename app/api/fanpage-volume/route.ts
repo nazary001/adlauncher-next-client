@@ -1,15 +1,11 @@
 import { NextResponse } from "next/server";
-import { moDefaultToken } from "@/lib/mo-soc";
+import { resolveMoSigner } from "@/lib/mo-soc";
 import { sessionFromCookieHeader } from "@/lib/session";
 
 export const runtime = "nodejs";
 // One 15s-bounded Graph read — the function itself gets a matching hard cap.
 export const maxDuration = 30;
 
-// Server-only: the bearer never reaches the browser. The DEFAULT MO signer's token (Spencermo —
-// the system user gcformo is dead, owner rule 09-08); the legacy launch token only when no soc
-// is provisioned at all.
-const TOKEN = moDefaultToken() || (process.env.FB_LAUNCH_TOKEN ?? "");
 const VER = "v21.0";
 
 /**
@@ -21,14 +17,17 @@ const VER = "v21.0";
  * against that limit. The API returns the count but NOT the numeric ceiling, so the limit
  * is a UI-side constant (`partner.pageAdLimit`).
  *
- * Degrades quietly (ok:false, 200) when the token is absent so the field just renders
- * without a badge; real API/transport failures return 4xx/5xx.
+ * Signs as the MO LAUNCH signer (the owner's pick on /tokens; env default while unassigned) —
+ * server-only, the bearer never reaches the browser. Degrades quietly (ok:false, 200) when no
+ * token is assigned so the field just renders without a badge; real API/transport failures
+ * return 4xx/5xx.
  */
 export async function GET(req: Request) {
   if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  if (!TOKEN) return NextResponse.json({ ok: false, reason: "no_token" });
+  const signer = await resolveMoSigner("launch");
+  if (!signer.ok) return NextResponse.json({ ok: false, reason: "no_token" });
 
   const account = new URL(req.url).searchParams.get("account") ?? "";
   if (!/^\d{5,}$/.test(account)) {
@@ -38,7 +37,7 @@ export async function GET(req: Request) {
   try {
     const res = await fetch(
       `https://graph.facebook.com/${VER}/act_${account}/ads_volume?fields=ads_running_or_in_review_count`,
-      { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store", signal: AbortSignal.timeout(15_000) },
+      { headers: { Authorization: `Bearer ${signer.signer.token}` }, cache: "no-store", signal: AbortSignal.timeout(15_000) },
     );
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {

@@ -233,6 +233,17 @@ export function LockIcon(props: P) {
   );
 }
 
+export function KeyIcon(props: P) {
+  return (
+    <S {...props}>
+      <circle cx="7.5" cy="15.5" r="4.5" />
+      <path d="M10.7 12.3 21 2" />
+      <path d="m15 8 3 3" />
+      <path d="m18 5 3 3" />
+    </S>
+  );
+}
+
 export function LogoutIcon(props: P) {
   return (
     <S {...props}>

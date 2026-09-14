@@ -20,11 +20,11 @@ export async function GET(req: Request) {
   if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  if (!hsTokenConfigured() && !hsDupTokenConfigured()) {
+  if (!(await hsTokenConfigured()) && !(await hsDupTokenConfigured())) {
     return NextResponse.json({ ok: true, now: Date.now(), tokens: [], dup: null });
   }
   try {
-    const tokens = hsTokenConfigured() ? await hsProbeTokenHealth() : [];
+    const tokens = await hsTokenConfigured() ? await hsProbeTokenHealth() : [];
     const dup = await hsProbeDupToken();
     return NextResponse.json({ ok: true, now: Date.now(), tokens, dup });
   } catch (e) {

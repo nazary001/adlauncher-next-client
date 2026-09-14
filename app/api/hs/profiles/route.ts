@@ -21,7 +21,7 @@ export async function GET(req: Request): Promise<NextResponse> {
   }
   try {
     const profiles = await lionProfiles();
-    return NextResponse.json({ ok: true, acr: LION_ACR, profiles, tokenLaunch: hsTokenConfigured() });
+    return NextResponse.json({ ok: true, acr: LION_ACR, profiles, tokenLaunch: await hsTokenConfigured() });
   } catch (e) {
     return NextResponse.json({ ok: false, error: String((e as Error).message) }, { status: 502 });
   }

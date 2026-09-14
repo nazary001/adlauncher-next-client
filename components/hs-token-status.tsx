@@ -12,6 +12,8 @@ import { FacebookMark } from "./icons";
 export type HsTokenRow = {
   index: number;
   fp: string;
+  /** Vault / env label — what the owner named this bearer on /tokens. */
+  label?: string;
   user: string;
   app: string;
   state: "ok" | "limited" | "dead";
@@ -23,7 +25,7 @@ type TokenRow = HsTokenRow;
 
 /** The DUPLICATE/JURO rails' signer (dedicated bearer since 09-03, else the pool's active
  *  token) — powers the cloner's "signs as …" badge next to the FB Token channel pick. */
-export type HsDupTokenRow = Omit<HsTokenRow, "active"> & { dedicated: boolean };
+export type HsDupTokenRow = Omit<HsTokenRow, "active"> & { dedicated: boolean; poolSize?: number };
 
 const POLL_MS = 60_000;
 
@@ -174,7 +176,7 @@ export function HsTokenStatusWidget() {
                     <span className={`h-2 w-2 shrink-0 rounded-full ${dotTone(t)}`} />
                     <div className="min-w-0">
                       <p className="truncate text-[12px] font-medium text-ink">
-                        T{t.index}
+                        {t.label || `T${t.index}`}
                         {t.app ? ` · ${t.app}` : ""}
                       </p>
                       <p className="truncate font-mono text-[10px] text-faint">
@@ -203,8 +205,8 @@ export function HsTokenStatusWidget() {
                 <div className="flex min-w-0 items-center gap-2">
                   <span className={`h-2 w-2 shrink-0 rounded-full ${dotTone(dup as unknown as TokenRow)}`} />
                   <div className="min-w-0">
-                    <p className="truncate text-[12px] font-medium text-ink">{dup.app || "dedicated token"}</p>
-                    <p className="truncate font-mono text-[10px] text-faint">{dup.user || dup.fp}</p>
+                    <p className="truncate text-[12px] font-medium text-ink">{dup.label || dup.app || "dedicated token"}</p>
+                    <p className="truncate font-mono text-[10px] text-faint">{[dup.user, dup.app].filter(Boolean).join(" · ") || dup.fp}{dup.poolSize && dup.poolSize > 1 ? ` · +${dup.poolSize - 1} failover` : ""}</p>
                   </div>
                 </div>
                 <span
@@ -219,6 +221,7 @@ export function HsTokenStatusWidget() {
             Launches use the first healthy token; a rate-limited or dead one is skipped
             automatically and retried after its cooldown.
             {dup?.dedicated ? " Duplicates and JURO sign with their own dedicated token." : ""}
+            {" "}Owners manage both pools under FB tokens.
           </p>
         </div>
       ) : null}

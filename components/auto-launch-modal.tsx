@@ -2,8 +2,9 @@
 
 // Confirm-and-fire dialog for the Auto-landings "Launch campaign" button (owner). It calls
 // prepare-launch (Gemini ad copy + a fresh creative staged to Blob + a ready MO Campaign), shows the
-// buyer the EXACT campaign that will fire, lets them pick the soc signer / fanka / account / pixel
-// (defaults pre-filled), and on Confirm streams the same /api/launch pipeline the launcher uses.
+// buyer the EXACT campaign that will fire, shows the signer (the owner's /tokens pick), lets them
+// pick fanka / account / pixel (defaults pre-filled), and on Confirm streams the same /api/launch
+// pipeline the launcher uses.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Campaign } from "@/lib/types";
@@ -11,6 +12,8 @@ import { limitMoney, parseMoney } from "@/lib/types";
 import { UploadingNotice, useUnloadGuard } from "./upload-guard";
 import type { AutoLandingJob } from "@/lib/auto-landings";
 import { drainNdjson, isLaunchStream, launchOutcome, parseEvent, type LaunchEvent } from "@/lib/launch-stream";
+import { useSigners } from "./use-signers";
+import { SignerBadge } from "./signer-badge";
 
 type Prepared = {
   campaign: Campaign;
@@ -19,7 +22,6 @@ type Prepared = {
   suggested: { channel: string; account: { id: string; name: string } | null; pixel: { id: string; name: string } | null };
   landing: { slug: string; title: string; niche: string; lang: string };
 };
-type SocStatus = { name: string; ok: boolean; error?: string; system?: boolean };
 type Page = { id: string; name: string };
 type Pixel = { id: string; name: string };
 type Account = { id: string; name: string; pixels: Pixel[] };
@@ -35,8 +37,10 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
   const [prep, setPrep] = useState<Prepared | null>(null);
   const [prepErr, setPrepErr] = useState<string | null>(null);
 
-  const [socs, setSocs] = useState<SocStatus[] | null>(null);
-  const [channel, setChannel] = useState(""); // "soc:<name>"
+  // The MO launch signer is the owner's pick on /tokens — shown read-only, gates the fire.
+  const signers = useSigners(true);
+  const moSigner = signers.slots?.["mo.launch"] ?? null;
+  const signerReady = Boolean(moSigner?.primary);
   const [pages, setPages] = useState<Page[] | null>(null);
   const [accounts, setAccounts] = useState<Account[] | null>(null);
   const [pageId, setPageId] = useState("");
@@ -67,7 +71,6 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
         if (!alive) return;
         if (!r.ok || !d.ok) return setPrepErr(d.error || `prepare failed (${r.status})`);
         setPrep(d);
-        setChannel(d.suggested.channel || "");
         setBudget(d.campaign.budget || "10");
         setPixelId(d.suggested.pixel?.id || "");
         setAccountId(d.suggested.account?.id || "");
@@ -80,7 +83,7 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
     };
   }, [job.documentId, prepNonce]);
 
-  // 2) load signers + the next free gcm code once prep is in. The code shown here is the code the
+  // 2) load the next free gcm code once prep is in. The code shown here is the code the
   // fire will TRY to claim; /api/launch reserves it atomically (walking to the next free one if a
   // concurrent launch took it in the meantime), so the preview is real but the claim stays race-safe.
   useEffect(() => {
@@ -94,30 +97,21 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
       .catch(() => {
         /* preview falls back to "auto"; the fire still claims a real code */
       });
-    fetch("/api/mo-socs")
-      .then((r) => r.json())
-      .then((d: { ok?: boolean; statuses?: SocStatus[] }) => {
-        if (!alive) return;
-        const list = Array.isArray(d?.statuses) ? d.statuses : [];
-        setSocs(list);
-        setChannel((cur) => cur || (list.find((s) => s.ok) ? `soc:${list.find((s) => s.ok)!.name}` : ""));
-      })
-      .catch(() => alive && setSocs([]));
     return () => {
       alive = false;
     };
   }, [prep]);
 
-  // 3) load fankas + accounts for the chosen signer
+  // 3) load fankas + accounts of the launch signer (server-side pick, ?rail=launch)
   useEffect(() => {
-    if (!channel) return;
+    if (!prep) return;
     let alive = true;
     // Safe setState-in-effect: a signer switch resets the catalogs to loading once, then the
     // fetch callbacks fill them — converges in one pass.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPages(null);
     setAccounts(null);
-    const q = `channel=${encodeURIComponent(channel)}`;
+    const q = "rail=launch";
     fetch(`/api/fanpages?${q}`)
       .then((r) => r.json())
       .then((d: { ok?: boolean; pages?: Page[] }) => {
@@ -139,7 +133,7 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
     return () => {
       alive = false;
     };
-  }, [channel]);
+  }, [prep]);
 
   // keep the pixel valid for the chosen account
   const acct = accounts?.find((a) => a.id === accountId) ?? null;
@@ -153,7 +147,7 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
 
   // parseMoney reads the board's comma money ("12,50") — Number() would read it as NaN and a
   // stripped "1250" as $1250 (audit 09-09).
-  const canFire = Boolean(prep && channel && pageId && accountId && pixelId && parseMoney(budget) >= 1 && !firing && !result?.ok && !creativeConsumed);
+  const canFire = Boolean(prep && signerReady && pageId && accountId && pixelId && parseMoney(budget) >= 1 && !firing && !result?.ok && !creativeConsumed);
 
   const fire = useCallback(async () => {
     if (!prep || !canFire) return;
@@ -166,7 +160,6 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
     const body = {
       partnerId: "in",
       campaign,
-      channel,
       medias: [{ url: prep.media.url, kind: "image" as const }],
       mediaUrl: prep.media.url,
       mediaKind: "image" as const,
@@ -216,7 +209,7 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
       setFiring(false);
       setStage(null);
     }
-  }, [prep, canFire, pageId, accountId, pixelId, budget, channel, gcmNext]);
+  }, [prep, canFire, pageId, accountId, pixelId, budget, gcmNext]);
 
   // Fresh copy + creative for another attempt (the previous run dropped the staged one).
   const regenerate = useCallback(() => {
@@ -290,14 +283,7 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
             <div className="grid grid-cols-2 gap-2.5">
               <div className="flex flex-col gap-1">
                 <span className={label}>Signer</span>
-                <select className={sel} value={channel} onChange={(e) => setChannel(e.target.value)}>
-                  <option value="">— pick signer —</option>
-                  {(socs ?? []).map((s) => (
-                    <option key={s.name} value={`soc:${s.name}`} disabled={!s.ok}>
-                      {s.name}{s.ok ? "" : " (token down)"}
-                    </option>
-                  ))}
-                </select>
+                <SignerBadge signer={moSigner} loaded={signers.loaded} rail="launch" owner compact />
               </div>
               <div className="flex flex-col gap-1">
                 <span className={label}>Fanpage</span>

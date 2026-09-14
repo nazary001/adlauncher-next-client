@@ -15,7 +15,6 @@ import {
   normalizeAdCopy,
 } from "@/lib/auto-launch";
 import { fullLandingUrl, partnerConfig } from "@/lib/partners";
-import { moSocStatuses } from "@/lib/mo-soc";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -103,15 +102,9 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     pageId: "", // the buyer picks the fanka in the confirm dialog
   });
 
-  // 4) default signer = the first healthy soc (the confirm dialog lets the buyer change it)
-  let suggestedChannel = "";
-  try {
-    const socs = await moSocStatuses();
-    const ok = socs.find((s) => s.ok);
-    if (ok) suggestedChannel = `soc:${ok.name}`;
-  } catch {
-    /* modal fetches /api/mo-socs itself; a suggestion is a nicety */
-  }
+  // 4) the signer is the OWNER'S pick on /tokens (mo.launch) — the confirm dialog shows it as a
+  //    read-only "Signs as" badge; `channel` stays on the wire (empty) for open tabs.
+  const suggestedChannel = "";
 
   // Preview link (real gcm is claimed at fire; NN is the placeholder the buyer sees)
   const linkPreview = fullLandingUrl(mo, landing.slug, "NN", true, pixelId);

@@ -23,8 +23,7 @@ import { CampaignCard } from "./campaign-card";
 import { type FanpageOption, useFanpages } from "./use-fanpages";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { useAutoLandings } from "./use-auto-landings";
-import { useMoSocs } from "./use-mo-socs";
-import { MO_CHANNEL_LS, defaultMoSoc } from "./mo-soc-picker";
+import { useSigners } from "./use-signers";
 import { hsTokensAllDown, useHsTokenStatus } from "./hs-token-status";
 import { type AdAccountOption, defaultPixelFor, useAdAccounts } from "./use-adaccounts";
 import { type AcctLimits, acctIdKey, useAcctLimits } from "./use-acct-limit";
@@ -66,8 +65,8 @@ const GCM_LOW_WATER = 15;
  *  one rail, re-picking it every session would invite accidental LION shots mid-token-wave. */
 const HS_CHANNEL_LS = "adlauncher.hs.channel";
 
-// The MO launch-signer pick lives in mo-soc-picker (MO_CHANNEL_LS) — shared with the clone
-// board so one persisted pick drives every MO rail.
+// The MO / AIF launch signer is no longer a per-buyer pick: the owner assigns it on /tokens
+// (lib/fb-tokens) and every rail resolves that same slot server-side (badge via use-signers).
 
 /** gcm auto-claim (skipping registry-reserved codes) + single account/pixel/fanpage pinning. */
 function normalize(rows: Campaign[], partner: PartnerConfig, reserved: Set<string> | null): Campaign[] {
@@ -216,46 +215,17 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // without extra requests. Drives the exhaustion banner and the Launch hard-block below.
   const poolFree = pool && reserved ? Math.max(0, pool.max - reserved.size) : null;
   const poolExhausted = Boolean(pool) && poolFree === 0;
-  // MO launch signer: the system-user token (default) or one of the provisioned soc tokens.
-  // The soc list comes from the server (names only); a stored pick is honored only while its
-  // name is still provisioned — otherwise the wave rides the system token as before.
-  const moSocs = useMoSocs(partnerId === "in");
-  const [moChannel, setMoChannel] = useState<string>("");
-  useEffect(() => {
-    try {
-      const v = localStorage.getItem(MO_CHANNEL_LS);
-      // Safe setState-in-effect: runs once on mount (same pattern as the HS channel restore).
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (v) setMoChannel(v);
-    } catch {
-      /* storage disabled — session-local pick only */
-    }
-  }, []);
-  const changeMoChannel = useCallback((v: string) => {
-    setMoChannel(v);
-    try {
-      localStorage.setItem(MO_CHANNEL_LS, v);
-    } catch {
-      /* storage disabled */
-    }
-  }, []);
-  // The system token is RETIRED (owner ask 09-01): once the roster lands, an empty/stale pick
-  // auto-settles on the default signer (system-class Spencermo when healthy, else first healthy).
-  useEffect(() => {
-    if (partnerId !== "in" || !moSocs || moSocs.length === 0) return;
-    if (moChannel && moSocs.some((s) => s.name === moChannel)) return;
-    // Safe setState-in-effect: converges in one pass (the pick lands in the roster).
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    changeMoChannel(defaultMoSoc(moSocs));
-  }, [partnerId, moSocs, moChannel, changeMoChannel]);
-  /** The EFFECTIVE soc for this wave ("" = no valid signer yet — launches gate on it): picked
-   *  AND provisioned server-side. An UNHEALTHY soc stays effective — its pickers/launch error
-   *  with FB's own reason (shown under the picker); silent rerouting would defeat the routing. */
-  const moSoc =
-    partnerId === "in" && moChannel && (moSocs ?? []).some((s) => s.name === moChannel) ? moChannel : "";
-  /** SOC name marker rides only соц-class picks — an alternate SYSTEM entry (system:true)
-   *  launches unmarked, so its previews must be unmarked too (server is the truth either way). */
-  const moSocMarks = Boolean(moSoc) && !(moSocs ?? []).find((s) => s.name === moSoc)?.system;
+  // The rail's signer (MO / AIF direct-Graph rails) is the OWNER'S pick on /tokens — read-only
+  // here (badge in the rail); the launch route resolves the very same slot server-side.
+  const graphRail = !partner.lionLaunch && (partner.usesGcm || Boolean(partner.aifLaunch));
+  const signers = useSigners(graphRail);
+  const railSigner = graphRail ? (signers.slots?.[partner.aifLaunch ? "aif.launch" : "mo.launch"] ?? null) : null;
+  /** A token exists for this rail (assigned or env default) — the catalogs load and waves may
+   *  fire. An UNHEALTHY token stays effective: its pickers/launch error with FB's own reason. */
+  const signerReady = !graphRail || Boolean(railSigner?.primary);
+  /** SOC name marker rides personal-soc signers only (MO) — system users launch unmarked, so
+   *  their previews stay unmarked too (server is the truth either way). */
+  const moSocMarks = partner.usesGcm && Boolean(railSigner?.primary?.personal);
 
   // Token fanpages for the per-card fanka picker, each with its live N/limit fill tag from the
   // hs-tools registry (AIF reads its own token's pages; its registry scope fills the badges the
@@ -264,11 +234,11 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // MO catalogs wait for the signer pick (no system token to read from any more) — the picker
   // shows its loading hint for the auto-pick beat instead of flashing the retired catalog.
   const fanpages = useFanpages(
-    Boolean(partner.fanpagesFromToken) && (Boolean(partner.aifLaunch) || Boolean(moSoc)),
+    Boolean(partner.fanpagesFromToken) && signerReady,
     partner.pageAdLimit ?? 250,
     partner.aifLaunch
-      ? { list: "/api/aif/fanpages", volume: "/api/aif/fanpages/volume" }
-      : { list: `/api/fanpages?channel=soc:${encodeURIComponent(moSoc)}`, volume: "/api/fanpages/volume" },
+      ? { list: "/api/aif/fanpages?rail=launch", volume: "/api/aif/fanpages/volume" }
+      : { list: "/api/fanpages?rail=launch", volume: "/api/fanpages/volume" },
   );
   // HS launch-token pool health — powers the "all tokens burned" banner (the server gate is the
   // enforcement; this is the courtesy warning before buyers build a wave into a 429).
@@ -277,9 +247,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // Token ad accounts (with their pixels) for the account/pixel pickers — read from the picked
   // signer's catalog (a soc may see a different account set than the system user).
   const adAccounts = useAdAccounts(
-    Boolean(partner.accountsFromToken) && (Boolean(partner.aifLaunch) || Boolean(moSoc)),
+    Boolean(partner.accountsFromToken) && signerReady,
     partner.preferredPixel,
-    partner.aifLaunch ? "/api/aif/adaccounts" : `/api/adaccounts?channel=soc:${encodeURIComponent(moSoc)}`,
+    partner.aifLaunch ? "/api/aif/adaccounts?rail=launch" : "/api/adaccounts?rail=launch",
   );
   // LION catalog (HS): profiles + ACR, per-profile accounts/pages/locales, per-account pixels.
   const hs = useHs(Boolean(partner.lionLaunch));
@@ -435,9 +405,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     // A tab older than the deployed build has outdated gates — launching is locked until reload
     // (the banner explains; the rail button is disabled too).
     if (limits.staleBuild) return;
-    // System token retired on MO: no wave fires without a provisioned signer (belt over the
-    // rail's disabled button; the server rejects channel-less MO launches too).
-    if (!partner.aifLaunch && partner.usesGcm && !moSoc) return;
+    // No token for this rail (nothing assigned on /tokens, no env default): nothing fires (belt
+    // over the rail's disabled button; the server refuses signer-less launches too).
+    if (!signerReady) return;
     const opts = launchReadyOpts(partner);
     const launchable = campaigns.filter((c) => isLaunchable(c, opts));
     if (launchable.length === 0) return;
@@ -542,9 +512,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       enqueue({
         partnerId,
         campaign: c,
-        // MO soc channel: the signer rides with the task; the drawer row previews the SOC-marked
-        // name the server will really create (server-side moEnsureSocMark stays the truth).
-        ...(moSoc ? { channel: `soc:${moSoc}` } : {}),
+        // The signer is resolved server-side from the owner's /tokens pick; the drawer row
+        // previews the SOC-marked name the server will really create (moEnsureSocMark is the truth).
         medias,
         mediaUrl: media.url,
         mediaName: media.name,
@@ -892,10 +861,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
             hsChannel={hsChannel}
             hsTokenReady={hs.tokenLaunch}
             onHsChannel={changeHsChannel}
-            moSocs={moSocs}
-            moChannel={moChannel}
-            moSoc={moSoc}
-            onMoChannel={changeMoChannel}
+            signer={railSigner}
+            signerLoaded={signers.loaded}
+            owner={Boolean(user?.owner)}
             previewed={previewed}
             justQueued={justQueued}
             inFlight={partner.lionLaunch ? hsTasks.counts.inFlight : partner.aifLaunch ? aifTm.counts.inFlight : teamTm.counts.inFlight}

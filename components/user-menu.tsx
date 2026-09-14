@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { CheckIcon, ChevronDownIcon, LogoutIcon, SparklesIcon, UsersIcon } from "./icons";
+import { CheckIcon, ChevronDownIcon, KeyIcon, LogoutIcon, SparklesIcon, UsersIcon } from "./icons";
 
 export type SessionUser = {
   username: string;
@@ -86,6 +86,7 @@ export function UserMenu({ user }: { user: SessionUser }) {
 
   const onAccounts = pathname === "/accounts";
   const onAutoLandings = pathname === "/auto-landings";
+  const onTokens = pathname === "/tokens";
 
   return (
     <div ref={boxRef} className="relative">
@@ -189,6 +190,35 @@ export function UserMenu({ user }: { user: SessionUser }) {
               </span>
               <span className="block text-[11px] leading-snug text-faint">
                 Generate &amp; schedule MK Learn articles
+              </span>
+            </span>
+          </Link>
+          <Link
+            href="/tokens"
+            role="menuitem"
+            onClick={() => setOpen(false)}
+            className={
+              "group flex items-start gap-2.5 rounded-xl px-2.5 py-2 transition-colors " +
+              (onTokens ? "bg-accent/10" : "hover:bg-raise")
+            }
+          >
+            <span
+              className={
+                "mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg border transition-colors " +
+                (onTokens
+                  ? "border-accent/40 bg-accent/15 text-[#9db8ff]"
+                  : "border-line bg-surface2 text-dim group-hover:text-[#9db8ff]")
+              }
+            >
+              <KeyIcon className="h-4 w-4" />
+            </span>
+            <span className="min-w-0">
+              <span className="flex items-center gap-1.5 text-[13px] font-medium text-ink">
+                FB tokens
+                {onTokens ? <CheckIcon className="h-3.5 w-3.5 text-[#9db8ff]" /> : null}
+              </span>
+              <span className="block text-[11px] leading-snug text-faint">
+                Add tokens &amp; pick who signs per partner
               </span>
             </span>
           </Link>

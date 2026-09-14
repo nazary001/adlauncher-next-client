@@ -58,8 +58,8 @@ import { CloneTargetingModal } from "./clone-targeting-modal";
 import { CloneHighOfferModal } from "./clone-high-offer-modal";
 import { CloneDestinationModal } from "./clone-destination-modal";
 import { SearchSelect } from "./search-select";
-import { useMoSocs } from "./use-mo-socs";
-import { MO_CHANNEL_LS, MoSocPicker, defaultMoSoc } from "./mo-soc-picker";
+import { useSigners } from "./use-signers";
+import { SignerBadge } from "./signer-badge";
 import { useFanpages } from "./use-fanpages";
 import { defaultPixelFor, pixelOptionsOf, useAdAccounts } from "./use-adaccounts";
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
@@ -218,61 +218,34 @@ function CloneInner({
 
   const partner = partnerConfig(partnerId);
   const aifMode = Boolean(partner.aifLaunch);
-  // MO clone signer — the same soc roster + persisted pick as the launcher (one signer drives
-  // every MO rail): the system token is RETIRED (owner ask 09-01 — Meta's ward kills its
-  // adset-creates), so the CATALOGS (fanpages/accounts/pixels) and the clone build itself all
-  // ride the picked soc's bearer. AIF keeps its own token — no signer concept there.
-  const moSocs = useMoSocs(!aifMode);
-  const [moChannel, setMoChannel] = useState<string>("");
-  useEffect(() => {
-    try {
-      const v = localStorage.getItem(MO_CHANNEL_LS);
-      // Safe setState-in-effect: runs once on mount (localStorage is unreadable during SSR).
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (v) setMoChannel(v);
-    } catch {
-      /* storage disabled — session-local pick only */
-    }
-  }, []);
-  const changeMoChannel = useCallback((v: string) => {
-    setMoChannel(v);
-    try {
-      localStorage.setItem(MO_CHANNEL_LS, v);
-    } catch {
-      /* storage disabled */
-    }
-  }, []);
-  // Once the roster lands, an empty/stale pick auto-settles on the default signer.
-  useEffect(() => {
-    if (aifMode || !moSocs || moSocs.length === 0) return;
-    if (moChannel && moSocs.some((s) => s.name === moChannel)) return;
-    // Safe setState-in-effect: converges in one pass (the pick lands in the roster).
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    changeMoChannel(defaultMoSoc(moSocs));
-  }, [aifMode, moSocs, moChannel, changeMoChannel]);
-  /** The EFFECTIVE signer ("" = none yet — Duplicate gates on it): picked AND provisioned. */
-  const moSoc = !aifMode && moChannel && (moSocs ?? []).some((s) => s.name === moChannel) ? moChannel : "";
-  /** SOC name marker rides соц-class picks only — system-class entries (Spencermo) go unmarked. */
-  const moSocMarks = Boolean(moSoc) && !(moSocs ?? []).find((s) => s.name === moSoc)?.system;
-  const signerMissing = !aifMode && !moSoc;
+  // The clone signer is the OWNER'S pick on /tokens (mo.clone / aif.clone; env default while
+  // unassigned) — read-only here: the CATALOGS (fanpages/accounts/pixels), the source reads and
+  // the clone build all ride that bearer (the run route resolves the same slot server-side).
+  const signers = useSigners(true);
+  const railSigner = signers.slots?.[aifMode ? "aif.clone" : "mo.clone"] ?? null;
+  /** A token exists for this rail — catalogs load, Duplicate may fire. */
+  const signerReady = Boolean(railSigner?.primary);
+  /** SOC name marker rides personal-soc signers only (MO) — system users go unmarked. */
+  const moSocMarks = !aifMode && Boolean(railSigner?.primary?.personal);
+  const signerMissing = !signerReady;
   // Token fanpages for the batch fanka picker (with live N/limit fill tags from the hs-tools
   // registry; AIF's scope fills in the day the box syncs AIF pages — same as the launcher board).
   // MO waits for the signer pick — there is no system catalog to fall back to any more.
   const fanpages = useFanpages(
-    Boolean(partner.fanpagesFromToken) && (aifMode || Boolean(moSoc)),
+    Boolean(partner.fanpagesFromToken) && signerReady,
     partner.pageAdLimit ?? 250,
     aifMode
-      ? { list: "/api/aif/fanpages", volume: "/api/aif/fanpages/volume" }
-      : { list: `/api/fanpages?channel=soc:${encodeURIComponent(moSoc)}`, volume: "/api/fanpages/volume" },
+      ? { list: "/api/aif/fanpages?rail=clone", volume: "/api/aif/fanpages/volume" }
+      : { list: "/api/fanpages?rail=clone", volume: "/api/fanpages/volume" },
   );
   // Token ad accounts for the destination pick. The destination is an EXPLICIT choice:
   // "" = nothing chosen yet (Duplicate stays locked), SOURCE_ACCOUNT = consciously keep each
   // clone in its source campaign's own account, digits = a concrete target account (media gets
   // migrated there). No silent default — the buyer must say where the batch goes.
   const adAccounts = useAdAccounts(
-    Boolean(partner.accountsFromToken) && (aifMode || Boolean(moSoc)),
+    Boolean(partner.accountsFromToken) && signerReady,
     partner.preferredPixel,
-    aifMode ? "/api/aif/adaccounts" : `/api/adaccounts?channel=soc:${encodeURIComponent(moSoc)}`,
+    aifMode ? "/api/aif/adaccounts?rail=clone" : "/api/adaccounts?rail=clone",
   );
 
   // ---- destination verdicts, per TUPLE (owner ask 09-08: a row may carry its own) -----------
@@ -424,10 +397,8 @@ function CloneInner({
   const pixelLabel = (accountId: string, pixelId: string): string =>
     pixelOptionsOf(adAccounts, accountId).find((p) => p.id === pixelId)?.name || pixelId;
 
-  // The MO source read rides the picked SIGNER's token (the retired system token can't see the
-  // campaigns — owner report 09-08: the board sat on "No campaigns received"); AIF reads on
-  // its own token, no channel.
-  const sourceChannel = aifMode ? undefined : moSoc ? `soc:${moSoc}` : undefined;
+  // Source reads ride the CLONE signer's token server-side (?rail=clone) — the same bearer that
+  // will build, so "no access" on read means "no access" on build.
   const partialWarn = (failed: { id: string; error: string }[]): string | null =>
     failed.length
       ? `${failed.length} campaign${failed.length === 1 ? "" : "s"} didn't load with this signer: ` +
@@ -447,7 +418,7 @@ function CloneInner({
       setLoading(true);
       setError(null);
       const ddmm = todayDDMM();
-      loadCloneSources(ids, partnerId, sourceChannel)
+      loadCloneSources(ids, partnerId)
         .then(({ sources, failed }) => {
           setRows(sources.map((s) => seedRow(s, ddmm, `r${nextRowId.current++}`, me)));
           setLoadWarn(partialWarn(failed));
@@ -459,7 +430,7 @@ function CloneInner({
         })
         .finally(() => setLoading(false));
     },
-    [partnerId, me, sourceChannel],
+    [partnerId, me],
   );
 
   /** Load local mock sources for the "Load sample" button — no Facebook call. */
@@ -484,12 +455,12 @@ function CloneInner({
   const initialLoadRef = useRef(false);
   useEffect(() => {
     if (initialIds.length === 0 || initialLoadRef.current) return;
-    if (!aifMode && !moSoc) {
-      if (moSocs && moSocs.length === 0) {
+    if (!signerReady) {
+      if (signers.loaded) {
         initialLoadRef.current = true;
         Promise.resolve().then(() => {
           setLoading(false);
-          setError("No MO signer is provisioned on the server (FB_MO_SOC_TOKENS) — the system token is retired, sources can't be read");
+          setError(railSigner?.error || "No clone token is assigned for this partner — an owner assigns one under FB tokens; sources can't be read");
         });
       }
       return;
@@ -497,7 +468,7 @@ function CloneInner({
     initialLoadRef.current = true;
     let alive = true;
     const ddmm = todayDDMM();
-    loadCloneSources(initialIds, partnerId, sourceChannel)
+    loadCloneSources(initialIds, partnerId)
       .then(({ sources, failed }) => {
         if (!alive) return;
         setRows(sources.map((s) => seedRow(s, ddmm, `r${nextRowId.current++}`, me)));
@@ -516,7 +487,7 @@ function CloneInner({
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [aifMode, moSoc, moSocs]);
+  }, [signerReady, signers.loaded]);
 
   const patchRow = (id: string, patch: Partial<CloneRow>) => {
     setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
@@ -601,8 +572,6 @@ function CloneInner({
         enqueueClone({
           partnerId,
           edit,
-          // MO clones sign as the picked soc (the run route rejects signer-less MO batches).
-          ...(moSoc ? { channel: `soc:${moSoc}` } : {}),
           name,
           geo: geoSummary(r.countries),
           budget: r.budget,
@@ -636,14 +605,12 @@ function CloneInner({
               Batch defaults — every row rides these unless it sets its own Destination in the table.
             </p>
 
-            {/* MO signer — the soc token that reads the catalogs below AND signs every clone
-                (the system token is retired). Shared pick with the launcher board. */}
-            {!aifMode ? (
-              <div className="flex flex-col gap-2">
-                <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Signer</span>
-                <MoSocPicker socs={moSocs} value={moChannel} onChange={changeMoChannel} />
-              </div>
-            ) : null}
+            {/* The clone signer — the OWNER'S pick on /tokens: reads the catalogs below AND signs
+                every clone (read-only here, owner ask 09-14). */}
+            <div className="flex flex-col gap-2">
+              <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Signer</span>
+              <SignerBadge signer={railSigner} loaded={signers.loaded} rail="clone" owner={Boolean(user?.owner)} />
+            </div>
 
             {/* destination — fanpage always picked; account+pixel optionally re-target the batch */}
             <div className="flex flex-col gap-2">
@@ -899,8 +866,8 @@ function CloneInner({
 
               {previewed && rows.length > 0 && signerMissing ? (
                 <div className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11.5px] leading-relaxed text-warn">
-                  Duplicate is locked — pick a <span className="font-semibold">Signer</span> (the
-                  system token is retired; MO clones sign as a soc).
+                  Duplicate is locked — no clone token is assigned for this partner (an owner
+                  assigns one under <span className="font-semibold">FB tokens</span>).
                 </div>
               ) : null}
 
@@ -967,7 +934,7 @@ function CloneInner({
             ) : null}
             {loading ? (
               <div className="flex h-40 items-center justify-center rounded-2xl border border-dashed border-line2 text-[13px] text-faint">
-                {!aifMode && !moSoc ? "Waiting for the signer…" : "Loading campaigns from Facebook…"}
+                {signerMissing ? "Waiting for the signer…" : "Loading campaigns from Facebook…"}
               </div>
             ) : error ? (
               <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-danger/30 bg-danger/5 px-6 py-12 text-center">

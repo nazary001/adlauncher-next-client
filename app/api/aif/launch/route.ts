@@ -14,21 +14,7 @@ import {
 import { sessionFromCookieHeader } from "@/lib/session";
 import { FbError, withFbBudget, withParentRetry } from "@/lib/fb-graph";
 import { fetchValidatedImage } from "@/lib/fb-media";
-import {
-  aifAccountName,
-  aifAccountPixels,
-  aifAdvertisablePageName,
-  aifCreateAdset,
-  aifFbGet,
-  aifFbPost,
-  aifIsAdvertisablePage,
-  aifIsTokenAccount,
-  aifTokenConfigured,
-  aifUploadImage,
-  aifUploadVideo,
-  aifVideoThumb,
-  aifWaitForVideo,
-} from "@/lib/aif-launch";
+import { type AifRail, aifRail } from "@/lib/aif-launch";
 import { backfillBrand, claimBrand, deleteBrand } from "@/lib/aif-claim";
 import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
@@ -53,13 +39,13 @@ const SLUG_RE = /^[\w-]{1,200}$/;
 // ---------- locale resolution (best-effort, non-fatal) — the AIF-token twin of /api/launch's ----------
 
 const localeCache = new Map<string, number | null>();
-async function resolveLocales(names: string[]): Promise<number[]> {
+async function resolveLocales(names: string[], rail: AifRail): Promise<number[]> {
   const ids: number[] = [];
   for (const raw of names) {
     if (/\(all\)/i.test(raw)) continue; // "all" = no language restriction (broadest)
     if (!localeCache.has(raw)) {
       try {
-        const body = await aifFbGet(`search?type=adlocale&limit=25&q=${encodeURIComponent(raw.replace(/[()]/g, " ").trim())}`);
+        const body = await rail.fbGet(`search?type=adlocale&limit=25&q=${encodeURIComponent(raw.replace(/[()]/g, " ").trim())}`);
         const data = (body?.data as Array<{ key?: number; name?: string }> | undefined) ?? [];
         const norm = (s: string) => s.toLowerCase().replace(/[^a-z]/g, "");
         // Only accept an exact normalized-name match — never fall back to data[0], which would
@@ -98,12 +84,13 @@ export async function POST(req: Request) {
   if (!session) {
     return NextResponse.json({ ok: false, stage: "auth", error: "unauthorized" }, { status: 401 });
   }
-  if (!aifTokenConfigured()) {
-    return NextResponse.json(
-      { ok: false, stage: "config", error: "no_aif_token — set FB_AIF_LAUNCH_TOKEN in the environment" },
-      { status: 500 },
-    );
+  // The AIF launch signer is the OWNER'S pick on /tokens (aif.launch slot; FB_AIF_LAUNCH_TOKEN
+  // while unassigned). Missing/unreadable → clean config error, never another bearer.
+  const railRes = await aifRail("launch");
+  if (!railRes.ok) {
+    return NextResponse.json({ ok: false, stage: "config", error: railRes.error }, { status: 400 });
   }
+  const rail = railRes.rail;
 
   let campaign: Campaign;
   /** Creatives of this launch (1..maxCreatives, MO-parity 09-02): own-Blob URLs; cover = video
@@ -172,7 +159,7 @@ export async function POST(req: Request) {
         { status: 400 },
       );
     }
-    if (!(await aifIsTokenAccount(pickedAccount))) {
+    if (!(await rail.isTokenAccount(pickedAccount))) {
       return NextResponse.json(
         { ok: false, stage: "config", error: "account_not_allowed — the AIF token cannot use this ad account" },
         { status: 400 },
@@ -184,14 +171,14 @@ export async function POST(req: Request) {
         { status: 400 },
       );
     }
-    if (!(await aifIsAdvertisablePage(pickedPage))) {
+    if (!(await rail.isAdvertisablePage(pickedPage))) {
       return NextResponse.json(
         { ok: false, stage: "config", error: "fanpage_not_allowed — the AIF token cannot advertise with this page" },
         { status: 400 },
       );
     }
     // DSA beneficiary/payor for EU-reaching ad sets — same rule as MO (live failure 2026-08-10).
-    binds.pageName = await aifAdvertisablePageName(pickedPage);
+    binds.pageName = await rail.advertisablePageName(pickedPage);
     // Conversion launches run on the cabinet's OFFERABLE pixels (token catalog minus the
     // retired «GC for AIF» / «GC for MO» — owner call 09-02 pt3), validated here BEFORE
     // anything is claimed (Meta would only reject the ad set after the campaign exists —
@@ -199,7 +186,7 @@ export async function POST(req: Request) {
     // eligible 09-02) no matter what the draft sent; a plain conversion binds the buyer's pick
     // or the pickAifPixel auto-default (fresh cards, legacy drafts, queued tasks).
     if (conversions) {
-      const raw = await aifAccountPixels(pickedAccount);
+      const raw = await rail.accountPixels(pickedAccount);
       const offer = aifOfferablePixels(raw);
       if (bidKind(campaign.bidStrategy) === "roas") {
         if (!offer.some((p) => p.id === AIF_VALUE_PIXEL.id)) {
@@ -395,7 +382,7 @@ export async function POST(req: Request) {
           partner: "us",
           channel: "aif",
           name,
-          accountName: await aifAccountName(binds.accountId).catch(() => ""),
+          accountName: await rail.accountName(binds.accountId).catch(() => ""),
         });
 
         // 1) reserve the brand BEFORE building the link (guarantees no duplicate revenue key)
@@ -422,10 +409,10 @@ export async function POST(req: Request) {
         for (let i = 0; i < medias.length; i++) {
           const m = medias[i];
           if (m.kind === "image") {
-            regs[i] = { kind: "image", imageHash: await aifUploadImage(binds.accountId, imageBufs.get(i) as Buffer) };
+            regs[i] = { kind: "image", imageHash: await rail.uploadImage(binds.accountId, imageBufs.get(i) as Buffer) };
           } else {
             const suffix = medias.length > 1 ? ` · video ${i + 1}` : " · video";
-            regs[i] = { kind: "video", videoId: await aifUploadVideo(binds.accountId, m.url, `${name}${suffix}`), thumbUrl: "" };
+            regs[i] = { kind: "video", videoId: await rail.uploadVideo(binds.accountId, m.url, `${name}${suffix}`), thumbUrl: "" };
           }
         }
         created.video_id = regs.find((r) => r.kind === "video")?.videoId ?? undefined;
@@ -434,22 +421,22 @@ export async function POST(req: Request) {
         for (let i = 0; i < medias.length; i++) {
           const r = regs[i];
           if (r.kind !== "video") continue;
-          await aifWaitForVideo(r.videoId);
+          await rail.waitForVideo(r.videoId);
           // A custom cover replaces the auto-thumbnail entirely (no thumbnail poll needed).
           const coverBuf = coverBufs.get(i);
-          if (coverBuf) r.coverHash = await aifUploadImage(binds.accountId, coverBuf);
-          else r.thumbUrl = await aifVideoThumb(r.videoId);
+          if (coverBuf) r.coverHash = await rail.uploadImage(binds.accountId, coverBuf);
+          else r.thumbUrl = await rail.videoThumb(r.videoId);
         }
-        const localeIds = await resolveLocales(serverCampaign.locales);
+        const localeIds = await resolveLocales(serverCampaign.locales, rail);
 
         // 3) campaign → adset → one creative+ad PER media, all ACTIVE (parity with the MO rail)
         progress("campaign");
-        const camp = await aifFbPost(`act_${binds.accountId}/campaigns`, campaignPayload(serverCampaign, name));
+        const camp = await rail.fbPost(`act_${binds.accountId}/campaigns`, campaignPayload(serverCampaign, name));
         created.campaign_id = String(camp.id);
 
         progress("adset");
         const adset = await withParentRetry(String(camp.id), () =>
-          aifCreateAdset(`act_${binds.accountId}/adsets`, adsetPayload(serverCampaign, name, String(camp.id), binds, localeIds)),
+          rail.createAdset(`act_${binds.accountId}/adsets`, adsetPayload(serverCampaign, name, String(camp.id), binds, localeIds)),
         );
         created.adset_id = String(adset.id);
 
@@ -458,7 +445,7 @@ export async function POST(req: Request) {
         for (let i = 0; i < regs.length; i++) {
           const r = regs[i];
           const adName = regs.length > 1 ? `${name} · ${i + 1}` : name;
-          const creative = await aifFbPost(
+          const creative = await rail.fbPost(
             `act_${binds.accountId}/adcreatives`,
             r.kind === "image"
               ? imageCreativePayload(serverCampaign, adName, binds, { imageHash: r.imageHash, link })
@@ -478,7 +465,7 @@ export async function POST(req: Request) {
         for (let i = 0; i < creativeIds.length; i++) {
           const adName = creativeIds.length > 1 ? `${name} · ${i + 1}` : name;
           const ad = await withParentRetry(String(adset.id), () =>
-            aifFbPost(`act_${binds.accountId}/ads`, adPayload(adName, String(adset.id), creativeIds[i])),
+            rail.fbPost(`act_${binds.accountId}/ads`, adPayload(adName, String(adset.id), creativeIds[i])),
           );
           // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
           if (!ad.id) throw new FbError("ad create returned no id", ad);

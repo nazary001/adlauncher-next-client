@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
-import { FbError, fbGet, hasFbToken } from "@/lib/fb-graph";
-import { aifRawToken, aifTokenConfigured } from "@/lib/aif-launch";
+import { FbError, fbGet } from "@/lib/fb-graph";
+import { aifRail } from "@/lib/aif-launch";
 import { partnerConfig, sanitizePartnerId } from "@/lib/partners";
-import { resolveMoChannel } from "@/lib/mo-soc";
+import { resolveMoSigner } from "@/lib/mo-soc";
 import { moneyLabel } from "@/lib/types";
 import { sessionFromCookieHeader } from "@/lib/session";
 import type { CloneCreative, CloneSource } from "@/lib/clone";
@@ -128,24 +128,23 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
   const url = new URL(req.url);
-  // The partner picks the Graph bearer: AIF sources live in the AIF cabinets (its own token).
-  // MO reads with the board's SIGNER (`channel=soc:<name>`, the same personal token that reads
-  // the catalogs and builds the clones — the system user gcformo is retired/degraded since
-  // 09-01, so a read on it answers "no access" for every campaign and the board showed an
-  // empty "No campaigns received"; owner report 09-08). Absent channel = the historical system
-  // default (old tabs); an unknown soc is refused instead of silently falling back.
+  // The partner picks the Graph bearer: AIF sources live in the AIF cabinets (the AIF token),
+  // MO sources are read with the MO signer. Both come from the OWNER'S assignment on /tokens for
+  // the rail named by `?rail=` (the clone board reads with the CLONE signer — the same bearer
+  // that will build the copies, so "no access" on read means "no access" on build; default
+  // clone). A missing/unreadable token is a clean config error, never a guessed bearer.
   const partner = partnerConfig(sanitizePartnerId(url.searchParams.get("partner")));
   const aif = Boolean(partner.aifLaunch);
-  const channel = aif ? null : resolveMoChannel(url.searchParams.get("channel"));
-  if (!aif && !channel) {
-    return NextResponse.json(
-      { ok: false, error: "soc_channel_unknown — this signer is not provisioned on the server (FB_MO_SOC_TOKENS)" },
-      { status: 400 },
-    );
-  }
-  const token = aif ? aifRawToken() : channel && channel.kind === "soc" ? channel.token : undefined;
-  if (aif ? !aifTokenConfigured() : !token && !hasFbToken()) {
-    return NextResponse.json({ ok: false, error: "no_fb_token" }, { status: 500 });
+  const railName = url.searchParams.get("rail") === "launch" ? "launch" : "clone";
+  let token: string;
+  if (aif) {
+    const r = await aifRail(railName);
+    if (!r.ok) return NextResponse.json({ ok: false, error: r.error }, { status: 400 });
+    token = r.rail.token;
+  } else {
+    const r = await resolveMoSigner(railName);
+    if (!r.ok) return NextResponse.json({ ok: false, error: r.error }, { status: 400 });
+    token = r.signer.token;
   }
 
   const ids = [

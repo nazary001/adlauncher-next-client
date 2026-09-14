@@ -7,8 +7,8 @@ import { CONVERSION_EVENTS, geoSummary } from "@/lib/catalog";
 import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { type PartnerConfig, launchReadyOpts, markerPool } from "@/lib/partners";
 import type { HsLaunchChannel } from "./hs-task-manager";
-import type { MoSocStatus } from "./use-mo-socs";
-import { MoSocPicker } from "./mo-soc-picker";
+import type { SlotSigner } from "./use-signers";
+import { SignerBadge } from "./signer-badge";
 import { CheckIcon, EyeIcon, RocketIcon } from "./icons";
 import { useAcctLimits } from "./use-acct-limit";
 
@@ -19,10 +19,9 @@ export function LaunchRail({
   hsChannel = "lion",
   hsTokenReady = false,
   onHsChannel,
-  moSocs = null,
-  moChannel = "",
-  moSoc = "",
-  onMoChannel,
+  signer = null,
+  signerLoaded = false,
+  owner = false,
   previewed,
   justQueued,
   inFlight = 0,
@@ -42,16 +41,13 @@ export function LaunchRail({
   /** FB Token rail provisioned server-side — until then the Token option renders disabled. */
   hsTokenReady?: boolean;
   onHsChannel?: (ch: HsLaunchChannel) => void;
-  /** MO soc channels provisioned server-side, each with its live token verdict (null while
-   *  loading, [] = switch hidden). A dead soc renders flagged, with FB's reason under the
-   *  switch when picked — so an empty account picker reads as "re-issue this token". */
-  moSocs?: MoSocStatus[] | null;
-  /** The STORED MO signer pick ("" = system token) — what the switch highlights. */
-  moChannel?: string;
-  /** The EFFECTIVE soc for the wave ("" = system): picked AND provisioned — drives the name
-   *  preview and the caption, same honor rule the launch itself applies. */
-  moSoc?: string;
-  onMoChannel?: (v: string) => void;
+  /** The rail's effective signer (MO / AIF: the owner's pick on /tokens) — read-only badge +
+   *  launch gate; null while unknown. */
+  signer?: SlotSigner | null;
+  /** false until the first /signers answer landed (the badge says "resolving"). */
+  signerLoaded?: boolean;
+  /** Owners get a /tokens link in the badge's empty/dead states. */
+  owner?: boolean;
   previewed: boolean;
   /** Count just sent to the Task Manager — shows a brief confirmation; campaigns stay on the board. */
   justQueued: number;
@@ -87,13 +83,11 @@ export function LaunchRail({
   // The bay previews the name the launch will really create — the FB Token rail's fixed TOKEN
   // marker included (same effective-channel rule as the launch itself: picked AND provisioned).
   const nameChannel = hsChannel === "token" && hsTokenReady ? ("token" as const) : ("lion" as const);
-  /** The picked MO signer's registry row (undefined = system token / not provisioned). */
-  const moSocEntry = moSoc ? (moSocs ?? []).find((s) => s.name === moSoc) : undefined;
-  // SOC name marker rides соц-class picks only — alternate SYSTEM entries launch unmarked.
-  const moSocMarks = Boolean(moSoc) && !moSocEntry?.system;
-  // System token is RETIRED on MO — a wave can't fire without a provisioned signer pick (the
-  // boards auto-pick a default; this only bites while the roster loads or when it's empty).
-  const moSignerMissing = !partner.lionLaunch && partner.usesGcm && !moSoc;
+  const graphRail = !partner.lionLaunch && (partner.usesGcm || Boolean(partner.aifLaunch));
+  // SOC name marker rides personal-soc signers only (MO) — system users launch unmarked.
+  const moSocMarks = partner.usesGcm && Boolean(signer?.primary?.personal);
+  // No token for this partner's launch rail (nothing assigned, no env default) → nothing may fire.
+  const moSignerMissing = graphRail && !signer?.primary;
   const nameOf = (c: Campaign) =>
     partner.lionLaunch
       ? c.name.trim()
@@ -261,15 +255,14 @@ export function LaunchRail({
               </p>
             </div>
           ) : null}
-          {/* MO launch signer — a provisioned soc token; the system-user token is RETIRED
-              (owner ask 09-01: Meta's ward kills its adset-creates, so it's gone from the
-              roster). One pick for the whole wave; the boards share the persisted pick. */}
-          {!partner.lionLaunch && partner.usesGcm ? (
+          {/* The rail's signer — the OWNER'S pick on /tokens (read-only here; owner ask 09-14).
+              One bearer for the whole wave; the launch route resolves the very same slot. */}
+          {graphRail ? (
             <div className="flex flex-col gap-1">
               <span className="select-none text-[10px] font-medium uppercase tracking-[0.14em] text-faint">
                 Signer
               </span>
-              <MoSocPicker socs={moSocs ?? null} value={moChannel} onChange={(v) => onMoChannel?.(v)} />
+              <SignerBadge signer={signer} loaded={signerLoaded} rail="launch" owner={owner} />
             </div>
           ) : null}
           <button
@@ -323,7 +316,7 @@ export function LaunchRail({
             </p>
           ) : moSignerMissing ? (
             <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">
-              No signer picked — the system token is retired; pick a soc in the Signer menu above.
+              No launch token is assigned for this partner — an owner assigns one under FB tokens (menu).
             </p>
           ) : gcmBlocked ? (
             <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">

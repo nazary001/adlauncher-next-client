@@ -322,9 +322,9 @@ export async function POST(req: Request): Promise<NextResponse> {
       (s) => s.binds.account,
     );
     if (overrideAccts.length > 0) {
-      if (!hsAnyTokenConfigured()) {
+      if (!(await hsAnyTokenConfigured())) {
         return bad(
-          "targeting_override_needs_fb_token — set FB_HS_DUP_TOKEN or FB_HS_LAUNCH_TOKEN; or run these rows on JURO (LION API applies the geo natively, no token needed)",
+          "targeting_override_needs_fb_token — no HS FB token is assigned (an owner assigns one under FB tokens); or run these rows on JURO (LION API applies the geo natively, no token needed)",
         );
       }
       const visible = await hsAnyTokenAccountIds();

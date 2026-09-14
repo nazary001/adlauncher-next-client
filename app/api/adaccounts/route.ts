@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { FbError, hasFbToken, tokenAdAccounts } from "@/lib/fb-graph";
-import { resolveMoChannel } from "@/lib/mo-soc";
+import { FbError, tokenAdAccounts } from "@/lib/fb-graph";
+import { railParam, resolveMoSigner } from "@/lib/mo-soc";
 import { filterAccountsFor } from "@/lib/acct-assignments";
 import { sessionFromCookieHeader } from "@/lib/session";
 
@@ -10,18 +10,17 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 /**
- * GET /api/adaccounts[?channel=soc:<name>]
+ * GET /api/adaccounts[?rail=launch|clone]
  *
- * ACTIVE ad accounts the launch token can use, each with its pixel list — feeds the account
- * picker (and its per-account pixel picker) on the launcher. The launch route validates the
- * picked account/pixel against the same server-cached data. Gated by the proxy.
+ * ACTIVE ad accounts the MO signer can use, each with its pixel list — feeds the account picker
+ * (and its per-account pixel picker) on the launcher / clone board. The launch route validates
+ * the picked account/pixel against the same server-cached data. Gated by the proxy.
  *
- * `channel` picks the signer the catalog is read from: absent/system = the DEFAULT soc (Spencermo
- * — the MO system user is dead, owner rule 09-08; the system token only when no soc is provisioned),
- * token, `soc:<name>` = that personal token from FB_MO_SOC_TOKENS (own cache identity —
- * a soc may see a different account set than the system user).
+ * `rail` picks WHICH MO signer's catalog is read — the owner's assignment on /tokens for
+ * launches (default) or clones (a different bearer may see a different account set; own cache
+ * identity per bearer).
  *
- * Degrades quietly (ok:false, 200) when the token is absent; real API failures return their
+ * Degrades quietly (ok:false, 200) when no token is assigned; real API failures return their
  * mapped status (429 rate-limited / 502 otherwise).
  */
 export async function GET(req: Request) {
@@ -29,19 +28,12 @@ export async function GET(req: Request) {
   if (!session) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  const channel = resolveMoChannel(new URL(req.url).searchParams.get("channel"));
-  if (!channel) return NextResponse.json({ ok: false, reason: "channel_unknown", accounts: [] });
-  if (channel.kind === "system" && !hasFbToken()) {
-    return NextResponse.json({ ok: false, reason: "no_token", accounts: [] });
-  }
+  const signer = await resolveMoSigner(railParam(new URL(req.url).searchParams.get("rail")));
+  if (!signer.ok) return NextResponse.json({ ok: false, reason: "no_token", error: signer.error, accounts: [] });
   try {
     // Owner assignments: a non-owner sees only accounts assigned to them (unassigned = shared).
-    const accounts = await filterAccountsFor(
-      session,
-      await tokenAdAccounts(channel.kind === "soc" ? channel.cat : undefined),
-      (a) => a.id,
-    );
-    return NextResponse.json({ ok: true, accounts });
+    const accounts = await filterAccountsFor(session, await tokenAdAccounts(signer.signer.cat), (a) => a.id);
+    return NextResponse.json({ ok: true, accounts, signer: signer.signer.name });
   } catch (e) {
     const err = e as FbError;
     return NextResponse.json(
