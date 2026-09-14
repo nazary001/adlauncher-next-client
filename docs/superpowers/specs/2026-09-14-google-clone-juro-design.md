@@ -236,3 +236,15 @@ mode, added the same day after the owner asked why the launcher was missing.
   re-POST, status poller.
 - Live read-only against the real partner: customers, dataset fetch/status on real sources.
 - ⚠️ A live clone shot creates a REAL, ENABLED Google campaign — fired only on the owner's word.
+
+## Acceptance is the terminal outcome (owner call 15.09)
+
+Mirrors the HS launches ("Sent to LION", 08-14): LION's `201 {taskId}` on `clone/launch/`,
+`juro/launch/` or `campaign/launch/` finishes the row — status `done`, stage `sent`, the partner
+task id in `link`, `finished_at` stamped. The pump no longer polls `tasks/{id}/` and the task
+manager's `/api/google/status` finisher only serves LEGACY rows still `running` from before
+15.09. What LION then builds (or drops — 14.09: a launch sat `running` 62 min on google-weapon and
+ended `failed` "Execution ended before a complete result was confirmed", leaving our row
+`running` all evening for everyone but the owner) is checked in LION itself. The task manager
+reads `Sent to LION` for a done row without a campaign id; legacy rows keep `Created on LION ·
+cmp …`. Sections above that describe the poll/finisher flow are historical.

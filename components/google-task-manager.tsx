@@ -6,9 +6,11 @@
 // pump ensures each source's dataset, submits every shot to google-weapon exactly-once and writes
 // the shared Strapi row at every stage — so the board can close the moment it queues. This
 // provider therefore never enqueues or runs work: it MIRRORS the team's shared rows (partner="gg"
-// scope via /api/google-tasks) and, for MY still-running rows, FINISHES the story by polling
-// google-weapon through /api/google/status (LION owns the build server-side; the record's
-// completed/failed answer is what turns a row green or red). Own-row authority: a row I just
+// scope via /api/google-tasks). Since 15.09 a row is DONE the moment LION accepts the shot
+// ("Sent to LION", HS-launch parity — the build itself is checked in LION); the finisher that
+// polls /api/google/status only remains for MY legacy rows still "running" from before that
+// (LION owns the build server-side; its completed/failed answer turns such a row green or red).
+// Own-row authority: a row I just
 // patched locally stays until the server echoes a newer updatedMs, so a racing shared fetch can't
 // flip my just-finished row back to "running". No retry/dismiss — creates are exactly-once (re-fire
 // from the board) and every error is the team's permanent record.
@@ -47,7 +49,7 @@ export type GoogleTask = {
   /** Pre-formatted "what it bids on" tag ("CPA 3,95" / "ROAS 90%" / "auto" / "inherit"). */
   bid?: string;
   status: "queued" | "running" | "done" | "error" | "interrupted";
-  /** dataset | submit | lion | queue | done | failed — drives the stage/status label. */
+  /** dataset | submit | sent (done at LION acceptance) | failed; legacy rows: lion | queue | done. */
   stage: string | null;
   /** google-weapon task id (Strapi link column) — the finisher polls this. */
   lionTaskId?: string;
@@ -228,7 +230,9 @@ function fmtElapsed(ms: number): string {
 
 /** The stage/status one-liner for a row. */
 function stageLabel(t: GoogleTask): string {
-  if (t.status === "done") return t.campaignId ? `Created on LION · cmp ${t.campaignId}` : "Created on LION";
+  // Acceptance is the terminal outcome (15.09): a done row without a campaign id reads "Sent to
+  // LION" like the HS launches; legacy rows the old pump/finisher completed keep the richer label.
+  if (t.status === "done") return t.campaignId ? `Created on LION · cmp ${t.campaignId}` : "Sent to LION";
   if (t.status === "error") return t.error || "Failed";
   if (t.status === "interrupted") return t.error || "Check google-weapon";
   switch (t.stage) {
@@ -398,7 +402,7 @@ export function GoogleTaskManagerProvider({
     };
   }, [loadRemote]);
 
-  // ---- LION finisher: only MY running rows with a google-weapon task id ----
+  // ---- LION finisher: only MY LEGACY running rows (stamped before 15.09) with a google-weapon task id ----
 
   const finish = useCallback(async () => {
     const now = Date.now();

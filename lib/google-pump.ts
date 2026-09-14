@@ -8,18 +8,20 @@
 //      carries the partner task id; a clean 4xx is the partner's sentence on the row and the
 //      remaining copies of the same board row (identical wire) skip with the same refusal; a
 //      5xx/network cut is AMBIGUOUS (the task may exist) → status "interrupted", never re-sent.
-//   3. poll    — task reads every 10 s until every task is terminal or the time budget ends;
-//      completed → done (+ the real campaign id/name), failed → error. Rows still running at the
-//      deadline are finished by the owner's browser (the Google task manager polls /api/google/status).
+//   3. sent    — LION's 201 IS the terminal outcome (owner call 15.09, HS-launch parity: "Sent to
+//      LION", nobody waits on the build). The row lands "done" at stage "sent" with the partner
+//      task id in `link`; what LION then builds — or fails to build — is checked in LION itself.
+//      (Until 15.09 the pump polled google-weapon for up to 13 min and the owner's browser
+//      finished the rest; a build that LION chewed on for an hour and then dropped left the row
+//      "running" all evening for everyone but the owner — the exact thing this removes.)
 
-import { googleTaskStage, type GoogleMode } from "./google-bid";
+import { type GoogleMode } from "./google-bid";
 import {
   GoogleWeaponError,
   gwCampaignLaunch,
   gwCloneLaunch,
   gwEnsureDataset,
   gwJuroLaunch,
-  gwTasks,
   type GwCloneBody,
   type GwJuroBody,
   type GwLaunchBody,
@@ -28,7 +30,6 @@ import { taskWriter, type TaskRowData } from "./task-store";
 
 export const GOOGLE_PARTNER = "gg";
 export const GOOGLE_PUMP_BUDGET_MS = 770_000;
-const POLL_MS = 10_000;
 const DEADLINE_MARGIN_MS = 20_000;
 
 export type GooglePumpShot = {
@@ -67,7 +68,6 @@ export async function pumpGoogleWave(
     cloneLaunch?: typeof gwCloneLaunch;
     juroLaunch?: typeof gwJuroLaunch;
     campaignLaunch?: typeof gwCampaignLaunch;
-    readTasks?: typeof gwTasks;
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
   } = {},
@@ -76,7 +76,6 @@ export async function pumpGoogleWave(
   const cloneLaunch = deps.cloneLaunch ?? gwCloneLaunch;
   const juroLaunch = deps.juroLaunch ?? gwJuroLaunch;
   const campaignLaunch = deps.campaignLaunch ?? gwCampaignLaunch;
-  const readTasks = deps.readTasks ?? gwTasks;
   const wait = deps.sleep ?? sleep;
   const now = deps.now ?? (() => Date.now());
 
@@ -115,8 +114,7 @@ export async function pumpGoogleWave(
     if (reason) fail(s, "dataset", reason);
   }
 
-  // ---- phase 2: submit, one at a time --------------------------------------------------------
-  const pending = new Map<string, GooglePumpShot>(); // partner task id → shot
+  // ---- phase 2: submit, one at a time; 201 = "Sent to LION" = done -------------------------
   const rowRefusal = new Map<string, string>();
   let first = true;
   for (const shot of shots) {
@@ -140,8 +138,7 @@ export async function pumpGoogleWave(
           : shot.mode === "juro"
             ? await juroLaunch(shot.body as GwJuroBody)
             : await campaignLaunch(shot.body as GwLaunchBody);
-      pending.set(res.taskId, shot);
-      write(shot.taskId, { stage: "lion", link: res.taskId, status: "running" });
+      write(shot.taskId, { status: "done", stage: "sent", link: res.taskId, finished_at: now() });
     } catch (e) {
       const err = e instanceof GoogleWeaponError ? e : null;
       if (err?.status && err.status < 500) {
@@ -156,47 +153,5 @@ export async function pumpGoogleWave(
     }
   }
 
-  // ---- phase 3: poll ---------------------------------------------------------------------------
-  // Stage writes only on CHANGE — a 45-shot wave polled every 10 s would otherwise hammer the
-  // shared Strapi with no-op writes.
-  const lastStage = new Map<string, string>();
-  while (pending.size > 0 && now() < deadline - DEADLINE_MARGIN_MS) {
-    await wait(POLL_MS);
-    const ids = [...pending.keys()];
-    let tasks;
-    try {
-      tasks = await readTasks(ids);
-    } catch {
-      continue; // transient — next tick
-    }
-    for (const t of tasks) {
-      const shot = pending.get(t.taskId);
-      if (!shot) continue;
-      const stage = googleTaskStage(t.status);
-      if (stage === "done") {
-        pending.delete(t.taskId);
-        write(shot.taskId, {
-          status: "done",
-          stage: "done",
-          campaign_id: t.campaignId ?? "",
-          ...(t.campaignName ? { name: t.campaignName } : {}),
-          finished_at: now(),
-        });
-      } else if (stage === "failed") {
-        pending.delete(t.taskId);
-        fail(shot, "failed", t.error || "google-weapon task failed");
-      } else if (t.status === "not_found") {
-        // The task record vanished (or belongs to another user) — nothing more to learn here.
-        pending.delete(t.taskId);
-        fail(shot, "lion", `google-weapon lost task ${t.taskId} (${t.error ?? "not found"}) — check the account`, "interrupted");
-      } else if (stage === "lion" || stage === "queue") {
-        if (lastStage.get(shot.taskId) !== stage) {
-          lastStage.set(shot.taskId, stage);
-          write(shot.taskId, { stage });
-        }
-      }
-      // "unknown" (read failed) → keep polling
-    }
-  }
   await flushAll();
 }
