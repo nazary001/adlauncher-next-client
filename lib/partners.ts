@@ -10,7 +10,7 @@ export type PartnerId = "br" | "in" | "us";
 export type Landing = {
   slug: string;
   title: string;
-  lang: "EN" | "ES";
+  lang: "EN" | "ES" | "AR";
   /** Niche section the landing picker groups under (Cars / Loans / MK Digital / …). */
   niche: string;
 };
@@ -110,13 +110,13 @@ const MKLEARN_LANDINGS: Landing[] = [
   { slug: "no-degree-jobs-hiring-fastest", title: "No-Degree Jobs Hiring Fastest", lang: "EN", niche: "Jobs" },
   { slug: "empleos-sin-diploma-que-mas-contratan", title: "Empleos sin diploma que más contratan", lang: "ES", niche: "Jobs" },
   { slug: "packing-jobs-in-dubai", title: "Packing Jobs in Dubai", lang: "EN", niche: "Jobs" },
-  { slug: "empleos-de-empaque-en-dubai", title: "Empleos de empaque en Dubái", lang: "ES", niche: "Jobs" },
+  { slug: "packing-jobs-in-dubai-ar", title: "وظائف التغليف في دبي", lang: "AR", niche: "Jobs" },
   { slug: "warehouse-jobs-in-the-uae", title: "Warehouse Jobs in the UAE", lang: "EN", niche: "Jobs" },
-  { slug: "empleos-de-almacen-en-los-eau", title: "Empleos en almacenes en los EAU", lang: "ES", niche: "Jobs" },
+  { slug: "warehouse-jobs-in-the-uae-ar", title: "وظائف المستودعات في الإمارات", lang: "AR", niche: "Jobs" },
   { slug: "hotel-jobs-in-dubai", title: "Hotel Jobs in Dubai", lang: "EN", niche: "Jobs" },
-  { slug: "empleos-en-hoteles-en-dubai", title: "Empleos en hoteles en Dubái", lang: "ES", niche: "Jobs" },
+  { slug: "hotel-jobs-in-dubai-ar", title: "وظائف الفنادق في دبي", lang: "AR", niche: "Jobs" },
   { slug: "cleaning-jobs-in-the-uae", title: "Cleaning Jobs in the UAE", lang: "EN", niche: "Jobs" },
-  { slug: "empleos-de-limpieza-en-los-eau", title: "Empleos de limpieza en los EAU", lang: "ES", niche: "Jobs" },
+  { slug: "cleaning-jobs-in-the-uae-ar", title: "وظائف التنظيف في الإمارات", lang: "AR", niche: "Jobs" },
   { slug: "paying-twice-for-netflix", title: "Paying Twice for Netflix", lang: "EN", niche: "Streaming" },
   { slug: "retiree-health-coverage", title: "Retiree Health Coverage", lang: "EN", niche: "Health" },
   { slug: "nighttime-habit-ruining-your-sleep", title: "Nighttime Habit Ruining Your Sleep", lang: "EN", niche: "Health" },
