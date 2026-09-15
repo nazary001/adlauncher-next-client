@@ -15,7 +15,7 @@
 // fallback to another signer; an UNASSIGNED slot resolves to today's env default, so deploying
 // the registry changes nothing until an owner assigns.
 
-import { readAppCacheDetailed, writeAppCache } from "@/lib/app-cache";
+import { readAppCache, readAppCacheDetailed, writeAppCache } from "@/lib/app-cache";
 import { openToken, sealToken, tokenFingerprint, vaultKey } from "@/lib/fb-token-vault";
 import {
   type Outcome,
@@ -215,11 +215,23 @@ export async function resolveSlot(slot: SlotId): Promise<SlotResolution> {
   return resolveFrom(row?.data ?? emptyRegistry(), envTokenSeeds(), slot);
 }
 
-// ---- live health (tiny raw `/me`, cached per fingerprint) ----------------------------------------
+// ---- live health (tiny raw `/me`) — L1 module cache + L2 SHARED app-cache row --------------------
+// The verdict is shared across serverless instances (same discipline as token-adaccounts /
+// fanpage-volume in lib/fb-graph, and the HS token pool in lib/hs-token-launch): once ANY instance
+// probes `/me` for a fingerprint, every instance and every board poll within the TTL reads that
+// row instead of re-probing. The `/me` heartbeat behind the "Signs as …" badge (useSigners polls
+// /api/fb-tokens/signers) was the top consumer of the MO app's dev-tier rate limit; a per-instance
+// 60s cache barely deduped because Vercel spreads requests across instances — the shared row does.
 
 export type TokenHealth = { ok: boolean; error?: string; checkedAt: number };
-const healthCache = new Map<string, TokenHealth>();
-const HEALTH_TTL_MS = 60_000;
+// Verdict trusted this long (was 60s — a token rarely dies mid-session; an explicit re-check forces
+// a fresh probe via forgetTokenHealth). L1 re-syncs with the shared row at most once a minute so a
+// fresh probe on one instance reaches the others promptly.
+const HEALTH_TTL_MS = 5 * 60_000;
+const HEALTH_L1_MS = 60_000;
+const healthKey = (fp: string): string => `token-health:${fp}`;
+type HealthL1 = { readAt: number; value: TokenHealth };
+const healthL1 = new Map<string, HealthL1>();
 
 function fmtGraphError(err: { message?: string; code?: number; error_subcode?: number } | undefined, fallback: string): string {
   if (!err) return fallback;
@@ -243,19 +255,44 @@ async function graphGet(path: string, token: string, timeoutMs = 10_000): Promis
 }
 
 export async function tokenHealth(fp: string, token: string): Promise<TokenHealth> {
-  const hit = healthCache.get(fp);
-  if (hit && Date.now() - hit.checkedAt < HEALTH_TTL_MS) return hit;
+  const now = Date.now();
+  const l1 = healthL1.get(fp);
+  if (l1 && now - l1.value.checkedAt < HEALTH_TTL_MS && now < l1.readAt + HEALTH_L1_MS) return l1.value;
+
+  // L2: the shared verdict. Best-effort — a store outage just means we probe like before.
+  const row = await readAppCache<TokenHealth>(healthKey(fp));
+  const shared = row?.value ?? null;
+  if (shared && typeof shared.checkedAt === "number" && now - shared.checkedAt < HEALTH_TTL_MS) {
+    healthL1.set(fp, { readAt: now, value: shared });
+    return shared;
+  }
+
+  // Miss (or expired) → probe `/me` once and refresh the shared row for the whole fleet.
   const body = await graphGet("me?fields=id", token, 8_000);
   const err = body.error as { message?: string; code?: number; error_subcode?: number; transient?: boolean } | undefined;
   const res: TokenHealth = body.id ? { ok: true, checkedAt: Date.now() } : { ok: false, error: fmtGraphError(err, "token rejected"), checkedAt: Date.now() };
-  if (!err?.transient) healthCache.set(fp, res); // a network blip is reported, never cached
+  if (!err?.transient) {
+    // A network blip is reported to the caller, never cached (neither L1 nor the shared row).
+    healthL1.set(fp, { readAt: Date.now(), value: res });
+    await writeAppCache(healthKey(fp), res, row?.documentId ?? null);
+  }
   return res;
 }
 
-/** Forget a bearer's cached verdict (after an explicit re-check). */
-export const forgetTokenHealth = (fp: string): void => {
-  healthCache.delete(fp);
-};
+/** Forget a bearer's cached verdict (after an explicit re-check) — locally AND fleet-wide, so the
+ *  re-check re-probes instead of reading another instance's still-fresh shared verdict. */
+export function forgetTokenHealth(fp: string): void {
+  healthL1.delete(fp);
+  void (async () => {
+    try {
+      const row = await readAppCache<TokenHealth>(healthKey(fp));
+      // Stamp checkedAt:0 so the row reads as expired everywhere → next tokenHealth re-probes.
+      if (row?.documentId) await writeAppCache(healthKey(fp), { ...(row.value ?? { ok: false, checkedAt: 0 }), checkedAt: 0 }, row.documentId);
+    } catch {
+      /* best-effort: the local delete + the 5-min TTL still bound the staleness */
+    }
+  })();
+}
 
 // ---- identity probe (add / re-check) -----------------------------------------------------------
 
