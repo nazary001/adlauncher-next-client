@@ -9,7 +9,7 @@
 // Gating is delegated to snapLaunchWire (the server's own validator) so the bay can never disagree
 // with the route's refusal; the keys gate mirrors the registry (free keys ≥ shots).
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Header } from "./header";
 import { SnapNav } from "./snap-nav";
 import { useSnapCatalog, useSnapKeys, type SnapCatalogAccount } from "./use-snap";
@@ -51,6 +51,29 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
   const defaults = catalog?.defaults;
   const [cards, setCards] = useState<SnapCard[]>(() => [freshSnapCard(FIRST_SNAP_CARD_ID)]);
   const [previewed, setPreviewed] = useState(false);
+
+  // The first card is born before the catalog answers, so the board defaults (SNAP_AD_ACCOUNT_ID,
+  // SNAP_BRAND_NAME) reach it here, once, and only into fields nobody has touched: an empty account
+  // takes the default when the catalog lists it, an empty brand takes the default brand. Pixel and
+  // profile need no backfill — they fall back at render time below. The catalog is a one-shot load
+  // (a manual retry aside), so a deliberately cleared field is not re-filled behind the user's back.
+  useEffect(() => {
+    if (!catalog) return;
+    const d = catalog.defaults;
+    const acct = d.adAccount && catalog.accounts.some((a) => a.id === d.adAccount) ? d.adAccount : "";
+    if (!acct && !d.brandName) return;
+    // Safe setState-in-effect: fills empty fields from a freshly loaded catalog — converges in one pass.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCards((cs) => {
+      const next = cs.map((c) => {
+        const p: Partial<SnapCard> = {};
+        if (acct && !c.adAccount) p.adAccount = acct;
+        if (d.brandName && !c.brandName) p.brandName = d.brandName;
+        return Object.keys(p).length ? { ...c, ...p } : c;
+      });
+      return next.some((c, i) => c !== cs[i]) ? next : cs;
+    });
+  }, [catalog]);
   const [firing, setFiring] = useState(false);
   const [fireNote, setFireNote] = useState<string | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);

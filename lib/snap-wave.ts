@@ -129,7 +129,9 @@ export async function handleSnapLaunch(req: Request): Promise<NextResponse> {
     const profileId = x.profileId || defaults.profile;
     if (!profileId) return bad(`${at}: a Public Profile is required on every Snapchat ad — set SNAP_PROFILE_ID or pick one`);
 
-    const shot: SnapLaunchShotIn = { ...x, currency: account.currency };
+    // An empty brand takes SNAP_BRAND_NAME (the spec's default) — the same server-side fallback as
+    // the profile and the pixel above, so a card that never touched the field still launches.
+    const shot: SnapLaunchShotIn = { ...x, brandName: x.brandName || defaults.brandName, currency: account.currency };
     // Dry-run with placeholders: the validator is pure, so every refusal fires here, before any row exists.
     const dry = snapLaunchWire(shot, { adAccountId, pixelId: px.pixelId, profileId, name: "preview", key: "glo-snp_001", mediaId: "pending", startTimeIso: nowIso });
     if ("refusal" in dry) return bad(`${at}: ${dry.refusal}`);
