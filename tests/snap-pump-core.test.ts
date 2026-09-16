@@ -43,6 +43,7 @@ function world(fail: Partial<Record<string, unknown>> = {}) {
   const writes: Record<string, Record<string, unknown>[]> = {};
   let seq = 0;
   let keyN = 0;
+  let flushes = 0;
   const throwIf = (step: string) => {
     const f = fail[step];
     if (f) throw f;
@@ -56,9 +57,11 @@ function world(fail: Partial<Record<string, unknown>> = {}) {
     },
     releaseKey: async (documentId) => {
       calls.push(["releaseKey", documentId]);
+      throwIf("releaseKey");
     },
     backfillKey: async (key, patch) => {
       calls.push(["backfillKey", key, patch]);
+      throwIf("backfillKey");
     },
     fetchBytes: async (url) => {
       calls.push(["fetchBytes", url]);
@@ -140,7 +143,9 @@ function world(fail: Partial<Record<string, unknown>> = {}) {
     write: (taskId, fields) => {
       (writes[taskId] ??= []).push(fields);
     },
-    flush: async () => {},
+    flush: async () => {
+      flushes += 1;
+    },
     sleep: async () => {},
     now: () => 1_000_000,
     maxMediaBytes: 32 * 1024 * 1024,
@@ -149,7 +154,7 @@ function world(fail: Partial<Record<string, unknown>> = {}) {
   };
   const last = (taskId: string) => Object.assign({}, ...(writes[taskId] ?? []));
   const stages = (taskId: string) => (writes[taskId] ?? []).map((w) => w.stage).filter(Boolean);
-  return { deps, calls, writes, last, stages };
+  return { deps, calls, writes, last, stages, flushed: () => flushes };
 }
 
 const refusal = (msg: string) => Object.assign(new Error(msg), { status: 400 });
@@ -182,6 +187,9 @@ test("happy path: two copies share ONE media upload, each gets its own key, chai
   const creative = w.calls.find((c) => c[0] === "createCreative");
   assert.match(JSON.stringify(creative), /glo-snp_001/);
   assert.match(JSON.stringify(creative), /media-1/);
+  // the campaign starts one minute after the claim — a slow upload can never push start_time into the past
+  const campaign = w.calls.find((c) => c[0] === "createCampaign");
+  assert.equal((campaign![2] as { start_time: string }).start_time, new Date(1_000_000 + 60_000).toISOString());
 });
 
 test("start paused: the chain is built, nothing is activated, row done at stage paused", async () => {
@@ -316,4 +324,57 @@ test("a shot whose media wait cannot fit the remaining budget is refused, but a 
   assert.equal(w3.last("t3").status, "error");
   assert.match(String(w3.last("t3").error), /time budget/);
   assert.equal(w3.calls.filter((c) => c[0] === "createMedia").length, 1, "t3 never reached media");
+});
+
+test("a registry backfill failure after activation still writes the done row and flushes, naming the failure", async () => {
+  const w = world({ backfillKey: new Error("strapi 503") });
+  await runSnapPump("nazar", [pumpShot("t1"), pumpShot("t2")], 1_000_000 + 700_000, w.deps);
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "done");
+  assert.equal(t1.stage, "live");
+  assert.match(String(t1.error), /registry backfill failed.*strapi 503/);
+  assert.equal(w.last("t2").status, "done", "the wave went on to the second copy");
+  assert.equal(w.flushed(), 1);
+});
+
+test("a release failure at the media step still writes the error row and continues", async () => {
+  const w = world({ uploadMedia: refusal("media too large"), releaseKey: new Error("strapi 503") });
+  await runSnapPump("nazar", [pumpShot("t1"), pumpShot("t2")], 1_000_000 + 700_000, w.deps);
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "error");
+  assert.equal(t1.stage, "media");
+  assert.match(String(t1.error), /media too large.*registry: strapi 503/);
+  assert.equal(t1.gcm, "glo-snp_001", "the claim the registry refused to release stays visible on the row");
+  assert.equal(w.last("t2").status, "error", "shot 2 was processed (same injected media failure)");
+  assert.ok(w.stages("t2").length > 0);
+  assert.equal(w.flushed(), 1);
+});
+
+test("a buildWire throw is handled like a refusal: key released, row error, the wave goes on", async () => {
+  const w = world();
+  const real = w.deps.buildWire;
+  let n = 0;
+  w.deps.buildWire = (shot, resolved) => {
+    if (++n === 1) throw new Error("boom");
+    return real(shot, resolved);
+  };
+  await runSnapPump("nazar", [pumpShot("t1"), pumpShot("t2")], 1_000_000 + 700_000, w.deps);
+  assert.deepEqual(w.calls.filter((c) => c[0] === "releaseKey"), [["releaseKey", "doc-1"]]);
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "error");
+  assert.match(String(t1.error), /boom/);
+  assert.equal(t1.gcm, "", "the key went back to the pool");
+  assert.equal(w.calls.some((c) => c[0] === "createCampaign" && c[1] === "acct-a" && JSON.stringify(c[2]).includes("glo-snp_001")), false, "nothing built for shot 1");
+  assert.equal(w.last("t2").status, "done", "shot 2 built normally");
+  assert.equal(w.last("t2").gcm, "glo-snp_002");
+});
+
+test("flush runs even when a shot throws something the stages did not anticipate", async () => {
+  const w = world();
+  w.deps.sleep = async () => {
+    throw new Error("unexpected");
+  };
+  await assert.rejects(runSnapPump("nazar", [pumpShot("t1"), pumpShot("t2")], 1_000_000 + 700_000, w.deps), /unexpected/);
+  assert.equal(w.last("t1").status, "done", "the first copy was fully built before the throw");
+  assert.equal(w.flushed(), 1);
 });
