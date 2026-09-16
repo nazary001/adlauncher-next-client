@@ -13,6 +13,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { moneyLabel } from "@/lib/types";
 import { STALE_MS, ownerHue } from "@/lib/task-view";
 import { snapCurrencySymbol } from "@/lib/snap-launch";
+import { SNAP_ENABLED } from "@/lib/partners";
 import { AlertIcon, CheckIcon, CopyIcon, RocketIcon, SnapMark, TasksIcon, XIcon } from "./icons";
 
 // ---------- model ----------
@@ -195,6 +196,8 @@ export function useSnapTaskManager(): SnapTaskManagerValue {
 
 // ---------- provider ----------
 
+// Dormant on prod (NEXT_PUBLIC_SNAP_ENABLED unset → SNAP_ENABLED is false at build time): the tab is hidden and
+// /api/snap-tasks answers 404, so this provider must not generate traffic — every fetch, poll and save is gated.
 export function SnapTaskManagerProvider({ children, user }: { children: React.ReactNode; user?: { username: string; role?: string | null } }) {
   const me = user?.username ?? null;
   const [tasks, setTasks] = useState<SnapTask[]>([]);
@@ -233,6 +236,7 @@ export function SnapTaskManagerProvider({ children, user }: { children: React.Re
   }, []);
 
   const saveRemote = useCallback((id: string, dyn: Record<string, unknown>) => {
+    if (!SNAP_ENABLED) return;
     const body = JSON.stringify({ tasks: [{ task_id: id, ...dyn }] });
     const post = () => fetch("/api/snap-tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body, signal: AbortSignal.timeout(20_000) });
     const prev = saveChains.current.get(id) ?? Promise.resolve();
@@ -252,6 +256,7 @@ export function SnapTaskManagerProvider({ children, user }: { children: React.Re
   }, []);
 
   const loadRemote = useCallback(() => {
+    if (!SNAP_ENABLED) return;
     fetch("/api/snap-tasks", { signal: AbortSignal.timeout(20_000) })
       .then(async (r) => {
         if (!r.ok) return;
@@ -265,12 +270,14 @@ export function SnapTaskManagerProvider({ children, user }: { children: React.Re
   }, [noteSkew]);
 
   useEffect(() => {
+    if (!SNAP_ENABLED) return;
     loadRemote();
   }, [loadRemote]);
 
   // Shared-store polling (faster while open) + a coarse clock for stale detection + the age-out
   // of MY wedged running rows (the pump's budget is 13 min; 3 h of "running" is a dead row).
   useEffect(() => {
+    if (!SNAP_ENABLED) return;
     const tick = () => {
       if (document.hidden) return;
       const interval = openRef.current ? SHARED_POLL_OPEN_MS : SHARED_POLL_CLOSED_MS;
@@ -308,7 +315,7 @@ export function SnapTaskManagerProvider({ children, user }: { children: React.Re
   }, [loadRemote, isMine, patch, saveRemote]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!SNAP_ENABLED || !open) return;
     lastSharedPollRef.current = Date.now();
     loadRemote();
   }, [open, loadRemote]);
