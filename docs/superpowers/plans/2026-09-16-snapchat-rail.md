@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **Local only.** No `git commit`, no `git push`, no Vercel env, no prod flag. The owner commits/deploys on command. Every task ends with a verification step instead of a commit.
+- **Local only.** Work happens on the local feature branch `feat/snapchat-rail` in the owner's checkout: commit each task there (implementers commit their own work), but NEVER merge to `main`, never `git push`, no Vercel env, no prod flag. The owner merges/deploys on command. Every task ends with its verification step, then a commit on the feature branch.
 - **Dormant on prod.** Client gate `SNAP_ENABLED = process.env.NEXT_PUBLIC_SNAP_ENABLED === "1"` (build-time, `lib/partners.ts`); server mirror `snapRailEnabled()` (`lib/snap-api.ts`) → every `/api/snap/*` and `/api/snap-tasks` answers `404 {ok:false,error:"snap_rail_disabled"}` when unset.
 - **Partner constants (verbatim from the brief):** `utm_source=stone`; keys `glo-snp_001`…`glo-snp_100` (prefix `glo-snp_`, 3 digits, pool 100); landings `https://azmvhs.com/v/dmi-online-marketing-course/` (Digital marketing) and `https://azmvhs.com/v/auto-financing-by-ford/` (Cars); final link `<landing>?utm_source=stone&utm_campaign=<key>`; never put Snapchat macros (`{{…}}`) in the URL; `ScCid` is appended by Snap.
 - **LION report:** `GET ${LION_BASE}/api/high-adx-cluster-utms/snapchat-report/?date=YYYY-MM-DD`, bearer `LION_TOKEN`, body `{date, affiliate, utm_prefix, totals{revenue, forecasted_revenue, impressions, ecpm, triggered, fired, visitors, conversions}, campaigns[{utm_campaign, …same}]}`. Today = partial + forecast (São Paulo day).
