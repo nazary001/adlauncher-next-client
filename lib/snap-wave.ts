@@ -75,6 +75,10 @@ function cleanShot(x: SnapLaunchShotIn): SnapLaunchShotIn {
 type ResolvedShot = { taskId: string; pump: SnapPumpShot; row: { name: string; geo: string; budget: string; bid: string; key: string } };
 
 export async function handleSnapLaunch(req: Request): Promise<NextResponse> {
+  // The pump's deadline is anchored HERE, before the catalog reads (snapAdAccounts / snapPixels can
+  // spend minutes of timeouts): the route's maxDuration counts from the request, so a deadline taken
+  // after those reads could land past it and Vercel would kill a copy mid-create, unrecorded.
+  const t0 = Date.now();
   const session = sessionFromCookieHeader(req.headers.get("cookie"));
   if (!session?.username) return bad("unauthorized", 401);
   if (!snapRailEnabled()) return bad("snap_rail_disabled", 404);
@@ -129,6 +133,14 @@ export async function handleSnapLaunch(req: Request): Promise<NextResponse> {
     const profileId = x.profileId || defaults.profile;
     if (!profileId) return bad(`${at}: a Public Profile is required on every Snapchat ad — set SNAP_PROFILE_ID or pick one`);
 
+    // The board's placeholder from before its Blob upload finished: a client bug, never a creative —
+    // refused here rather than at the pump's download (which would claim and release a key first).
+    if (/^https?:\/\/pending\.local(?:[:/]|$)/i.test(x.mediaUrl)) return bad(`${at}: creative upload did not finish — re-attach the file`);
+    // The pure validator admits a loopback http creative for the local mock; a production build takes
+    // only a public https file (SNAP_ALLOW_LOOPBACK_MEDIA=1 re-admits loopback for a `next start`
+    // smoke — never set on Vercel).
+    if (process.env.NODE_ENV === "production" && process.env.SNAP_ALLOW_LOOPBACK_MEDIA !== "1" && !/^https:\/\//i.test(x.mediaUrl)) return bad(`${at}: The creative must be a public https:// file`);
+
     // An empty brand takes SNAP_BRAND_NAME (the spec's default) — the same server-side fallback as
     // the profile and the pixel above, so a card that never touched the field still launches.
     const shot: SnapLaunchShotIn = { ...x, brandName: x.brandName || defaults.brandName, currency: account.currency };
@@ -151,7 +163,7 @@ export async function handleSnapLaunch(req: Request): Promise<NextResponse> {
       row: { name: provisionalName.slice(0, 250), geo: dry.geoLabel, budget, bid: dry.label, key: desiredKey ?? "" },
     });
   }
-  return acceptSnapWave(user, waveId, resolved);
+  return acceptSnapWave(user, waveId, resolved, t0);
 }
 
 /**
@@ -159,7 +171,7 @@ export async function handleSnapLaunch(req: Request): Promise<NextResponse> {
  * (the team sees queued rows even if the browser dies now), claim (fail CLOSED when unwritable —
  * a retry could otherwise pump twice), after(pump), answer.
  */
-async function acceptSnapWave(user: string, waveId: string, resolved: ResolvedShot[]): Promise<NextResponse> {
+async function acceptSnapWave(user: string, waveId: string, resolved: ResolvedShot[], t0: number): Promise<NextResponse> {
   const waveKey = `snap-wave:${waveId}`;
   const alreadyAccepted = () => NextResponse.json({ ok: true, queued: resolved.length, rows: resolved.map((r) => ({ taskId: r.taskId })), alreadyAccepted: true });
   if (claimedWaves.has(waveId)) return alreadyAccepted();
@@ -191,9 +203,20 @@ async function acceptSnapWave(user: string, waveId: string, resolved: ResolvedSh
     ),
   );
   const claim = await writeAppCache(waveKey, { user, at: now });
-  if (!claim) return bad("task_store_unavailable_wave_not_fired", 503);
+  if (!claim) {
+    // A null write is the store being down OR the unique-ckey race lost to another instance that
+    // accepted this same wave (a re-POST): re-read to tell them apart — a row present means the
+    // wave IS running there, so the answer is the alreadyAccepted shape, not a 503.
+    const winner = await readAppCache<{ user: string; at: number }>(waveKey);
+    if (winner) return alreadyAccepted();
+    // Nothing will ever finish the rows stamped above: fail them now instead of leaving them
+    // `running` in the team drawer for 3 h. Best-effort — the store just refused a write.
+    await Promise.all(resolved.map((r) => upsertTaskRow(user, r.taskId, { status: "error", stage: "failed", error: "wave not fired — task store unavailable", finished_at: Date.now() }).catch(() => undefined)));
+    return bad("task_store_unavailable_wave_not_fired", 503);
+  }
   rememberWave(waveId);
   const shots = resolved.map((r) => r.pump);
-  after(() => pumpSnapWave(user, shots, now + SNAP_PUMP_BUDGET_MS));
+  // The budget runs from the request's first instant (t0), not from the stamping — see handleSnapLaunch.
+  after(() => pumpSnapWave(user, shots, t0 + SNAP_PUMP_BUDGET_MS));
   return NextResponse.json({ ok: true, queued: resolved.length, rows: resolved.map((r) => ({ taskId: r.taskId })) });
 }

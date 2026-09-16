@@ -14,7 +14,11 @@
 import type { SnapLaunchShotIn, SnapLaunchWire, SnapResolved } from "./snap-launch";
 
 export const SNAP_PUMP_BUDGET_MS = 770_000;
-const DEADLINE_MARGIN_MS = 20_000;
+/** The tail a copy admitted at the deadline may still need once its media is uploaded: five creates
+ *  plus the activation GET/PUT, each bounded by the client's 60 s timeout. Vercel kills the function
+ *  past maxDuration with the outcome unrecorded (row `running` for 3 h, key `active` with no ids), so
+ *  the last two minutes of the budget refuse copies instead of admitting them. */
+const DEADLINE_MARGIN_MS = 120_000;
 /** The campaign and ad squad start one minute after the claim, so a slow media upload can never
  *  push start_time into the past by the time the create lands (Snap refuses a past start_time). */
 const START_LEAD_MS = 60_000;

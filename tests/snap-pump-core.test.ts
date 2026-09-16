@@ -294,10 +294,10 @@ test("media never READY within the wait: key released, row error", async () => {
 });
 
 test("a shot whose media wait cannot fit the remaining budget is refused, but a copy with the media already uploaded is admitted", async () => {
-  // 1) deadline = margin + mediaWaitMs + 5 ms: the fresh upload's reserve (10 + 20 000) fits with
+  // 1) deadline = margin + mediaWaitMs + 5 ms: the fresh upload's reserve (10 + 120 000) fits with
   //    5 ms to spare; the second copy reuses the media, so its reserve is the margin alone.
   const w = world();
-  await runSnapPump("nazar", [pumpShot("t1"), pumpShot("t2")], 1_000_000 + 20_000 + 10 + 5, w.deps);
+  await runSnapPump("nazar", [pumpShot("t1"), pumpShot("t2")], 1_000_000 + 120_000 + 10 + 5, w.deps);
   assert.equal(w.last("t1").status, "done");
   assert.equal(w.last("t1").stage, "live");
   assert.equal(w.last("t2").status, "done");
@@ -305,7 +305,7 @@ test("a shot whose media wait cannot fit the remaining budget is refused, but a 
   assert.equal(w.calls.filter((c) => c[0] === "createMedia").length, 1);
   // 2) deadline = margin + 5 ms: below mediaWaitMs + margin → refused before a single call.
   const w2 = world();
-  await runSnapPump("nazar", [pumpShot("t1")], 1_000_000 + 20_000 + 5, w2.deps);
+  await runSnapPump("nazar", [pumpShot("t1")], 1_000_000 + 120_000 + 5, w2.deps);
   assert.equal(w2.last("t1").status, "error");
   assert.match(String(w2.last("t1").error), /time budget/);
   assert.equal(w2.calls.length, 0);
@@ -318,12 +318,27 @@ test("a shot whose media wait cannot fit the remaining budget is refused, but a 
     w3.calls.push(["uploadMedia", id]);
     clock += 5;
   };
-  await runSnapPump("nazar", [pumpShot("t1"), pumpShot("t2"), pumpShot("t3", { mediaUrl: "https://blob/other.mp4" })], 1_000_000 + 20_000 + 10 + 3, w3.deps);
+  await runSnapPump("nazar", [pumpShot("t1"), pumpShot("t2"), pumpShot("t3", { mediaUrl: "https://blob/other.mp4" })], 1_000_000 + 120_000 + 10 + 3, w3.deps);
   assert.equal(w3.last("t1").status, "done");
   assert.equal(w3.last("t2").status, "done");
   assert.equal(w3.last("t3").status, "error");
   assert.match(String(w3.last("t3").error), /time budget/);
   assert.equal(w3.calls.filter((c) => c[0] === "createMedia").length, 1, "t3 never reached media");
+  // 4) even with the media cached, a copy whose remaining budget is below the margin is REFUSED with
+  //    the "fire it again" row: t1's upload moves the clock past the point where t2's chain tail fits.
+  const w4 = world();
+  let clock4 = 1_000_000;
+  w4.deps.now = () => clock4;
+  w4.deps.uploadMedia = async (id) => {
+    w4.calls.push(["uploadMedia", id]);
+    clock4 += 20;
+  };
+  await runSnapPump("nazar", [pumpShot("t1"), pumpShot("t2")], 1_000_000 + 120_000 + 10 + 3, w4.deps);
+  assert.equal(w4.last("t1").status, "done");
+  assert.equal(w4.last("t2").status, "error");
+  assert.equal(w4.last("t2").stage, "failed");
+  assert.match(String(w4.last("t2").error), /time budget ran out before this copy; fire it again/);
+  assert.equal(w4.calls.filter((c) => c[0] === "claimKey").length, 1, "t2 never claimed a key");
 });
 
 test("a registry backfill failure after activation still writes the done row and flushes, naming the failure", async () => {
