@@ -6,7 +6,7 @@ import { SNAP_OAUTH_STATE_COOKIE, signOauthState, snapClientConfigured, snapOaut
 
 export const runtime = "nodejs";
 
-/** GET → 302 to Snapchat's consent page (scope snapchat-marketing-api). Owner only. */
+/** GET → 307 (NextResponse.redirect default; a GET navigation either way) to Snapchat's consent page (scope snapchat-marketing-api). Owner only. */
 export async function GET(req: Request) {
   const session = sessionFromCookieHeader(req.headers.get("cookie"));
   if (!session) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });

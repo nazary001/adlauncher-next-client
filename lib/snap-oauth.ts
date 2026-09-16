@@ -24,6 +24,7 @@ export function verifyOauthState(state: string | null, cookie: string | null): b
   if (!SECRET || !state || !cookie || state !== cookie) return false;
   const [nonce, sig] = state.split(".");
   if (!nonce || !sig) return false;
+  if (!/^[0-9a-f]{64}$/.test(sig)) return false; // non-hex (e.g. non-ASCII) sig: timingSafeEqual would throw on a byte-length mismatch
   const expected = createHmac("sha256", SECRET).update(nonce).digest("hex");
   return sig.length === expected.length && timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
 }
