@@ -1,10 +1,12 @@
 # Snapchat rail — launch on our own Snapchat Ads account, partner keys `glo-snp_001…100`, LION daily report
 
-**Date:** 2026-09-16 · **Status:** design approved (owner, 16.09) — to be built LOCALLY only (no push, no
-prod flag, no Vercel env); ships dormant behind `NEXT_PUBLIC_SNAP_ENABLED`. No Snapchat account exists
-yet: the rail is built against the public Marketing API docs and verified end to end on a local fake
-Snapchat API (`_e2e/_snap_mock.mjs`). The first live read-only check runs once the owner has an
-account, an OAuth app and a refresh token.
+**Date:** 2026-09-16 · **Status:** built + verified locally on 2026-09-16 (six unit suites,
+tsc/eslint/next build, mock smoke 41/41 with Strapi + LION live, dormancy proof); NOT merged, NOT
+pushed, NOT deployed, prod flag unset — awaiting a real Snapchat account (see _e2e/README-snap.md
+§1); ships dormant behind `NEXT_PUBLIC_SNAP_ENABLED`. No Snapchat account exists yet: the rail is
+built against the public Marketing API docs and verified end to end on a local fake Snapchat API
+(`_e2e/_snap_mock.mjs`). The first live read-only check runs once the owner has an account, an OAuth
+app and a refresh token.
 
 The third platform in the console (after Facebook and Google). A **Snapchat** platform tab opens a
 launcher that creates Demand-style web campaigns on OUR Snapchat ad account through the Snapchat
