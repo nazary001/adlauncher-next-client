@@ -22,6 +22,11 @@ type StatusFilter = "all" | "free" | "active" | "retired";
 const money = (v: number) => `$${v.toFixed(2)}`;
 const int = (v: number) => Math.round(v).toLocaleString("en-US");
 const dateLabel = (iso: string) => iso.replace(/^(\d{4})-(\d{2})-(\d{2})$/, "$3.$2.$1");
+/** A registry timestamp (ms) as dd.mm.yyyy in local time — the same shape as the report label. */
+const fmtDay = (ms: number) => {
+  const d = new Date(ms);
+  return `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}.${d.getFullYear()}`;
+};
 
 export function SnapKeysBoard({ user }: { user?: SessionUser }) {
   const { keys, error: keysError, refresh: refreshKeys } = useSnapKeys();
@@ -54,11 +59,13 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
     void loadReport(dateParam);
   }, [dateParam, loadReport]);
 
-  // The registry view wins for bindings (it refreshes after a release); the report brings the money.
+  // Once the registry view has loaded it is the ONLY source of bindings — a just-released key must
+  // not keep showing bound while the report reload is in flight or failed. The report's own binding
+  // is only the fallback before the registry answers; the report brings the money either way.
   const bindingByKey = useMemo(() => new Map((keys?.used ?? []).map((r) => [r.key, r])), [keys]);
   const rows = useMemo(() => {
     const base = report?.rows ?? (keys ? keys.free.concat(keys.used.map((r) => r.key)).sort().map((key) => ({ key, metrics: null as SnapReportMetrics | null, binding: null })) : []);
-    return base.map((r) => ({ key: r.key, metrics: r.metrics, binding: bindingByKey.get(r.key) ?? r.binding ?? null }));
+    return base.map((r) => ({ key: r.key, metrics: r.metrics, binding: keys ? (bindingByKey.get(r.key) ?? null) : (r.binding ?? null) }));
   }, [report, keys, bindingByKey]);
   const shown = rows.filter((r) => (filter === "all" ? true : filter === "free" ? !r.binding : r.binding?.status === filter));
   const freeCount = rows.filter((r) => !r.binding).length;
@@ -191,7 +198,7 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
                         )}
                       </td>
                       <td className="px-3 py-2 text-dim">{b?.user || "—"}</td>
-                      <td className="px-3 py-2 font-mono text-[10.5px] text-faint">{b?.claimed_at ? new Date(b.claimed_at).toLocaleDateString("en-GB") : "—"}</td>
+                      <td className="px-3 py-2 font-mono text-[10.5px] text-faint">{b?.claimed_at ? fmtDay(b.claimed_at) : "—"}</td>
                       <td className="px-3 py-2 font-mono tabular-nums text-ink">
                         {m ? money(m.revenue) : "—"}
                         {m && report?.partial && m.forecastedRevenue ? <span className="text-faint"> / {money(m.forecastedRevenue)}</span> : null}
