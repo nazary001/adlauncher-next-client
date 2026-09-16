@@ -261,6 +261,12 @@ const AIF_LANDINGS: Landing[] = [
  *  unlocks the header's Google tab + the /google route; NEXT_PUBLIC_* is inlined at build time. */
 export const GOOGLE_ENABLED = process.env.NEXT_PUBLIC_GOOGLE_ENABLED === "1";
 
+/** Snapchat is a PLATFORM tab too (not a PartnerId): the rail launches on our OWN Snapchat ad
+ *  account through the Marketing API — there is no partner rail to pin. Build-time gate, same
+ *  dormant-on-prod pattern — set NEXT_PUBLIC_SNAP_ENABLED=1 in .env.local ONLY (never on Vercel
+ *  in this phase). It unlocks the header's Snapchat tab + the /snap routes. */
+export const SNAP_ENABLED = process.env.NEXT_PUBLIC_SNAP_ENABLED === "1";
+
 export const PARTNERS: PartnerConfig[] = [
   {
     id: "br",
