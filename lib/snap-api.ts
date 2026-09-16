@@ -179,6 +179,10 @@ async function snapFetch(url: string, init: RequestInit = {}, attempts = 2): Pro
         return body;
       }
       const err = new SnapApiError(snapErrorMessage(res.status, body), res.status, body);
+      // A 401 from the ads/business host = the cached access token is revoked (or expired early):
+      // drop it so the NEXT call refreshes instead of replaying it for up to an hour. A refresh in
+      // flight, if any, is left alone — it overwrites the cache with a fresh token anyway.
+      if (res.status === 401) tokenCache = null;
       if (res.status >= 500 && attempt < attempts - 1) {
         lastErr = err;
         await new Promise((r) => setTimeout(r, 1500));
@@ -199,25 +203,27 @@ async function snapFetch(url: string, init: RequestInit = {}, attempts = 2): Pro
 
 const jsonInit = (method: "POST" | "PUT", body: unknown): RequestInit => ({ method, body: JSON.stringify(body) });
 
-// ---------- reads (cached 10 min per instance; empty answers never cached) ----------
+// ---------- reads (cached 10 min per instance; an EMPTY list only 60 s — a pixel-less account
+//            with SNAP_PIXEL_ID set would otherwise be re-read once per shot, ~45 reads a wave) ----------
 
 export type SnapAdAccount = { id: string; name: string; currency: string; timezone: string; status: string; organizationId: string };
 export type SnapPixel = { id: string; name: string; status: string };
 export type SnapProfile = { id: string; displayName: string; profileType: string };
 
 const TTL_MS = 10 * 60_000;
-type Cached<T> = { at: number; value: T };
+const EMPTY_TTL_MS = 60_000;
+type Cached<T> = { at: number; ttl: number; value: T };
 const caches = new Map<string, Cached<unknown>>();
 const inflight = new Map<string, Promise<unknown>>();
 async function cached<T>(key: string, load: () => Promise<T>): Promise<T> {
   const hit = caches.get(key);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.value as T;
+  if (hit && Date.now() - hit.at < hit.ttl) return hit.value as T;
   const running = inflight.get(key);
   if (running) return running as Promise<T>;
   const p = (async () => {
     try {
       const value = await load();
-      if (!(Array.isArray(value) && value.length === 0)) caches.set(key, { at: Date.now(), value });
+      caches.set(key, { at: Date.now(), ttl: Array.isArray(value) && value.length === 0 ? EMPTY_TTL_MS : TTL_MS, value });
       return value;
     } finally {
       inflight.delete(key);
@@ -332,15 +338,47 @@ export async function snapSetCampaignStatus(campaignId: string, status: "ACTIVE"
   snapBatchItem(res, "campaigns");
 }
 
-// ---------- creative bytes (public Blob URL → memory) ----------
+// ---------- creative bytes (public Blob URL → memory, bounded) ----------
 
+/**
+ * Download ONE creative into memory, never more than `maxBytes` of it. The body is streamed with a
+ * running counter and the request is torn down the moment the count passes the cap, so a host that
+ * omits (or understates) content-length cannot make the pump buffer 60 s of bytes — an OOM would
+ * kill the whole after() function and wedge every remaining row of the wave. A present
+ * content-length still refuses before the first byte (Vercel Blob sends it). One 60 s timeout
+ * covers the headers and the body.
+ */
 export async function snapFetchBytes(url: string, maxBytes: number): Promise<{ bytes: Uint8Array; mime: string; size: number }> {
-  const res = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(TIMEOUT_MS) });
+  const cap = Math.round(maxBytes / 1024 / 1024);
+  const overCap = (mb: string) => new SnapApiError(`creative is ${mb} MB — Snapchat single upload takes at most ${cap} MB; trim the file`, 400);
+  const controller = new AbortController();
+  const res = await fetch(url, { cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(TIMEOUT_MS)]) });
   if (!res.ok) throw new SnapApiError(`creative download failed (HTTP ${res.status})`, 400);
   const declared = Number(res.headers.get("content-length") || 0);
-  const cap = Math.round(maxBytes / 1024 / 1024);
-  if (declared > maxBytes) throw new SnapApiError(`creative is ${Math.round(declared / 1024 / 1024)} MB — Snapchat single upload takes at most ${cap} MB; trim the file`, 400);
-  const buf = new Uint8Array(await res.arrayBuffer());
-  if (buf.byteLength > maxBytes) throw new SnapApiError(`creative is ${Math.round(buf.byteLength / 1024 / 1024)} MB — Snapchat single upload takes at most ${cap} MB; trim the file`, 400);
-  return { bytes: buf, mime: res.headers.get("content-type") || "", size: buf.byteLength };
+  if (declared > maxBytes) throw overCap(String(Math.round(declared / 1024 / 1024)));
+  // A null body (a 204-class answer) cannot be metered — and cannot be a creative either.
+  if (!res.body) throw new SnapApiError("creative download answered without a body — re-attach the file", 400);
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      // Cancel the stream (the source stops producing) and abort the request (the socket goes):
+      // the rest of the file never lands in memory.
+      await reader.cancel().catch(() => {});
+      controller.abort();
+      throw overCap(`over ${cap}`);
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const c of chunks) {
+    bytes.set(c, offset);
+    offset += c.byteLength;
+  }
+  return { bytes, mime: res.headers.get("content-type") || "", size };
 }

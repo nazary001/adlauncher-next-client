@@ -217,3 +217,93 @@ test("snapFetchBytes refuses a file over the cap by content-length before downlo
     ok.restore();
   }
 });
+
+/** A body that streams `chunks` chunks of `chunkBytes`, pulled one read at a time (no prefetch), and
+ *  records whether the consumer cancelled it. */
+function streamingBody(chunks: number, chunkBytes: number) {
+  const state = { pulled: 0, cancelled: false };
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      pull(ctrl) {
+        if (state.pulled >= chunks) return ctrl.close();
+        state.pulled += 1;
+        ctrl.enqueue(new Uint8Array(chunkBytes).fill(7));
+      },
+      cancel() {
+        state.cancelled = true;
+      },
+    },
+    new CountQueuingStrategy({ highWaterMark: 0 }),
+  );
+  return { stream, state };
+}
+
+test("snapFetchBytes meters a body without content-length: past the cap the stream is cancelled and the download refused; under it the bytes come back whole", async () => {
+  // 64 chunks of 1 MB against a 4 MB cap, no content-length: refused the moment the count passes
+  // 4 MB — the stream is cancelled and only the chunks up to that point were ever pulled.
+  const over = streamingBody(64, 1024 * 1024);
+  const stub = stubFetch([[/blob\.test/, () => new Response(over.stream, { status: 200, headers: { "content-type": "video/mp4" } })]]);
+  try {
+    await assert.rejects(api.snapFetchBytes("https://blob.test/v.mp4", 4 * 1024 * 1024), (e: api.SnapApiError) => e.status === 400 && /creative is over 4 MB/.test(e.message) && /at most 4 MB/.test(e.message));
+    assert.equal(over.state.cancelled, true, "the body stream was cancelled");
+    assert.ok(over.state.pulled <= 6, `pulled ${over.state.pulled} chunks — the download went on past the cap`);
+  } finally {
+    stub.restore();
+  }
+  // 3 chunks of 1 MB under the same cap: whole, in order, with the mime; the stream ran to its end.
+  const under = streamingBody(3, 1024 * 1024);
+  const ok = stubFetch([[/blob\.test/, () => new Response(under.stream, { status: 200, headers: { "content-type": "video/mp4" } })]]);
+  try {
+    const f = await api.snapFetchBytes("https://blob.test/v.mp4", 4 * 1024 * 1024);
+    assert.equal(f.size, 3 * 1024 * 1024);
+    assert.equal(f.bytes.byteLength, 3 * 1024 * 1024);
+    assert.equal(f.bytes[0], 7);
+    assert.equal(f.bytes[f.bytes.byteLength - 1], 7);
+    assert.equal(f.mime, "video/mp4");
+    assert.equal(under.state.cancelled, false);
+  } finally {
+    ok.restore();
+  }
+});
+
+test("a 401 from the ads host drops the cached token: the next call refreshes instead of replaying it for an hour", async () => {
+  api._resetSnapTokenCache();
+  let grants = 0;
+  let hits = 0;
+  const stub = stubFetch([
+    [/auth\.test\/login\/oauth2\/access_token/, () => json({ access_token: `at-${++grants}`, expires_in: 3600, token_type: "Bearer" })],
+    [/\/v1\/media\/m-1$/, () => (++hits === 1 ? json({ request_status: "ERROR", display_message: "Unauthorized" }, 401) : json({ request_status: "SUCCESS", media: [{ sub_request_status: "SUCCESS", media: { id: "m-1", media_status: "READY" } }] }))],
+  ]);
+  try {
+    await assert.rejects(api.snapMediaReady("m-1"), (e: api.SnapApiError) => e.status === 401);
+    assert.equal(grants, 1);
+    assert.equal(await api.snapMediaReady("m-1"), true);
+    assert.equal(grants, 2, "the 401 dropped the cached token — a fresh grant preceded the next call");
+    const reads = stub.calls.filter((c) => /media\/m-1$/.test(c.url));
+    assert.deepEqual(reads.map((c) => c.headers.authorization), ["Bearer at-1", "Bearer at-2"]);
+  } finally {
+    stub.restore();
+  }
+});
+
+test("an EMPTY pixel list is cached too (60 s): a pixel-less account is read once, not once per shot", async () => {
+  api._resetSnapTokenCache();
+  let hits = 0;
+  const stub = stubFetch([
+    tokenRoute,
+    [
+      /adaccounts\/acct-empty\/pixels/,
+      () => {
+        hits += 1;
+        return json({ request_status: "SUCCESS", pixels: [] });
+      },
+    ],
+  ]);
+  try {
+    assert.deepEqual(await api.snapPixels("acct-empty"), []);
+    assert.deepEqual(await api.snapPixels("acct-empty"), []);
+    assert.equal(hits, 1, "the empty list was served from the cache");
+  } finally {
+    stub.restore();
+  }
+});
