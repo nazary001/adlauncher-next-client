@@ -6,7 +6,7 @@
 // button that deletes the registry row (Snapchat itself is never touched here — pause/delete the
 // campaign in Ads Manager). Today is partial + forecast; earlier days are final.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Header } from "./header";
 import { SnapNav } from "./snap-nav";
 import { useSnapKeys, type SnapKeyRow } from "./use-snap";
@@ -33,31 +33,40 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
   const [dateParam, setDateParam] = useState<"today" | "yesterday" | string>("yesterday");
   const [report, setReport] = useState<Report | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  // Bumped by a release → the effect re-reads the same day. A re-read is a new effect run, so the
+  // request before it is cancelled exactly like on a date change — never a call from a stale closure.
+  const [reportTick, setReportTick] = useState(0);
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [releasing, setReleasing] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<"ok" | "fail" | null>(null);
 
-  const loadReport = useCallback(async (param: string) => {
+  // The report load lives IN the effect so every date change / re-read / unmount aborts the request
+  // before it: no last-response-wins race, an abort touches no state, nothing lands on an unmounted
+  // board. The previous day's numbers stay on screen (dimmed) until the new day answers.
+  useEffect(() => {
+    const ctrl = new AbortController();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     setReportError(null);
-    try {
-      const res = await fetch(`/api/snap/report?date=${encodeURIComponent(param)}`, { signal: AbortSignal.timeout(60_000) });
-      const d = (await res.json().catch(() => ({}))) as Partial<Report> & { ok?: boolean; error?: string };
-      if (!res.ok || !d.ok || !Array.isArray(d.rows)) throw new Error(d.error || `HTTP ${res.status}`);
-      setReport({ date: String(d.date), partial: Boolean(d.partial), affiliate: String(d.affiliate ?? ""), totals: d.totals as SnapReportMetrics, rows: d.rows as ReportRow[], ...(d.registryError ? { registryError: String(d.registryError) } : {}) });
-    } catch (e) {
-      setReportError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    // The fetch resolves later (an async callback update) — the analyzer can't see through it.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void loadReport(dateParam);
-  }, [dateParam, loadReport]);
+    void (async () => {
+      try {
+        const res = await fetch(`/api/snap/report?date=${encodeURIComponent(dateParam)}`, { signal: AbortSignal.any([ctrl.signal, AbortSignal.timeout(60_000)]) });
+        const d = (await res.json().catch(() => ({}))) as Partial<Report> & { ok?: boolean; error?: string };
+        if (!res.ok || !d.ok || !Array.isArray(d.rows)) throw new Error(d.error || `HTTP ${res.status}`);
+        if (!d.totals || typeof d.totals !== "object") throw new Error("malformed report");
+        if (ctrl.signal.aborted) return;
+        setReport({ date: String(d.date), partial: Boolean(d.partial), affiliate: String(d.affiliate ?? ""), totals: d.totals, rows: d.rows as ReportRow[], ...(d.registryError ? { registryError: String(d.registryError) } : {}) });
+      } catch (e) {
+        // Our own cancel (superseded / unmounted) is the AbortError to ignore; the 60 s TimeoutError is a real failure.
+        if (ctrl.signal.aborted) return;
+        setReportError(e instanceof DOMException && e.name === "TimeoutError" ? "LION didn't answer in 60 s" : e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!ctrl.signal.aborted) setLoading(false);
+      }
+    })();
+    return () => ctrl.abort();
+  }, [dateParam, reportTick]);
 
   // Once the registry view has loaded it is the ONLY source of bindings — a just-released key must
   // not keep showing bound while the report reload is in flight or failed. The report's own binding
@@ -80,7 +89,7 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
       const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
       if (!res.ok || !d.ok) throw new Error(d.error || `HTTP ${res.status}`);
       refreshKeys();
-      void loadReport(dateParam);
+      setReportTick((t) => t + 1);
     } catch (e) {
       window.alert(`Release failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -90,10 +99,12 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
 
   const copyFree = () => {
     const free = rows.filter((r) => !r.binding).map((r) => r.key).join("\n");
-    void navigator.clipboard?.writeText(free).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1400);
-    });
+    const flash = (s: "ok" | "fail") => {
+      setCopied(s);
+      setTimeout(() => setCopied(null), 1400);
+    };
+    if (!navigator.clipboard) return flash("fail");
+    void navigator.clipboard.writeText(free).then(() => flash("ok")).catch(() => flash("fail"));
   };
 
   const changePartner = (id: PartnerId) =>
@@ -123,8 +134,8 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
                 <input type="date" value={/^\d{4}-\d{2}-\d{2}$/.test(dateParam) ? dateParam : ""} onChange={(e) => e.target.value && setDateParam(e.target.value)} aria-label="Report date" className="h-7 rounded-md border border-line bg-surface2 px-2 text-[11.5px] text-ink" />
               </div>
               <button type="button" onClick={copyFree} className={chip + " " + off}>
-                {copied ? <CheckIcon className="mr-1 inline h-3 w-3 text-launch2" /> : <CopyIcon className="mr-1 inline h-3 w-3" />}
-                {copied ? "Copied" : "Copy free keys"}
+                {copied === "ok" ? <CheckIcon className="mr-1 inline h-3 w-3 text-launch2" /> : <CopyIcon className="mr-1 inline h-3 w-3" />}
+                {copied === "ok" ? "Copied" : copied === "fail" ? "Copy failed" : "Copy free keys"}
               </button>
             </div>
           </div>
@@ -136,13 +147,15 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
               </button>
             ))}
             <span className="ml-auto text-[11px] text-faint">
-              {report ? `${dateLabel(report.date)} · ${report.partial ? "partial day — includes the partner's forecast" : "final"} · LION` : loading ? "Loading the report…" : reportError ? `Report: ${reportError}` : ""}
+              {loading ? "Loading… " : ""}
+              {reportError ? <span className="text-warn">{`Report: ${reportError}${report ? " · " : ""}`}</span> : null}
+              {report ? `${dateLabel(report.date)} · ${report.partial ? "partial day — includes the partner's forecast" : "final"} · LION` : ""}
               {report?.registryError ? ` · registry: ${report.registryError}` : ""}
             </span>
           </div>
 
           {report ? (
-            <div className="grid gap-2 sm:grid-cols-4 lg:grid-cols-8">
+            <div className={"grid gap-2 transition-opacity sm:grid-cols-4 lg:grid-cols-8" + (loading ? " opacity-60" : "")}>
               {[
                 ["Revenue", money(report.totals.revenue)],
                 ["Forecast", report.partial ? money(report.totals.forecastedRevenue) : "—"],
@@ -161,7 +174,7 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
             </div>
           ) : null}
 
-          <div className="overflow-x-auto rounded-2xl border border-line bg-surface">
+          <div className={"overflow-x-auto rounded-2xl border border-line bg-surface transition-opacity" + (loading ? " opacity-60" : "")}>
             <table className="w-full text-[12px]">
               <thead className="bg-surface2/50 text-[10px] uppercase tracking-[0.12em] text-faint">
                 <tr>
