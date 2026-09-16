@@ -54,13 +54,15 @@ const isRefusal = (e: unknown): boolean => {
 };
 const messageOf = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const jitter = () => 1000 + Math.floor(Math.random() * 2000);
+/** Media cache key — the same creative on the same ad account is uploaded once per wave. */
+const cacheKeyOf = (s: SnapPumpShot): string => `${s.ctx.adAccountId}|${s.shot.mediaUrl}`;
 
 export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline: number, deps: SnapPumpDeps): Promise<void> {
   // One upload per (ad account, creative URL) per wave: copies of a card reuse the media id.
   const mediaByKey = new Map<string, string>();
 
   const ensureMedia = async (s: SnapPumpShot): Promise<string> => {
-    const cacheKey = `${s.ctx.adAccountId}|${s.shot.mediaUrl}`;
+    const cacheKey = cacheKeyOf(s);
     const hit = mediaByKey.get(cacheKey);
     if (hit) return hit;
     const file = await deps.fetchBytes(s.shot.mediaUrl);
@@ -86,7 +88,12 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
 
   let first = true;
   for (const s of shots) {
-    if (deps.now() > deadline - DEADLINE_MARGIN_MS) {
+    // The after() budget is hard (Vercel kills the function past it), so a copy is admitted only
+    // when its LONGEST possible run still fits: a fresh upload may wait up to mediaWaitMs for
+    // READY on top of the chain itself; a copy whose media is already uploaded needs only the
+    // chain (the margin). A refused copy costs nothing — no key claimed, no Snap call.
+    const reserve = mediaByKey.has(cacheKeyOf(s)) ? DEADLINE_MARGIN_MS : deps.mediaWaitMs + DEADLINE_MARGIN_MS;
+    if (deps.now() > deadline - reserve) {
       deps.write(s.taskId, { status: "error", stage: "failed", error: "Not built — the wave's time budget ran out before this copy; fire it again", finished_at: deps.now() });
       continue;
     }

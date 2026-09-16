@@ -284,3 +284,36 @@ test("media never READY within the wait: key released, row error", async () => {
   assert.match(String(w.last("t1").error), /not ready/);
   assert.deepEqual(w.calls.filter((c) => c[0] === "releaseKey"), [["releaseKey", "doc-1"]]);
 });
+
+test("a shot whose media wait cannot fit the remaining budget is refused, but a copy with the media already uploaded is admitted", async () => {
+  // 1) deadline = margin + mediaWaitMs + 5 ms: the fresh upload's reserve (10 + 20 000) fits with
+  //    5 ms to spare; the second copy reuses the media, so its reserve is the margin alone.
+  const w = world();
+  await runSnapPump("nazar", [pumpShot("t1"), pumpShot("t2")], 1_000_000 + 20_000 + 10 + 5, w.deps);
+  assert.equal(w.last("t1").status, "done");
+  assert.equal(w.last("t1").stage, "live");
+  assert.equal(w.last("t2").status, "done");
+  assert.equal(w.last("t2").stage, "live");
+  assert.equal(w.calls.filter((c) => c[0] === "createMedia").length, 1);
+  // 2) deadline = margin + 5 ms: below mediaWaitMs + margin → refused before a single call.
+  const w2 = world();
+  await runSnapPump("nazar", [pumpShot("t1")], 1_000_000 + 20_000 + 5, w2.deps);
+  assert.equal(w2.last("t1").status, "error");
+  assert.match(String(w2.last("t1").error), /time budget/);
+  assert.equal(w2.calls.length, 0);
+  // 3) the clock moves during the first upload so the remaining budget lands between the margin and
+  //    margin + mediaWaitMs: the cached copy (t2) is admitted, a fresh creative (t3) is refused.
+  const w3 = world();
+  let clock = 1_000_000;
+  w3.deps.now = () => clock;
+  w3.deps.uploadMedia = async (id) => {
+    w3.calls.push(["uploadMedia", id]);
+    clock += 5;
+  };
+  await runSnapPump("nazar", [pumpShot("t1"), pumpShot("t2"), pumpShot("t3", { mediaUrl: "https://blob/other.mp4" })], 1_000_000 + 20_000 + 10 + 3, w3.deps);
+  assert.equal(w3.last("t1").status, "done");
+  assert.equal(w3.last("t2").status, "done");
+  assert.equal(w3.last("t3").status, "error");
+  assert.match(String(w3.last("t3").error), /time budget/);
+  assert.equal(w3.calls.filter((c) => c[0] === "createMedia").length, 1, "t3 never reached media");
+});
