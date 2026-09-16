@@ -218,8 +218,11 @@ export const SNAP_WAVE_ID_RE = /^[a-zA-Z0-9-]{8,64}$/;
 
 // ---------- money ----------
 
-/** Decimal-comma aware string → number (same rule as lib/types parseMoney, duplicated to stay
- *  import-pure): a lone comma is the decimal point; "1,234.56" reads the comma as thousands. */
+/** Decimal-comma aware string → number: a lone comma is the decimal point; "1,234.56" reads the
+ *  comma as thousands. Byte-identical copy of lib/google-bid parseDecimal — NOT lib/types
+ *  parseMoney, which follows a looser rule ("1,2,3" → 1.2, "1 000" → 1000, unparsable → 0; NaN
+ *  here) — kept local because this module must load under `node --test` without imports. Keep
+ *  the two copies in sync. */
 export function parseDecimal(raw: string): number {
   const s = String(raw ?? "").trim();
   if (!s) return NaN;
