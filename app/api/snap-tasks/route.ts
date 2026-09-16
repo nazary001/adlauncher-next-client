@@ -1,0 +1,167 @@
+import { NextResponse } from "next/server";
+import { sessionFromCookieHeader } from "@/lib/session";
+import { snapRailEnabled } from "@/lib/snap-api";
+import { findTaskRow, pickTaskFields, readTeamTasks, storeConfigured, strapiFetch, upsertTaskRow } from "@/lib/task-store";
+
+// Snapchat rows share the `launch-task` collection (no separate deploy), tagged partner="sn" so
+// they live alongside MO/HS/AIF/Google rows without colliding — the MO reader excludes "sn", this
+// reader takes only "sn". Same shared-visibility + owner-authority model as /api/hs-tasks. Like
+// every /api/snap* route, each verb answers 404 snap_rail_disabled while the rail is dormant.
+export const maxDuration = 60;
+
+const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
+const TOKEN = process.env.STRAPI_TOKEN ?? "";
+const H = () => ({ Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" });
+const SNAP_PARTNER = "sn";
+
+const WINDOW_MS = 7 * 24 * 3_600_000;
+const PAGE_SIZE = 100;
+const MAX_PAGES = 3;
+
+type Row = Record<string, unknown>;
+
+const num = (v: unknown): number | undefined => {
+  if (v === null || v === undefined || v === "") return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+};
+
+/** Strapi row → Snap client task. Snap ids ride in reused columns: the partner key in `gcm`, the
+ *  ad squad id in `adset_id`, the ad id in `ad_id`, the final landing URL in `link`. */
+function toClient(r: Row): Row {
+  const updated = typeof r.updatedAt === "string" ? Date.parse(r.updatedAt) : NaN;
+  return {
+    id: r.task_id,
+    owner: r.owner ?? null,
+    name: r.name ?? "",
+    geo: r.geo ?? "",
+    budget: r.budget ?? "",
+    status: r.status ?? "queued",
+    stage: r.stage ?? null,
+    key: r.gcm ?? null,
+    campaignId: r.campaign_id ?? null,
+    adSquadId: r.adset_id ?? null,
+    adId: r.ad_id ?? null,
+    link: r.link ?? null,
+    bid: r.bid ?? null,
+    error: r.error ?? null,
+    queued_at: num(r.queued_at) ?? null,
+    started_at: num(r.started_at) ?? null,
+    finished_at: num(r.finished_at) ?? null,
+    updated_ms: Number.isFinite(updated) ? updated : null,
+  };
+}
+
+function callerOf(req: Request): string | null {
+  const session = sessionFromCookieHeader(req.headers.get("cookie"));
+  return session?.username ? String(session.username) : null;
+}
+
+/** GET → the team's Snap tasks from the last 7 days (shared view). */
+export async function GET(req: Request) {
+  const user = callerOf(req);
+  if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!snapRailEnabled()) return NextResponse.json({ ok: false, error: "snap_rail_disabled" }, { status: 404 });
+  if (!storeConfigured()) return NextResponse.json({ ok: false, tasks: [] });
+  // Bounded + short-cached read (task-store) — see /api/launch-tasks; keeps the team's Snap
+  // polling from hammering the shared Strapi and serves the last good list through a Strapi blip.
+  const cutoff = Date.now() - WINDOW_MS;
+  const pageUrl = (page: number) =>
+    `${STRAPI}/api/launch-tasks?filters[partner][$eq]=${SNAP_PARTNER}&filters[owner][$notNull]=true` +
+    `&filters[queued_at][$gte]=${cutoff}&sort[0]=queued_at:desc&pagination[page]=${page}&pagination[pageSize]=${PAGE_SIZE}`;
+  const { ok, tasks, status } = await readTeamTasks("snap", pageUrl, toClient, {
+    pageSize: PAGE_SIZE,
+    maxPages: MAX_PAGES,
+  });
+  if (!ok) return NextResponse.json({ ok: false, tasks: [], ...(status ? { status } : {}) });
+  return NextResponse.json({ ok: true, now: Date.now(), tasks });
+}
+
+/** POST → upsert one Snap task by task_id (partner forced to "sn", owner from the session). */
+export async function POST(req: Request) {
+  const user = callerOf(req);
+  if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!snapRailEnabled()) return NextResponse.json({ ok: false, error: "snap_rail_disabled" }, { status: 404 });
+  if (!storeConfigured()) return NextResponse.json({ ok: false, reason: "not_configured" }, { status: 500 });
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const items = (Array.isArray(body.tasks) ? body.tasks : [body]).filter(
+    (x): x is Record<string, unknown> => !!x && typeof x === "object",
+  );
+  if (items.length === 0 || items.length > 25) {
+    return NextResponse.json({ ok: false, reason: "bad_batch" }, { status: 400 });
+  }
+  if (items.some((item) => !String(item.task_id ?? ""))) {
+    return NextResponse.json({ ok: false, reason: "no_task_id" }, { status: 400 });
+  }
+  let forbidden = false;
+  let failed: string | null = null;
+  // Failure states never get another write after them, so a failure-write for a row that no
+  // longer exists can only be a stale client resurrecting an admin-deleted zombie. Skip the
+  // create; a legit first-write is always queued/running (client) or the server-side stamp.
+  // "done" stays writable as a first write — losing a real completion would be worse.
+  const failureStates = new Set(["error", "interrupted"]);
+  try {
+    for (let i = 0; i < items.length; i += 8) {
+      const results = await Promise.all(
+        items.slice(i, i + 8).map(async (item) => {
+          const fields = pickTaskFields(item);
+          const incoming = String(fields.status ?? "");
+          // STRICT read: a Strapi blip must not read as "row absent" — the zombie-guard below
+          // would swallow a terminal error-write while answering ok:true, and the client never
+          // retries a claimed success. A store failure throws instead → the batch answers 502
+          // below and the client's next save retries it.
+          const existing = await findTaskRow(String(item.task_id), true);
+          if (incoming !== "done") {
+            if (!existing && failureStates.has(incoming)) return { ok: true as const };
+            // done is TERMINAL: a stale tab's heartbeat, age-out or late error must never demote a
+            // row that already recorded the real completion.
+            if (existing?.status === "done") return { ok: true as const };
+          }
+          // partner:"sn" is forced here — the wire never sets it, so a Snap row can't masquerade
+          // as MO/HS/AIF/Google (nor the reverse).
+          return upsertTaskRow(user, String(item.task_id), { ...fields, partner: SNAP_PARTNER });
+        }),
+      );
+      for (const r of results) {
+        if (!r.ok) {
+          if (r.reason === "forbidden") forbidden = true;
+          else failed = r.detail ?? r.reason;
+        }
+      }
+    }
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: `store: ${(e as Error).message ?? String(e)}` }, { status: 502 });
+  }
+  if (forbidden && items.length === 1) return NextResponse.json({ ok: false, reason: "forbidden" }, { status: 403 });
+  if (failed) return NextResponse.json({ ok: false, error: failed }, { status: 502 });
+  return NextResponse.json({ ok: true });
+}
+
+/** DELETE ?taskIds=… → remove the caller's Snap rows (foreign rows skipped). Kept for
+ *  parity/admin; the drawer itself never deletes (errors are a permanent team-visible record). */
+export async function DELETE(req: Request) {
+  const user = callerOf(req);
+  if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!snapRailEnabled()) return NextResponse.json({ ok: false, error: "snap_rail_disabled" }, { status: 404 });
+  if (!storeConfigured()) return NextResponse.json({ ok: false, reason: "not_configured" }, { status: 500 });
+  const ids = (new URL(req.url).searchParams.get("taskIds") ?? new URL(req.url).searchParams.get("taskId") ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (ids.length === 0) return NextResponse.json({ ok: false, reason: "no_task_id" }, { status: 400 });
+  try {
+    for (let i = 0; i < ids.length; i += 8) {
+      await Promise.all(
+        ids.slice(i, i + 8).map(async (id) => {
+          const found = await findTaskRow(id);
+          if (found && found.owner === user) {
+            await strapiFetch(`${STRAPI}/api/launch-tasks/${found.documentId}`, { method: "DELETE", headers: H() });
+          }
+        }),
+      );
+    }
+    return NextResponse.json({ ok: true });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: String(e) }, { status: 502 });
+  }
+}
