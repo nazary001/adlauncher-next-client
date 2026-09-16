@@ -2,7 +2,8 @@
 // Excluded from the app's tsconfig — the explicit .ts import below is a Node requirement.
 // Snapchat rail — the key registry over Strapi `app-cache` rows (ckey "snap-key:<key>", unique →
 // an atomic claim): free/next computation, the claim walk (unique-400 → next candidate, lost
-// concurrent race → delete ours and walk on, pool exhausted → throw), backfill and release.
+// concurrent race → delete ours and walk on, pool exhausted → throw), backfill and release — and
+// the rule that a registry failure is never swallowed (release / find / backfill throw).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -31,6 +32,8 @@ const row = (key: string, documentId: string, extra: Record<string, unknown> = {
 });
 
 test("free / next: the pool minus the used keys, desired-or-next with wrap-around", () => {
+  assert.equal(keys.SNAP_KEY_POOL_SIZE, 100);
+  assert.equal(keys.snapFreeKeys([]).length, keys.SNAP_KEY_POOL_SIZE, "the reported pool size is the size the arithmetic walks");
   const used = ["glo-snp_001", "glo-snp_003"];
   const free = keys.snapFreeKeys(used);
   assert.equal(free.length, 98);
@@ -109,6 +112,24 @@ test("claim: a lost concurrent race (an older twin row) deletes ours and walks o
   } finally {
     stub.restore();
   }
+  // A failed loser-delete must not abort the walk: the next candidate is still claimed.
+  const stuck = stubFetch((r) => {
+    if (r.method === "GET" && /startsWith/.test(r.url)) return json({ data: [] });
+    if (r.method === "POST") {
+      const ckey = String((r.body?.data as Record<string, unknown>)?.ckey);
+      return json({ data: { documentId: ckey.endsWith("001") ? "mine-1" : "mine-2" } });
+    }
+    if (r.method === "GET" && /glo-snp_001/.test(r.url)) return json({ data: [{ documentId: "theirs-1" }, { documentId: "mine-1" }] });
+    if (r.method === "GET" && /glo-snp_002/.test(r.url)) return json({ data: [{ documentId: "mine-2" }] });
+    if (r.method === "DELETE") return json({ error: "boom" }, 500);
+    return json({}, 404);
+  });
+  try {
+    assert.deepEqual(await keys.claimSnapKey(undefined, { user: "nazar" }), { key: "glo-snp_002", documentId: "mine-2" });
+    assert.equal(stuck.calls.filter((c) => c.method === "DELETE").length, 1, "the loser-delete was attempted exactly once");
+  } finally {
+    stuck.restore();
+  }
 });
 
 test("claim: every key used → pool exhausted without a single POST; a non-400 POST failure aborts", async () => {
@@ -151,5 +172,49 @@ test("backfill merges into the row's cvalue with a PUT that carries NO ckey; rel
     assert.equal(await keys.releaseSnapKeyByKey("glo-snp_077"), false);
   } finally {
     missing.restore();
+  }
+});
+
+test("registry failures are never swallowed: release / find / backfill throw with the Strapi status", async () => {
+  // DELETE refused → releaseSnapKey throws, and releaseSnapKeyByKey never answers `true` for it.
+  const forbidden = stubFetch((r) => (r.method === "DELETE" ? json({ error: "forbidden" }, 403) : json({ data: [row("glo-snp_005", "d5")] })));
+  try {
+    await assert.rejects(keys.releaseSnapKey("d5"), /release failed \(403\)/);
+    await assert.rejects(keys.releaseSnapKeyByKey("glo-snp_005"), /release failed \(403\)/);
+  } finally {
+    forbidden.restore();
+  }
+  // A failed find is an error, not "no row": release-by-key and backfill propagate it (route → 502).
+  const findDown = stubFetch(() => json({}, 503));
+  try {
+    await assert.rejects(keys.findSnapKey("glo-snp_005"), /strapi 503/);
+    await assert.rejects(keys.releaseSnapKeyByKey("glo-snp_005"), /strapi 503/);
+    await assert.rejects(keys.backfillSnapKey("glo-snp_005", { notes: "x" }), /strapi 503/);
+  } finally {
+    findDown.restore();
+  }
+  // PUT refused → backfill throws with the status.
+  const putDown = stubFetch((r) => (r.method === "PUT" ? json({ error: "boom" }, 500) : json({ data: [row("glo-snp_005", "d5")] })));
+  try {
+    await assert.rejects(keys.backfillSnapKey("glo-snp_005", { status: "retired" }), /backfill failed \(500\)/);
+  } finally {
+    putDown.restore();
+  }
+  // No row to merge into → the campaign would run on a key the registry thinks is free: an error, no PUT.
+  const noRow = stubFetch(() => json({ data: [] }));
+  try {
+    await assert.rejects(keys.backfillSnapKey("glo-snp_005", { status: "retired" }), /backfill failed: no registry row for glo-snp_005/);
+    assert.equal(noRow.calls.filter((c) => c.method === "PUT").length, 0);
+  } finally {
+    noRow.restore();
+  }
+  // A network error propagates as-is (nothing is caught and hidden).
+  const offline = stubFetch(() => {
+    throw new TypeError("fetch failed");
+  });
+  try {
+    await assert.rejects(keys.releaseSnapKey("d5"), /fetch failed/);
+  } finally {
+    offline.restore();
   }
 });

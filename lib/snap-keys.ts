@@ -4,6 +4,9 @@
 // the binding. Same race-safe claim-then-verify contract as lib/aif-claim (Strapi's app-level
 // uniqueness has a TOCTOU window under concurrent POSTs — the OLDEST row wins). Server-only; no
 // runtime imports (own 8 s-bounded fetch) so `node --test` covers it with a stubbed fetch.
+// Nothing here fails quietly: a registry write that did not happen is reported to the caller (the
+// pump folds it into the launch row, the keys route answers 502) — a key the registry has lost
+// track of is an attribution hazard, not a detail.
 // Moving to a dedicated `snap-map` collection later = replacing this one file.
 
 const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
@@ -11,6 +14,12 @@ const TOKEN = process.env.STRAPI_TOKEN ?? "";
 const H = () => ({ Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" });
 
 export const SNAP_KEY_CKEY_PREFIX = "snap-key:";
+
+// The key codec below is a deliberate LOCAL COPY of lib/snap-launch.ts — snapKeyCode / snapKeyIndex /
+// SNAP_KEY_RE / SNAP_KEY_POOL_MAX are the canonical twin; KEEP IN SYNC. A runtime import is not an
+// option: `node --test` resolves a relative import only with an explicit `.ts` extension, which the
+// app's tsconfig does not allow (no allowImportingTsExtensions) — that is why every pure module on
+// this rail is import-free.
 const POOL_MAX = 100;
 const KEY_RE = /^glo-snp_(\d{3})$/;
 const keyCode = (n: number): string => `glo-snp_${String(n).padStart(3, "0")}`;
@@ -19,6 +28,9 @@ const keyIndex = (key: string): number | null => {
   const n = m ? Number(m[1]) : 0;
   return n >= 1 && n <= POOL_MAX ? n : null;
 };
+/** The pool size the keys route reports — the same constant the arithmetic below walks
+ *  (`snapFreeKeys([]).length === SNAP_KEY_POOL_SIZE`), so the GET payload is self-consistent. */
+export const SNAP_KEY_POOL_SIZE = POOL_MAX;
 
 export type SnapKeyBinding = {
   key: string;
@@ -105,9 +117,11 @@ export async function listSnapKeys(): Promise<SnapKeyRow[]> {
   return out.sort((a, b) => a.key.localeCompare(b.key));
 }
 
+/** The row bound to `key`, null ONLY when no row exists; a failed read throws (`strapi <status>`)
+ *  so "unknown" is never reported as "free". */
 export async function findSnapKey(key: string): Promise<SnapKeyRow | null> {
   const res = await strapi(`${STRAPI}/api/app-caches?filters[ckey][$eq]=${encodeURIComponent(SNAP_KEY_CKEY_PREFIX + key)}&pagination[pageSize]=1`);
-  if (!res.ok) return null;
+  if (!res.ok) throw new Error(`strapi ${res.status}`);
   const body = (await res.json().catch(() => ({}))) as { data?: Record<string, unknown>[] };
   return body.data?.[0] ? rowOf(body.data[0]) : null;
 }
@@ -155,7 +169,15 @@ export async function claimSnapKey(desired: string | undefined, meta: Partial<Sn
       const body = (await res.json().catch(() => ({}))) as { data?: { documentId?: string } };
       const documentId = body.data?.documentId ?? "";
       if (!documentId || (await wonClaim(key, documentId))) return { key, documentId };
-      await releaseSnapKey(documentId); // lost a concurrent race → next candidate
+      // Lost a concurrent race → drop our younger twin and try the next candidate. This is the one
+      // place a failed delete is deliberately tolerated: releaseSnapKey throws now, but a leftover
+      // twin does not disturb the claim (the older row owns the key; the twin shows on the Keys
+      // page and is released by hand) and must not abort the walk.
+      try {
+        await releaseSnapKey(documentId);
+      } catch {
+        /* walk on */
+      }
       continue;
     }
     if (res.status !== 400) {
@@ -169,25 +191,28 @@ export async function claimSnapKey(desired: string | undefined, meta: Partial<Sn
 // ---------- writes ----------
 
 /** Merge `patch` into the key's binding (PUT carries NO ckey — re-sending the unique key trips
- *  Strapi's uniqueness check). Best-effort: a missing row or a failed write is swallowed. */
+ *  Strapi's uniqueness check). Throws on a failed find, on a missing row (the campaign would be
+ *  running on a key the registry considers free) and on a non-ok PUT (`snap key backfill failed
+ *  (<status>)`) — the pump folds the message into the launch row. */
 export async function backfillSnapKey(key: string, patch: Partial<SnapKeyBinding>): Promise<void> {
-  try {
-    const row = await findSnapKey(key);
-    if (!row) return;
-    const { documentId, ...current } = row;
-    const merged: SnapKeyBinding = { ...current, ...patch, key };
-    await strapi(`${STRAPI}/api/app-caches/${documentId}`, { method: "PUT", body: JSON.stringify({ data: { cvalue: merged, refreshed_at: Date.now() } }) });
-  } catch {
-    /* best-effort */
-  }
+  const row = await findSnapKey(key);
+  if (!row) throw new Error(`snap key backfill failed: no registry row for ${key}`);
+  const { documentId, ...current } = row;
+  const merged: SnapKeyBinding = { ...current, ...patch, key };
+  const res = await strapi(`${STRAPI}/api/app-caches/${documentId}`, { method: "PUT", body: JSON.stringify({ data: { cvalue: merged, refreshed_at: Date.now() } }) });
+  if (!res.ok) throw new Error(`snap key backfill failed (${res.status})`);
 }
 
-/** Delete the row — the key returns to the pool (a key that never carried traffic is capacity, not history). */
+/** Delete the row — the key returns to the pool (a key that never carried traffic is capacity, not
+ *  history). Throws on a non-ok answer (`snap key release failed (<status>)`); a network error
+ *  propagates as-is — the caller decides (the pump keeps the key visible, the route answers 502). */
 export async function releaseSnapKey(documentId: string): Promise<void> {
-  await strapi(`${STRAPI}/api/app-caches/${documentId}`, { method: "DELETE" }).catch(() => {});
+  const res = await strapi(`${STRAPI}/api/app-caches/${documentId}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`snap key release failed (${res.status})`);
 }
 
-/** Owner release from the keys page. True when a row existed and was deleted. */
+/** Owner release from the keys page: false ONLY when no row exists, true after a SUCCESSFUL
+ *  delete; a failed find or delete propagates (the route answers 502, never `released: true`). */
 export async function releaseSnapKeyByKey(key: string): Promise<boolean> {
   const row = await findSnapKey(key);
   if (!row) return false;

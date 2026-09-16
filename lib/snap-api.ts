@@ -81,24 +81,43 @@ export function _resetSnapTokenCache(): void {
   tokenInflight = null;
 }
 
-/** Refresh-token grant, cached per instance until 60 s before expiry; in-flight calls dedupe. */
+/** Refresh-token grant, cached per instance until 60 s before expiry; in-flight calls dedupe.
+ *  The three failure shapes are kept apart so nobody re-consents over an outage: a network /
+ *  timeout failure → 502 "OAuth unreachable"; HTTP 400/401 or an OAuth `error` of invalid_grant /
+ *  invalid_client → 401 "refresh token rejected" (re-consent needed); any other non-2xx → its own
+ *  status ("Snapchat OAuth HTTP <status>: <sentence>"). */
 export async function snapAccessToken(): Promise<string> {
   if (!snapConfigured()) throw new SnapApiError("Snapchat is not configured (SNAP_CLIENT_ID / SNAP_CLIENT_SECRET / SNAP_REFRESH_TOKEN)", 500);
   if (tokenCache && Date.now() < tokenCache.expiresAt) return tokenCache.token;
   if (tokenInflight) return tokenInflight;
   tokenInflight = (async () => {
     try {
-      const res = await fetch(`${AUTH_BASE}/login/oauth2/access_token`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ grant_type: "refresh_token", client_id: CLIENT_ID, client_secret: CLIENT_SECRET, refresh_token: REFRESH_TOKEN }),
-        cache: "no-store",
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      });
+      let res: Response;
+      try {
+        res = await fetch(`${AUTH_BASE}/login/oauth2/access_token`, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ grant_type: "refresh_token", client_id: CLIENT_ID, client_secret: CLIENT_SECRET, refresh_token: REFRESH_TOKEN }),
+          cache: "no-store",
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        });
+      } catch (e) {
+        // fetch throws on DNS / connection / AbortSignal.timeout — never a Response, so never a rejection.
+        const cause = str((e as { cause?: { message?: unknown } })?.cause?.message);
+        const msg = (e instanceof Error && e.message) || String(e);
+        throw new SnapApiError(`Snapchat OAuth unreachable: ${cause ? `${msg} (${cause})` : msg}`, 502, e);
+      }
       const body = await res.json().catch(() => ({}));
-      const token = str(rec(body).access_token);
-      if (!res.ok || !token) throw new SnapApiError(`Snapchat refresh token rejected (${snapErrorMessage(res.status, body)})`, 401, body);
-      const ttl = Number(rec(body).expires_in) || 3600;
+      const r = rec(body);
+      const oauthError = str(r.error).trim();
+      if (res.status === 400 || res.status === 401 || oauthError === "invalid_grant" || oauthError === "invalid_client") {
+        const description = str(r.error_description).trim();
+        throw new SnapApiError(`Snapchat refresh token rejected (${snapErrorMessage(res.status, body)}${description ? `: ${description}` : ""})`, 401, body);
+      }
+      if (!res.ok) throw new SnapApiError(`Snapchat OAuth HTTP ${res.status}: ${snapErrorMessage(res.status, body)}`, res.status, body);
+      const token = str(r.access_token);
+      if (!token) throw new SnapApiError("Snapchat OAuth answered without an access_token", 502, body);
+      const ttl = Number(r.expires_in) || 3600;
       tokenCache = { token, expiresAt: Date.now() + Math.max(60, ttl - 60) * 1000 };
       return token;
     } finally {

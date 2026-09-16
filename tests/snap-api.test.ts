@@ -50,7 +50,7 @@ test("snapBatchItem unwraps {campaigns:[{sub_request_status, campaign}]} and thr
   assert.throws(() => api.snapBatchItem({ request_status: "SUCCESS", campaigns: [] }, "campaigns"), /empty/);
 });
 
-test("refresh grant is a form POST, cached until expiry, and rejected refresh → SnapApiError 401", async () => {
+test("refresh grant is a form POST, cached until expiry; rejected → 401, an OAuth outage → its own status, unreachable → 502", async () => {
   api._resetSnapTokenCache();
   const stub = stubFetch([tokenRoute]);
   try {
@@ -65,12 +65,36 @@ test("refresh grant is a form POST, cached until expiry, and rejected refresh �
   } finally {
     stub.restore();
   }
+  // A rejected refresh (400/401 or an OAuth error of invalid_grant/invalid_client) = re-consent needed.
   api._resetSnapTokenCache();
-  const bad = stubFetch([[/access_token/, () => json({ error: "invalid_grant" }, 400)]]);
+  const bad = stubFetch([[/access_token/, () => json({ error: "invalid_grant", error_description: "Refresh token is invalid" }, 400)]]);
   try {
-    await assert.rejects(api.snapAccessToken(), (e: api.SnapApiError) => e.status === 401 && /refresh token rejected/.test(e.message));
+    await assert.rejects(api.snapAccessToken(), (e: api.SnapApiError) => e.status === 401 && /refresh token rejected \(invalid_grant: Refresh token is invalid\)/.test(e.message));
   } finally {
     bad.restore();
+  }
+  // An accounts.snapchat.com outage is NOT a rejected token: the status is Snap's own, never 401.
+  api._resetSnapTokenCache();
+  const outage = stubFetch([[/access_token/, () => json({ error: "server_error" }, 503)]]);
+  try {
+    await assert.rejects(api.snapAccessToken(), (e: api.SnapApiError) => e.status === 503 && /OAuth HTTP 503/.test(e.message) && !/refresh token rejected/.test(e.message));
+  } finally {
+    outage.restore();
+  }
+  // A thrown fetch (DNS / timeout) becomes a SnapApiError 502, never a raw TypeError.
+  api._resetSnapTokenCache();
+  const down = stubFetch([
+    [
+      /access_token/,
+      () => {
+        throw new TypeError("fetch failed");
+      },
+    ],
+  ]);
+  try {
+    await assert.rejects(api.snapAccessToken(), (e: api.SnapApiError) => e instanceof api.SnapApiError && e.status === 502 && /OAuth unreachable: fetch failed/.test(e.message));
+  } finally {
+    down.restore();
   }
 });
 
