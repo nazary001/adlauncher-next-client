@@ -28,7 +28,14 @@ export async function GET(req: Request) {
   const state = url.searchParams.get("state");
   const cookie = /(?:^|;\s*)snap_oauth_state=([^;]+)/.exec(req.headers.get("cookie") ?? "")?.[1] ?? null;
   if (url.searchParams.get("error")) return page("Snapchat OAuth", `<h2>Snapchat refused</h2><p>${esc(url.searchParams.get("error_description") || url.searchParams.get("error") || "")}</p>`, 400);
-  if (!code || !verifyOauthState(state, cookie ? decodeURIComponent(cookie) : null)) return page("Snapchat OAuth", "<h2>State mismatch</h2><p>Start again from <a href=\"/api/snap/oauth/start\">/api/snap/oauth/start</a> in the same browser.</p>", 400);
+  // A hand-tampered cookie with a malformed %-escape must land on the 400 page, never a 500.
+  let cookieState: string | null = null;
+  try {
+    cookieState = cookie ? decodeURIComponent(cookie) : null;
+  } catch {
+    cookieState = null;
+  }
+  if (!code || !verifyOauthState(state, cookieState)) return page("Snapchat OAuth", "<h2>State mismatch</h2><p>Start again from <a href=\"/api/snap/oauth/start\">/api/snap/oauth/start</a> in the same browser.</p>", 400);
   try {
     const t = await snapExchangeCode(code, snapOauthRedirectUri(req));
     return page(
