@@ -95,9 +95,14 @@ export function snapReportDate(param: string | null | undefined, now: Date = new
   if (p === "yesterday") return saoPauloISO(1, now);
   const m = ISO_RE.exec(p);
   if (!m) return null;
+  const year = Number(m[1]);
   const month = Number(m[2]);
   const day = Number(m[3]);
   if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  // A Date.UTC round-trip rejects the impossible days the range check lets through (2026-02-31
+  // rolls over to 03-03 — LION would answer for that rolled day as if it were the asked one).
+  const rt = new Date(Date.UTC(year, month - 1, day));
+  if (rt.getUTCFullYear() !== year || rt.getUTCMonth() !== month - 1 || rt.getUTCDate() !== day) return null;
   return p > today ? null : p;
 }
 

@@ -325,10 +325,14 @@ export function SnapLaunchCard({
 
   const copyLink = () => {
     if (!landingBase) return;
-    void navigator.clipboard?.writeText(snapLandingUrl(landingBase, firstKey || "glo-snp_???")).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1400);
-    });
+    // A denied clipboard rejects — swallowed (no "copied" flash), never an unhandled rejection.
+    void navigator.clipboard
+      ?.writeText(snapLandingUrl(landingBase, firstKey || "glo-snp_???"))
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1400);
+      })
+      .catch(() => {});
   };
 
   const onFiles = (files: FileItem[]) => {

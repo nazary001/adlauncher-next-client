@@ -51,6 +51,12 @@ test("date resolution: today / yesterday in São Paulo, ISO passthrough, junk an
   assert.equal(snapReportDate("2026-09-16", at), null); // tomorrow in São Paulo
   assert.equal(snapReportDate("16.09.2026", at), null);
   assert.equal(snapReportDate("2026-13-01", at), null);
+  // impossible days pass the 1..31 range check but not the calendar
+  assert.equal(snapReportDate("2026-02-31", at), null);
+  assert.equal(snapReportDate("2026-02-29", at), null);
+  assert.equal(snapReportDate("2026-04-31", at), null);
+  assert.equal(snapReportDate("2024-02-29", at), "2024-02-29");
+  assert.equal(snapReportDate("2026-02-28", at), "2026-02-28");
 });
 
 test("partial: today (São Paulo) is partial, every earlier day is final", () => {

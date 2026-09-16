@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { lionConfigured } from "@/lib/lion";
+import { lionTokenConfigured } from "@/lib/lion";
 import { lionSnapReport } from "@/lib/lion-snap";
 import { snapRailEnabled } from "@/lib/snap-api";
 import { snapKeyPool } from "@/lib/snap-launch";
@@ -21,7 +21,8 @@ const bad = (error: string, status = 400) => NextResponse.json({ ok: false, erro
 export async function GET(req: Request): Promise<NextResponse> {
   if (!sessionFromCookieHeader(req.headers.get("cookie"))) return bad("unauthorized", 401);
   if (!snapRailEnabled()) return bad("snap_rail_disabled", 404);
-  if (!lionConfigured()) return bad("lion_not_configured", 500);
+  // The report needs only the bearer — lionConfigured() would also demand LION_ACR (the FB rail's account).
+  if (!lionTokenConfigured()) return bad("lion_not_configured", 500);
   const date = snapReportDate(new URL(req.url).searchParams.get("date"));
   if (!date) return bad("bad_date (today | yesterday | YYYY-MM-DD, not in the future)");
 

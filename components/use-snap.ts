@@ -20,6 +20,8 @@ function useOneShot<T>(url: string, pick: (d: Record<string, unknown>) => T): { 
   const [error, setError] = useState<string | null>(null);
   const inflightRef = useRef(false);
   const doneRef = useRef(false);
+  /** A reload asked for while a read was in flight — exactly one follow-up read, never a queue. */
+  const queuedRef = useRef(false);
   const attemptRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadRef = useRef<(() => void) | null>(null);
@@ -40,6 +42,11 @@ function useOneShot<T>(url: string, pick: (d: Record<string, unknown>) => T): { 
       if (attemptRef.current < MAX_AUTO_ATTEMPTS) timerRef.current = setTimeout(() => loadRef.current?.(), RETRY_COOLDOWN_MS);
     } finally {
       inflightRef.current = false;
+      if (queuedRef.current) {
+        queuedRef.current = false;
+        doneRef.current = false;
+        void loadRef.current?.();
+      }
     }
   }, [url, pick]);
   useEffect(() => {
@@ -54,8 +61,14 @@ function useOneShot<T>(url: string, pick: (d: Record<string, unknown>) => T): { 
     setError(null);
     void load();
   }, [load]);
-  /** Silent re-read (keeps the current data on screen while it runs). */
+  /** Silent re-read (keeps the current data on screen while it runs). A call while a read is in
+   *  flight is not dropped: ONE follow-up read runs when the current one settles — the answer in
+   *  flight may already be stale (the pump keeps claiming keys while the board polls). */
   const reload = useCallback(() => {
+    if (inflightRef.current) {
+      queuedRef.current = true;
+      return;
+    }
     doneRef.current = false;
     void load();
   }, [load]);
@@ -66,6 +79,7 @@ function useOneShot<T>(url: string, pick: (d: Record<string, unknown>) => T): { 
     void load();
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
+      queuedRef.current = false;
     };
   }, [load]);
 
@@ -94,7 +108,9 @@ const pickKeys = (d: Record<string, unknown>): SnapKeysState => ({
 });
 
 /** GET /api/snap/keys — the registry view (free keys drive the card preview + the fire gate). */
-export function useSnapKeys(): { keys: SnapKeysState | null; error: string | null; refresh: () => void } {
+export function useSnapKeys(): { keys: SnapKeysState | null; error: string | null; refresh: () => void; poll: () => void } {
   const { data, error, retry, reload } = useOneShot<SnapKeysState>("/api/snap/keys", pickKeys);
-  return { keys: data, error, refresh: error ? retry : reload };
+  // `refresh` is the button (a retry when the last read failed); `poll` is the silent re-read the
+  // launch board runs while builds are in flight — what is on screen stays until the answer lands.
+  return { keys: data, error, refresh: error ? retry : reload, poll: reload };
 }

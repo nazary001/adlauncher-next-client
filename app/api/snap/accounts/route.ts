@@ -16,6 +16,8 @@ import {
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
+/** An ad account with its pixels; `status` rides through from SnapAdAccount (every status is listed —
+ *  the picker tags a non-ACTIVE one, Snapchat itself is the authority at the create). */
 export type SnapCatalogAccount = SnapAdAccount & { pixels: SnapPixel[]; pixelsError?: string };
 export type SnapCatalog = {
   accounts: SnapCatalogAccount[];

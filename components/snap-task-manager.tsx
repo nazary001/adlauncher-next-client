@@ -578,7 +578,8 @@ function CopyId({ prefix, id }: { prefix: string; id: string }) {
     <button
       type="button"
       onClick={() => {
-        navigator.clipboard?.writeText(id);
+        // A denied clipboard rejects — swallowed; the "copied" flash is a best-effort hint.
+        void navigator.clipboard?.writeText(id).catch(() => {});
         setCopied(true);
         setTimeout(() => setCopied(false), 1200);
       }}

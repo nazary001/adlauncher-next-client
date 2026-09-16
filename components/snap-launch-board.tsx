@@ -22,10 +22,12 @@ import { UploadingNotice, useUnloadGuard } from "./upload-guard";
 import { CopyIcon, EyeIcon, PlusIcon } from "./icons";
 import { FIRST_SNAP_CARD_ID, SnapLaunchCard, buildSnapShot, cloneSnapCard, freshSnapCard, snapCardCopies, snapCardRefusal, snapCardSignature, type SnapCard } from "./snap-launch-card";
 import type { RichOption } from "@/lib/catalog";
-import type { PartnerId } from "@/lib/partners";
+import { SNAP_ENABLED, type PartnerId } from "@/lib/partners";
 import type { SessionUser } from "./user-menu";
 
 const MAX_CARDS = 45;
+/** How often the key registry is re-read while the team's builds are in flight. */
+const KEYS_POLL_MS = 10_000;
 
 type CardView = {
   card: SnapCard;
@@ -45,7 +47,7 @@ type CardView = {
 
 export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
   const { catalog, error: catError, retry: retryCatalog } = useSnapCatalog();
-  const { keys, error: keysError, refresh: refreshKeys } = useSnapKeys();
+  const { keys, error: keysError, refresh: refreshKeys, poll: pollKeys } = useSnapKeys();
   const { setOpen, counts, refresh } = useSnapTaskManager();
 
   const defaults = catalog?.defaults;
@@ -74,6 +76,26 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
       return next.some((c, i) => c !== cs[i]) ? next : cs;
     });
   }, [catalog]);
+
+  // The keys view is a one-shot read and the pool changes AFTER a wave is accepted: the server pump
+  // claims one key per copy over minutes, while refreshKeys() in fireWave fires before the first
+  // claim. So while builds are in flight (anyone's — the pool is shared) the registry is re-read
+  // every KEYS_POLL_MS and once more when the last one lands: the free count, the per-card key
+  // preview and the "free keys ≥ shots" gate then describe the live pool. Inert when dormant.
+  const activeBuilds = counts.active;
+  const sawBuildsRef = useRef(false);
+  useEffect(() => {
+    if (!SNAP_ENABLED) return;
+    if (activeBuilds > 0) {
+      sawBuildsRef.current = true;
+      const iv = window.setInterval(pollKeys, KEYS_POLL_MS);
+      return () => window.clearInterval(iv);
+    }
+    if (sawBuildsRef.current) {
+      sawBuildsRef.current = false;
+      pollKeys();
+    }
+  }, [activeBuilds, pollKeys]);
   const [firing, setFiring] = useState(false);
   const [fireNote, setFireNote] = useState<string | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
@@ -84,14 +106,19 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
 
   const accountById = new Map((catalog?.accounts ?? []).map((a) => [a.id, a]));
   const catalogLoading = catalog === null && !catError;
-  const accountOptions: RichOption[] = (catalog?.accounts ?? []).map((a) => ({
-    value: a.id,
-    label: a.name || a.id,
-    subLabel: a.id,
-    meta: a.currency,
-    tag: a.pixelsError ? "px ?" : `${a.pixels.length} px`,
-    tagTone: a.pixels.length === 0 ? "warn" : "dim",
-  }));
+  const accountOptions: RichOption[] = (catalog?.accounts ?? []).map((a) => {
+    // A non-ACTIVE account (CLOSED, …) stays pickable — Snapchat is the authority at the create —
+    // but wears its raw status as the warning tag instead of the pixel count.
+    const off = a.status && a.status.toUpperCase() !== "ACTIVE" ? a.status : "";
+    return {
+      value: a.id,
+      label: a.name || a.id,
+      subLabel: a.id,
+      meta: a.currency,
+      tag: off || (a.pixelsError ? "px ?" : `${a.pixels.length} px`),
+      tagTone: off || a.pixels.length === 0 ? "warn" : "dim",
+    };
+  });
   const profileOptions: RichOption[] = (catalog?.profiles ?? []).map((p) => ({ value: p.id, label: p.displayName || p.id, subLabel: p.id }));
   const pixelOptionsFor = (a: SnapCatalogAccount | null): RichOption[] => (a?.pixels ?? []).map((p) => ({ value: p.id, label: p.name || p.id, subLabel: p.id }));
 

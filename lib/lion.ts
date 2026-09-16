@@ -22,6 +22,9 @@ export class LionError extends Error {
 }
 
 export const lionConfigured = (): boolean => Boolean(TOKEN && LION_ACR);
+/** Token-only readiness for reads that carry no campaign name (the Snapchat report): LION_ACR is
+ *  the FB rail's account and must not gate them. */
+export const lionTokenConfigured = (): boolean => Boolean(TOKEN);
 
 /** Fetch with auth + one retry on network errors / 5xx (LION lags routinely per live memory).
  *  4xx bodies are surfaced verbatim — they carry the actionable reason.

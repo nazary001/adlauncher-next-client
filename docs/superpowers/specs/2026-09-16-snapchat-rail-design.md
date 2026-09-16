@@ -253,7 +253,9 @@ LION (`LION_TOKEN`) works — no new credential for the report.
 - `components/snap-task-manager.tsx` = the compact Google drawer: stats, All/Active/Done/Failed, Mine,
   rows with the key chip, stage/status label, account · currency · geo · budget · bid tag, owner chip,
   elapsed, copy buttons for campaign / ad squad / ad ids, an "Open in Ads Manager" link
-  (`https://ads.snapchat.com/<adAccount>/campaigns/<campaignId>`, best-effort deep link). Shared poll
+  (`https://ads.snapchat.com/<adAccount>/campaigns/<campaignId>`, best-effort deep link) — deferred:
+  the deep-link URL pattern is verified only with a real account; the drawer's copy button and the
+  keys page show the campaign id until then. Shared poll
   6 s open / 20 s closed; no LION-style finisher; age-out 3 h → interrupted. No retry, no dismiss.
 
 ### Launcher — `components/snap-launch-board.tsx` + `snap-launch-card.tsx` + `use-snap.ts`

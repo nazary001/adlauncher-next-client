@@ -22,11 +22,10 @@ type StatusFilter = "all" | "free" | "active" | "retired";
 const money = (v: number) => `$${v.toFixed(2)}`;
 const int = (v: number) => Math.round(v).toLocaleString("en-US");
 const dateLabel = (iso: string) => iso.replace(/^(\d{4})-(\d{2})-(\d{2})$/, "$3.$2.$1");
-/** A registry timestamp (ms) as dd.mm.yyyy in local time — the same shape as the report label. */
-const fmtDay = (ms: number) => {
-  const d = new Date(ms);
-  return `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}.${d.getFullYear()}`;
-};
+/** A registry timestamp (ms) as dd.mm.yyyy in São Paulo — the report day is a São Paulo day, so a
+ *  claim at 23:30 there must not read as the next date beside the report label for a UTC+ viewer. */
+const SAO_PAULO_DAY = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", year: "numeric" });
+const fmtDay = (ms: number) => SAO_PAULO_DAY.format(new Date(ms)).replace(/\//g, ".");
 
 export function SnapKeysBoard({ user }: { user?: SessionUser }) {
   const { keys, error: keysError, refresh: refreshKeys } = useSnapKeys();
