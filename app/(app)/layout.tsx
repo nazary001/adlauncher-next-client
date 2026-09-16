@@ -4,6 +4,7 @@ import { SESSION_COOKIE, verifySession } from "@/lib/session";
 import { AifTaskManagerProvider, TaskManagerProvider } from "@/components/task-manager";
 import { HsTaskManagerProvider } from "@/components/hs-task-manager";
 import { GoogleTaskManagerProvider } from "@/components/google-task-manager";
+import { SnapTaskManagerProvider } from "@/components/snap-task-manager";
 import { AcctLimitProvider } from "@/components/use-acct-limit";
 
 /**
@@ -24,7 +25,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           <AcctLimitProvider>
             {/* Google rail queue — innermost so it survives navigating between every board. */}
             <GoogleTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
-              {children}
+              {/* Snapchat rail queue — innermost, same reason. */}
+              <SnapTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>{children}</SnapTaskManagerProvider>
             </GoogleTaskManagerProvider>
           </AcctLimitProvider>
         </HsTaskManagerProvider>
