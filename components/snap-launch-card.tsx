@@ -451,7 +451,13 @@ export function SnapLaunchCard({
                 <span className={micro}>Creative</span>
                 <span className="font-mono text-[10px] text-faint">{card.files[0] ? `${Math.round(card.files[0].size / 1024 / 1024)} MB` : "9:16 · ≤32 MB"}</span>
               </div>
-              <Dropzone id={`media-${card.id}`} files={card.files} onChange={onFiles} maxFiles={1} accept="any" compact />
+              {/* The zone IS a 9:16 phone frame: an empty slot shows the vertical shape the creative
+                  must fill, a dropped file fills it edge to edge (object-contain inside a 9:16 box
+                  letterboxes anything that is not 9:16 — the visual cue next to the dims note). */}
+              <div className="relative mx-auto w-[180px] max-w-full overflow-hidden rounded-[18px] border border-line bg-black/40 shadow-inner" style={{ aspectRatio: "9 / 16" }}>
+                <Dropzone id={`media-${card.id}`} files={card.files} onChange={onFiles} maxFiles={1} accept="any" compact />
+                <span className="pointer-events-none absolute right-2 top-2 rounded-md bg-black/55 px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-white/80 backdrop-blur-sm">9:16</span>
+              </div>
               {dimsNote ? <p className="text-[10px] leading-snug text-warn">{dimsNote}</p> : card.mediaDims ? <p className="text-[10px] leading-snug text-faint">{card.mediaDims.w}×{card.mediaDims.h} · 9:16 ✓</p> : <p className="text-[10px] leading-snug text-faint">One vertical video (mp4/mov, 3–180 s) or image (png/jpg), 1080×1920.</p>}
               {dropNote ? <p className="text-[10px] leading-snug text-warn">{dropNote}</p> : null}
             </div>
