@@ -213,6 +213,16 @@ export const SNAP_BRAND_MAX = 32;
 /** Single-part media upload cap (bigger needs Snap's chunked upload — not in v1). */
 export const SNAP_MEDIA_MAX_BYTES = 32 * 1024 * 1024;
 export const SNAP_MAX_SHOTS = 45;
+
+/** Ad accounts the launcher never offers nor accepts (owner ask 17.09): Snapchat auto-creates an
+ *  "<org> Self Service" account on every organization — no pixel, not a buying account — and any
+ *  id listed here is hidden too. One predicate for the catalog AND the wave route, so "not shown"
+ *  always means "not launchable". Name compared case-insensitively, trimmed. */
+export const SNAP_HIDDEN_AD_ACCOUNT_IDS: ReadonlySet<string> = new Set(["d7defe80-abed-4109-8a8f-556619f14989"]);
+export function isSnapLaunchAccount(a: { id: string; name: string }): boolean {
+  if (SNAP_HIDDEN_AD_ACCOUNT_IDS.has(String(a.id ?? "").trim())) return false;
+  return !/\bself service$/i.test(String(a.name ?? "").trim());
+}
 export const SNAP_MAX_COPIES = 20;
 export const SNAP_WAVE_ID_RE = /^[a-zA-Z0-9-]{8,64}$/;
 

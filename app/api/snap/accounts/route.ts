@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { isSnapLaunchAccount } from "@/lib/snap-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
 import {
   SnapApiError,
@@ -51,7 +52,7 @@ export async function GET(req: Request): Promise<NextResponse> {
   if (!snapConfigured()) return bad("snap_not_configured", 500);
   let accounts: SnapAdAccount[];
   try {
-    accounts = await snapAdAccounts();
+    accounts = (await snapAdAccounts()).filter(isSnapLaunchAccount); // the org's Self Service account and any hidden id stay out
   } catch (e) {
     const auth = e instanceof SnapApiError && e.status === 401;
     return bad(`${auth ? "snap_auth_failed" : "snap_unavailable"}: ${(e as Error).message}`, 502);

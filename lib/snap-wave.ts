@@ -11,6 +11,7 @@ import {
   SNAP_MAX_SHOTS,
   SNAP_WAVE_ID_RE,
   isSnapKey,
+  isSnapLaunchAccount,
   snapCampaignName,
   snapGoalNeedsPixel,
   snapLaunchWire,
@@ -98,7 +99,7 @@ export async function handleSnapLaunch(req: Request): Promise<NextResponse> {
 
   let accounts: SnapAdAccount[];
   try {
-    accounts = await snapAdAccounts();
+    accounts = (await snapAdAccounts()).filter(isSnapLaunchAccount); // hidden accounts are refused as targets, not just unlisted
   } catch (e) {
     const auth = e instanceof SnapApiError && e.status === 401;
     return bad(`${auth ? "snap_auth_failed" : "snap_unavailable"}: ${(e as Error).message}`, 502);

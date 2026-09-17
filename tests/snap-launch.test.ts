@@ -21,6 +21,14 @@ import {
   type SnapLaunchShotIn,
   type SnapResolved,
 } from "../lib/snap-launch.ts";
+import { isSnapLaunchAccount } from "../lib/snap-launch.ts";
+
+test("isSnapLaunchAccount hides the org's Self Service account and listed ids, keeps the buying accounts", () => {
+  assert.equal(isSnapLaunchAccount({ id: "d7defe80-abed-4109-8a8f-556619f14989", name: "GlobeCoders OÜ Self Service" }), false);
+  assert.equal(isSnapLaunchAccount({ id: "x", name: "Some Org self service" }), false);
+  assert.equal(isSnapLaunchAccount({ id: "0ee94840-33aa-48ae-b57e-105c5ee0ebfd", name: "GC-HS-snapchat-LA-1" }), true);
+  assert.equal(isSnapLaunchAccount({ id: "y", name: "Self Service Desk Ads" }), true);
+});
 
 test("vocabulary: three bid strategies (no MIN_ROAS), five goals, PIXEL_* need a pixel", () => {
   assert.deepEqual(SNAP_BID_STRATEGIES.map((s) => [s.value, s.kind]), [
