@@ -85,7 +85,10 @@ export function freshSnapCard(id?: string, defaults: { adAccount?: string; pixel
     adAccount: defaults.adAccount ?? "",
     pixel: defaults.pixel ?? "",
     profileId: defaults.profileId ?? "",
-    optimizationGoal: "PIXEL_PURCHASE",
+    // Swipes by default: Snap refuses a pixel goal until that pixel already receives the event
+    // (E3017 "event source is ineligible") — a fresh pixel launches on Swipes, the pixel goals
+    // come back once the partner's events flow.
+    optimizationGoal: "SWIPES",
     bidStrategy: "AUTO_BID",
     bid: "",
     budget: SNAP_DEFAULT_BUDGET,
@@ -411,6 +414,7 @@ export function SnapLaunchCard({
             <div className="flex flex-col gap-1.5">
               <span className={micro}>Optimization goal</span>
               <Select value={card.optimizationGoal} onChange={(e) => patch({ optimizationGoal: e.target.value })} options={GOAL_OPTIONS} aria-label="Optimization goal" />
+              {needsPixel ? <span className="text-[10px] leading-snug text-warn">Snap accepts a pixel goal only once the pixel already receives that event (E3017 otherwise) — start on Swipes until the partner&apos;s events flow.</span> : null}
             </div>
             <div className="flex flex-col gap-1.5">
               <span className={micro}>Bidding</span>

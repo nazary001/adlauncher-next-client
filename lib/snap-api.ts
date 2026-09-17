@@ -53,7 +53,18 @@ export function snapErrorMessage(status: number | undefined, body: unknown): str
   const r = rec(body);
   const display = str(r.display_message).trim();
   const debug = str(r.debug_message).trim();
-  let msg = display && debug && display !== debug ? `${display} (${debug})` : display || debug || str(r.error).trim();
+  // Batch refusals carry the sentence per item (`sub_request_error_reason`), not at the top:
+  // read it from the item itself or from the first item of any batch array in the envelope,
+  // otherwise a refused ad squad reads as a bare "Snapchat HTTP 400" in the task manager.
+  const itemReason = str(r.sub_request_error_reason).trim() || (() => {
+    for (const key of ["campaigns", "adsquads", "creatives", "ads", "media"]) {
+      const first = Array.isArray(r[key]) ? rec((r[key] as unknown[])[0]) : null;
+      const reason = first ? str(first.sub_request_error_reason).trim() : "";
+      if (reason) return reason;
+    }
+    return "";
+  })();
+  let msg = display && debug && display !== debug ? `${display} (${debug})` : display || debug || itemReason || str(r.error).trim();
   if (!msg && typeof body === "string" && body) msg = body.slice(0, 300);
   if (!msg) msg = status ? `Snapchat HTTP ${status}` : "Snapchat unreachable";
   return msg;

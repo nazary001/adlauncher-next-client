@@ -35,6 +35,12 @@ function stubFetch(routes: Array<[RegExp, (r: Rec) => Response | Promise<Respons
 const json = (obj: unknown, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
 const tokenRoute: [RegExp, (r: Rec) => Response] = [/auth\.test\/login\/oauth2\/access_token/, () => json({ access_token: "at-1", expires_in: 3600, token_type: "Bearer" })];
 
+test("snapErrorMessage surfaces a batch item's sub_request_error_reason (item or envelope) before the status fallback", () => {
+  assert.equal(api.snapErrorMessage(400, { sub_request_status: "ERROR", sub_request_error_reason: "Error code: E3017, message: validation failed" }), "Error code: E3017, message: validation failed");
+  assert.equal(api.snapErrorMessage(400, { request_status: "ERROR", adsquads: [{ sub_request_status: "ERROR", sub_request_error_reason: "AdSquad ineligible for PIXEL_PURCHASE" }] }), "AdSquad ineligible for PIXEL_PURCHASE");
+  assert.equal(api.snapErrorMessage(400, { request_status: "ERROR", adsquads: [{ sub_request_status: "ERROR" }] }), "Snapchat HTTP 400");
+});
+
 test("snapErrorMessage prefers display_message, then debug_message, then a status fallback", () => {
   assert.equal(api.snapErrorMessage(400, { request_status: "ERROR", display_message: "Budget too low", debug_message: "daily_budget_micro < 5000000" }), "Budget too low (daily_budget_micro < 5000000)");
   assert.equal(api.snapErrorMessage(400, { debug_message: "x" }), "x");
