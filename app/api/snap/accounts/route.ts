@@ -77,6 +77,12 @@ export async function GET(req: Request): Promise<NextResponse> {
   } else {
     profilesError = "no organization id (no ad accounts and SNAP_ORGANIZATION_ID unset)";
   }
+  // The Business API may refuse the profile list (403 on some organizations) while the creative
+  // still needs a profile id: SNAP_PROFILE_ID is the owner-verified default, so the picker offers
+  // it as an entry instead of showing an empty list the buyer cannot resolve.
+  if (defaults.profile && !profiles.some((p) => p.id === defaults.profile)) {
+    profiles = [{ id: defaults.profile, displayName: process.env.SNAP_PROFILE_NAME || "Default Public Profile", profileType: "default" }, ...profiles];
+  }
   const body: { ok: true } & SnapCatalog = {
     ok: true,
     accounts: withPixels,

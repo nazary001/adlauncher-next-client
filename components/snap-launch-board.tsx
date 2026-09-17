@@ -57,19 +57,21 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
   // The first card is born before the catalog answers, so the board defaults (SNAP_AD_ACCOUNT_ID,
   // SNAP_BRAND_NAME) reach it here, once, and only into fields nobody has touched: an empty account
   // takes the default when the catalog lists it, an empty brand takes the default brand. Pixel and
-  // profile need no backfill — they fall back at render time below. The catalog is a one-shot load
+  // need no backfill — it falls back at render time below; the profile is filled when the catalog lists the default. The catalog is a one-shot load
   // (a manual retry aside), so a deliberately cleared field is not re-filled behind the user's back.
   useEffect(() => {
     if (!catalog) return;
     const d = catalog.defaults;
     const acct = d.adAccount && catalog.accounts.some((a) => a.id === d.adAccount) ? d.adAccount : "";
-    if (!acct && !d.brandName) return;
+    const prof = d.profile && catalog.profiles.some((p) => p.id === d.profile) ? d.profile : "";
+    if (!acct && !d.brandName && !prof) return;
     // Safe setState-in-effect: fills empty fields from a freshly loaded catalog — converges in one pass.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setCards((cs) => {
       const next = cs.map((c) => {
         const p: Partial<SnapCard> = {};
         if (acct && !c.adAccount) p.adAccount = acct;
+        if (prof && !c.profileId) p.profileId = prof;
         if (d.brandName && !c.brandName) p.brandName = d.brandName;
         return Object.keys(p).length ? { ...c, ...p } : c;
       });
@@ -381,7 +383,7 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
                   </button>
                 </div>
               ) : null}
-              {catalog?.profilesError ? <p className="text-center text-[10.5px] leading-relaxed text-warn">Public Profiles didn&apos;t load ({catalog.profilesError}) — set SNAP_PROFILE_ID or retry.</p> : null}
+              {catalog?.profilesError ? <p className="text-center text-[10.5px] leading-relaxed text-warn">Public Profile list unavailable ({catalog.profilesError}){defaults?.profile ? " — the default profile from SNAP_PROFILE_ID is used" : " — set SNAP_PROFILE_ID or retry"}.</p> : null}
               {noAccountCount > 0 ? <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">{noAccountCount} campaign{noAccountCount === 1 ? " needs" : "s need"} an ad account.</p> : null}
               {pixelNeededCount > 0 ? <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">{pixelNeededCount} campaign{pixelNeededCount === 1 ? " needs" : "s need"} a pixel decision — see the card.</p> : null}
               {refusalCount > 0 ? <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">{refusalCount} campaign{refusalCount === 1 ? " is" : "s are"} incomplete — see the note on the card.</p> : null}
