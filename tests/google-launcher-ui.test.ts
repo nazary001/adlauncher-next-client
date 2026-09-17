@@ -234,9 +234,12 @@ test("googleLaunchWire names the offending ad group when a later group is short 
 
 // ---- isGoogleLaunchAccount: the GLO-HS allowlist (owner rule 14.09) ----------------------------
 
-test("isGoogleLaunchAccount accepts GLO-HS-001…010 on the LION MCC and nothing else", () => {
-  assert.equal(isGoogleLaunchAccount({ name: "GLO-HS-001", mccId: "2678500976" }), true);
+test("isGoogleLaunchAccount accepts the GLO-HS accounts on the LION MCC minus the hidden ones, and nothing else", () => {
+  assert.equal(isGoogleLaunchAccount({ name: "GLO-HS-002", mccId: "2678500976" }), true);
   assert.equal(isGoogleLaunchAccount({ name: "GLO-HS-010", mccId: "2678500976" }), true);
+  // Owner ask 17.09: GLO-HS-001 and GLO-HS-003 are out of rotation — hidden AND refused, any spelling.
+  assert.equal(isGoogleLaunchAccount({ name: "GLO-HS-001", mccId: "2678500976" }), false);
+  assert.equal(isGoogleLaunchAccount({ name: " glo-hs-003 " }), false);
   assert.equal(isGoogleLaunchAccount({ name: "glo-hs-011" }), true); // a future account appears by itself
   assert.equal(isGoogleLaunchAccount({ name: "GC-HS-Lion-BR-1", mccId: "2678500976" }), false);
   assert.equal(isGoogleLaunchAccount({ name: "Ads 1", mccId: "4904785717" }), false);

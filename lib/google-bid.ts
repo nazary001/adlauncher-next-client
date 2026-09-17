@@ -674,6 +674,13 @@ export const GOOGLE_LAUNCH_ACCOUNT_RE = /^GLO-HS-\d{3}$/i;
 /** Only the GLO-HS-001…010 accounts are offered and accepted for Google launches (owner rule
  *  14.09: the suspended "Ads N" book, GC-Vis and the pixel-less GC-HS-Lion-BR-N stay hidden).
  *  Name pattern + MCC, so a future GLO-HS-011 appears by itself. */
+/** GLO-HS accounts the owner took out of rotation (owner ask 17.09): hidden from every picker
+ *  and refused as a launch/clone/JURO target — one predicate, so "not shown" always means
+ *  "not launchable". Names compared case-insensitively, trimmed. */
+export const GOOGLE_HIDDEN_LAUNCH_ACCOUNTS: ReadonlySet<string> = new Set(["GLO-HS-001", "GLO-HS-003"]);
+
 export function isGoogleLaunchAccount(c: { name: string; mccId?: string }): boolean {
-  return GOOGLE_LAUNCH_ACCOUNT_RE.test(String(c.name ?? "").trim()) && (!c.mccId || c.mccId === GOOGLE_LAUNCH_MCC);
+  const name = String(c.name ?? "").trim();
+  if (GOOGLE_HIDDEN_LAUNCH_ACCOUNTS.has(name.toUpperCase())) return false;
+  return GOOGLE_LAUNCH_ACCOUNT_RE.test(name) && (!c.mccId || c.mccId === GOOGLE_LAUNCH_MCC);
 }
