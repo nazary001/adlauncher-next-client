@@ -106,6 +106,14 @@ export function snapReportDate(param: string | null | undefined, now: Date = new
   return p > today ? null : p;
 }
 
+/** The day the keys page opens on. The report day is a São Paulo day, so for the first hours after
+ *  its midnight "today" is an almost empty table while the day everyone is asking about is the one
+ *  that just closed: before 06:00 there the page opens on yesterday, after it on today. */
+export function snapDefaultReportDay(now: Date = new Date()): "today" | "yesterday" {
+  const hour = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "America/Sao_Paulo", hour: "2-digit", hourCycle: "h23" }).format(now));
+  return hour < 6 ? "yesterday" : "today";
+}
+
 /** Today (São Paulo) or later = still accumulating (+ the partner's forecast); earlier = final. */
 export function isSnapReportPartial(date: string, now: Date = new Date()): boolean {
   return date >= saoPauloISO(0, now);

@@ -167,7 +167,7 @@ export async function snapExchangeCode(code: string, redirectUri: string): Promi
  * surfaced verbatim (they carry the actionable sentence); a 2xx whose request_status is ERROR is
  * an error too.
  */
-async function snapFetch(url: string, init: RequestInit = {}, attempts = 2): Promise<unknown> {
+async function snapFetch(url: string, init: RequestInit = {}, attempts = 2, timeoutMs = TIMEOUT_MS): Promise<unknown> {
   const token = await snapAccessToken();
   let lastErr: unknown;
   for (let attempt = 0; attempt < attempts; attempt++) {
@@ -176,7 +176,7 @@ async function snapFetch(url: string, init: RequestInit = {}, attempts = 2): Pro
         ...init,
         headers: { Authorization: `Bearer ${token}`, ...(init.body && !(init.body instanceof FormData) ? { "Content-Type": "application/json" } : {}), ...(init.headers ?? {}) },
         cache: "no-store",
-        signal: AbortSignal.timeout(TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       const text = await res.text();
       let body: unknown = null;
@@ -226,7 +226,7 @@ const EMPTY_TTL_MS = 60_000;
 type Cached<T> = { at: number; ttl: number; value: T };
 const caches = new Map<string, Cached<unknown>>();
 const inflight = new Map<string, Promise<unknown>>();
-async function cached<T>(key: string, load: () => Promise<T>): Promise<T> {
+async function cached<T>(key: string, load: () => Promise<T>, ttl = TTL_MS): Promise<T> {
   const hit = caches.get(key);
   if (hit && Date.now() - hit.at < hit.ttl) return hit.value as T;
   const running = inflight.get(key);
@@ -234,7 +234,9 @@ async function cached<T>(key: string, load: () => Promise<T>): Promise<T> {
   const p = (async () => {
     try {
       const value = await load();
-      caches.set(key, { at: Date.now(), ttl: Array.isArray(value) && value.length === 0 ? EMPTY_TTL_MS : TTL_MS, value });
+      // The per-day stats keys add one entry per opened date — drop what has expired.
+      if (caches.size > 200) for (const [k, c] of caches) if (Date.now() - c.at >= c.ttl) caches.delete(k);
+      caches.set(key, { at: Date.now(), ttl: Array.isArray(value) && value.length === 0 ? EMPTY_TTL_MS : ttl, value });
       return value;
     } finally {
       inflight.delete(key);
@@ -291,6 +293,50 @@ export async function snapProfiles(organizationId: string): Promise<SnapProfile[
       .filter((p) => str(p.id))
       .map((p) => ({ id: str(p.id), displayName: str(p.display_name), profileType: str(p.profile_type) }));
   });
+}
+
+// ---------- live reads for the keys report ----------
+// RAW bodies on purpose: lib/snap-stats.ts parses them (pure, tested) and this file stays free of
+// runtime imports. They share the token's rate limit (10 rps) with the launch pump, so: 5 min of
+// cache per instance, ONE attempt and a 12 s ceiling — the keys page would rather name an account
+// it could not read than sit on it, and never competes with a launch for long.
+
+const LIVE_TTL_MS = 5 * 60_000;
+const LIVE_TIMEOUT_MS = 12_000;
+const LIVE_MAX_PAGES = 5;
+
+/** A paged list: follows paging.next_link while it stays on OUR ads host (the bearer goes with it). */
+async function snapPages(url: string): Promise<unknown[]> {
+  const pages: unknown[] = [];
+  let next = url;
+  for (let i = 0; i < LIVE_MAX_PAGES && next; i++) {
+    const body = await snapFetch(next, {}, 1, LIVE_TIMEOUT_MS);
+    pages.push(body);
+    const link = str(rec(rec(body).paging).next_link);
+    next = link.startsWith(`${API_BASE}/`) ? link : "";
+  }
+  return pages;
+}
+
+/** One account's stats for a window, broken down by campaign (granularity TOTAL takes any
+ *  hour-aligned window — lib/snap-stats.ts says why the day is not asked as DAY). */
+export async function snapAccountStatsRaw(adAccountId: string, startTime: string, endTime: string): Promise<unknown> {
+  return cached(
+    `stats:${adAccountId}:${startTime}`,
+    () => {
+      const q = new URLSearchParams({ granularity: "TOTAL", breakdown: "campaign", start_time: startTime, end_time: endTime, fields: "impressions,swipes,spend" });
+      return snapFetch(`${API_BASE}/adaccounts/${encodeURIComponent(adAccountId)}/stats?${q.toString()}`, {}, 1, LIVE_TIMEOUT_MS);
+    },
+    LIVE_TTL_MS,
+  );
+}
+
+export async function snapAccountCampaignsRaw(adAccountId: string): Promise<unknown[]> {
+  return cached(`live-campaigns:${adAccountId}`, () => snapPages(`${API_BASE}/adaccounts/${encodeURIComponent(adAccountId)}/campaigns`), LIVE_TTL_MS);
+}
+
+export async function snapAccountAdsRaw(adAccountId: string): Promise<unknown[]> {
+  return cached(`live-ads:${adAccountId}`, () => snapPages(`${API_BASE}/adaccounts/${encodeURIComponent(adAccountId)}/ads`), LIVE_TTL_MS);
 }
 
 // ---------- media ----------

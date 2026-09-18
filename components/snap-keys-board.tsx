@@ -1,40 +1,61 @@
 "use client";
 
 // Snapchat KEYS · REPORT page — the 100 partner keys as one table: who holds each (registry),
-// what it earned on the picked São Paulo day (LION's report: revenue, forecast while the day is
-// partial, impressions, eCPM, visitors, pixel events, conversions) and, for the owner, a Release
-// button that deletes the registry row (Snapchat itself is never touched here — pause/delete the
-// campaign in Ads Manager). Today is partial + forecast; earlier days are final.
+// what its campaign SPENT on the picked São Paulo day (Snapchat's own stats: spend, impressions,
+// swipes + where the campaign stands with delivery and ad review), what it EARNED over the same
+// 24 hours (LION's report: revenue, forecast while the day is partial, ad impressions, eCPM,
+// visitors, pixel events, conversions), the difference, and, for the owner, a Release button that
+// deletes the registry row (Snapchat itself is never touched here — pause/delete the campaign in
+// Ads Manager). The two sides load independently: either one failing leaves the other on screen.
+// Today is partial + forecast; earlier days are final.
 
 import { useEffect, useMemo, useState } from "react";
 import { Header } from "./header";
 import { SnapNav } from "./snap-nav";
 import { useSnapKeys, type SnapKeyRow } from "./use-snap";
-import type { SnapReportMetrics } from "@/lib/snap-report";
-import { CheckIcon, CopyIcon } from "./icons";
+import { snapDefaultReportDay, snapReportDate, type SnapReportMetrics } from "@/lib/snap-report";
+import { snapDeliveryNote, snapMoney as money, type SnapCampaignStats, type SnapKeyLive } from "@/lib/snap-stats";
+import { CheckIcon, CopyIcon, RetryIcon } from "./icons";
 import type { PartnerId } from "@/lib/partners";
 import type { SessionUser } from "./user-menu";
 
 type ReportRow = { key: string; metrics: SnapReportMetrics; binding: SnapKeyRow | null };
 type Report = { date: string; partial: boolean; affiliate: string; totals: SnapReportMetrics; rows: ReportRow[]; registryError?: string };
+type Live = { date: string; totals: SnapCampaignStats & { complete: boolean }; keys: SnapKeyLive[]; errors: string[] };
 type StatusFilter = "all" | "free" | "active" | "retired";
 
-const money = (v: number) => `$${v.toFixed(2)}`;
 const int = (v: number) => Math.round(v).toLocaleString("en-US");
 const dateLabel = (iso: string) => iso.replace(/^(\d{4})-(\d{2})-(\d{2})$/, "$3.$2.$1");
+const shortDate = (iso: string | null) => (iso ? iso.replace(/^\d{4}-(\d{2})-(\d{2})$/, "$2.$1") : "");
+const pct = (v: number) => `${v > 0 ? "+" : ""}${Math.round(v * 100).toLocaleString("en-US")}%`;
+const plTone = (v: number) => (v > 0 ? "text-launch2" : v < 0 ? "text-danger" : "text-dim");
+const NOTE_TONE = { ok: "text-launch2", warn: "text-warn", bad: "text-danger" } as const;
+/** Our accounts are all "GC-HS-snapchat-LA-N" — the row only needs the tail. */
+const accountLabel = (name: string) => name.replace(/^GC-HS-snapchat-/i, "");
 /** A registry timestamp (ms) as dd.mm.yyyy in São Paulo — the report day is a São Paulo day, so a
  *  claim at 23:30 there must not read as the next date beside the report label for a UTC+ viewer. */
 const SAO_PAULO_DAY = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", year: "numeric" });
 const fmtDay = (ms: number) => SAO_PAULO_DAY.format(new Date(ms)).replace(/\//g, ".");
 
+const HEAD = ["Key", "Status", "Campaign", "Buyer"] as const;
+const HEAD_SNAP = ["Spend", "Impr.", "Swipes"] as const;
+const HEAD_LION = ["Revenue", "P/L", "Ad impr.", "eCPM", "Visitors", "Trig/Fired", "Conv."] as const;
+const COLUMNS = HEAD.length + HEAD_SNAP.length + HEAD_LION.length + 1;
+
 export function SnapKeysBoard({ user }: { user?: SessionUser }) {
   const { keys, error: keysError, refresh: refreshKeys } = useSnapKeys();
-  const [dateParam, setDateParam] = useState<"today" | "yesterday" | string>("yesterday");
+  // Opens on the day that has the numbers (lib/snap-report.ts): the report day is a São Paulo day,
+  // and a fixed "yesterday" used to open the page on the day BEFORE a same-day launch — all zeros.
+  const [dateParam, setDateParam] = useState<"today" | "yesterday" | string>(() => snapDefaultReportDay());
   const [report, setReport] = useState<Report | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  // Bumped by a release → the effect re-reads the same day. A re-read is a new effect run, so the
-  // request before it is cancelled exactly like on a date change — never a call from a stale closure.
+  const [live, setLive] = useState<Live | null>(null);
+  const [liveError, setLiveError] = useState<string | null>(null);
+  const [liveLoading, setLiveLoading] = useState(true);
+  // Bumped by a release / the Refresh button → the effects re-read the same day. A re-read is a new
+  // effect run, so the request before it is cancelled exactly like on a date change — never a call
+  // from a stale closure.
   const [reportTick, setReportTick] = useState(0);
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [releasing, setReleasing] = useState<string | null>(null);
@@ -67,6 +88,30 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
     return () => ctrl.abort();
   }, [dateParam, reportTick]);
 
+  // The Snapchat side — same discipline, its own request: LION's money must not wait for (or fall
+  // with) a dozen Marketing API reads, and the other way round.
+  useEffect(() => {
+    const ctrl = new AbortController();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLiveLoading(true);
+    setLiveError(null);
+    void (async () => {
+      try {
+        const res = await fetch(`/api/snap/stats?date=${encodeURIComponent(dateParam)}`, { signal: AbortSignal.any([ctrl.signal, AbortSignal.timeout(60_000)]) });
+        const d = (await res.json().catch(() => ({}))) as Partial<Live> & { ok?: boolean; error?: string };
+        if (!res.ok || !d.ok || !Array.isArray(d.keys) || !d.totals) throw new Error(d.error || `HTTP ${res.status}`);
+        if (ctrl.signal.aborted) return;
+        setLive({ date: String(d.date), totals: d.totals, keys: d.keys, errors: Array.isArray(d.errors) ? d.errors.map(String) : [] });
+      } catch (e) {
+        if (ctrl.signal.aborted) return;
+        setLiveError(e instanceof DOMException && e.name === "TimeoutError" ? "Snapchat didn't answer in 60 s" : e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!ctrl.signal.aborted) setLiveLoading(false);
+      }
+    })();
+    return () => ctrl.abort();
+  }, [dateParam, reportTick]);
+
   // Once the registry view has loaded it is the ONLY source of bindings — a just-released key must
   // not keep showing bound while the report reload is in flight or failed. The report's own binding
   // is only the fallback before the registry answers; the report brings the money either way.
@@ -75,6 +120,10 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
     const base = report?.rows ?? (keys ? keys.free.concat(keys.used.map((r) => r.key)).sort().map((key) => ({ key, metrics: null as SnapReportMetrics | null, binding: null })) : []);
     return base.map((r) => ({ key: r.key, metrics: r.metrics, binding: keys ? (bindingByKey.get(r.key) ?? null) : (r.binding ?? null) }));
   }, [report, keys, bindingByKey]);
+  // Snapchat numbers are shown only beside LION numbers of the SAME day: after a date change the two
+  // answers land at different moments, and a row must never pair one day's spend with another's revenue.
+  const liveNow = live && (!report || live.date === report.date) ? live : null;
+  const liveByKey = useMemo(() => new Map((liveNow?.keys ?? []).map((k) => [k.key, k])), [liveNow]);
   const shown = rows.filter((r) => (filter === "all" ? true : filter === "free" ? !r.binding : r.binding?.status === filter));
   const freeCount = rows.filter((r) => !r.binding).length;
   const activeCount = rows.filter((r) => r.binding?.status === "active").length;
@@ -114,6 +163,33 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
   const on = "border-[#FFFC00]/50 bg-[#FFFC00]/10 text-[#f3f0a3]";
   const off = "border-line bg-surface2 text-dim hover:text-ink";
 
+  // The money line of the day. Profit is on CONFIRMED revenue; while the day is partial the partner's
+  // forecast is shown beside it, never folded in.
+  const spend = liveNow ? liveNow.totals.spend : null;
+  const profit = report && spend != null ? report.totals.revenue - spend : null;
+  const pending = liveLoading ? "…" : "—";
+  const tiles: { label: string; value: string; tone?: string; sub?: string; subTone?: string }[] = report
+    ? [
+        { label: "Spend · Snapchat", value: spend != null ? money(spend) : pending, ...(liveNow && !liveNow.totals.complete ? { sub: "some accounts unread", subTone: "text-warn" } : {}) },
+        { label: "Revenue · LION", value: money(report.totals.revenue) },
+        { label: "Forecast", value: report.partial ? money(report.totals.forecastedRevenue) : "—" },
+        {
+          label: "Profit",
+          value: profit != null ? money(profit) : pending,
+          ...(profit != null ? { tone: plTone(profit) } : {}),
+          ...(profit != null && report.partial && report.totals.forecastedRevenue ? { sub: `with forecast ${money(profit + report.totals.forecastedRevenue)}` } : {}),
+        },
+        { label: "ROI", value: profit != null && spend ? pct(profit / spend) : profit != null ? "—" : pending, ...(profit != null && spend ? { tone: plTone(profit) } : {}) },
+        { label: "eCPM", value: money(report.totals.ecpm) },
+        { label: "Snap impressions", value: liveNow ? int(liveNow.totals.impressions) : pending },
+        { label: "Swipes", value: liveNow ? int(liveNow.totals.swipes) : pending },
+        { label: "Visitors", value: int(report.totals.visitors) },
+        { label: "Ad impressions", value: int(report.totals.impressions) },
+        { label: "Pixel trig / fired", value: `${int(report.totals.triggered)} / ${int(report.totals.fired)}` },
+        { label: "Conversions", value: int(report.totals.conversions) },
+      ]
+    : [];
+
   return (
     <>
       <Header partner="in" onPartnerChange={changePartner} user={user} platform="snapchat" />
@@ -124,14 +200,21 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
             <h1 className="text-sm font-semibold text-ink">Partner keys</h1>
             <span className="rounded-md border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[11px] text-dim">{keys ? `${freeCount} free · ${activeCount} active · ${retiredCount} retired` : keysError ? "registry unavailable" : "…"}</span>
             <div className="ml-auto flex flex-wrap items-center gap-2">
-              <div className="flex items-center gap-1 rounded-lg border border-line bg-surface p-0.5">
+              <div className="flex flex-wrap items-center gap-1 rounded-lg border border-line bg-surface p-0.5">
                 {(["yesterday", "today"] as const).map((p) => (
-                  <button key={p} type="button" onClick={() => setDateParam(p)} className={"h-7 rounded-md px-2.5 text-[11.5px] font-medium " + (dateParam === p ? "bg-[#FFFC00]/15 text-[#f3f0a3]" : "text-dim hover:text-ink")}>
-                    {p === "today" ? "Today (partial)" : "Yesterday"}
+                  <button key={p} type="button" onClick={() => setDateParam(p)} className={"h-7 whitespace-nowrap rounded-md px-2.5 text-[11.5px] font-medium " + (dateParam === p ? "bg-[#FFFC00]/15 text-[#f3f0a3]" : "text-dim hover:text-ink")}>
+                    {p === "today" ? "Today" : "Yesterday"}
+                    {/* The date itself: "yesterday" is São Paulo's, which is not the viewer's for a good part of the day. */}
+                    <span suppressHydrationWarning className="font-mono opacity-80">{` · ${shortDate(snapReportDate(p))}`}</span>
+                    {p === "today" ? " (partial)" : ""}
                   </button>
                 ))}
                 <input type="date" value={/^\d{4}-\d{2}-\d{2}$/.test(dateParam) ? dateParam : ""} onChange={(e) => e.target.value && setDateParam(e.target.value)} aria-label="Report date" className="h-7 rounded-md border border-line bg-surface2 px-2 text-[11.5px] text-ink" />
               </div>
+              <button type="button" onClick={() => setReportTick((t) => t + 1)} disabled={loading || liveLoading} className={chip + " " + off + " disabled:opacity-50"}>
+                <RetryIcon className="mr-1 inline h-3 w-3" />
+                Refresh
+              </button>
               <button type="button" onClick={copyFree} className={chip + " " + off}>
                 {copied === "ok" ? <CheckIcon className="mr-1 inline h-3 w-3 text-launch2" /> : <CopyIcon className="mr-1 inline h-3 w-3" />}
                 {copied === "ok" ? "Copied" : copied === "fail" ? "Copy failed" : "Copy free keys"}
@@ -146,30 +229,29 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
               </button>
             ))}
             <span className="ml-auto text-[11px] text-faint">
-              {loading ? "Loading… " : ""}
+              {loading || liveLoading ? "Loading… " : ""}
               {reportError ? <span className="text-warn">{`Report: ${reportError}${report ? " · " : ""}`}</span> : null}
-              {report ? `${dateLabel(report.date)} · ${report.partial ? "partial day — includes the partner's forecast" : "final"} · LION` : ""}
+              {report ? `${dateLabel(report.date)} · São Paulo day · ${report.partial ? "partial — includes the partner's forecast" : "final"}` : ""}
               {report?.registryError ? ` · registry: ${report.registryError}` : ""}
             </span>
           </div>
 
           {report ? (
-            <div className={"grid gap-2 transition-opacity sm:grid-cols-4 lg:grid-cols-8" + (loading ? " opacity-60" : "")}>
-              {[
-                ["Revenue", money(report.totals.revenue)],
-                ["Forecast", report.partial ? money(report.totals.forecastedRevenue) : "—"],
-                ["Impressions", int(report.totals.impressions)],
-                ["eCPM", money(report.totals.ecpm)],
-                ["Visitors", int(report.totals.visitors)],
-                ["Triggered", int(report.totals.triggered)],
-                ["Fired", int(report.totals.fired)],
-                ["Conversions", int(report.totals.conversions)],
-              ].map(([label, value]) => (
-                <div key={label} className="rounded-lg border border-line bg-surface px-3 py-2">
-                  <p className="text-[10px] uppercase tracking-[0.14em] text-faint">{label}</p>
-                  <p className="font-mono text-[14px] tabular-nums text-ink">{value}</p>
+            <div className={"grid grid-cols-2 gap-2 transition-opacity sm:grid-cols-4 lg:grid-cols-6" + (loading ? " opacity-60" : "")}>
+              {tiles.map((t) => (
+                <div key={t.label} className="rounded-lg border border-line bg-surface px-3 py-2">
+                  <p className="text-[10px] uppercase tracking-[0.14em] text-faint">{t.label}</p>
+                  <p className={"font-mono text-[14px] tabular-nums " + (t.tone ?? "text-ink")}>{t.value}</p>
+                  {t.sub ? <p className={"font-mono text-[10px] tabular-nums " + (t.subTone ?? "text-faint")}>{t.sub}</p> : null}
                 </div>
               ))}
+            </div>
+          ) : null}
+
+          {liveError || liveNow?.errors.length ? (
+            <div className="rounded-lg border border-warn/30 bg-warn/5 px-3 py-2 text-[11px] leading-relaxed text-warn">
+              {liveError ? <p>{`Snapchat stats unavailable — ${liveError}. Revenue below is unaffected.`}</p> : null}
+              {liveNow?.errors.map((e) => <p key={e}>{`Snapchat · ${e}`}</p>)}
             </div>
           ) : null}
 
@@ -177,8 +259,18 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
             <table className="w-full text-[12px]">
               <thead className="bg-surface2/50 text-[10px] uppercase tracking-[0.12em] text-faint">
                 <tr>
-                  {["Key", "Status", "Campaign", "Buyer", "Claimed", "Revenue", "Impr.", "eCPM", "Visitors", "Trig/Fired", "Conv.", ""].map((h) => (
-                    <th key={h} className="px-3 py-2 text-left font-semibold">
+                  <th colSpan={HEAD.length} />
+                  <th colSpan={HEAD_SNAP.length} className="border-l border-line/60 px-3 pt-2 text-left font-semibold text-[#f3f0a3]/80">
+                    Snapchat
+                  </th>
+                  <th colSpan={HEAD_LION.length} className="border-l border-line/60 px-3 pt-2 text-left font-semibold text-dim">
+                    Partner · LION
+                  </th>
+                  <th />
+                </tr>
+                <tr>
+                  {[...HEAD, ...HEAD_SNAP, ...HEAD_LION, ""].map((h, i) => (
+                    <th key={h || "release"} className={"whitespace-nowrap py-2 text-left font-semibold " + (i === HEAD.length || i === HEAD.length + HEAD_SNAP.length ? "border-l border-line/60 pl-3 pr-2" : i > HEAD.length ? "px-2" : "px-3")}>
                       {h}
                     </th>
                   ))}
@@ -188,19 +280,29 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
                 {shown.map((r) => {
                   const b = r.binding;
                   const m = r.metrics;
+                  // The live row must be about the campaign the registry names NOW (a key released and re-claimed between the two reads).
+                  const hit = b ? liveByKey.get(r.key) : undefined;
+                  const l = hit && hit.campaignId === b?.campaign_id ? hit : null;
+                  const note = l ? snapDeliveryNote(l) : null;
+                  const s = l?.stats ?? null;
+                  // A bound campaign whose numbers are still on the way reads "…"; one whose account could not be read reads "n/a".
+                  const snapCell = (v: (st: SnapCampaignStats) => string) => (s ? v(s) : !b?.campaign_id ? "—" : l ? "n/a" : liveLoading ? "…" : "—");
+                  const pl = s && m ? m.revenue - s.spend : null;
                   return (
                     <tr key={r.key} className="border-t border-line/60 hover:bg-raise/40">
-                      <td className="px-3 py-2 font-mono text-[#f3f0a3]">{r.key}</td>
+                      <td className="whitespace-nowrap px-3 py-2 font-mono text-[#f3f0a3]">{r.key}</td>
                       <td className="px-3 py-2">
                         <span className={"rounded px-1.5 py-[1px] text-[10px] font-semibold uppercase " + (!b ? "bg-surface2 text-faint" : b.status === "active" ? "bg-launch/15 text-launch2" : "bg-warn/15 text-warn")}>{b ? b.status : "free"}</span>
                       </td>
-                      <td className="max-w-[360px] px-3 py-2">
+                      <td className="max-w-[300px] px-3 py-2">
                         {b ? (
                           <div className="min-w-0">
                             <p className="truncate text-ink" title={b.name || ""}>
                               {b.name || b.niche || "—"}
                             </p>
+                            {note ? <p className={"truncate text-[10.5px] " + NOTE_TONE[note.tone]}>{note.text}</p> : null}
                             <p className="truncate font-mono text-[10px] text-faint">
+                              {l?.adAccountName ? `${accountLabel(l.adAccountName)} · ` : ""}
                               {b.campaign_id ? `cmp ${b.campaign_id}` : "no campaign id"}
                               {b.notes ? ` · ${b.notes}` : ""}
                             </p>
@@ -209,17 +311,23 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
                           <span className="text-faint">—</span>
                         )}
                       </td>
-                      <td className="px-3 py-2 text-dim">{b?.user || "—"}</td>
-                      <td className="px-3 py-2 font-mono text-[10.5px] text-faint">{b?.claimed_at ? fmtDay(b.claimed_at) : "—"}</td>
-                      <td className="px-3 py-2 font-mono tabular-nums text-ink">
-                        {m ? money(m.revenue) : "—"}
-                        {m && report?.partial && m.forecastedRevenue ? <span className="text-faint"> / {money(m.forecastedRevenue)}</span> : null}
+                      <td className="whitespace-nowrap px-3 py-2 text-dim">
+                        {b?.user || "—"}
+                        {b?.claimed_at ? <p className="font-mono text-[10px] text-faint" title="claimed (São Paulo date)">{fmtDay(b.claimed_at)}</p> : null}
                       </td>
-                      <td className="px-3 py-2 font-mono tabular-nums text-dim">{m ? int(m.impressions) : "—"}</td>
-                      <td className="px-3 py-2 font-mono tabular-nums text-dim">{m ? money(m.ecpm) : "—"}</td>
-                      <td className="px-3 py-2 font-mono tabular-nums text-dim">{m ? int(m.visitors) : "—"}</td>
-                      <td className="px-3 py-2 font-mono tabular-nums text-dim">{m ? `${int(m.triggered)}/${int(m.fired)}` : "—"}</td>
-                      <td className="px-3 py-2 font-mono tabular-nums text-dim">{m ? int(m.conversions) : "—"}</td>
+                      <td className="border-l border-line/60 py-2 pl-3 pr-2 font-mono tabular-nums text-ink">{snapCell((st) => money(st.spend))}</td>
+                      <td className="px-2 py-2 font-mono tabular-nums text-dim">{snapCell((st) => int(st.impressions))}</td>
+                      <td className="px-2 py-2 font-mono tabular-nums text-dim">{snapCell((st) => int(st.swipes))}</td>
+                      <td className="whitespace-nowrap border-l border-line/60 py-2 pl-3 pr-2 font-mono tabular-nums text-ink">
+                        {m ? money(m.revenue) : "—"}
+                        {m && report?.partial && m.forecastedRevenue ? <span className="text-faint" title="the partner's forecast for the rest of the day">{` +${money(m.forecastedRevenue)}`}</span> : null}
+                      </td>
+                      <td className={"px-2 py-2 font-mono tabular-nums " + (pl != null ? plTone(pl) : "text-dim")}>{pl != null ? money(pl) : "—"}</td>
+                      <td className="px-2 py-2 font-mono tabular-nums text-dim">{m ? int(m.impressions) : "—"}</td>
+                      <td className="px-2 py-2 font-mono tabular-nums text-dim">{m ? money(m.ecpm) : "—"}</td>
+                      <td className="px-2 py-2 font-mono tabular-nums text-dim">{m ? int(m.visitors) : "—"}</td>
+                      <td className="px-2 py-2 font-mono tabular-nums text-dim">{m ? `${int(m.triggered)}/${int(m.fired)}` : "—"}</td>
+                      <td className="px-2 py-2 font-mono tabular-nums text-dim">{m ? int(m.conversions) : "—"}</td>
                       <td className="px-3 py-2 text-right">
                         {b && user?.owner ? (
                           <button type="button" onClick={() => void release(r.key)} disabled={releasing === r.key} className="rounded-md border border-danger/30 px-2 py-1 text-[10.5px] font-medium text-danger transition-colors hover:bg-danger/10 disabled:opacity-50">
@@ -232,7 +340,7 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
                 })}
                 {shown.length === 0 ? (
                   <tr>
-                    <td colSpan={12} className="px-3 py-8 text-center text-[12px] text-faint">
+                    <td colSpan={COLUMNS} className="px-3 py-8 text-center text-[12px] text-faint">
                       {keysError ? `Registry unavailable — ${keysError}` : "Nothing to show"}
                     </td>
                   </tr>
@@ -240,7 +348,9 @@ export function SnapKeysBoard({ user }: { user?: SessionUser }) {
               </tbody>
             </table>
           </div>
-          <p className="text-[10.5px] leading-relaxed text-faint">Release deletes the registry row only. A retired key still owns a campaign shell on Snapchat (PAUSED) — clean it in Ads Manager, then release. Revenue is reported per key by the partner through LION; today is partial and carries the partner&apos;s forecast, a day is final the next morning.</p>
+          <p className="text-[10.5px] leading-relaxed text-faint">
+            Both sides cover the same São Paulo day (UTC−3, LION&apos;s day): spend, impressions and swipes come from Snapchat for the campaign bound to the key, revenue is reported per key by the partner through LION. Today is partial and carries the partner&apos;s forecast; a day is final the next morning, and Snapchat keeps settling its own numbers for a few hours. P/L is confirmed revenue minus spend. Release deletes the registry row only. A retired key still owns a campaign shell on Snapchat (PAUSED) — clean it in Ads Manager, then release.
+          </p>
         </div>
       </main>
     </>

@@ -8,7 +8,7 @@ import Link from "next/link";
 
 const PILLS = [
   { key: "launch", href: "/snap", label: "Launch", hint: "Web campaigns on our Snapchat ad account — one partner key per campaign" },
-  { key: "keys", href: "/snap/keys", label: "Keys · report", hint: "The 100 partner keys, who holds them, and LION's daily revenue per key" },
+  { key: "keys", href: "/snap/keys", label: "Keys · report", hint: "The 100 partner keys, who holds them, what each campaign spent on Snapchat and earned through LION that day" },
 ] as const;
 
 export function SnapNav({ active }: { active: "launch" | "keys" }) {
