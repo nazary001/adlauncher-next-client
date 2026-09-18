@@ -8,8 +8,11 @@
 // to close. The one client-side phase is the creative UPLOAD (avatar → 256² PNG, videos → Vercel
 // Blob, three at a time) — while that runs the tab must stay open, so the unload guard + notice
 // mount exactly then. Gating is delegated to tiktokLaunchWire (the server's own validator) so the
-// bay can never disagree with LION's refusal. A card that was queued is NOT ready again until it
-// is edited — a second press of Launch can't silently build the same campaigns twice.
+// bay can never disagree with LION's refusal. Three rules keep a wave from building twice or from
+// lying about what it sent: a card that was queued is NOT ready again until it is edited; the cards
+// are LOCKED while a wave uploads and fires (what is on screen is what goes out); and a wave goes
+// out with EVERY ready card or not at all — the wave id is cut from the ready set, so the body a
+// retry re-sends under that id is always the body the first attempt sent.
 
 import { useEffect, useRef, useState } from "react";
 import { Header } from "./header";
@@ -74,6 +77,9 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
   // One waveId per prepared wave (same ready-card content): a retry after a lost answer re-sends
   // the same id, and the server's wave claim makes the re-POST a no-op instead of a second pump.
   const waveRef = useRef<{ sig: string; id: string } | null>(null);
+  // Files this tab has already hosted (file id → Blob URL): a wave that has to be fired again — an
+  // upload that died on another card, an answer that never came — re-uploads nothing.
+  const hostedRef = useRef(new Map<string, string>());
 
   // Remembered identities live in localStorage — unreadable during SSR, so they join after mount.
   useEffect(() => {
@@ -92,6 +98,7 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
 
   // Any edit makes a queued / failed card a fresh draft again (and drops the preview).
   const patch = (id: string, p: Partial<TiktokCard>) => {
+    if (firing) return; // the wave on its way out was cut from what is on screen — see the header
     setCards((cs) => cs.map((c) => (c.id === id ? { ...c, ...p, state: "idle", msg: undefined, progress: undefined } : c)));
     setPreviewed(false);
   };
@@ -99,10 +106,12 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
   const setCardState = (id: string, p: Partial<TiktokCard>) => setCards((cs) => cs.map((c) => (c.id === id ? { ...c, ...p } : c)));
 
   const add = () => {
+    if (firing) return;
     setCards((cs) => (cs.length >= MAX_CARDS ? cs : [...cs, freshTiktokCard()]));
     setPreviewed(false);
   };
   const duplicate = (id: string) => {
+    if (firing) return;
     setCards((cs) => {
       const i = cs.findIndex((c) => c.id === id);
       if (i === -1 || cs.length >= MAX_CARDS) return cs;
@@ -111,6 +120,7 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
     setPreviewed(false);
   };
   const remove = (id: string) => {
+    if (firing) return;
     setCards((cs) => (cs.length <= 1 ? cs : cs.filter((c) => c.id !== id)));
     setPreviewed(false);
   };
@@ -177,8 +187,14 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
     const base = `tiktok/${safeBlobName(username, "buyer")}/${waveId}/${c.id}`;
     if (c.identityMode === "file" && c.identityFiles[0]) {
       setCardState(c.id, { state: "uploading", progress: "Preparing the identity avatar…" });
-      const png = await identityAvatarPng(c.identityFiles[0].url);
-      upload.identityUrl = await uploadCreativeFile(`${base}-identity.png`, png, "Identity avatar");
+      const key = `identity:${c.identityFiles[0].id}`;
+      let url = hostedRef.current.get(key);
+      if (!url) {
+        const png = await identityAvatarPng(c.identityFiles[0].url);
+        url = await uploadCreativeFile(`${base}-identity.png`, png, "Identity avatar");
+        hostedRef.current.set(key, url);
+      }
+      upload.identityUrl = url;
     }
     if (c.videoMode === "files" && c.videoFiles.length > 0) {
       const files = c.videoFiles;
@@ -193,8 +209,13 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
           const f = files[i];
           const label = files.length === 1 ? "Video" : `Video #${i + 1} (${f.name})`;
           try {
-            const file = await readCreative(f.url, f.name, "video", label);
-            urls[i] = await uploadCreativeFile(`${base}-v${i + 1}-${safeBlobName(f.name, "video.mp4")}`, file, label);
+            let url = hostedRef.current.get(f.id);
+            if (!url) {
+              const file = await readCreative(f.url, f.name, "video", label);
+              url = await uploadCreativeFile(`${base}-v${i + 1}-${safeBlobName(f.name, "video.mp4")}`, file, label);
+              hostedRef.current.set(f.id, url);
+            }
+            urls[i] = url;
           } catch (e) {
             failed = true;
             throw e;
@@ -228,15 +249,19 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
       const shots: TiktokLaunchShotIn[] = [];
       const shotCard: string[] = []; // parallel to shots: the card id each shot came from
       const hosted: Array<{ card: TiktokCard; upload: TiktokCardUpload }> = [];
+      let uploadFailed = false;
       for (const v of ready) {
         const c = v.card;
         let upload: TiktokCardUpload;
         try {
           upload = await uploadCard(c, waveId);
         } catch (e) {
-          // This card's upload died — mark it and keep launching the others.
+          // This card's upload died → NOTHING is sent. A wave cut short would go out under the id of
+          // the full ready set; if its answer were then lost, the retry (upload healed) would re-send
+          // that id with MORE cards and be told "already accepted" for campaigns never launched.
           setCardState(c.id, { state: "error", msg: String((e as Error).message ?? e) });
-          continue;
+          uploadFailed = true;
+          break;
         }
         hosted.push({ card: c, upload });
         const shot = buildTiktokShot({ ...c, pixel: v.effPixel }, { currency: v.target?.currency, advertiserName: v.target?.name, upload });
@@ -247,8 +272,9 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
         setCardState(c.id, { state: "sending", msg: "queuing on server…" });
       }
 
-      if (shots.length === 0) {
-        setFireNote("Nothing was launched — every card failed to upload its files. Re-attach them and try again.");
+      if (uploadFailed || shots.length === 0) {
+        setFireNote("Nothing was launched — a card's files failed to upload (see the note on it). Fix or remove that card and press Launch again: the files that did upload are kept, nothing is uploaded twice.");
+        for (const h of hosted) setCardState(h.card.id, { state: "idle", msg: undefined, progress: undefined });
         return;
       }
 
@@ -283,7 +309,13 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
         }
       }
     } catch (e) {
-      setFireNote(String((e as Error).message ?? e));
+      // No ANSWER is not a refusal: the wave may have been accepted before the connection dropped.
+      // The same cards re-send the SAME wave id (the server answers "already accepted" instead of
+      // pumping twice) — an edit would mint a new id, so the drawer is the thing to look at first.
+      setFireNote(`No answer from the server (${String((e as Error).message ?? e)}) — the wave MAY have been accepted: check the Task Manager. Pressing Launch again WITHOUT edits is safe.`);
+      for (const v of ready) setCardState(v.card.id, { state: "error", msg: "no answer — check the Task Manager before editing this card", progress: undefined });
+      refresh();
+      setOpen(true);
     } finally {
       setFiring(false);
       fireGate.current.exit();
@@ -316,7 +348,7 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
                 <button
                   type="button"
                   onClick={add}
-                  disabled={cards.length >= MAX_CARDS}
+                  disabled={cards.length >= MAX_CARDS || firing}
                   className="flex h-9 items-center gap-2 rounded-lg border border-accent/40 bg-accent/15 px-3.5 text-[13px] font-semibold text-[#9db8ff] transition-all duration-150 hover:border-accent/60 hover:bg-accent/25 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 >
                   <PlusIcon className="h-4 w-4" />
@@ -342,6 +374,7 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
                 ready={v.ready}
                 advertisersLoading={advertisersLoading}
                 highlight={highlightId === v.card.id}
+                locked={firing}
                 landings={landings}
                 identities={identities}
                 onForgetIdentity={(id) => setIdentities(forgetIdentity(id))}
@@ -355,7 +388,7 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
             <button
               type="button"
               onClick={add}
-              disabled={cards.length >= MAX_CARDS}
+              disabled={cards.length >= MAX_CARDS || firing}
               className="flex h-13 w-full items-center justify-center gap-2 rounded-2xl border border-dashed border-line2 py-3 text-[13px] font-medium text-dim transition-all duration-200 hover:border-accent/50 hover:bg-accent/5 hover:text-ink active:scale-[0.995] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             >
               <PlusIcon className="h-4 w-4" />

@@ -154,7 +154,7 @@ type Dest =
  *  `pending` = nothing to fix, a read is still in flight. */
 type RowPlan =
   | { ready: true; label: string }
-  | { ready: false; why: string; at: "target" | "config" | "pixel" | "source" | "wire"; pending?: boolean };
+  | { ready: false; why: string; at: "target" | "config" | "pixel" | "source" | "wire" | "queued"; pending?: boolean };
 
 /**
  * TikTok clone / JURO board — the Google clone board's twin (a sticky Settings column with the wave
@@ -229,6 +229,7 @@ export function TiktokCloneBoard({
     setMode(m);
     setPreviewed(false);
     setFireNote(null);
+    reopenQueued();
     // The value field means DOLLARS in JURO and under "Same as source" / Bid cap, but a MULTIPLIER
     // under Min ROAS: a row that carried a ROAS or value-less mode drops back to "Same as source"
     // with the machine bid, so 1,20 (= 120 %) can never ride as $1.20 in the other mode. A typed
@@ -247,7 +248,14 @@ export function TiktokCloneBoard({
     }
   };
 
+  /** A launch-lifecycle / machine patch (sending → ok | error, facts and prefills arriving). */
   const patchRow = (id: string, p: Partial<Row>) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p } : r)));
+  /** A BUYER's edit: it makes a queued (or failed) row a fresh draft again. A row that was queued is
+   *  NOT fireable until this happens — Preview → Fire twice must never build the same copies twice. */
+  const editRow = (id: string, p: Partial<Row>) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p, state: "idle", msg: undefined } : r)));
+  /** A wave-level change (mode, target advertiser, pixel, default copies) changes what EVERY row
+   *  riding the defaults would send — queued rows become drafts of that new wave. */
+  const reopenQueued = () => setRows((rs) => (rs.some((r) => r.state === "ok" || r.state === "error") ? rs.map((r) => (r.state === "ok" || r.state === "error" ? { ...r, state: "idle", msg: undefined } : r)) : rs));
 
   const addSources = () => {
     const ids = [...new Set(draftId.split(/[\s,;]+/).map((x) => x.trim()).filter((x) => TIKTOK_CAMPAIGN_ID_RE.test(x)))];
@@ -426,6 +434,7 @@ export function TiktokCloneBoard({
   /** Ready (with the monitor's bid tag) or the sentence that names the fix — in the server's own
    *  order: target → config → pixel → wire for a clone; the two JURO rules → wire for a JURO. */
   const rowPlan = (r: Row): RowPlan => {
+    if (r.state === "ok") return { ready: false, at: "queued", why: "already queued — edit the row to fire it again" };
     const shot = rowShot(r);
     const nameSuffix = rowSuffix(r);
     if (mode === "juro") {
@@ -465,7 +474,10 @@ export function TiktokCloneBoard({
   // fetch is never waited on, and a failed trigger isn't proof of anything — the pump re-asks.
   const datasetBad = (r: Row): boolean => r.info?.dataset.state === "missing";
   const lowBudget = (r: Row): boolean => idOk(r) && parseMoney(r.budget) < TIKTOK_BUDGET_MIN;
-  const candidateRows = rows.filter((r) => idOk(r) && !lowBudget(r));
+  // A row that was QUEUED is out of the wave until the buyer edits it (or changes a wave default):
+  // the counts, the totals and the fire set all read from here, so Preview → Fire a second time
+  // can't rebuild what LION is already building.
+  const candidateRows = rows.filter((r) => idOk(r) && !lowBudget(r) && r.state !== "ok");
   const validRows = candidateRows.filter((r) => !datasetBad(r));
   const blockedDatasetRows = candidateRows.filter(datasetBad);
   const lowBudgetCount = rows.filter(lowBudget).length;
@@ -551,7 +563,7 @@ export function TiktokCloneBoard({
         waveRef.current = null; // accepted — the next wave is a new wave
         setPreviewed(false);
         validRows.forEach((r) =>
-          patchRow(r.id, { state: "ok", msg: `${rowCopies(r)}/${rowCopies(r)} queued — safe to close the tab (LION builds them server-side)` }),
+          patchRow(r.id, { state: "ok", msg: `${rowCopies(r)}/${rowCopies(r)} queued — safe to close the tab (LION builds them server-side) · edit the row to fire it again` }),
         );
         refresh(); // pull the pump-stamped rows now instead of waiting for the next poll tick
         setOpen(true); // the drawer mirrors the server's progress from the shared store
@@ -571,8 +583,14 @@ export function TiktokCloneBoard({
         );
       }
     } catch (e) {
-      const msg = String((e as Error).message ?? e);
-      validRows.forEach((r) => patchRow(r.id, { state: "error", msg }));
+      // No ANSWER is not a refusal: the wave may have been accepted before the connection dropped.
+      // The same rows re-send the SAME wave id (the server answers "already accepted" instead of
+      // pumping twice) — an edit would mint a new id, so the drawer is the thing to look at first.
+      const msg = `No answer from the server (${String((e as Error).message ?? e)}) — the wave MAY have been accepted: check the Task Manager. Firing again WITHOUT edits is safe.`;
+      setFireNote(msg);
+      validRows.forEach((r) => patchRow(r.id, { state: "error", msg: "no answer — check the Task Manager before editing this row" }));
+      refresh();
+      setOpen(true);
     } finally {
       setFiring(false);
       fireGate.current.exit();
@@ -653,6 +671,7 @@ export function TiktokCloneBoard({
                       setAdvertiser(v);
                       setPixel("");
                       setPreviewed(false);
+                      reopenQueued();
                       // A pixel belongs to ONE advertiser: rows riding the wave default drop a pick
                       // made for the previous target (rows with their own advertiser keep theirs).
                       setRows((rs) => rs.map((r) => (r.advertiser || !r.pixel ? r : { ...r, pixel: "" })));
@@ -703,6 +722,7 @@ export function TiktokCloneBoard({
                     value={effWavePixel}
                     onChange={(v) => {
                       setPixel(v);
+                      reopenQueued();
                       setPreviewed(false);
                     }}
                     options={pixelOptionsFor(waveDest)}
@@ -729,6 +749,7 @@ export function TiktokCloneBoard({
                   onChange={(e) => {
                     const raw = e.target.value.replace(/\D/g, "").slice(0, 2);
                     setCopies(raw !== "" && Number(raw) > MAX_COPIES ? String(MAX_COPIES) : raw);
+                    reopenQueued();
                     setPreviewed(false);
                   }}
                   onBlur={() => {
@@ -965,7 +986,7 @@ export function TiktokCloneBoard({
                         <AutoTextarea
                           value={r.suffix}
                           onChange={(v) => {
-                            patchRow(r.id, { suffix: v });
+                            editRow(r.id, { suffix: v });
                             setPreviewed(false);
                           }}
                           placeholder="note — appended to the team suffix"
@@ -1173,7 +1194,7 @@ export function TiktokCloneBoard({
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      patchRow(r.id, { advertiser: "", pixel: "" });
+                                      editRow(r.id, { advertiser: "", pixel: "" });
                                       setPreviewed(false);
                                     }}
                                     aria-label="Back to the wave defaults"
@@ -1195,7 +1216,7 @@ export function TiktokCloneBoard({
                                 size="sm"
                                 value={r.advertiser || advertiser}
                                 onChange={(v) => {
-                                  patchRow(r.id, { advertiser: v, pixel: "" });
+                                  editRow(r.id, { advertiser: v, pixel: "" });
                                   setPreviewed(false);
                                 }}
                                 options={advertiserOptions}
@@ -1209,7 +1230,7 @@ export function TiktokCloneBoard({
                                 size="sm"
                                 value={destPixel(dest, r.pixel)}
                                 onChange={(v) => {
-                                  patchRow(r.id, { pixel: v });
+                                  editRow(r.id, { pixel: v });
                                   setPreviewed(false);
                                 }}
                                 options={pixelOptionsFor(dest)}
@@ -1261,7 +1282,7 @@ export function TiktokCloneBoard({
                                   // kind means dollars, empty otherwise — a value-less mode must
                                   // ride without one).
                                   const next: Row = valueKindOf(val) === valueKind ? { ...r, bidMode: val } : { ...r, bidMode: val, bid: "", autoBid: true };
-                                  patchRow(r.id, { bidMode: next.bidMode, bid: next.bid, autoBid: next.autoBid, ...derivePrefill(next) });
+                                  editRow(r.id, { bidMode: next.bidMode, bid: next.bid, autoBid: next.autoBid, ...derivePrefill(next) });
                                   setPreviewed(false);
                                 }}
                                 disabled={badDataset}
@@ -1269,7 +1290,7 @@ export function TiktokCloneBoard({
                                 title={
                                   modeDef
                                     ? modeDef.hint
-                                    : "Same as source keeps the source's mode. The partner never inherits a BID — a Bid-cap source needs its bid typed here (prefilled from the source)"
+                                    : "Same as source keeps the source's mode. The partner never inherits a BID — a Bid-cap source needs its bid typed here (prefilled from the source). The value typed here always rides as a DOLLAR bid: for a Min-ROAS source pick Min ROAS explicitly and type the goal there"
                                 }
                                 className={cellSelect + (r.bidMode ? " border-accent/50 text-[#9db8ff]" : "")}
                               >
@@ -1304,7 +1325,7 @@ export function TiktokCloneBoard({
                                 <input
                                   value={r.bid}
                                   onChange={(e) => {
-                                    patchRow(r.id, { bid: limitMoneyCents(e.target.value, valueKind === "roas" ? TIKTOK_ROAS_MAX : TIKTOK_BID_MAX), autoBid: false });
+                                    editRow(r.id, { bid: limitMoneyCents(e.target.value, valueKind === "roas" ? TIKTOK_ROAS_MAX : TIKTOK_BID_MAX), autoBid: false });
                                     setPreviewed(false);
                                   }}
                                   disabled={badDataset}
@@ -1342,7 +1363,7 @@ export function TiktokCloneBoard({
                             <input
                               value={r.budget}
                               onChange={(e) => {
-                                patchRow(r.id, { budget: limitMoneyCents(e.target.value, TIKTOK_BUDGET_MAX), autoBudget: false });
+                                editRow(r.id, { budget: limitMoneyCents(e.target.value, TIKTOK_BUDGET_MAX), autoBudget: false });
                                 setPreviewed(false);
                               }}
                               disabled={badDataset}
@@ -1368,7 +1389,7 @@ export function TiktokCloneBoard({
                             <button
                               type="button"
                               onClick={() => {
-                                patchRow(r.id, { copies: String(Math.max(1, rowCopies(r) - 1)) });
+                                editRow(r.id, { copies: String(Math.max(1, rowCopies(r) - 1)) });
                                 setPreviewed(false);
                               }}
                               disabled={badDataset || rowCopies(r) <= 1}
@@ -1382,7 +1403,7 @@ export function TiktokCloneBoard({
                               value={r.copies}
                               onChange={(e) => {
                                 const raw = e.target.value.replace(/\D/g, "").slice(0, 2);
-                                patchRow(r.id, { copies: raw !== "" && Number(raw) > MAX_COPIES ? String(MAX_COPIES) : raw });
+                                editRow(r.id, { copies: raw !== "" && Number(raw) > MAX_COPIES ? String(MAX_COPIES) : raw });
                                 setPreviewed(false);
                               }}
                               onBlur={() => {
@@ -1400,7 +1421,7 @@ export function TiktokCloneBoard({
                             <button
                               type="button"
                               onClick={() => {
-                                patchRow(r.id, { copies: String(Math.min(MAX_COPIES, rowCopies(r) + 1)) });
+                                editRow(r.id, { copies: String(Math.min(MAX_COPIES, rowCopies(r) + 1)) });
                                 setPreviewed(false);
                               }}
                               disabled={badDataset || rowCopies(r) >= MAX_COPIES}

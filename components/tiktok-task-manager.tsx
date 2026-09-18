@@ -429,7 +429,15 @@ export function TiktokTaskManagerProvider({
     if (!TIKTOK_ENABLED) return;
     // A "sent" row counts as moving only inside the finisher's window — one LION never finished
     // must not keep a tab polling for the rest of its life.
-    const moving = (t: TiktokTask) => t.status === "running" || t.status === "queued" || (isSent(t) && !isUnconfirmed(t, Date.now() + skewRef.current));
+    // A "running" row counts only while its pump can still be alive (the pump lives ≤ 800 s): an
+    // orphan whose pump died never turns terminal, and must not keep every tab that once loaded it
+    // polling for the row's whole 7-day window.
+    const PUMP_LIFE_MS = 15 * 60_000;
+    const moving = (t: TiktokTask) => {
+      const estNow = Date.now() + skewRef.current;
+      if (t.status === "running" || t.status === "queued") return estNow - (t.startedAt ?? t.queuedAt) < PUMP_LIFE_MS;
+      return isSent(t) && !isUnconfirmed(t, estNow);
+    };
     const watched = () => onPlatformRef.current || openRef.current || tasksRef.current.some(moving);
     const tick = () => {
       if (document.hidden || !watched()) return;

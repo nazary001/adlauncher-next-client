@@ -303,6 +303,7 @@ export function TiktokLaunchCard({
   ready,
   advertisersLoading,
   highlight,
+  locked = false,
   landings,
   identities,
   onForgetIdentity,
@@ -328,6 +329,9 @@ export function TiktokLaunchCard({
   ready: boolean;
   advertisersLoading: boolean;
   highlight?: boolean;
+  /** A wave is uploading / firing: the card is frozen — the shot was cut from what is on screen,
+   *  and an edit now would show one campaign while another goes out (the board ignores it too). */
+  locked?: boolean;
   /** The team's live landings — suggestions for the landing field. */
   landings: string[];
   identities: RememberedIdentity[];
@@ -410,8 +414,12 @@ export function TiktokLaunchCard({
   return (
     <div
       id={`ttcard-${card.id}`}
+      aria-busy={locked || undefined}
+      // `inert` takes the keyboard too — pointer-events alone would still let a focused field edit.
+      inert={locked || undefined}
       className={
         "animate-row-in overflow-hidden rounded-2xl border bg-surface transition-shadow " +
+        (locked ? "pointer-events-none select-none opacity-75 " : "") +
         (highlight ? "border-accent/60 shadow-[0_0_0_2px_rgba(122,150,255,0.28)]" : "border-line")
       }
     >
