@@ -77,14 +77,15 @@ export async function GET(req: Request) {
   // $or a row created without a partner stamp (historic server-writer/beacon creates) would be
   // invisible in EVERY drawer. Null = MO by definition (lib/task-view.ts). The $and excludes every
   // other partner's rows: HS ("br", see /api/hs-tasks), AIF ("us"), Google ("gg", see
-  // /api/google-tasks) and Snapchat ("sn", see /api/snap-tasks) each run their OWN task manager
-  // over this one collection.
+  // /api/google-tasks), Snapchat ("sn", see /api/snap-tasks) and TikTok ("tt", see
+  // /api/tiktok-tasks) each run their OWN task manager over this one collection.
   const partnerFilter =
     scope === "aif"
       ? `&filters[partner][$eq]=us`
       : `&filters[$or][0][partner][$null]=true` +
         `&filters[$or][1][$and][0][partner][$ne]=br&filters[$or][1][$and][1][partner][$ne]=us` +
-        `&filters[$or][1][$and][2][partner][$ne]=gg&filters[$or][1][$and][3][partner][$ne]=sn`;
+        `&filters[$or][1][$and][2][partner][$ne]=gg&filters[$or][1][$and][3][partner][$ne]=sn` +
+        `&filters[$or][1][$and][4][partner][$ne]=tt`;
   // Bounded + short-cached read (task-store): the team's polling collapses to ~one Strapi read per
   // scope per few seconds, and a slow/failing Strapi serves the last good list instead of hanging.
   const cutoff = Date.now() - WINDOW_MS;

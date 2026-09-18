@@ -267,6 +267,12 @@ export const GOOGLE_ENABLED = process.env.NEXT_PUBLIC_GOOGLE_ENABLED === "1";
  *  in this phase). It unlocks the header's Snapchat tab + the /snap routes. */
 export const SNAP_ENABLED = process.env.NEXT_PUBLIC_SNAP_ENABLED === "1";
 
+/** TikTok is a PLATFORM tab (not a PartnerId), pinned to the HS partner like Google: the rail runs
+ *  entirely through LION's tiktok-weapon API. Build-time gate, same dormant-on-prod pattern — set
+ *  NEXT_PUBLIC_TIKTOK_ENABLED=1 in .env.local ONLY (not on Vercel until the owner says so). It
+ *  unlocks the header's TikTok tab + the /tiktok routes; NEXT_PUBLIC_* is inlined at build time. */
+export const TIKTOK_ENABLED = process.env.NEXT_PUBLIC_TIKTOK_ENABLED === "1";
+
 export const PARTNERS: PartnerConfig[] = [
   {
     id: "br",
