@@ -3,8 +3,8 @@
 // Deliberately dependency-free (no "@/" imports, no extensionless imports) so
 // `node --test tests/tiktok-launch.test.ts` runs it straight off Node's type stripping — this
 // module carries the DECISIONS (mode vocabulary, money parsing, the bid plan, LION's name grammar,
-// locales, the ONE fresh-launch validator, the clone / JURO wires, error wording, the row
-// disposition of a partner task); the routes/boards own the I/O around them.
+// locales, the ONE fresh-launch validator, the clone / JURO wires, the row disposition of a
+// partner task); the routes/boards own the I/O around them.
 
 export type TiktokKind = "launch" | "clone" | "juro";
 
@@ -597,25 +597,28 @@ export function tiktokJuroWire(shot: TiktokCloneShotIn, r: { nameSuffix: string 
   };
 }
 
-// ---------- partner sentences ----------
+// ---------- pixel resolution ----------
 
-const listOf = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => String(x ?? "")).filter(Boolean) : []);
+/** A pixel of the target advertiser as its config lists it. */
+export type TiktokPixelLike = { pixelCode: string; supportedModes: string[] };
 
-/** Human sentence for a tiktok-weapon refusal body (`{error|message, hint?, allowed_domains?,
- *  available_pixels?}`) — the partner's words first, its lists appended. */
-export function tiktokWeaponErrorMessage(status: number | undefined, body: unknown): string {
-  const rec = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
-  const pick = (v: unknown): string => (typeof v === "string" && v.trim() ? v.trim() : "");
-  let msg = pick(rec.error) || pick(rec.message) || pick(rec.detail) || (typeof body === "string" && body.trim() ? body.trim().slice(0, 300) : "");
-  if (!msg) msg = status ? `tiktok-weapon HTTP ${status}` : "tiktok-weapon unreachable";
-  const domains = listOf(rec.allowed_domains ?? rec.allowedDomains ?? rec.domains);
-  if (domains.length) msg += ` · allowed domains: ${domains.join(", ")}`;
-  const pixels = listOf(rec.available_pixels ?? rec.availablePixels);
-  if (pixels.length) msg += ` · available pixels: ${pixels.join(", ")}`;
-  const hint = pick(rec.hint);
-  if (hint && !msg.includes(hint)) msg += ` (${hint})`;
-  if (status === 403 && !/advertiser/i.test(msg)) msg += " — advertiser not allowed for the LION user or not launch eligible";
-  return msg;
+/**
+ * Which pixel rides for a target advertiser: exactly one → it is used (a different pick is a
+ * refusal, not a silent swap); several → the buyer's pick is required and must be one of them;
+ * none → the advertiser can't launch (the partner's `launch_eligible` already implies a usable
+ * pixel, so this is a config that changed under us).
+ */
+export function tiktokResolvePixel(pixels: TiktokPixelLike[], picked: string, advertiserName: string): TiktokPixelLike | { refusal: string } {
+  const want = String(picked ?? "").trim();
+  const name = advertiserName || "this advertiser";
+  if (pixels.length === 0) return { refusal: `${name} has no usable pixel — LION can't launch on it` };
+  if (pixels.length === 1) {
+    if (want && want !== pixels[0].pixelCode) return { refusal: `pixel ${want} is not on ${name} (its only pixel is ${pixels[0].pixelCode})` };
+    return pixels[0];
+  }
+  if (!want) return { refusal: `${name} has ${pixels.length} pixels — pick one` };
+  const hit = pixels.find((p) => p.pixelCode === want);
+  return hit ?? { refusal: `pixel ${want} is not on ${name}` };
 }
 
 // ---------- task lifecycle ----------

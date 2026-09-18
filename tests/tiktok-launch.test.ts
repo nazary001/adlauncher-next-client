@@ -23,10 +23,10 @@ import {
   tiktokNameHeadPreview,
   tiktokNamePreview,
   tiktokNameSuffix,
+  tiktokResolvePixel,
   tiktokShotTaskId,
   tiktokTaskOutcome,
   tiktokTaskStage,
-  tiktokWeaponErrorMessage,
   todaySaoPauloDotDDMM,
   type TiktokCloneShotIn,
   type TiktokLaunchShotIn,
@@ -348,21 +348,7 @@ test("JURO wire: no advertiser, no pixel, no mode", () => {
   assert.match(refusalOf(tiktokJuroWire({ ...CSHOT, mode: "WARM_UP" }, { nameSuffix: "s" })), /JURO keeps/);
 });
 
-// ---------- partner sentences, tasks, ids ----------
-
-test("refusal sentences keep the partner's words and its lists", () => {
-  assert.equal(tiktokWeaponErrorMessage(400, { error: "budget must be at least 20.00" }), "budget must be at least 20.00");
-  assert.equal(
-    tiktokWeaponErrorMessage(400, { error: "landing URL not allowed", allowed_domains: ["choice-flow.org", "guide-choice.com"] }),
-    "landing URL not allowed · allowed domains: choice-flow.org, guide-choice.com",
-  );
-  assert.equal(tiktokWeaponErrorMessage(404, { error: "source not in dataset", hint: "call dataset/fetch first" }), "source not in dataset (call dataset/fetch first)");
-  assert.equal(tiktokWeaponErrorMessage(400, { message: "bad pixel", available_pixels: ["A", "B"] }), "bad pixel · available pixels: A, B");
-  assert.match(tiktokWeaponErrorMessage(403, { error: "Forbidden" }), /advertiser not allowed for the LION user or not launch eligible/);
-  assert.equal(tiktokWeaponErrorMessage(502, "<html>bad gateway</html>"), "<html>bad gateway</html>");
-  assert.equal(tiktokWeaponErrorMessage(500, null), "tiktok-weapon HTTP 500");
-  assert.equal(tiktokWeaponErrorMessage(undefined, null), "tiktok-weapon unreachable");
-});
+// ---------- tasks, ids ----------
 
 test("task status → stage, and the row disposition of a final task", () => {
   assert.equal(tiktokTaskStage("pending"), "queue");
@@ -394,4 +380,16 @@ test("task ids and the account predicate", () => {
   assert.equal(tiktokShotTaskId("juro", "wave1234", 44), "ttj-wave1234-45");
   assert.equal(isTiktokLaunchAccount({ name: "gcxunion 308 (London)", advertiserId: "7501321230599962632", launchEligible: true }), true);
   assert.equal(isTiktokLaunchAccount({ name: "gcxunion 308 (London)", advertiserId: "7501321230599962632", launchEligible: false }), false);
+});
+
+test("pixel resolution: one → auto, several → a pick that belongs, none → refusal", () => {
+  const A = { pixelCode: "PXA", supportedModes: ["NORMAL_WITH_BID"] };
+  const B = { pixelCode: "PXB", supportedModes: [] };
+  assert.deepEqual(tiktokResolvePixel([A], "", "acc"), A);
+  assert.deepEqual(tiktokResolvePixel([A], "PXA", "acc"), A);
+  assert.match(refusalOf(tiktokResolvePixel([A], "PXB", "acc")), /PXB is not on acc \(its only pixel is PXA\)/);
+  assert.match(refusalOf(tiktokResolvePixel([A, B], "", "acc")), /acc has 2 pixels — pick one/);
+  assert.deepEqual(tiktokResolvePixel([A, B], "PXB", "acc"), B);
+  assert.match(refusalOf(tiktokResolvePixel([A, B], "PXC", "acc")), /PXC is not on acc/);
+  assert.match(refusalOf(tiktokResolvePixel([], "", "acc")), /no usable pixel/);
 });
