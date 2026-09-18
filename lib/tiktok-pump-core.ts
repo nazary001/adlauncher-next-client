@@ -75,7 +75,11 @@ export async function runTiktokPump(shots: TiktokPumpShot[], deadline: number, d
   const giveUpMs = opts.giveUpMs ?? 270_000;
   const settleMs = opts.settleMs ?? 360_000;
   const settlePollMs = opts.settlePollMs ?? 10_000;
-  const margin = opts.deadlineMarginMs ?? 20_000;
+  // The tail a shot admitted AT the margin may still need: its submit (the client's 60 s timeout)
+  // plus, on a cold source, the dataset fetch (30 s in the pump's binding). Vercel kills the function
+  // past maxDuration with the outcome UNRECORDED — a row left "running" over a campaign that may
+  // exist — so the last 100 s of the budget admit nothing new.
+  const margin = opts.deadlineMarginMs ?? 100_000;
   const jitter = deps.jitter ?? (() => 1000 + Math.floor(Math.random() * 2000));
   const now = () => deps.now();
   const outOfTime = () => now() > deadline - margin;
@@ -99,7 +103,8 @@ export async function runTiktokPump(shots: TiktokPumpShot[], deadline: number, d
     const ids = [...pending.keys()];
     let next = 0;
     const worker = async () => {
-      while (next < ids.length) {
+      // No new read past the margin: a settle pass over many tasks must end inside the budget too.
+      while (next < ids.length && !outOfTime()) {
         const partnerId = ids[next++];
         try {
           const verdict = deps.outcome(await deps.task(partnerId));

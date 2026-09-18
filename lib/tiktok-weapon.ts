@@ -77,7 +77,7 @@ export function tiktokWeaponErrorMessage(status: number | undefined, body: unkno
  *  carry the actionable sentence). `attempts=1` disables the retry — REQUIRED for the three
  *  campaign-creating launches: a network cut or 5xx is an AMBIGUOUS outcome (the task may have
  *  been accepted before the answer was lost) and a resend could build a second campaign. */
-async function twFetch(path: string, init?: RequestInit, attempts = 2): Promise<unknown> {
+async function twFetch(path: string, init?: RequestInit, attempts = 2, timeoutMs = 60_000): Promise<unknown> {
   if (!TOKEN) throw new TiktokWeaponError("tiktok-weapon token is not configured (TIKTOK_WEAPON_TOKEN / LION_TOKEN)");
   const url = `${BASE}${path}`;
   let lastErr: unknown;
@@ -87,7 +87,7 @@ async function twFetch(path: string, init?: RequestInit, attempts = 2): Promise<
         ...init,
         headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", ...(init?.headers ?? {}) },
         cache: "no-store",
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       const text = await res.text();
       let body: unknown = null;
@@ -223,13 +223,17 @@ export async function twAdvertiserConfig(advertiserId: string): Promise<TwConfig
   return p;
 }
 
+/** Bounds for a read made INSIDE the wave pump, where every second comes out of one time budget
+ *  (the defaults — two attempts of 60 s — suit a route that serves a board). */
+export type TwReadOpts = { attempts?: number; timeoutMs?: number };
+
 // ---------- dataset ----------
 
 /** Trigger the partner's fetch of a source campaign (202, done in 30–120 s; there is NO status
  *  read — the launch itself answers 404 until the source is in). Idempotent → keeps the retry.
  *  Throws 404 for a campaign LION never saw. */
-export async function twDatasetFetch(campaignId: string): Promise<{ runId: string }> {
-  const body = recOf(await twFetch("/api/external/dataset/fetch/", { method: "POST", body: JSON.stringify({ campaign_id: campaignId }) }));
+export async function twDatasetFetch(campaignId: string, opts: TwReadOpts = {}): Promise<{ runId: string }> {
+  const body = recOf(await twFetch("/api/external/dataset/fetch/", { method: "POST", body: JSON.stringify({ campaign_id: campaignId }) }, opts.attempts ?? 2, opts.timeoutMs ?? 60_000));
   return { runId: str(body.runId ?? body.run_id) };
 }
 
@@ -269,8 +273,8 @@ export type TwTask = TiktokTaskLike & {
   updatedAt: string | null;
 };
 
-export async function twTask(taskId: string): Promise<TwTask> {
-  const rec = recOf(await twFetch(`/api/external/tasks/${encodeURIComponent(taskId)}/`));
+export async function twTask(taskId: string, opts: TwReadOpts = {}): Promise<TwTask> {
+  const rec = recOf(await twFetch(`/api/external/tasks/${encodeURIComponent(taskId)}/`, undefined, opts.attempts ?? 2, opts.timeoutMs ?? 60_000));
   return {
     taskId: str(rec.taskId ?? rec.task_id) || taskId,
     kind: str(rec.kind),

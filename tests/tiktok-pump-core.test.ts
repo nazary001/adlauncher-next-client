@@ -184,7 +184,7 @@ test("a 404 on a FRESH launch is a plain refusal — there is no dataset to fetc
 
 test("past the deadline margin nothing new is admitted", async () => {
   const h = harness();
-  const deadline = h.deps.now() + 21_000; // margin 20 s → room for the first shot only (jitter 1.5 s eats the rest)
+  const deadline = h.deps.now() + 101_000; // margin 100 s → room for the first shot only (jitter 1.5 s eats the rest)
   await runTiktokPump([shot("a", "launch"), shot("b", "launch")], deadline, h.deps, { settleMs: 0 });
   assert.equal(h.row("a").status, "done");
   assert.equal(h.row("b").status, "error");
@@ -265,4 +265,28 @@ test("rows sent before a cold source are settled WHILE the pump waits for its da
   assert.equal(h.row("c1").stage, "created");
   assert.ok(settledAt.l1 < 30_000, `l1 settled at ${settledAt.l1} ms — before the cold source's first retry`);
   assert.ok(settledAt.c1 > 100_000);
+});
+
+test("the default margin covers the slowest admitted chain (submit 60 s + dataset fetch 30 s) inside maxDuration 800", async () => {
+  const h = harness();
+  const start = h.deps.now();
+  // 770 s budget, 100 s margin → a shot may still be admitted at +669 s and never at +671 s.
+  const lateOk = harness();
+  lateOk.deps.jitter = () => 669_000;
+  await runTiktokPump([shot("a", "launch"), shot("b", "launch")], lateOk.deps.now() + 770_000, lateOk.deps, { settleMs: 0 });
+  assert.equal(lateOk.row("b").status, "done");
+  h.deps.jitter = () => 671_000;
+  await runTiktokPump([shot("a", "launch"), shot("b", "launch")], start + 770_000, h.deps, { settleMs: 0 });
+  assert.equal(h.row("b").status, "error");
+  assert.match(String(h.row("b").error), /time budget ran out/);
+  // 669 s admitted + 60 s submit + 30 s fetch = 759 s < 800 s.
+  assert.ok(669_000 + 60_000 + 30_000 < 800_000);
+});
+
+test("settle starts no new task read past the margin", async () => {
+  const h = harness({ task: () => task("running") });
+  const deadline = h.deps.now() + 130_000; // margin 100 s → settle may run until +30 s
+  await runTiktokPump([shot("a", "launch")], deadline, h.deps);
+  assert.ok(h.elapsed() <= 30_000, `settle ran until ${h.elapsed()} ms`);
+  assert.equal(h.row("a").stage, "sent");
 });

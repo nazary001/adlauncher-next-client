@@ -70,7 +70,7 @@ Store columns reused like Google: `link` = partner task id, `gcm` = `t-launch|t-
 
 ### 4.2 Pump (`runTiktokPump`)
 
-One shot at a time, 1–3 s jitter, inside `TIKTOK_PUMP_BUDGET_MS = 770 000` with a 20 s margin.
+One shot at a time, 1–3 s jitter, inside `TIKTOK_PUMP_BUDGET_MS = 770 000` with a 100 s margin — the slowest chain a shot admitted at the margin may still need is its submit (60 s client timeout) plus a cold source's dataset fetch (30 s, one attempt inside the pump), and a function killed past `maxDuration = 800` would leave the outcome unrecorded. Task reads inside the pump are one 15 s attempt.
 
 - **201** → row `done/sent` + partner task id.
 - **404 on clone/JURO** = "source not fetched" (a clean refusal, nothing was created, so a retry is safe): `dataset/fetch` once per source per wave → wait 30 s → re-submit every 20 s, re-trigger the fetch once after 150 s, give up after 270 s (or at the deadline margin) with a sentence that names the wait. A 404 from the **fetch** itself ("LION never saw this campaign") fails every shot of that source. A source proven ready is not re-fetched for its remaining copies.

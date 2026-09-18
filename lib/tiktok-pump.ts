@@ -24,8 +24,10 @@ export async function pumpTiktokWave(user: string, shots: TiktokPumpShot[], dead
   await runTiktokPump(shots, deadline, {
     submit: (kind, body) =>
       kind === "launch" ? twCampaignLaunch(body as TiktokLaunchWire) : kind === "clone" ? twCloneLaunch(body as TiktokCloneWire) : twJuroLaunch(body as TiktokJuroWire),
-    datasetFetch: twDatasetFetch,
-    task: twTask,
+    // Reads inside the pump are ONE bounded attempt: the pump re-asks by design (the dataset probe,
+    // the settle pass), and a hung partner must not eat the wave's time budget.
+    datasetFetch: (campaignId) => twDatasetFetch(campaignId, { attempts: 1, timeoutMs: 30_000 }),
+    task: (taskId) => twTask(taskId, { attempts: 1, timeoutMs: 15_000 }),
     outcome: tiktokTaskOutcome,
     write: (taskId, fields) => writerOf(taskId).write(fields as TaskRowData),
     flush: () => Promise.all([...writers.values()].map((w) => w.flush())),
