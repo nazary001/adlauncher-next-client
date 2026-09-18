@@ -24,6 +24,7 @@ import {
 } from "react";
 import { moneyLabel } from "@/lib/types";
 import { STALE_MS, ownerHue } from "@/lib/task-view";
+import { usePathname } from "next/navigation";
 import { TIKTOK_ENABLED } from "@/lib/partners";
 import { AlertIcon, CheckIcon, CopyIcon, RocketIcon, TikTokMark, XIcon } from "./icons";
 
@@ -356,6 +357,13 @@ export function TiktokTaskManagerProvider({
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [lionStatus, setLionStatus] = useState<ReadonlyMap<string, TiktokLionStatus>>(() => new Map());
 
+  // The provider is mounted for EVERY page of the console, but its button exists only on the TikTok
+  // boards. The shared store has fallen over under the team's polling before, so this rail adds no
+  // standing load to it: rows are pulled only while someone can SEE them (a TikTok page, the open
+  // drawer) or while a build the tab knows about is still moving.
+  const onPlatform = (usePathname() ?? "").startsWith("/tiktok");
+  const onPlatformRef = useRef(onPlatform);
+
   const tasksRef = useRef<TiktokTask[]>([]);
   const openRef = useRef(false);
   const lastSharedPollRef = useRef(0);
@@ -406,19 +414,25 @@ export function TiktokTaskManagerProvider({
       });
   }, [noteSkew]);
 
-  // Initial load.
+  // First load — and a fresh one on every arrival at a TikTok board.
   useEffect(() => {
-    if (!TIKTOK_ENABLED) return;
+    onPlatformRef.current = onPlatform;
+    if (!TIKTOK_ENABLED || !onPlatform) return;
+    lastSharedPollRef.current = Date.now();
     loadRemote();
-  }, [loadRemote]);
+  }, [onPlatform, loadRemote]);
 
   // Shared-store polling: keep the team's rows fresh (faster while the drawer is open, slower
   // while the store is failing), and drive a coarse clock so stale / "still building" judgements
   // advance even with the drawer closed.
   useEffect(() => {
     if (!TIKTOK_ENABLED) return;
+    // A "sent" row counts as moving only inside the finisher's window — one LION never finished
+    // must not keep a tab polling for the rest of its life.
+    const moving = (t: TiktokTask) => t.status === "running" || t.status === "queued" || (isSent(t) && !isUnconfirmed(t, Date.now() + skewRef.current));
+    const watched = () => onPlatformRef.current || openRef.current || tasksRef.current.some(moving);
     const tick = () => {
-      if (document.hidden) return;
+      if (document.hidden || !watched()) return;
       const base = openRef.current ? SHARED_POLL_OPEN_MS : SHARED_POLL_CLOSED_MS;
       const interval = Math.min(base * 2 ** pullFailsRef.current, SHARED_POLL_MAX_MS);
       if (Date.now() - lastSharedPollRef.current < interval - 300) return;
@@ -428,7 +442,7 @@ export function TiktokTaskManagerProvider({
     const iv = window.setInterval(tick, SHARED_POLL_OPEN_MS);
     const onVis = () => {
       // focus + visibilitychange fire together on a tab switch — one pull, not two.
-      if (document.hidden || Date.now() - lastSharedPollRef.current < 2_000) return;
+      if (document.hidden || !watched() || Date.now() - lastSharedPollRef.current < 2_000) return;
       lastSharedPollRef.current = Date.now();
       loadRemote();
     };
