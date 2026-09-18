@@ -140,8 +140,21 @@ async function acceptTiktokWave(user: string, waveId: string, resolved: Resolved
       }),
     ),
   );
+  // The claim is a POST of a UNIQUE key, so exactly one of two racing requests gets a row back.
   const claim = await writeAppCache(waveKey, { user, at: now });
-  if (!claim) return bad("task_store_unavailable_wave_not_fired", 503);
+  if (!claim) {
+    // Lost the race to a twin request (a double submit, a retry that overlapped): the winner is
+    // pumping these very task ids — answer like any other repeat.
+    if (await readAppCache(waveKey)) return alreadyAccepted();
+    // The store really refused the claim: nothing will pump the rows stamped above, so they must
+    // not sit "running" for the team to wonder about (a stuck row invites a blind re-fire).
+    await Promise.all(
+      resolved.map((r) =>
+        upsertTaskRow(user, r.taskId, { partner: TIKTOK_PARTNER, status: "error", stage: "submit", error: "Not fired — the task store refused the wave claim; nothing was sent to LION. Fire the wave again.", finished_at: Date.now() }),
+      ),
+    );
+    return bad("task_store_unavailable_wave_not_fired", 503);
+  }
   rememberWave(waveId);
 
   const shots: TiktokPumpShot[] = resolved.map((r) => ({ taskId: r.taskId, kind: r.kind, campaignId: r.campaignId, body: r.wire, rowKey: r.rowKey }));
