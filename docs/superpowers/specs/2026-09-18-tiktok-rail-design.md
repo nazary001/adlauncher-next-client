@@ -1,6 +1,6 @@
 # TikTok rail — launch, clone and JURO through LION's tiktok-weapon
 
-**Date:** 2026-09-18 · **Status:** built + verified locally (unit 65, route smoke 75/75 on the production bundle, browser run incl. the queued-row guard, dormancy 28/28, live-launch guard 7/7; code review done — 1 critical / 4 important / 8 minor, all fixed) — NOT deployed, no live launch made · design approved by the owner (scope, accounts, row outcome, assets) · **Branch:** `feat/tiktok-rail` — local only, never pushed (a push to `main` auto-deploys on Vercel).
+**Date:** 2026-09-18 · **Status:** built + verified locally (unit 65, route smoke 75/75 on the production bundle, browser run incl. the queued-row guard, dormancy 28/28, live-launch guard 7/7; code review done — 1 critical / 4 important / 8 minor: all fixed except two deliberate leftovers — a JURO of a Min-ROAS source still tags its value as a bid (cosmetic; the clone board hints to pick Min ROAS explicitly), and the same wave-claim shape in the DEPLOYED lib/google-wave.ts was left untouched for a separate, owner-approved change) — NOT deployed, no live launch made · design approved by the owner (scope, accounts, row outcome, assets) · **Branch:** `feat/tiktok-rail` — local only, never pushed (a push to `main` auto-deploys on Vercel).
 
 ## 1. Goal
 
