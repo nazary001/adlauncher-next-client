@@ -9,10 +9,11 @@ import { AifTaskManagerButton, TaskManagerButton } from "./task-manager";
 import { HsTaskManagerButton } from "./hs-task-manager";
 import { GoogleTaskManagerButton } from "./google-task-manager";
 import { SnapTaskManagerButton } from "./snap-task-manager";
+import { TiktokTaskManagerButton } from "./tiktok-task-manager";
 import { UserMenu, type SessionUser } from "./user-menu";
-import { GOOGLE_ENABLED, SNAP_ENABLED, partnerConfig, type PartnerId } from "@/lib/partners";
+import { GOOGLE_ENABLED, SNAP_ENABLED, TIKTOK_ENABLED, partnerConfig, type PartnerId } from "@/lib/partners";
 
-type Platform = "facebook" | "google" | "snapchat";
+type Platform = "facebook" | "tiktok" | "google" | "snapchat";
 
 function Logo() {
   return (
@@ -54,7 +55,10 @@ function PlatformTabs({ platform }: { platform: Platform }) {
     "border border-[#4285F4]/40 bg-[#4285F4]/15 text-[#9cc0ff] shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_0_18px_rgba(66,133,244,0.18)]";
   // Snapchat: the same pill shape in the brand yellow (a third sibling, same glow recipe).
   const snapActive = "border border-[#FFFC00]/40 bg-[#FFFC00]/10 text-[#f3f0a3] shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_0_18px_rgba(255,252,0,0.12)]";
+  // TikTok: the same pill in the brand cyan.
+  const tiktokActive = "border border-[#25F4EE]/40 bg-[#25F4EE]/10 text-[#9ff3ef] shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_0_18px_rgba(37,244,238,0.14)]";
   const onFacebook = platform === "facebook";
+  const onTiktok = platform === "tiktok";
   const onGoogle = platform === "google";
   const onSnap = platform === "snapchat";
   return (
@@ -68,17 +72,25 @@ function PlatformTabs({ platform }: { platform: Platform }) {
         <span className="hidden sm:inline">Facebook</span>
       </Link>
 
-      <button
-        type="button"
-        aria-disabled="true"
-        tabIndex={-1}
-        data-tip="TikTok — in development"
-        className={`${base} tip tip-b cursor-not-allowed text-faint opacity-60 hover:opacity-80`}
-      >
-        <TikTokMark className="h-4 w-4" />
-        <span className="hidden sm:inline">TikTok</span>
-        <span className="animate-pulse-soft absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-warn" />
-      </button>
+      {TIKTOK_ENABLED ? (
+        <Link href="/tiktok" aria-current={onTiktok ? "page" : undefined} className={`${base} ${onTiktok ? tiktokActive : inactive}`}>
+          <TikTokMark className="h-4 w-4" />
+          <span className="hidden sm:inline">TikTok</span>
+        </Link>
+      ) : (
+        // Dormant on prod (NEXT_PUBLIC_TIKTOK_ENABLED unset) → the disabled "in development" cue.
+        <button
+          type="button"
+          aria-disabled="true"
+          tabIndex={-1}
+          data-tip="TikTok — in development"
+          className={`${base} tip tip-b cursor-not-allowed text-faint opacity-60 hover:opacity-80`}
+        >
+          <TikTokMark className="h-4 w-4" />
+          <span className="hidden sm:inline">TikTok</span>
+          <span className="animate-pulse-soft absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-warn" />
+        </button>
+      )}
 
       {GOOGLE_ENABLED ? (
         // Real navigation target: full-colour Google mark, active pill when we're on /google.
@@ -130,16 +142,18 @@ export function Header({
   partner: PartnerId;
   onPartnerChange: (id: PartnerId) => void;
   user?: SessionUser;
-  /** Which platform board this header sits on. On "google" the partner switcher is pinned to HS
-   *  and the FB-only widgets give way to the Google task manager. On "snapchat" there is no
+  /** Which platform board this header sits on. On "google" and "tiktok" the partner switcher is
+   *  pinned to HS (both rails run through LION only) and the FB-only widgets give way to that
+   *  platform's task manager. On "snapchat" there is no
    *  partner axis at all (our own ad account): the switcher becomes a static label and the queue
    *  button is the Snapchat task manager. Default keeps FB behaviour. */
   platform?: Platform;
 }) {
   const isGoogle = platform === "google";
   const isSnap = platform === "snapchat";
-  // Both non-FB platforms hide the FB-only widgets (HS token pool, per-account launch limit).
-  const pinned = isGoogle || isSnap;
+  const isTiktok = platform === "tiktok";
+  // Every non-FB platform hides the FB-only widgets (HS token pool, per-account launch limit).
+  const pinned = isGoogle || isSnap || isTiktok;
   return (
     <header className="sticky top-0 z-40 border-b border-line bg-bg/75 backdrop-blur-md">
       <div className="mx-auto grid h-16 w-full max-w-[1440px] grid-cols-[1fr_auto_1fr] items-center gap-3 px-4 sm:px-6">
@@ -154,7 +168,11 @@ export function Header({
             Own Snapchat ad account
           </span>
         ) : (
-          <PartnerSwitcher value={partner} onChange={onPartnerChange} {...(isGoogle ? { lockedNote: "Google runs through LION (HS) only" } : {})} />
+          <PartnerSwitcher
+            value={partner}
+            onChange={onPartnerChange}
+            {...(isGoogle ? { lockedNote: "Google runs through LION (HS) only" } : isTiktok ? { lockedNote: "TikTok runs through LION (HS) only" } : {})}
+          />
         )}
         <div className="flex items-center gap-2.5 justify-self-end">
           {/* HS launch-token pool (T1→T2 failover) — health dots + which bearer is in use;
@@ -173,6 +191,8 @@ export function Header({
             <SnapTaskManagerButton />
           ) : isGoogle ? (
             <GoogleTaskManagerButton />
+          ) : isTiktok ? (
+            <TiktokTaskManagerButton />
           ) : partnerConfig(partner).lionLaunch ? (
             <HsTaskManagerButton />
           ) : partnerConfig(partner).aifLaunch ? (

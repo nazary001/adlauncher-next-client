@@ -515,6 +515,89 @@ export function tiktokLaunchWire(
   return { wire, label: plan.label, bidKind: plan.bidKind };
 }
 
+// ---------- launcher card → shot ----------
+
+/** Max copies one launcher card fans out (each copy = one campaign of the wave). */
+export const TIKTOK_MAX_COPIES = 10;
+
+/** One text per line (the Smart+ "extra ad texts" box): trimmed, squashed, empties dropped. */
+export function splitTextLines(raw: string): string[] {
+  return String(raw ?? "")
+    .split(/\r?\n/)
+    .map((x) => squash(x))
+    .filter(Boolean);
+}
+
+/** One URL per line (also tolerates commas / spaces): trimmed, de-duplicated. */
+export function splitUrlLines(raw: string): string[] {
+  return [...new Set(String(raw ?? "").split(/[\n,\s]+/).map((x) => x.trim()).filter(Boolean))];
+}
+
+/** A card's copies field → a whole number 1…TIKTOK_MAX_COPIES (junk → 1). */
+export function tiktokCopies(raw: string | number): number {
+  const n = Math.round(Number(raw));
+  return Number.isFinite(n) ? Math.min(TIKTOK_MAX_COPIES, Math.max(1, n)) : 1;
+}
+
+/** The launcher card's fields as plain data — files already turned into URLs (the real hosted
+ *  ones at launch, placeholders for the card's dry-run readiness check). */
+export type TiktokCardDraft = {
+  advertiser: string;
+  pixel: string;
+  mode: string;
+  budget: string;
+  bid: string;
+  suffix: string;
+  landingUrl: string;
+  identityName: string;
+  identityImageUrl: string;
+  title: string;
+  callToAction: string;
+  videoUrls: string[];
+  countries: string[];
+  language: string;
+  mosh: boolean;
+  smartPlus: boolean;
+  budgetLevel: string;
+  /** The Smart+ "extra ad texts" box, one per line. */
+  extraTexts: string;
+  extraCtas: string[];
+  currency?: string;
+  label?: string;
+};
+
+/**
+ * Card → the shot the route takes. Smart+ fields ride ONLY while the Smart+ switch is on: a panel
+ * the buyer filled and then switched off must not turn into a "Smart+ only" refusal (the panel is
+ * hidden, so there would be nothing on screen to clear).
+ */
+export function tiktokDraftShot(d: TiktokCardDraft): TiktokLaunchShotIn {
+  const extraTexts = d.smartPlus ? splitTextLines(d.extraTexts) : [];
+  const extraCtas = d.smartPlus ? d.extraCtas.filter(Boolean) : [];
+  return {
+    advertiser: d.advertiser,
+    ...(d.pixel ? { pixel: d.pixel } : {}),
+    mode: d.mode,
+    budget: d.budget,
+    bid: d.bid.trim(),
+    suffix: d.suffix.trim(),
+    landingUrl: d.landingUrl.trim(),
+    identityName: d.identityName,
+    identityImageUrl: d.identityImageUrl,
+    title: d.title,
+    callToAction: d.callToAction,
+    videoUrls: d.videoUrls,
+    countries: d.countries,
+    ...(d.language ? { language: d.language } : {}),
+    ...(d.mosh ? { mosh: true } : {}),
+    ...(d.smartPlus ? { smartPlus: true, budgetLevel: d.budgetLevel || "adgroup" } : {}),
+    ...(extraTexts.length ? { adTexts: extraTexts } : {}),
+    ...(extraCtas.length ? { callToActions: extraCtas } : {}),
+    ...(d.currency ? { currency: d.currency } : {}),
+    ...(d.label ? { label: d.label } : {}),
+  };
+}
+
 // ---------- clone / JURO ----------
 
 /** One clone / JURO shot as the board sends it. */

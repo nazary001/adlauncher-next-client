@@ -5,6 +5,7 @@ import { AifTaskManagerProvider, TaskManagerProvider } from "@/components/task-m
 import { HsTaskManagerProvider } from "@/components/hs-task-manager";
 import { GoogleTaskManagerProvider } from "@/components/google-task-manager";
 import { SnapTaskManagerProvider } from "@/components/snap-task-manager";
+import { TiktokTaskManagerProvider } from "@/components/tiktok-task-manager";
 import { AcctLimitProvider } from "@/components/use-acct-limit";
 
 /**
@@ -26,7 +27,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
             {/* Google rail queue — innermost so it survives navigating between every board. */}
             <GoogleTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
               {/* Snapchat rail queue — innermost, same reason. */}
-              <SnapTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>{children}</SnapTaskManagerProvider>
+              <SnapTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
+                {/* TikTok rail queue — innermost, same reason. */}
+                <TiktokTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>{children}</TiktokTaskManagerProvider>
+              </SnapTaskManagerProvider>
             </GoogleTaskManagerProvider>
           </AcctLimitProvider>
         </HsTaskManagerProvider>
