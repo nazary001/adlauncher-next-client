@@ -365,3 +365,15 @@ v1 and this section overrides it where they differ.
   is listed in one soft note. At launch every file of a card rides to Vercel Blob once (3 at a time,
   progress `n/N`), reused by every copy; a card launches with ALL its files or not at all. The bay
   shows ads per card and the wave's total ads.
+- **Review hardening (same day):** the ads loop checks the deadline margin before EVERY unit after
+  the first, ads built or not (a list refused unit after unit must never run past `maxDuration`
+  with the row still `running`); a refusal about the account or token (401 / 403 / 429) ends the
+  loop instead of skipping a file, and so do 5 refusals in a row with nothing built; the stage is
+  written for the first unit only (a constant number of store writes however long the list, so the
+  terminal row is never queued behind the chain); a refused upload (4xx-class, incl. never READY)
+  is remembered for the rest of the wave, a network failure is not; on the done row what the buyer
+  must act on (ambiguous outcome, list cut short) rides before the skipped-file notes and Snap's
+  sentences are clamped to 140 characters. Board: a failed card waits for its in-flight Blob
+  uploads before the wave moves on; the size probe releases its media player and files are probed
+  one at a time; the shared Dropzone merges a drop into the list as of NOW (a second drop during
+  image recoding no longer overwrites the first). `snapShotMediaIn` (pure, unit-tested) reads the wire.

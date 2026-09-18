@@ -17,8 +17,8 @@ import {
   snapLaunchWire,
   snapShotTaskId,
   todaySaoPauloDotDDMM,
+  snapShotMediaIn,
   type SnapLaunchShotIn,
-  type SnapShotMedia,
 } from "./snap-launch";
 import { SnapApiError, snapAdAccounts, snapConfigured, snapDefaults, snapPixels, snapRailEnabled, type SnapAdAccount, type SnapPixel } from "./snap-api";
 import { SNAP_PARTNER, pumpSnapWave } from "./snap-pump";
@@ -47,21 +47,6 @@ function resolvePixel(pixels: SnapPixel[], picked: string, needed: boolean, acco
   return { pixelId: picked };
 }
 
-/** A pre-multi-creative caller's single creative (`mediaUrl` / `mediaKind` / `mediaName`). */
-type LegacyMedia = { mediaUrl?: unknown; mediaKind?: unknown; mediaName?: unknown };
-
-/** The card's creatives as the wire carries them. A body without `media` that still sends the old
- *  single-creative fields is read as a one-item list, so an open tab from before the deploy (and
- *  any script built on the old shape) keeps launching. */
-function cleanMedia(x: SnapLaunchShotIn & LegacyMedia): SnapShotMedia[] {
-  const list: unknown[] = Array.isArray(x.media) ? x.media : s(x.mediaUrl) ? [{ url: x.mediaUrl, kind: x.mediaKind, name: x.mediaName }] : [];
-  return list.map((m) => {
-    const r = (m ?? {}) as Record<string, unknown>;
-    const name = s(r.name);
-    return { url: s(r.url), kind: r.kind === "image" ? "image" : "video", ...(name ? { name } : {}) };
-  });
-}
-
 /** The shot as the board sent it, normalized (strings trimmed, geo as strings, booleans coerced). */
 function cleanShot(x: SnapLaunchShotIn): SnapLaunchShotIn {
   return {
@@ -77,7 +62,7 @@ function cleanShot(x: SnapLaunchShotIn): SnapLaunchShotIn {
     headline: s(x.headline),
     brandName: s(x.brandName),
     cta: s(x.cta),
-    media: cleanMedia(x),
+    media: snapShotMediaIn(x),
     geo: (Array.isArray(x.geo) ? x.geo : []).map(s).filter(Boolean),
     minAge: s(x.minAge) || "18",
     landingId: x.landingId === "custom" || x.landingId === "dmi" || x.landingId === "cars" ? x.landingId : ("" as SnapLaunchShotIn["landingId"]),

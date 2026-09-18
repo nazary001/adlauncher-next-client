@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FilmIcon, PlayIcon, PlusIcon, UploadIcon, XIcon } from "./icons";
 import type { FileItem } from "@/lib/types";
 
@@ -332,6 +332,13 @@ export function Dropzone({
   const counter = useRef(0);
   const rejectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const atMax = maxFiles != null && files.length >= maxFiles;
+  // The list as of NOW for the async adder below: images are recoded (awaited) before they join the
+  // list, so a second drop during that wait would otherwise merge into the list it captured and
+  // overwrite the first batch. Synced from the prop, and advanced at once when a batch lands.
+  const latestFiles = useRef(files);
+  useEffect(() => {
+    latestFiles.current = files;
+  }, [files]);
 
   async function addFiles(list: FileList | null) {
     if (!list || list.length === 0) return;
@@ -361,8 +368,10 @@ export function Dropzone({
       ok.push({ id: `f${Date.now()}-${counter.current++}`, name: f.name, size: f.size, kind, url: URL.createObjectURL(f) });
     }
     if (ok.length) {
-      const merged = [...files, ...ok];
-      onChange(maxFiles != null ? merged.slice(0, maxFiles) : merged);
+      const merged = [...latestFiles.current, ...ok];
+      const next = maxFiles != null ? merged.slice(0, maxFiles) : merged;
+      latestFiles.current = next;
+      onChange(next);
     }
     setRejected(bad);
     if (rejectTimer.current) clearTimeout(rejectTimer.current);

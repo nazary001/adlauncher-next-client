@@ -416,7 +416,7 @@ test("three creatives: three uploads, ONE campaign and ad squad, three creatives
   assert.equal(count(w, "createAdSquad"), 1);
   assert.equal(count(w, "createCreative"), 3);
   assert.equal(count(w, "createAd"), 3);
-  assert.deepEqual(w.stages("t1"), ["key", "media", "campaign", "adsquad", "creative", "ad", "creative", "ad", "creative", "ad", "activate", "live"]);
+  assert.deepEqual(w.stages("t1"), ["key", "media", "campaign", "adsquad", "creative", "ad", "activate", "live"], "the stage is written for the first unit only");
   const ads = w.calls.filter((c) => c[0] === "createAd");
   const squad = ads[0][1];
   assert.ok(ads.every((c) => c[1] === squad), "every ad lands in the campaign's ONE ad squad");
@@ -562,4 +562,156 @@ test("time budget inside the media stage: a later upload batch that cannot fit i
   assert.equal(count(w, "createMedia"), 3, "the second batch was never started");
   assert.equal(t1.status, "done");
   assert.match(String(t1.error), /creatives #4–#5 not uploaded.*time budget/);
+});
+
+// ---------- review 18.09: the ads loop must stay inside the budget, stay quiet on the store, and stop on account-level refusals ----------
+
+const status = (code: number, msg: string) => Object.assign(new Error(msg), { status: code });
+
+test("every creative refused while the clock runs: the loop stops at the deadline margin and the row is TERMINAL (never left running)", async () => {
+  const w = world();
+  let clock = 1_000_000;
+  w.deps.now = () => clock;
+  w.deps.createCreative = async (acct, body) => {
+    w.calls.push(["createCreative", acct, body]);
+    clock += 200_000; // each refused create eats a big slice of the budget
+    throw refusal("headline violates policy");
+  };
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(4) }), pumpShot("t2")], 1_000_000 + 700_000, w.deps);
+  assert.equal(count(w, "createCreative"), 3, "#4 is never started past the deadline margin, ads or no ads");
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "error");
+  assert.equal(t1.stage, "creative");
+  assert.match(String(t1.error), /3 of 4 creatives were refused.*time budget ran out.*headline violates policy/);
+  assert.equal((w.calls.find((c) => c[0] === "backfillKey")![2] as Record<string, unknown>).status, "retired");
+  assert.equal(w.last("t2").status, "error", "the next shot still gets its terminal row");
+  assert.match(String(w.last("t2").error), /time budget/);
+});
+
+test("a long list refused from the start stops after five refusals in a row — a shared cause, not 200 calls into the same wall", async () => {
+  const w = world({ createCreative: refusal("profile is not eligible") });
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(12) })], 1_000_000 + 700_000, w.deps);
+  assert.equal(count(w, "createCreative"), 5);
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "error");
+  assert.match(String(t1.error), /5 of 12 creatives were refused.*stopped after 5 refusals in a row.*profile is not eligible/);
+});
+
+test("an account-level refusal (429) ends the loop: with an ad built the campaign goes live and says what is missing", async () => {
+  const w = world();
+  const create = w.deps.createCreative;
+  let n = 0;
+  w.deps.createCreative = async (acct, body) => {
+    if (++n === 2) {
+      w.calls.push(["createCreative", acct, body]);
+      throw status(429, "Too Many Requests");
+    }
+    return create(acct, body);
+  };
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(5) })], 1_000_000 + 700_000, w.deps);
+  assert.equal(count(w, "createCreative"), 2, "no further request is fired into the rate limit");
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "done");
+  assert.equal(t1.stage, "live");
+  assert.match(String(t1.error), /creative #2 \(c2\.mp4\): Snapchat answered HTTP 429 \(Too Many Requests\).*3 more not sent/);
+});
+
+test("an account-level refusal (403) on the first unit: one call, row error with Snap's sentence, key retired, never activated", async () => {
+  const w = world({ createCreative: status(403, "token lacks the ad account") });
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(6) })], 1_000_000 + 700_000, w.deps);
+  assert.equal(count(w, "createCreative"), 1);
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "error");
+  assert.equal(t1.stage, "creative");
+  assert.match(String(t1.error), /token lacks the ad account/);
+  assert.equal(count(w, "setCampaignStatus"), 0);
+});
+
+test("fifty creatives cost the task store a handful of writes, not two per unit — the terminal row is never queued behind a long chain", async () => {
+  const w = world();
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(50) })], 1_000_000 + 700_000, w.deps);
+  assert.equal(count(w, "createAd"), 50);
+  assert.ok(w.writes.t1.length <= 14, `writes=${w.writes.t1.length}`);
+  assert.deepEqual(w.stages("t1"), ["key", "media", "campaign", "adsquad", "creative", "ad", "activate", "live"]);
+});
+
+test("a refused upload is remembered for the rest of the wave: the next copy does not re-upload the same bad file", async () => {
+  const w = world();
+  const upload = w.deps.createMedia;
+  w.deps.createMedia = async (acct, name, type) => {
+    if (name === "c2.mp4") {
+      w.calls.push(["createMedia", acct, name, type]);
+      throw refusal("unsupported codec");
+    }
+    return upload(acct, name, type);
+  };
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(2) }), pumpShot("t2", { media: vids(2) })], 1_000_000 + 700_000, w.deps);
+  assert.equal(w.calls.filter((c) => c[0] === "createMedia" && c[2] === "c2.mp4").length, 1);
+  assert.match(String(w.last("t2").error), /creative #2 \(c2\.mp4\) skipped.*unsupported codec/, "the copy still names the file");
+  assert.equal(w.last("t2").status, "done");
+  // a NETWORK failure is not remembered — a later copy may well get through
+  const w2 = world();
+  let n = 0;
+  const up2 = w2.deps.createMedia;
+  w2.deps.createMedia = async (acct, name, type) => {
+    if (++n === 1) throw new Error("fetch failed");
+    return up2(acct, name, type);
+  };
+  await runSnapPump("nazar", [pumpShot("t1"), pumpShot("t2")], 1_000_000 + 700_000, w2.deps);
+  assert.equal(w2.last("t1").status, "error");
+  assert.equal(w2.last("t2").status, "done");
+});
+
+test("what the buyer must act on survives the 1000-char cut: the ambiguous note rides before the skipped-file notes", async () => {
+  const w = world();
+  const upload = w.deps.createMedia;
+  w.deps.createMedia = async (acct, name, type) => {
+    if (["c1.mp4", "c2.mp4", "c3.mp4"].includes(name)) throw refusal(`unsupported codec ${"x".repeat(400)}`);
+    return upload(acct, name, type);
+  };
+  const createAd = w.deps.createAd;
+  let n = 0;
+  w.deps.createAd = async (sq, body) => {
+    if (++n === 2) throw new Error("fetch failed");
+    return createAd(sq, body);
+  };
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(6) })], 1_000_000 + 700_000, w.deps);
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "done");
+  const text = String(t1.error);
+  assert.ok(text.length <= 1000);
+  assert.match(text, /ambiguous outcome \(fetch failed\)/);
+  assert.ok(text.indexOf("ambiguous outcome") < text.indexOf("skipped:"), "urgent first");
+  assert.match(text, /creative #3 \(c3\.mp4\) skipped/, "every note is clamped, so all three still fit");
+});
+
+test("first batch failed and the budget cut the rest: the row says so instead of 'all N failed'", async () => {
+  const w = world();
+  let clock = 1_000_000;
+  w.deps.now = () => clock;
+  w.deps.createMedia = async (acct, name, type) => {
+    w.calls.push(["createMedia", acct, name, type]);
+    clock += 200_000;
+    throw refusal("unsupported codec");
+  };
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(5) })], 1_000_000 + 700_000, w.deps);
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "error");
+  assert.equal(t1.stage, "media");
+  assert.match(String(t1.error), /the first 3 creatives failed and the wave's time budget ran out before the rest.*unsupported codec/);
+  assert.equal(count(w, "createMedia"), 3);
+});
+
+test("a wire without a single ad unit is a terminal error row, never a throw that strands the wave", async () => {
+  const w = world();
+  const real = w.deps.buildWire;
+  w.deps.buildWire = (shot, resolved) => {
+    const b = real(shot, resolved);
+    return "refusal" in b ? b : { ...b, wire: { ...b.wire, ads: [] } };
+  };
+  await runSnapPump("nazar", [pumpShot("t1"), pumpShot("t2")], 1_000_000 + 700_000, w.deps);
+  assert.equal(w.last("t1").status, "error");
+  assert.match(String(w.last("t1").error), /no creative unit/);
+  assert.equal(w.last("t2").status, "error", "the wave went on (same stubbed wire)");
+  assert.equal(w.flushed(), 1);
 });

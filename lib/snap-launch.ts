@@ -297,6 +297,24 @@ export function snapShotTaskId(waveId: string, index: number): string {
 /** One creative of a shot: the public Blob URL the board uploaded, its kind, its file name. */
 export type SnapShotMedia = { url: string; kind: "video" | "image"; name?: string };
 
+/**
+ * The creatives of a shot as it arrived on the wire, normalized (strings trimmed, kind coerced). A
+ * body without a `media` list that still sends the pre-multi-creative fields (`mediaUrl` /
+ * `mediaKind` / `mediaName`) is read as a one-item list, so a tab opened before the deploy — and
+ * any script built on the old shape — keeps launching. Anything else is an empty list (the
+ * validator then refuses with "At least one creative…").
+ */
+export function snapShotMediaIn(raw: unknown): SnapShotMedia[] {
+  const t = (v: unknown): string => (v == null ? "" : String(v)).trim();
+  const x = (raw ?? {}) as Record<string, unknown>;
+  const list: unknown[] = Array.isArray(x.media) ? x.media : t(x.mediaUrl) ? [{ url: x.mediaUrl, kind: x.mediaKind, name: x.mediaName }] : [];
+  return list.map((m) => {
+    const r = (m ?? {}) as Record<string, unknown>;
+    const name = t(r.name);
+    return { url: t(r.url), kind: r.kind === "image" ? ("image" as const) : ("video" as const), ...(name ? { name } : {}) };
+  });
+}
+
 /** One shot as the board sends it (money as HUMAN strings; copies expanded client-side, one
  *  shot = one campaign = one key). `media` lists the card's creatives — each becomes its own
  *  creative + ad inside the campaign's ONE ad squad, all on the campaign's key. */

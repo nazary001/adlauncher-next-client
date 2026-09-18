@@ -13,6 +13,7 @@ import {
   SNAP_NAME_MAX,
   SNAP_OPTIMIZATION_GOALS,
   snapAdUnitName,
+  snapShotMediaIn,
   snapBidKind,
   snapBidLabel,
   snapGeoWire,
@@ -273,4 +274,21 @@ test("snapAdUnitName: verbatim for a single creative, numbered otherwise, the su
   const n = snapAdUnitName(long, 99, 120);
   assert.equal(n.length, SNAP_NAME_MAX);
   assert.ok(n.endsWith(" #100"));
+});
+
+test("snapShotMediaIn: the media list normalized; the pre-multi single-creative shape still reads as one creative", () => {
+  assert.deepEqual(snapShotMediaIn({ media: [{ url: " https://b/a.mp4 ", kind: "video", name: " a.mp4 " }, { url: "https://b/b.jpg", kind: "image" }] }), [
+    { url: "https://b/a.mp4", kind: "video", name: "a.mp4" },
+    { url: "https://b/b.jpg", kind: "image" },
+  ]);
+  // an old tab / script: mediaUrl + mediaKind + mediaName, no `media`
+  assert.deepEqual(snapShotMediaIn({ mediaUrl: "https://b/old.jpg", mediaKind: "image", mediaName: "old.jpg" }), [{ url: "https://b/old.jpg", kind: "image", name: "old.jpg" }]);
+  assert.deepEqual(snapShotMediaIn({ mediaUrl: "https://b/old.mp4" }), [{ url: "https://b/old.mp4", kind: "video" }]);
+  // `media` wins when both are sent; an unknown kind reads as video (the validator has the last word on the file)
+  assert.deepEqual(snapShotMediaIn({ media: [{ url: "https://b/new.mp4", kind: "gif" }], mediaUrl: "https://b/old.mp4" }), [{ url: "https://b/new.mp4", kind: "video" }]);
+  // junk never throws: no creative at all → the validator's "At least one creative" refusal
+  assert.deepEqual(snapShotMediaIn({}), []);
+  assert.deepEqual(snapShotMediaIn(null), []);
+  assert.deepEqual(snapShotMediaIn({ media: [null, 7] }), [{ url: "", kind: "video" }, { url: "", kind: "video" }]);
+  assert.deepEqual(snapShotMediaIn({ media: "https://b/a.mp4", mediaUrl: "  " }), []);
 });

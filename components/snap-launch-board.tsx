@@ -198,7 +198,10 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
   };
 
   /** Every creative of one card → Vercel Blob, UPLOAD_CONCURRENCY at a time; URLs in card order.
-   *  The first failure stops the rest and rejects — a card launches with ALL its files or not at all. */
+   *  The first failure stops the workers from taking new files and rejects — a card launches with
+   *  ALL its files or not at all. The reject waits for the uploads already in flight to settle
+   *  (allSettled): the wave must not move on to the next card — nor the card show its error and the
+   *  unload guard drop — while this card's bytes are still moving. */
   async function uploadCardCreatives(c: SnapCard, waveId: string): Promise<string[]> {
     const urls: string[] = c.files.map(() => "");
     let next = 0;
@@ -220,7 +223,9 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
         if (!failed) setCardState(c.id, { state: "uploading", progress: c.files.length === 1 ? "Uploading the creative…" : `Uploading creatives… ${done}/${c.files.length}` });
       }
     };
-    await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, c.files.length) }, worker));
+    const settled = await Promise.allSettled(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, c.files.length) }, worker));
+    const rejected = settled.find((r): r is PromiseRejectedResult => r.status === "rejected");
+    if (rejected) throw rejected.reason;
     return urls;
   }
 

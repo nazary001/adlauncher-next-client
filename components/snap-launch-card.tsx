@@ -217,10 +217,20 @@ export function readMediaDims(f: FileItem): Promise<{ w: number; h: number } | n
       img.src = f.url;
       return;
     }
+    // The probe element is released once it answered: Chrome caps the media players of a page, and a
+    // board of many videos would otherwise keep one probe per file alive next to its gallery tile
+    // (past the cap the tiles go black and later probes fail — a false "couldn't read the size").
     const v = document.createElement("video");
+    const done = (dims: { w: number; h: number } | null) => {
+      v.onloadedmetadata = null;
+      v.onerror = null;
+      v.removeAttribute("src");
+      v.load();
+      resolve(dims);
+    };
     v.preload = "metadata";
-    v.onloadedmetadata = () => resolve({ w: v.videoWidth, h: v.videoHeight });
-    v.onerror = () => resolve(null);
+    v.onloadedmetadata = () => done({ w: v.videoWidth, h: v.videoHeight });
+    v.onerror = () => done(null);
     v.src = f.url;
   });
 }
@@ -326,11 +336,13 @@ export function SnapLaunchCard({
   // unreadable. Display-only, so it lives here and not on the card: a duplicated card re-reads it.
   const [dims, setDims] = useState<Record<string, { w: number; h: number } | null>>({});
   const dimsStarted = useRef(new Set<string>());
+  const dimsQueue = useRef<Promise<void>>(Promise.resolve());
   useEffect(() => {
     for (const f of card.files) {
       if (dimsStarted.current.has(f.id)) continue; // one read per file, however often the list changes
       dimsStarted.current.add(f.id);
-      void readMediaDims(f).then((d) => setDims((prev) => ({ ...prev, [f.id]: d })));
+      // one probe at a time: a drop of fifty videos must not open fifty decoders at once
+      dimsQueue.current = dimsQueue.current.then(() => readMediaDims(f).then((d) => setDims((prev) => ({ ...prev, [f.id]: d }))));
     }
   }, [card.files]);
 
