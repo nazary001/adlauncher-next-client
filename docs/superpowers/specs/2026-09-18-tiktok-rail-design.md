@@ -62,7 +62,7 @@ Store columns reused like Google: `link` = partner task id, `gcm` = `t-launch|t-
 ### 4.1 Wire rules (`tiktokLaunchWire`)
 
 - `budget` 20…10000 → `"20.00"`. `mode` required; `conversion_bid_price` (0 < bid ≤ 100, and bid < budget) only with `NORMAL_WITH_BID`; `roas_bid` (0.01…1000, 2 places) only with `VO_MIN_ROAS`; a value typed under a no-bid mode is a refusal, never silently dropped. `VO_*` only when the pixel lists it.
-- `landing_page_url`: https, query + hash stripped (LION appends its own tracking); `identity.name` 1–40 chars, `identity.image_url` https; `creative_data.title` 1–100; CTA from the TikTok vocabulary; `video_urls` 1–20 distinct https.
+- `landing_page_url`: https, query + hash stripped (LION appends its own tracking); `identity.name` 1–100 chars, `identity.image_url` https; `creative_data.title` 1–100; CTA from the TikTok vocabulary; `video_urls` 1–20 distinct https.
 - `locales.countries`: codes from the advertiser's config or exactly `["WW"]`; `locales.language` from the config, required with `WW`, lower-cased.
 - Smart+ (`campaign_kind: "smart_plus"`): `budget_level` campaign|adgroup, `ad_texts` 1–5 distinct ≤100 with `[0] === title`, `call_to_actions` 1–3 distinct with `[0] === call_to_action`; any of the three without Smart+ is a refusal.
 - `name_suffix` = `DD.MM - <user> - GC-Launcher[ - <tail>]` (São Paulo date, pipes in the tail replaced, cap 80); `client_reference` = our task id. `targeting` and `postback_url` are never sent.
