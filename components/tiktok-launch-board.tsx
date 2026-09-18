@@ -1,8 +1,10 @@
 "use client";
 
 // TikTok LAUNCH board — the FB / Google launcher's shape for fresh TikTok campaigns: a column of
-// campaign CARDS (add / duplicate / remove / collapse, copies per card) on the left, a sticky
-// "Launch bay" on the right (per-card readiness, total/day, Preview → Launch). Like every LION rail
+// campaign CARDS under LION's own "Campaign Launcher" header (Autofill / + / −) on the left, a
+// sticky "Launch bay" on the right (per-card readiness, total/day, Preview → Launch). Copies are
+// whole cards — Autofill makes N of card 01, + duplicates the last one — never a per-card
+// multiplier: one card = one campaign, LION's launcher texture. Like every LION rail
 // the create is SERVER-side: one POST /api/tiktok/launch stamps the rows and an after() pump sends
 // every campaign to LION and settles what LION built, so once the wave is accepted the tab is safe
 // to close. The one client-side phase is the creative UPLOAD (avatar → 256² PNG, videos → Vercel
@@ -21,10 +23,10 @@ import { useTiktokAdvertisers, useTiktokConfigs, useTiktokLandings, type TwAdver
 import { useTiktokTaskManager } from "./tiktok-task-manager";
 import { makeGate } from "@/lib/launch-guards";
 import { moneyLabel, parseMoney } from "@/lib/types";
-import { tiktokBidPlan, tiktokCopies, tiktokResolvePixel, type TiktokLaunchShotIn } from "@/lib/tiktok-launch";
+import { tiktokBidPlan, tiktokResolvePixel, type TiktokLaunchShotIn } from "@/lib/tiktok-launch";
 import { readCreative, safeBlobName, uploadCreativeFile } from "./blob-uploader";
 import { UploadingNotice, useUnloadGuard } from "./upload-guard";
-import { CopyIcon, EyeIcon, PlusIcon } from "./icons";
+import { CopyIcon, EyeIcon, MinusIcon, PlusIcon, SparklesIcon } from "./icons";
 import {
   FIRST_TT_CARD_ID,
   TiktokLaunchCard,
@@ -36,14 +38,14 @@ import {
   type TiktokCard,
   type TiktokCardUpload,
 } from "./tiktok-launch-card";
+import { TiktokAutofillModal } from "./tiktok-autofill-modal";
 import { forgetIdentity, identityAvatarPng, loadIdentities, rememberIdentity, type RememberedIdentity } from "./tiktok-identity";
 import type { RichOption } from "@/lib/catalog";
 import type { PartnerId } from "@/lib/partners";
 import type { SessionUser } from "./user-menu";
 
-/** Server-side wave cap (lib/tiktok-wave TIKTOK_MAX_SHOTS) mirrored so an oversized wave is
- *  refused BEFORE Launch instead of every card flipping to error on the route's 400. */
-const MAX_SHOTS = 45;
+/** One card = one campaign, so the board's card cap IS the server-side wave cap (lib/tiktok-wave
+ *  TIKTOK_MAX_SHOTS) — an oversized wave can't be prepared in the first place. */
 const MAX_CARDS = 45;
 /** Files of one card uploaded to Blob at a time (the Snapchat board's number — a video upload is
  *  mostly waiting on the network, three keep a 20-video card to a third of the wall clock). */
@@ -56,7 +58,6 @@ type CardView = {
   effPixel: string;
   pixelNeeded: boolean;
   refusal: string | null;
-  copies: number;
   ready: boolean;
   why: string;
 };
@@ -71,6 +72,7 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
   const [firing, setFiring] = useState(false);
   const [fireNote, setFireNote] = useState<string | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
+  const [autofillOpen, setAutofillOpen] = useState(false);
   const [identities, setIdentities] = useState<RememberedIdentity[]>([]);
   const fireGate = useRef(makeGate());
   const hlTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -124,6 +126,24 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
     setCards((cs) => (cs.length <= 1 ? cs : cs.filter((c) => c.id !== id)));
     setPreviewed(false);
   };
+  // LION's header pair: + appends a copy of the LAST card, − deletes the last card.
+  const addCopyOfLast = () => {
+    if (firing) return;
+    setCards((cs) => (cs.length >= MAX_CARDS ? cs : [...cs, cloneTiktokCard(cs[cs.length - 1])]));
+    setPreviewed(false);
+  };
+  const removeLast = () => {
+    if (firing) return;
+    setCards((cs) => (cs.length <= 1 ? cs : cs.slice(0, -1)));
+    setPreviewed(false);
+  };
+  // Autofill: append N whole cards copied from card 01 (capped at MAX_CARDS).
+  const applyAutofill = (built: TiktokCard[]) => {
+    setAutofillOpen(false);
+    if (firing) return;
+    setCards((cs) => [...cs, ...built].slice(0, MAX_CARDS));
+    setPreviewed(false);
+  };
   const toggleCollapse = (id: string) => setCards((cs) => cs.map((c) => (c.id === id ? { ...c, collapsed: !c.collapsed } : c)));
 
   // ---- per-card derived view (pure — no effects) ---------------------------------------------
@@ -154,18 +174,17 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
                 : card.state === "ok"
                   ? "already queued — edit the card to launch it again"
                   : "";
-    return { card, target, effPixel, pixelNeeded, refusal, copies: tiktokCopies(card.copies), ready: why === "", why };
+    return { card, target, effPixel, pixelNeeded, refusal, ready: why === "", why };
   });
 
   const readyViews = view.filter((v) => v.ready);
-  const totalShots = readyViews.reduce((n, v) => n + v.copies, 0);
-  const overShotCap = totalShots > MAX_SHOTS;
-  const totalPerDay = readyViews.reduce((sum, v) => sum + parseMoney(v.card.budget) * v.copies, 0);
+  const totalShots = readyViews.length;
+  const totalPerDay = readyViews.reduce((sum, v) => sum + parseMoney(v.card.budget), 0);
 
   const uploadingN = cards.filter((c) => c.state === "uploading").length;
   useUnloadGuard(uploadingN > 0);
 
-  const fireBlocked = firing || readyViews.length === 0 || advertisersLoading || advertisersFailed || overShotCap || !liveLaunch;
+  const fireBlocked = firing || readyViews.length === 0 || advertisersLoading || advertisersFailed || !liveLaunch;
 
   // ---- launch bay row jump -------------------------------------------------------------------
   const jumpTo = (id: string) => {
@@ -185,7 +204,7 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
   async function uploadCard(c: TiktokCard, waveId: string): Promise<TiktokCardUpload> {
     const upload: TiktokCardUpload = {};
     const base = `tiktok/${safeBlobName(username, "buyer")}/${waveId}/${c.id}`;
-    if (c.identityMode === "file" && c.identityFiles[0]) {
+    if (c.identityFiles[0]) {
       setCardState(c.id, { state: "uploading", progress: "Preparing the identity avatar…" });
       const key = `identity:${c.identityFiles[0].id}`;
       let url = hostedRef.current.get(key);
@@ -196,7 +215,7 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
       }
       upload.identityUrl = url;
     }
-    if (c.videoMode === "files" && c.videoFiles.length > 0) {
+    if (c.videoFiles.length > 0) {
       const files = c.videoFiles;
       const urls: string[] = files.map(() => "");
       let next = 0;
@@ -234,7 +253,7 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
     return upload;
   }
 
-  // ---- fire: upload each ready card's files once, fan the copies out, one POST -----------------
+  // ---- fire: upload each ready card's files once (copies share them), one POST ------------------
   async function fireWave() {
     if (fireBlocked) return;
     if (!fireGate.current.enter()) return;
@@ -265,10 +284,8 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
         }
         hosted.push({ card: c, upload });
         const shot = buildTiktokShot({ ...c, pixel: v.effPixel }, { currency: v.target?.currency, advertiserName: v.target?.name, upload });
-        for (let j = 0; j < v.copies; j++) {
-          shots.push(shot);
-          shotCard.push(c.id);
-        }
+        shots.push(shot);
+        shotCard.push(c.id);
         setCardState(c.id, { state: "sending", msg: "queuing on server…" });
       }
 
@@ -283,16 +300,11 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
       if (d?.ok) {
         waveRef.current = null; // accepted — the next wave is a new wave
         setPreviewed(false);
-        // The files are hosted now: the card keeps their URLs, so launching it again (after an
-        // edit) re-uses them instead of uploading the same avatar and videos a second time.
+        // The card keeps its files: launching it again (after an edit) finds them in hostedRef and
+        // uploads nothing a second time.
         for (const h of hosted) {
-          setCardState(h.card.id, {
-            state: "ok",
-            msg: "queued — safe to close the tab (LION builds it server-side)",
-            ...(h.upload.identityUrl ? { identityMode: "url" as const, identityUrl: h.upload.identityUrl, identityFiles: [] } : {}),
-            ...(h.upload.videoUrls ? { videoMode: "urls" as const, videoUrlsText: h.upload.videoUrls.join("\n"), videoFiles: [] } : {}),
-          });
-          const imageUrl = h.upload.identityUrl ?? (h.card.identityMode === "url" ? h.card.identityUrl : "");
+          setCardState(h.card.id, { state: "ok", msg: "queued — safe to close the tab (LION builds it server-side)", progress: undefined });
+          const imageUrl = h.upload.identityUrl ?? h.card.identityUrl;
           if (imageUrl) setIdentities(rememberIdentity({ name: h.card.identityName, imageUrl }));
         }
         refresh();
@@ -341,18 +353,39 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
           {/* ---- campaign cards ---- */}
           <section className="flex min-w-0 flex-col gap-4">
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-sm font-semibold text-ink">Campaigns</h1>
+              <h1 className="text-sm font-semibold text-ink">Campaign Launcher</h1>
               <span className="rounded-md border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[11px] text-dim">{cards.length}</span>
-              <span className="rounded-md border border-line bg-surface2 px-1.5 py-0.5 text-[10.5px] text-faint">TikTok · Smart Creative</span>
+              <span className="rounded-md border border-line bg-surface2 px-1.5 py-0.5 text-[10.5px] text-faint">TikTok</span>
               <div className="ml-auto flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={add}
+                  onClick={() => setAutofillOpen(true)}
                   disabled={cards.length >= MAX_CARDS || firing}
-                  className="flex h-9 items-center gap-2 rounded-lg border border-accent/40 bg-accent/15 px-3.5 text-[13px] font-semibold text-[#9db8ff] transition-all duration-150 hover:border-accent/60 hover:bg-accent/25 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  title="Make copies of campaign 01"
+                  className="flex h-9 items-center gap-1.5 rounded-lg border border-line bg-surface2 px-3 text-[13px] font-medium text-dim transition-all duration-150 hover:border-accent/50 hover:text-ink active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                >
+                  <SparklesIcon className="h-4 w-4" />
+                  Autofill
+                </button>
+                <button
+                  type="button"
+                  onClick={addCopyOfLast}
+                  disabled={cards.length >= MAX_CARDS || firing}
+                  aria-label="Add a copy of the last campaign"
+                  title="Add a copy of the last campaign"
+                  className="flex h-9 w-9 items-center justify-center rounded-lg border border-accent/40 bg-accent/15 text-[#9db8ff] transition-all duration-150 hover:border-accent/60 hover:bg-accent/25 active:scale-[0.95] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 >
                   <PlusIcon className="h-4 w-4" />
-                  New campaign
+                </button>
+                <button
+                  type="button"
+                  onClick={removeLast}
+                  disabled={cards.length <= 1 || firing}
+                  aria-label="Delete the last campaign"
+                  title="Delete the last campaign"
+                  className="flex h-9 w-9 items-center justify-center rounded-lg border border-line bg-surface2 text-dim transition-all duration-150 hover:border-danger/50 hover:bg-danger/10 hover:text-danger active:scale-[0.95] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40"
+                >
+                  <MinusIcon className="h-4 w-4" />
                 </button>
               </div>
             </div>
@@ -368,6 +401,7 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
                 onRetryConfig={retryConfig}
                 acr={acr}
                 advertiserName={v.target?.name ?? ""}
+                currency={v.target?.currency ?? "USD"}
                 effPixel={v.effPixel}
                 pixelNeeded={v.pixelNeeded}
                 refusal={v.refusal}
@@ -429,7 +463,7 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[12.5px] font-medium text-ink">{v.target?.name || "No advertiser"}</span>
                       <span className={"block truncate text-[10.5px] " + (v.ready ? "text-faint" : v.card.state === "ok" ? "text-launch2" : "text-warn")}>
-                        {v.ready ? `${v.card.countries.join("+") || "—"}${v.copies > 1 ? ` · ×${v.copies}` : ""}` : v.why}
+                        {v.ready ? `${v.card.countries.join("+") || "—"}${v.card.smartPlus ? " · Smart+" : ""}` : v.why}
                       </span>
                     </span>
                     <span className="shrink-0 font-mono text-[11.5px] tabular-nums text-dim">${moneyLabel(v.card.budget)}</span>
@@ -512,11 +546,6 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
                   {refusalCount} campaign{refusalCount === 1 ? " is" : "s are"} incomplete — see the note on the card.
                 </p>
               ) : null}
-              {overShotCap ? (
-                <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
-                  {totalShots} campaigns — one wave carries at most {MAX_SHOTS}. Lower the copies or split into two waves.
-                </p>
-              ) : null}
 
               {/* preview list */}
               {previewed ? (
@@ -528,9 +557,8 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
                     return (
                       <p key={v.card.id} className="text-[11.5px] leading-snug text-dim">
                         <span className="text-ink">{v.target?.name}</span> → ${moneyLabel(v.card.budget)}/day · {v.card.countries.join("+")}
-                        {v.card.smartPlus ? ` · Smart+${v.card.budgetLevel === "campaign" ? " CBO" : ""}` : ""}
+                        {v.card.smartPlus ? ` · Smart+${v.card.cbo ? " CBO" : ""}` : ""}
                         <span className="text-[#9db8ff]"> · {bidText}</span>
-                        {v.copies > 1 ? <span className="text-faint"> · ×{v.copies}</span> : null}
                       </p>
                     );
                   })}
@@ -549,6 +577,8 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
           </aside>
         </div>
       </main>
+
+      <TiktokAutofillModal open={autofillOpen && !firing} source={cards[0] ?? null} room={MAX_CARDS - cards.length} onClose={() => setAutofillOpen(false)} onCreate={applyAutofill} />
     </>
   );
 }

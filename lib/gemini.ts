@@ -54,14 +54,15 @@ function isRaster(buf: Buffer): boolean {
 }
 
 /**
- * Generate one 16:9 ad creative image. Tries gemini-3-pro-image (2K), falls back to flash-image;
+ * Generate one image — a 16:9 2K ad creative unless `frame` says otherwise (the TikTok launcher's
+ * identity avatar asks for 1:1 at 1K). Tries gemini-3-pro-image, falls back to flash-image;
  * two attempts each. Returns the raw bytes + mime (the caller uploads them to Blob). Throws when
  * every attempt fails so the owner sees a clean error instead of a launch with no creative.
  */
-export async function geminiImage(prompt: string): Promise<GeneratedImage> {
+export async function geminiImage(prompt: string, frame: { aspectRatio?: string; imageSize?: string } = {}): Promise<GeneratedImage> {
   if (!KEY) throw new Error("gemini_not_configured — set GEMINI_API_KEY");
   const attempts: Array<{ model: string; config: Record<string, unknown> }> = [
-    { model: IMAGE_MODEL, config: { responseModalities: ["IMAGE"], imageConfig: { aspectRatio: "16:9", imageSize: "2K" } } },
+    { model: IMAGE_MODEL, config: { responseModalities: ["IMAGE"], imageConfig: { aspectRatio: frame.aspectRatio ?? "16:9", imageSize: frame.imageSize ?? "2K" } } },
     { model: IMAGE_MODEL_FALLBACK, config: { responseModalities: ["IMAGE"] } },
   ];
   let lastErr = "no image produced";

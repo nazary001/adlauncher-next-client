@@ -275,41 +275,32 @@ export const TIKTOK_VIDEOS_MAX = 20;
 export const TIKTOK_AD_TEXTS_MAX = 5;
 export const TIKTOK_CTAS_MAX = 3;
 
-/** TikTok's call-to-action enum; the partner docs name the first four. */
+/** The CTAs LION's own TikTok launcher offers, in its order (read from its form 18.09.2026) — the
+ *  partner's vocabulary, not TikTok's full enum: a value outside it has never been launched by LION. */
 export const TIKTOK_CTAS: readonly { value: string; label: string }[] = [
   { value: "LEARN_MORE", label: "Learn more" },
-  { value: "SHOP_NOW", label: "Shop now" },
-  { value: "SIGN_UP", label: "Sign up" },
-  { value: "DOWNLOAD_NOW", label: "Download" },
   { value: "APPLY_NOW", label: "Apply now" },
   { value: "BOOK_NOW", label: "Book now" },
+  { value: "CALL_NOW", label: "Call now" },
   { value: "CONTACT_US", label: "Contact us" },
+  { value: "DOWNLOAD_NOW", label: "Download now" },
+  { value: "EXPERIENCE_NOW", label: "Experience now" },
   { value: "GET_QUOTE", label: "Get quote" },
+  { value: "INSTALL_NOW", label: "Install now" },
+  { value: "INTERESTED", label: "Interested" },
+  { value: "LISTEN_NOW", label: "Listen now" },
   { value: "ORDER_NOW", label: "Order now" },
+  { value: "PLAY_GAME", label: "Play game" },
+  { value: "PREORDER_NOW", label: "Pre-order now" },
   { value: "READ_MORE", label: "Read more" },
+  { value: "SEND_MESSAGE", label: "Send message" },
+  { value: "SHOP_NOW", label: "Shop now" },
+  { value: "SIGN_UP", label: "Sign up" },
+  { value: "SUBSCRIBE", label: "Subscribe" },
   { value: "VIEW_NOW", label: "View now" },
   { value: "WATCH_NOW", label: "Watch now" },
-  { value: "SUBSCRIBE", label: "Subscribe" },
-  { value: "INTERESTED", label: "Interested" },
-  { value: "EXPERIENCE_NOW", label: "Experience now" },
-  { value: "PLAY_GAME", label: "Play game" },
-  { value: "INSTALL_NOW", label: "Install now" },
-  { value: "LISTEN_NOW", label: "Listen now" },
-  { value: "GET_TICKETS_NOW", label: "Get tickets" },
-  { value: "GET_SHOWTIMES", label: "Get showtimes" },
-  { value: "PRE_ORDER_NOW", label: "Pre-order" },
-  { value: "VISIT_STORE", label: "Visit store" },
 ] as const;
 const CTA_SET = new Set(TIKTOK_CTAS.map((c) => c.value));
-
-/** Launcher geo presets (the Google launcher's sets; the card keeps only what the advertiser's
- *  config allows). WORLD = the partner's `WW`. */
-export const TIKTOK_GEO_PRESETS: readonly { label: string; codes: string[] }[] = [
-  { label: "World", codes: ["WW"] },
-  { label: "LATAM", codes: ["AR", "BO", "CL", "CO", "CR", "DO", "EC", "GT", "HN", "MX", "NI", "PA", "PE", "PR", "PY", "SV", "UY"] },
-  { label: "Anglo", codes: ["US", "CA", "GB", "AU", "NZ", "IE"] },
-  { label: "Franco", codes: ["FR", "BE", "CH", "LU", "MC", "CA"] },
-] as const;
 
 /** Country / language CODES the target advertiser's config offers. */
 export type TiktokLocaleConfig = { countries: string[]; languages: string[] };
@@ -517,23 +508,24 @@ export function tiktokLaunchWire(
 
 // ---------- launcher card → shot ----------
 
-/** Max copies one launcher card fans out (each copy = one campaign of the wave). */
-export const TIKTOK_MAX_COPIES = 10;
+/** Max copies the board's Autofill fans out from card 01 (LION's launcher: whole cards, 1–20). */
+export const TIKTOK_MAX_COPIES = 20;
 
-/** One text per line (the Smart+ "extra ad texts" box): trimmed, squashed, empties dropped. */
-export function splitTextLines(raw: string): string[] {
+/** LION's launcher fixes the audience on every launch made through its external API (sending
+ *  `targeting` is a 400): the card shows both as locked fields so the structure reads like LION's. */
+export const TIKTOK_FIXED_GENDER = "GENDER_UNLIMITED";
+export const TIKTOK_FIXED_AGE = "AGE_18_100 (AUTOGEN)";
+
+/** LION's launcher takes Smart+ ad texts as ONE pipe-separated field ("Main | Second | Third"):
+ *  split, squash, drop empties. */
+export function splitPipes(raw: string): string[] {
   return String(raw ?? "")
-    .split(/\r?\n/)
+    .split("|")
     .map((x) => squash(x))
     .filter(Boolean);
 }
 
-/** One URL per line (also tolerates commas / spaces): trimmed, de-duplicated. */
-export function splitUrlLines(raw: string): string[] {
-  return [...new Set(String(raw ?? "").split(/[\n,\s]+/).map((x) => x.trim()).filter(Boolean))];
-}
-
-/** A card's copies field → a whole number 1…TIKTOK_MAX_COPIES (junk → 1). */
+/** An Autofill copies field → a whole number 1…TIKTOK_MAX_COPIES (junk → 1). */
 export function tiktokCopies(raw: string | number): number {
   const n = Math.round(Number(raw));
   return Number.isFinite(n) ? Math.min(TIKTOK_MAX_COPIES, Math.max(1, n)) : 1;
@@ -551,29 +543,33 @@ export type TiktokCardDraft = {
   landingUrl: string;
   identityName: string;
   identityImageUrl: string;
-  title: string;
-  callToAction: string;
+  /** The Ad Text field as typed. Classic: one text. Smart+: up to 5 separated by `|`, the first is
+   *  the main one (LION's launcher rule). */
+  adText: string;
+  /** Picked CTAs, the first is the main one. Classic cards carry exactly one. */
+  ctas: string[];
   videoUrls: string[];
   countries: string[];
   language: string;
   mosh: boolean;
   smartPlus: boolean;
-  budgetLevel: string;
-  /** The Smart+ "extra ad texts" box, one per line. */
-  extraTexts: string;
-  extraCtas: string[];
+  /** Smart+ only: the daily budget sits on the campaign (CBO) instead of the ad group. */
+  cbo: boolean;
   currency?: string;
   label?: string;
 };
 
 /**
- * Card → the shot the route takes. Smart+ fields ride ONLY while the Smart+ switch is on: a panel
- * the buyer filled and then switched off must not turn into a "Smart+ only" refusal (the panel is
- * hidden, so there would be nothing on screen to clear).
+ * Card → the shot the route takes, by LION's launcher rules. Smart+ fields ride ONLY while the
+ * Smart+ switch is on: a classic card sends its Ad Text whole (a `|` is just a character there) and
+ * its first CTA, so switching Smart+ off can never turn into a "Smart+ only" refusal with nothing on
+ * screen to clear.
  */
 export function tiktokDraftShot(d: TiktokCardDraft): TiktokLaunchShotIn {
-  const extraTexts = d.smartPlus ? splitTextLines(d.extraTexts) : [];
-  const extraCtas = d.smartPlus ? d.extraCtas.filter(Boolean) : [];
+  const texts = d.smartPlus ? splitPipes(d.adText) : [squash(d.adText)].filter(Boolean);
+  const ctas = d.ctas.filter(Boolean);
+  const extraTexts = d.smartPlus ? texts.slice(1) : [];
+  const extraCtas = d.smartPlus ? ctas.slice(1) : [];
   return {
     advertiser: d.advertiser,
     ...(d.pixel ? { pixel: d.pixel } : {}),
@@ -584,13 +580,13 @@ export function tiktokDraftShot(d: TiktokCardDraft): TiktokLaunchShotIn {
     landingUrl: d.landingUrl.trim(),
     identityName: d.identityName,
     identityImageUrl: d.identityImageUrl,
-    title: d.title,
-    callToAction: d.callToAction,
+    title: texts[0] ?? "",
+    callToAction: ctas[0] ?? "",
     videoUrls: d.videoUrls,
     countries: d.countries,
     ...(d.language ? { language: d.language } : {}),
     ...(d.mosh ? { mosh: true } : {}),
-    ...(d.smartPlus ? { smartPlus: true, budgetLevel: d.budgetLevel || "adgroup" } : {}),
+    ...(d.smartPlus ? { smartPlus: true, budgetLevel: d.cbo ? "campaign" : "adgroup" } : {}),
     ...(extraTexts.length ? { adTexts: extraTexts } : {}),
     ...(extraCtas.length ? { callToActions: extraCtas } : {}),
     ...(d.currency ? { currency: d.currency } : {}),
