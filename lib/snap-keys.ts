@@ -41,7 +41,9 @@ export type SnapKeyBinding = {
   claimed_at: number;
   campaign_id?: string;
   adsquad_id?: string;
+  /** The FIRST ad of the campaign; `ad_count` says how many the card's creatives built. */
   ad_id?: string;
+  ad_count?: number;
   ad_account?: string;
   niche?: string;
   landing?: string;

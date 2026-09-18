@@ -9,7 +9,10 @@ import {
   SNAP_BID_STRATEGIES,
   SNAP_CTAS,
   SNAP_GEO_PRESETS,
+  SNAP_MAX_CREATIVES,
+  SNAP_NAME_MAX,
   SNAP_OPTIMIZATION_GOALS,
+  snapAdUnitName,
   snapBidKind,
   snapBidLabel,
   snapGeoWire,
@@ -104,9 +107,7 @@ const shot = (over: Partial<SnapLaunchShotIn> = {}): SnapLaunchShotIn => ({
   headline: "Drive it home today",
   brandName: "GC Cars",
   cta: "MORE",
-  mediaUrl: "https://blob.vercel-storage.com/snap/x/v.mp4",
-  mediaKind: "video",
-  mediaName: "v.mp4",
+  media: [{ url: "https://blob.vercel-storage.com/snap/x/v.mp4", kind: "video", name: "v.mp4" }],
   geo: ["US"],
   minAge: "18",
   landingId: "cars",
@@ -121,11 +122,11 @@ const resolved: SnapResolved = {
   profileId: "prof-1",
   name: "[16.09] (SNP) Cars - US - glo-snp_003 - nazar - GC-Launcher",
   key: "glo-snp_003",
-  mediaId: "media-1",
+  mediaIds: ["media-1"],
   startTimeIso: "2026-09-16T12:00:00.000Z",
 };
 
-test("happy path: the four Snap bodies + the final landing URL, AUTO_BID sends no bid_micro", () => {
+test("happy path: the Snap bodies (one creative → one ad unit) + the final landing URL, AUTO_BID sends no bid_micro", () => {
   const r = snapLaunchWire(shot(), resolved);
   assert.ok(!("refusal" in r), JSON.stringify(r));
   if ("refusal" in r) return;
@@ -154,7 +155,9 @@ test("happy path: the four Snap bodies + the final landing URL, AUTO_BID sends n
     status: "ACTIVE",
     start_time: "2026-09-16T12:00:00.000Z",
   });
-  assert.deepEqual(r.wire.creative, {
+  assert.equal(r.wire.ads.length, 1);
+  assert.equal(r.wire.ads[0].index, 0);
+  assert.deepEqual(r.wire.ads[0].creative, {
     ad_account_id: "acct-a",
     name: resolved.name,
     type: "WEB_VIEW",
@@ -172,7 +175,7 @@ test("happy path: the four Snap bodies + the final landing URL, AUTO_BID sends n
     },
     profile_properties: { profile_id: "prof-1" },
   });
-  assert.deepEqual(r.wire.ad, { name: resolved.name, type: "REMOTE_WEBPAGE", status: "ACTIVE" });
+  assert.deepEqual(r.wire.ads[0].ad, { name: resolved.name, type: "REMOTE_WEBPAGE", status: "ACTIVE" });
   assert.equal(r.wire.landingUrl, "https://azmvhs.com/v/auto-financing-by-ford/?utm_source=stone&utm_campaign=glo-snp_003");
 });
 
@@ -191,7 +194,7 @@ test("custom landing: https base with its own query dropped; niche 'Custom'", ()
   assert.ok(!("refusal" in r));
   if ("refusal" in r) return;
   assert.equal(r.niche, "Custom");
-  assert.equal(r.wire.creative.web_view_properties.url, "https://example.com/offer/?utm_source=stone&utm_campaign=glo-snp_003");
+  assert.equal(r.wire.ads[0].creative.web_view_properties.url, "https://example.com/offer/?utm_source=stone&utm_campaign=glo-snp_003");
 });
 
 test("refusal matrix names the field and the fix", () => {
@@ -211,14 +214,63 @@ test("refusal matrix names the field and the fix", () => {
   assert.match(refusal(shot({ brandName: "" })), /Brand name is required/);
   assert.match(refusal(shot({ brandName: "x".repeat(33) })), /Brand name.*32/);
   assert.match(refusal(shot({ cta: "BUY_TICKETS" })), /Call to action/);
-  assert.match(refusal(shot({ mediaUrl: "" })), /creative.*required/i);
-  assert.match(refusal(shot({ mediaUrl: "http://x.com/v.mp4" })), /https/);
+  assert.match(refusal(shot({ media: [] })), /creative.*required/i);
+  assert.match(refusal(shot({ media: [{ url: "http://x.com/v.mp4", kind: "video" }] })), /https/);
+  assert.match(refusal(shot({ media: [{ url: "https://x.com/a.mp4", kind: "video" }, { url: "ftp://x.com/b.mp4", kind: "video" }] })), /Creative 2 .*https/);
+  assert.match(refusal(shot({ media: [{ url: "https://x.com/a.gif", kind: "gif" as "image" }] })), /kind must be video or image/);
+  assert.match(refusal(shot({ media: Array.from({ length: SNAP_MAX_CREATIVES + 1 }, (_, i) => ({ url: `https://x.com/${i}.mp4`, kind: "video" as const })) })), new RegExp(`at most ${SNAP_MAX_CREATIVES}`));
   assert.match(refusal(shot({ geo: [] })), /at least one country/i);
   assert.match(refusal(shot({ minAge: "16" })), /Minimum age/);
   assert.match(refusal(shot({ landingId: "custom", landingUrl: "http://example.com/" })), /https:\/\/ address/);
   assert.match(refusal(shot({ landingId: "nope" as "dmi" })), /Pick a landing/);
   assert.match(refusal(shot(), { ...resolved, profileId: "" }), /Public Profile/);
   assert.match(refusal(shot(), { ...resolved, key: "glo-snp_000" }), /not one of the partner keys/);
-  assert.match(refusal(shot(), { ...resolved, mediaId: "" }), /media id/i);
+  assert.match(refusal(shot(), { ...resolved, mediaIds: [""] }), /media id/i);
+  assert.match(refusal(shot(), { ...resolved, mediaIds: [] }), /media id/i);
   assert.match(refusal(shot(), { ...resolved, name: "x".repeat(376) }), /375/);
+});
+
+test("several creatives: ONE campaign and ad squad, one creative+ad unit per file, numbered names, the same key link", () => {
+  const media = [
+    { url: "https://blob.vercel-storage.com/snap/x/a.mp4", kind: "video" as const, name: "a.mp4" },
+    { url: "https://blob.vercel-storage.com/snap/x/b.jpg", kind: "image" as const, name: "b.jpg" },
+    { url: "https://blob.vercel-storage.com/snap/x/c.mp4", kind: "video" as const, name: "c.mp4" },
+  ];
+  const r = snapLaunchWire(shot({ media }), { ...resolved, mediaIds: ["m-a", "m-b", "m-c"] });
+  assert.ok(!("refusal" in r), JSON.stringify(r));
+  if ("refusal" in r) return;
+  assert.equal(r.wire.campaign.name, resolved.name);
+  assert.equal(r.wire.adsquad.name, resolved.name);
+  assert.deepEqual(r.wire.ads.map((u) => u.index), [0, 1, 2]);
+  assert.deepEqual(r.wire.ads.map((u) => u.creative.top_snap_media_id), ["m-a", "m-b", "m-c"]);
+  assert.deepEqual(r.wire.ads.map((u) => u.creative.name), [`${resolved.name} #1`, `${resolved.name} #2`, `${resolved.name} #3`]);
+  assert.deepEqual(r.wire.ads.map((u) => u.ad.name), [`${resolved.name} #1`, `${resolved.name} #2`, `${resolved.name} #3`]);
+  for (const u of r.wire.ads) {
+    assert.equal(u.creative.web_view_properties.url, r.wire.landingUrl, "every ad of the campaign rides the campaign's ONE key");
+    assert.equal(u.creative.headline, "Drive it home today");
+    assert.deepEqual(u.ad, { name: u.creative.name, type: "REMOTE_WEBPAGE", status: "ACTIVE" });
+  }
+});
+
+test("a creative the pump skipped (empty media id) builds no unit and keeps the others' numbers", () => {
+  const media = [
+    { url: "https://x.com/a.mp4", kind: "video" as const },
+    { url: "https://x.com/b.mp4", kind: "video" as const },
+    { url: "https://x.com/c.mp4", kind: "video" as const },
+  ];
+  const r = snapLaunchWire(shot({ media }), { ...resolved, mediaIds: ["m-a", "", "m-c"] });
+  assert.ok(!("refusal" in r), JSON.stringify(r));
+  if ("refusal" in r) return;
+  assert.deepEqual(r.wire.ads.map((u) => u.index), [0, 2]);
+  assert.deepEqual(r.wire.ads.map((u) => u.ad.name), [`${resolved.name} #1`, `${resolved.name} #3`]);
+});
+
+test("snapAdUnitName: verbatim for a single creative, numbered otherwise, the suffix always fits the cap", () => {
+  assert.equal(snapAdUnitName("name", 0, 1), "name");
+  assert.equal(snapAdUnitName("name", 0, 2), "name #1");
+  assert.equal(snapAdUnitName("name", 11, 12), "name #12");
+  const long = "x".repeat(SNAP_NAME_MAX);
+  const n = snapAdUnitName(long, 99, 120);
+  assert.equal(n.length, SNAP_NAME_MAX);
+  assert.ok(n.endsWith(" #100"));
 });

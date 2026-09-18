@@ -22,11 +22,22 @@ type VidMeta = { duration?: number; w?: number; h?: number };
 function CreativeCard({
   file,
   large,
+  contain = large,
+  index,
+  warn,
   onRemove,
   onCover,
 }: {
   file: FileItem;
   large: boolean;
+  /** Letterbox the media instead of cropping it (hero mode always does; the portrait gallery asks
+   *  for it so a non-9:16 file visibly fails to fill its phone frame). */
+  contain?: boolean;
+  /** 1-based position shown in the type chip ("#2 · Video") — the portrait gallery numbers its
+   *  tiles so a launch note about "creative #2" points at a tile. */
+  index?: number;
+  /** A soft issue with this file (wrong aspect…): amber frame + the sentence as the tile's title. */
+  warn?: string;
   onRemove: () => void;
   /** Present = the cover picker is enabled (video creatives only): pass the chosen image, or
    *  null to clear. The image is recoded like a dropped creative — it lands on adimages too. */
@@ -53,8 +64,10 @@ function CreativeCard({
 
   return (
     <div
+      title={warn}
       className={
-        "animate-pop-in group/creative relative overflow-hidden rounded-xl border border-line bg-black " +
+        "animate-pop-in group/creative relative overflow-hidden rounded-xl border bg-black " +
+        (warn ? "border-warn/60 " : "border-line ") +
         (large ? "h-full min-h-0" : "h-full")
       }
     >
@@ -63,7 +76,7 @@ function CreativeCard({
         <img
           src={file.url}
           alt={file.name}
-          className={"h-full w-full " + (large ? "object-contain" : "object-cover")}
+          className={"h-full w-full " + (contain ? "object-contain" : "object-cover")}
         />
       ) : isVideo ? (
         <video
@@ -97,7 +110,7 @@ function CreativeCard({
             }
             setPlaying(false);
           }}
-          className={"h-full w-full " + (large ? "object-contain" : "object-cover")}
+          className={"h-full w-full " + (contain ? "object-contain" : "object-cover")}
         />
       ) : (
         <div className="flex h-full w-full items-center justify-center text-faint">
@@ -127,6 +140,7 @@ function CreativeCard({
 
       {/* type chip */}
       <span className="absolute left-2 top-2 rounded-md bg-black/55 px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-white/80 backdrop-blur-sm">
+        {index != null ? `#${index} · ` : ""}
         {isVideo ? "Video" : isImage ? "Image" : "File"}
       </span>
 
@@ -288,6 +302,8 @@ export function Dropzone({
   covers,
   accept = "any",
   compact = false,
+  portrait = false,
+  fileWarnings,
 }: {
   id?: string;
   files: FileItem[];
@@ -303,6 +319,12 @@ export function Dropzone({
   /** Dense zone for inline slots (the Google ad group's video / logo fields): ~120 px tall, a
    *  smaller glyph and a one-line, kind-specific prompt instead of the launcher's 210 px hero. */
   compact?: boolean;
+  /** Portrait gallery (Snapchat): every creative is a numbered 9:16 phone-frame tile in a wrapping
+   *  row and the "add" slot is one more frame, so ANY number of files stays a tidy strip. Media is
+   *  letterboxed — a file that is not 9:16 visibly fails to fill its frame. */
+  portrait?: boolean;
+  /** Portrait gallery only: a soft issue per file id (amber frame + tooltip on that tile). */
+  fileWarnings?: Record<string, string>;
 }) {
   const [dragging, setDragging] = useState(false);
   const [rejected, setRejected] = useState<string[]>([]);
@@ -392,6 +414,44 @@ export function Dropzone({
         ))}
       </div>
     ) : null;
+
+  // ---------- portrait gallery (empty and filled are the same strip) ----------
+  if (portrait) {
+    const frame = "w-[132px] max-w-full shrink-0";
+    return (
+      <div className="flex flex-col gap-2" {...zoneEvents}>
+        {fileInput}
+        <div className={"flex flex-wrap gap-2 rounded-xl transition-colors duration-200 " + (dragging ? "outline outline-2 outline-dashed outline-accent/60" : "")}>
+          {files.map((f, i) => (
+            <div key={f.id} className={frame} style={{ aspectRatio: "9 / 16" }}>
+              <CreativeCard file={f} large={false} contain index={i + 1} warn={fileWarnings?.[f.id]} onRemove={() => remove(f.id)} />
+            </div>
+          ))}
+          {!atMax ? (
+            <button
+              type="button"
+              onClick={browse}
+              style={{ aspectRatio: "9 / 16" }}
+              className={
+                frame +
+                " group relative flex flex-col items-center justify-center gap-2 overflow-hidden rounded-[18px] border border-dashed px-2 text-center " +
+                "transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
+                (dragging ? "border-accent bg-accent/10" : "border-line2 bg-black/40 hover:border-accent/50 hover:bg-accent/[0.04]")
+              }
+            >
+              <span className="pointer-events-none absolute right-2 top-2 rounded-md bg-black/55 px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-white/80 backdrop-blur-sm">9:16</span>
+              <span className="flex h-9 w-9 items-center justify-center rounded-2xl border border-line2 bg-surface2 text-dim transition-all duration-200 group-hover:-translate-y-0.5 group-hover:border-accent/40 group-hover:text-[#9db8ff]">
+                {files.length === 0 ? <UploadIcon className="h-4 w-4" /> : <PlusIcon className="h-4 w-4" />}
+              </span>
+              <span className="text-[12px] font-medium text-dim transition-colors group-hover:text-ink">{dragging ? "Drop to add" : files.length === 0 ? "Drop creatives here" : "Add more"}</span>
+              <span className="text-[10.5px] leading-snug text-faint">{files.length === 0 ? "or click to browse · any number" : "drop or browse"}</span>
+            </button>
+          ) : null}
+        </div>
+        {rejectNote}
+      </div>
+    );
+  }
 
   // ---------- empty ----------
   const prompt =

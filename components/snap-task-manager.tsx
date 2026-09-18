@@ -158,15 +158,15 @@ export function snapStageLabel(t: SnapTask): string {
     case "key":
       return "Claiming a partner key…";
     case "media":
-      return "Uploading the creative to Snapchat…";
+      return "Uploading the creatives to Snapchat…";
     case "campaign":
       return "Creating the campaign (paused)…";
     case "adsquad":
       return "Creating the ad squad…";
     case "creative":
-      return "Creating the creative…";
+      return "Creating the creatives and ads…";
     case "ad":
-      return "Creating the ad…";
+      return "Creating the creatives and ads…";
     case "activate":
       return "Activating the campaign…";
     default:

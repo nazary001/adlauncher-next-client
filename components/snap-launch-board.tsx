@@ -2,10 +2,11 @@
 
 // Snapchat LAUNCH board — the Google launcher's shape: a column of campaign CARDS on the left, a
 // sticky Launch bay on the right (readiness per card, keys the wave takes, total/day, Preview →
-// Launch). One card = N copies = N campaigns = N partner keys. The create is SERVER-side: one POST
-// /api/snap/launch stamps the rows and an after() pump builds every campaign on Snapchat, so once
-// the wave is accepted the tab is safe to close. The one client-side phase is the creative UPLOAD
-// (one file per card → Vercel Blob, reused by every copy) — the unload guard + notice mount then.
+// Launch). One card = N copies = N campaigns = N partner keys; a card's creatives (any number) are
+// the ads of each of its campaigns. The create is SERVER-side: one POST /api/snap/launch stamps the
+// rows and an after() pump builds every campaign on Snapchat, so once the wave is accepted the tab
+// is safe to close. The one client-side phase is the creative UPLOAD (every file of a card → Vercel
+// Blob once, reused by every copy) — the unload guard + notice mount then.
 // Gating is delegated to snapLaunchWire (the server's own validator) so the bay can never disagree
 // with the route's refusal; the keys gate mirrors the registry (free keys ≥ shots).
 
@@ -28,6 +29,8 @@ import type { SessionUser } from "./user-menu";
 const MAX_CARDS = 45;
 /** How often the key registry is re-read while the team's builds are in flight. */
 const KEYS_POLL_MS = 10_000;
+/** A card's creatives ride to Vercel Blob this many at a time. */
+const UPLOAD_CONCURRENCY = 3;
 
 type CardView = {
   card: SnapCard;
@@ -173,6 +176,7 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
 
   const readyViews = view.filter((v) => v.ready);
   const totalShots = readyViews.reduce((n, v) => n + v.copies, 0);
+  const totalAds = readyViews.reduce((n, v) => n + v.copies * v.card.files.length, 0);
   const overShotCap = totalShots > SNAP_MAX_SHOTS;
   const keysShort = keys !== null && freeKeys.length < totalShots;
   const totalsByCur = new Map<string, number>();
@@ -193,7 +197,34 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
     hlTimer.current = setTimeout(() => setHighlightId(null), 1800);
   };
 
-  // ---- fire: upload each ready card's creative once, fan the copies out, one POST ----
+  /** Every creative of one card → Vercel Blob, UPLOAD_CONCURRENCY at a time; URLs in card order.
+   *  The first failure stops the rest and rejects — a card launches with ALL its files or not at all. */
+  async function uploadCardCreatives(c: SnapCard, waveId: string): Promise<string[]> {
+    const urls: string[] = c.files.map(() => "");
+    let next = 0;
+    let done = 0;
+    let failed = false;
+    const worker = async () => {
+      while (!failed && next < c.files.length) {
+        const i = next++;
+        const f = c.files[i];
+        const label = c.files.length === 1 ? "Creative" : `Creative #${i + 1} (${f.name})`;
+        try {
+          const file = await readCreative(f.url, f.name, f.kind === "image" ? "image" : "video", label);
+          urls[i] = await uploadCreativeFile(`snap/${username}/${waveId}/${c.id}-${i + 1}-${safeBlobName(f.name, f.kind === "image" ? "creative.jpg" : "creative.mp4")}`, file, label);
+        } catch (e) {
+          failed = true;
+          throw e;
+        }
+        done += 1;
+        if (!failed) setCardState(c.id, { state: "uploading", progress: c.files.length === 1 ? "Uploading the creative…" : `Uploading creatives… ${done}/${c.files.length}` });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, c.files.length) }, worker));
+    return urls;
+  }
+
+  // ---- fire: upload each ready card's creatives once, fan the copies out, one POST ----
   async function fireWave() {
     if (fireBlocked) return;
     if (!fireGate.current.enter()) return;
@@ -208,25 +239,23 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
       const shotCard: string[] = [];
       for (const v of ready) {
         const c = v.card;
-        const f = c.files[0];
-        if (!f) continue;
-        let mediaUrl = "";
-        setCardState(c.id, { state: "uploading", progress: "Uploading the creative…" });
+        if (c.files.length === 0) continue;
+        let mediaUrls: string[] = [];
+        setCardState(c.id, { state: "uploading", progress: c.files.length === 1 ? "Uploading the creative…" : `Uploading creatives… 0/${c.files.length}` });
         try {
-          const file = await readCreative(f.url, f.name, f.kind === "image" ? "image" : "video", "Creative");
-          mediaUrl = await uploadCreativeFile(`snap/${username}/${waveId}/${c.id}-${safeBlobName(f.name, f.kind === "image" ? "creative.jpg" : "creative.mp4")}`, file, "Creative");
+          mediaUrls = await uploadCardCreatives(c, waveId);
         } catch (e) {
           setCardState(c.id, { state: "error", msg: String((e as Error).message ?? e) });
           continue;
         }
         for (let j = 0; j < v.copies; j++) {
-          shots.push(buildSnapShot(c, { currency: v.currency, mediaUrl, desiredKey: v.keys[j], accountName: v.account?.name }));
+          shots.push(buildSnapShot(c, { currency: v.currency, mediaUrls, desiredKey: v.keys[j], accountName: v.account?.name }));
           shotCard.push(c.id);
         }
         setCardState(c.id, { state: "sending", msg: "queuing on server…" });
       }
       if (shots.length === 0) {
-        setFireNote("Nothing was launched — every card failed to upload its creative. Re-attach the files and try again.");
+        setFireNote("Nothing was launched — every card failed to upload its creatives. Re-attach the files and try again.");
         return;
       }
       const res = await fetch("/api/snap/launch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ waveId, shots }) });
@@ -319,14 +348,14 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
                   {readyViews.length}/{cards.length} ready
                 </span>
               </div>
-              <p className="text-[10.5px] leading-snug text-faint">Each copy takes one partner key and becomes its own campaign, born PAUSED and activated once the ad exists. Creative uploads run from this tab; keep it open until they finish.</p>
+              <p className="text-[10.5px] leading-snug text-faint">Each copy takes one partner key and becomes its own campaign, born PAUSED and activated once its ads exist — one ad per creative on the card, any number. Creative uploads run from this tab; keep it open until they finish.</p>
               <div className="-mx-2 flex flex-col">
                 {view.map((v, i) => (
                   <button key={v.card.id} type="button" onClick={() => jumpTo(v.card.id)} title="Jump to this campaign" className="group flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors duration-150 hover:bg-raise/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">
                     <span className="w-5 shrink-0 font-mono text-[10.5px] text-faint group-hover:text-[#f3f0a3]">{String(i + 1).padStart(2, "0")}</span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[12.5px] font-medium text-ink">{v.account?.name || "No account"}</span>
-                      <span className={"block truncate text-[10.5px] " + (v.ready ? "text-faint" : "text-warn")}>{v.ready ? `×${v.copies} · ${v.keys.join(", ") || "keys pending"}` : v.why}</span>
+                      <span className={"block truncate text-[10.5px] " + (v.ready ? "text-faint" : "text-warn")}>{v.ready ? `×${v.copies} · ${v.card.files.length} ad${v.card.files.length === 1 ? "" : "s"} · ${v.keys.join(", ") || "keys pending"}` : v.why}</span>
                     </span>
                     <span className="shrink-0 font-mono text-[11.5px] tabular-nums text-dim">
                       {snapCurrencySymbol(v.currency || "USD")}
@@ -340,6 +369,10 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
                 <div className="flex items-center justify-between">
                   <span className="text-faint">Campaigns</span>
                   <span className="font-mono tabular-nums">{totalShots}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-faint">Ads</span>
+                  <span className="font-mono tabular-nums">{totalAds}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-faint">Free keys</span>
@@ -394,11 +427,11 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
                   <p className="pb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-faint">Preview</p>
                   {readyViews.map((v) => (
                     <p key={v.card.id} className="text-[11.5px] leading-snug text-dim">
-                      <span className="text-ink">{v.account?.name}</span> → ×{v.copies} · {snapCurrencySymbol(v.currency || "USD")}
+                      <span className="text-ink">{v.account?.name}</span> → ×{v.copies} · {v.card.files.length} creative{v.card.files.length === 1 ? "" : "s"} · {snapCurrencySymbol(v.currency || "USD")}
                       {moneyLabel(v.card.budget)}/day · {v.card.geo.join("+")} · <span className="text-[#f3f0a3]">{v.keys.join(", ")}</span>
                     </p>
                   ))}
-                  <div className="mt-1 border-t border-line pt-1.5 text-[11.5px] text-ink">{totalShots} campaign{totalShots === 1 ? "" : "s"} · fires ONE wave · the tab is safe to close once accepted (uploads finish first).</div>
+                  <div className="mt-1 border-t border-line pt-1.5 text-[11.5px] text-ink">{totalShots} campaign{totalShots === 1 ? "" : "s"} · {totalAds} ad{totalAds === 1 ? "" : "s"} · fires ONE wave · the tab is safe to close once accepted (uploads finish first).</div>
                 </div>
               ) : null}
               {counts.active > 0 ? <p className="text-center text-[10.5px] leading-relaxed text-faint">{counts.active} Snapchat build{counts.active === 1 ? "" : "s"} in flight — the Task Manager drawer tracks them.</p> : null}

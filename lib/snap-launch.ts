@@ -212,6 +212,10 @@ export const SNAP_HEADLINE_MAX = 34;
 export const SNAP_BRAND_MAX = 32;
 /** Single-part media upload cap (bigger needs Snap's chunked upload — not in v1). */
 export const SNAP_MEDIA_MAX_BYTES = 32 * 1024 * 1024;
+/** Creatives per campaign: an abuse guard on the wire, NOT a product limit — the board offers no
+ *  cap, Snapchat documents none on ads per ad squad, and the pump's time budget ends an overlong
+ *  list gracefully (the campaign goes live with the ads built so far). */
+export const SNAP_MAX_CREATIVES = 200;
 export const SNAP_MAX_SHOTS = 45;
 
 /** Ad accounts the launcher never offers nor accepts (owner ask 17.09): Snapchat auto-creates an
@@ -290,8 +294,12 @@ export function snapShotTaskId(waveId: string, index: number): string {
 
 // ---------- the wire ----------
 
+/** One creative of a shot: the public Blob URL the board uploaded, its kind, its file name. */
+export type SnapShotMedia = { url: string; kind: "video" | "image"; name?: string };
+
 /** One shot as the board sends it (money as HUMAN strings; copies expanded client-side, one
- *  shot = one campaign = one key). `mediaUrl` is the public Blob URL of the ONE creative. */
+ *  shot = one campaign = one key). `media` lists the card's creatives — each becomes its own
+ *  creative + ad inside the campaign's ONE ad squad, all on the campaign's key. */
 export type SnapLaunchShotIn = {
   label?: string;
   adAccount: string;
@@ -305,9 +313,7 @@ export type SnapLaunchShotIn = {
   headline: string;
   brandName: string;
   cta: string;
-  mediaUrl: string;
-  mediaKind: "video" | "image";
-  mediaName?: string;
+  media: SnapShotMedia[];
   /** ISO-2 codes (Snap has no WW). */
   geo: string[];
   minAge: string;
@@ -351,13 +357,18 @@ export type SnapCreativeWire = {
   profile_properties: { profile_id: string };
 };
 export type SnapAdWire = { name: string; type: "REMOTE_WEBPAGE"; status: "ACTIVE" };
-/** The four Snap bodies of one campaign (parent ids — campaign_id, ad_squad_id, creative_id —
- *  are added by the pump as the chain proceeds) + the final landing URL for the row's `link`. */
-export type SnapLaunchWire = { campaign: SnapCampaignWire; adsquad: SnapAdSquadWire; creative: SnapCreativeWire; ad: SnapAdWire; landingUrl: string };
+/** One creative + its ad; `index` is the creative's place in `shot.media` (names and the row's
+ *  notes number creatives by it, so "#3" is always the third file of the card). */
+export type SnapAdUnitWire = { index: number; creative: SnapCreativeWire; ad: SnapAdWire };
+/** The Snap bodies of one campaign — campaign, ad squad and one creative+ad unit per creative
+ *  (parent ids — campaign_id, ad_squad_id, creative_id — are added by the pump as the chain
+ *  proceeds) + the final landing URL for the row's `link`. */
+export type SnapLaunchWire = { campaign: SnapCampaignWire; adsquad: SnapAdSquadWire; ads: SnapAdUnitWire[]; landingUrl: string };
 
-/** What the route/pump resolved around the shot. The board dry-runs with placeholders
- *  (key "glo-snp_001", mediaId "pending", name "preview"). */
-export type SnapResolved = { adAccountId: string; pixelId?: string; profileId: string; name: string; key: string; mediaId: string; startTimeIso: string };
+/** What the route/pump resolved around the shot. `mediaIds` runs parallel to `shot.media`; an
+ *  empty id is a creative the pump skipped (its upload failed) — no unit is built for it. The
+ *  board dry-runs with placeholders (key "glo-snp_001", media ids "pending", name "preview"). */
+export type SnapResolved = { adAccountId: string; pixelId?: string; profileId: string; name: string; key: string; mediaIds: string[]; startTimeIso: string };
 
 const isHttps = (u: string): boolean => /^https:\/\/[^\s]+$/i.test(u);
 /** A creative URL: public https — or a LOOPBACK http URL, which only the local e2e mock can serve
@@ -365,14 +376,22 @@ const isHttps = (u: string): boolean => /^https:\/\/[^\s]+$/i.test(u);
 const isMediaUrl = (u: string): boolean => isHttps(u) || /^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?\/[^\s]*$/i.test(u);
 const squashText = (s: unknown): string => String(s ?? "").replace(/\s+/g, " ").trim();
 
+/** Creative/ad name of unit `index` out of `total` creatives: the console name verbatim for a
+ *  single creative, `<name> #N` otherwise — the base is trimmed so the number always fits. */
+export function snapAdUnitName(name: string, index: number, total: number): string {
+  if (total <= 1) return name;
+  const tag = ` #${index + 1}`;
+  return `${name.slice(0, SNAP_NAME_MAX - tag.length).trimEnd()}${tag}`;
+}
+
 /** Niche word for names/rows: the partner landing's niche, or "Custom". */
 export function snapShotNiche(shot: SnapLaunchShotIn): string {
   return shot.landingId === "custom" ? "Custom" : (snapLandingById(shot.landingId)?.niche ?? "");
 }
 
 /**
- * Build the four Snap bodies for ONE shot, refusing with the exact fix when a field can't ride.
- * Order: budget → strategy/bid → goal (+pixel) → headline → brand → CTA → media → geo → age →
+ * Build the Snap bodies for ONE shot, refusing with the exact fix when a field can't ride.
+ * Order: budget → strategy/bid → goal (+pixel) → headline → brand → CTA → creatives → geo → age →
  * landing → Public Profile → key → name. Pure and deterministic: the board's dry-run (placeholder
  * key/media/name) and the pump's real run agree on every refusal.
  */
@@ -406,10 +425,16 @@ export function snapLaunchWire(
   if (brand.length > SNAP_BRAND_MAX) return { refusal: `Brand name is over ${SNAP_BRAND_MAX} characters (${brand.length})` };
   const cta = String(shot.cta ?? "").trim();
   if (!CTA_SET.has(cta)) return { refusal: `Call to action must be one of ${SNAP_CTAS.map((c) => c.label).join(" / ")}` };
-  const mediaUrl = String(shot.mediaUrl ?? "").trim();
-  if (!mediaUrl) return { refusal: "One creative (a vertical video or image) is required" };
-  if (!isMediaUrl(mediaUrl)) return { refusal: "The creative must be a public https:// file" };
-  if (shot.mediaKind !== "video" && shot.mediaKind !== "image") return { refusal: "Creative kind must be video or image" };
+  const media = Array.isArray(shot.media) ? shot.media : [];
+  if (media.length === 0) return { refusal: "At least one creative (a vertical video or image) is required" };
+  if (media.length > SNAP_MAX_CREATIVES) return { refusal: `One campaign carries at most ${SNAP_MAX_CREATIVES} creatives — move the rest to another card` };
+  for (let i = 0; i < media.length; i++) {
+    const at = media.length === 1 ? "The creative" : `Creative ${i + 1}`;
+    const url = String(media[i]?.url ?? "").trim();
+    if (!url) return { refusal: `${at} has no file — a vertical video or image is required` };
+    if (!isMediaUrl(url)) return { refusal: `${at} must be a public https:// file` };
+    if (media[i].kind !== "video" && media[i].kind !== "image") return { refusal: `${at}: kind must be video or image` };
+  }
   const geo = snapGeoWire(shot.geo);
   if ("refusal" in geo) return { refusal: geo.refusal };
   const minAge = String(shot.minAge ?? "").trim();
@@ -428,8 +453,8 @@ export function snapLaunchWire(
   if (!profileId) return { refusal: "A Public Profile is required on every Snapchat ad — set SNAP_PROFILE_ID or pick one" };
   const key = String(resolved.key ?? "").trim();
   if (!isSnapKey(key)) return { refusal: `Key "${key}" is not one of the partner keys glo-snp_001…${SNAP_KEY_POOL_MAX}` };
-  const mediaId = String(resolved.mediaId ?? "").trim();
-  if (!mediaId) return { refusal: "Snap media id is missing — the creative was not uploaded" };
+  const mediaIds = media.map((_, i) => String(resolved.mediaIds?.[i] ?? "").trim());
+  if (!mediaIds.some(Boolean)) return { refusal: "Snap media id is missing — the creative was not uploaded" };
   const name = squashText(resolved.name);
   if (!name) return { refusal: "Campaign name is empty" };
   if (name.length > SNAP_NAME_MAX) return { refusal: `Campaign name is over ${SNAP_NAME_MAX} characters` };
@@ -437,6 +462,30 @@ export function snapLaunchWire(
   if (!adAccountId) return { refusal: "Ad account is required" };
 
   const landingUrl = snapLandingUrl(landingBase, key);
+  // One creative + ad per uploaded file, all on the campaign's key; a skipped creative (empty
+  // media id) builds nothing and the others keep their numbers.
+  const ads: SnapAdUnitWire[] = [];
+  mediaIds.forEach((mediaId, index) => {
+    if (!mediaId) return;
+    const unitName = snapAdUnitName(name, index, media.length);
+    ads.push({
+      index,
+      creative: {
+        ad_account_id: adAccountId,
+        name: unitName,
+        type: "WEB_VIEW",
+        ad_product: "SNAP_AD",
+        headline,
+        brand_name: brand,
+        call_to_action: cta,
+        top_snap_media_id: mediaId,
+        shareable: true,
+        web_view_properties: { url: landingUrl, block_preload: false, allow_snap_javascript_sdk: false, use_immersive_mode: false },
+        profile_properties: { profile_id: profileId },
+      },
+      ad: { name: unitName, type: "REMOTE_WEBPAGE", status: "ACTIVE" },
+    });
+  });
   const wire: SnapLaunchWire = {
     campaign: { name, ad_account_id: adAccountId, status: "PAUSED", start_time: resolved.startTimeIso },
     adsquad: {
@@ -454,20 +503,7 @@ export function snapLaunchWire(
       status: "ACTIVE",
       start_time: resolved.startTimeIso,
     },
-    creative: {
-      ad_account_id: adAccountId,
-      name,
-      type: "WEB_VIEW",
-      ad_product: "SNAP_AD",
-      headline,
-      brand_name: brand,
-      call_to_action: cta,
-      top_snap_media_id: mediaId,
-      shareable: true,
-      web_view_properties: { url: landingUrl, block_preload: false, allow_snap_javascript_sdk: false, use_immersive_mode: false },
-      profile_properties: { profile_id: profileId },
-    },
-    ad: { name, type: "REMOTE_WEBPAGE", status: "ACTIVE" },
+    ads,
     landingUrl,
   };
   return {

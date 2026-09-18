@@ -2,14 +2,15 @@
 
 // One Snapchat web-campaign card for the launcher (the Google card's structure, Snap's fields):
 // SETUP (ad account · pixel · Public Profile · name tail) · DELIVERY (goal · bidding · bid ·
-// budget · start paused) · CREATIVE (ONE vertical video/image ≤32 MB · headline ≤34 · brand ≤32 ·
-// CTA) · TARGETING (countries + presets · min age) · LANDING (partner niche or custom https, the
-// final link with the NEXT free key highlighted) · COPIES (N campaigns = N keys). Every gate is
+// budget · start paused) · CREATIVES (ANY number of vertical videos/images, ≤32 MB each — every
+// file becomes its own ad inside the campaign's one ad squad · headline ≤34 · brand ≤32 · CTA) ·
+// TARGETING (countries + presets · min age) · LANDING (partner niche or custom https, the final
+// link with the NEXT free key highlighted) · COPIES (N campaigns = N keys). Every gate is
 // delegated to the SAME validator the server runs (snapLaunchWire) so the readiness dot can never
 // disagree with the route's refusal. Files stay session object URLs here and ride Vercel Blob at
-// launch (the board uploads, one file per card, reused by every copy).
+// launch (the board uploads each file once, reused by every copy).
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Dropzone } from "./dropzone";
 import { Select } from "./ui";
 import { SearchSelect } from "./search-select";
@@ -62,10 +63,9 @@ export type SnapCard = {
   headline: string;
   brandName: string;
   cta: string;
-  /** ONE creative (video mp4/mov or image png/jpg), session object URL until launch. */
+  /** The creatives (video mp4/mov or image png/jpg), session object URLs until launch. No cap:
+   *  each file becomes one ad of the campaign. */
   files: FileItem[];
-  /** Pixel size read client-side after the drop (Snap wants 1080×1920, 9:16). */
-  mediaDims: { w: number; h: number } | null;
   geo: string[];
   minAge: string;
   landingId: "dmi" | "cars" | "custom";
@@ -97,7 +97,6 @@ export function freshSnapCard(id?: string, defaults: { adAccount?: string; pixel
     brandName: defaults.brandName ?? "",
     cta: "MORE",
     files: [],
-    mediaDims: null,
     geo: ["US"],
     minAge: "18",
     landingId: "dmi",
@@ -116,12 +115,16 @@ export function snapCardCopies(card: SnapCard): number {
   return Math.min(SNAP_MAX_COPIES, Math.max(1, n));
 }
 
-/** Hard creative gates: exactly one file, ≤32 MB. (9:16 is a soft note — Snap has the last word.) */
+/** Hard creative gates: at least one file, every file a video/image ≤32 MB. (9:16 is a soft
+ *  note — Snap has the last word.) */
 export function snapMediaIssue(card: SnapCard): string | null {
-  const f = card.files[0];
-  if (!f) return "Attach one vertical video (mp4/mov) or image (png/jpg)";
-  if (f.kind !== "video" && f.kind !== "image") return "The creative must be a video or an image";
-  if (f.size > SNAP_MEDIA_MAX_BYTES) return `Creative is ${Math.round(f.size / 1024 / 1024)} MB — Snapchat single upload takes at most 32 MB`;
+  if (card.files.length === 0) return "Attach at least one vertical video (mp4/mov) or image (png/jpg)";
+  for (let i = 0; i < card.files.length; i++) {
+    const f = card.files[i];
+    const at = card.files.length === 1 ? "The creative" : `Creative #${i + 1} (${f.name})`;
+    if (f.kind !== "video" && f.kind !== "image") return `${at} must be a video or an image`;
+    if (f.size > SNAP_MEDIA_MAX_BYTES) return `${at} is ${Math.round(f.size / 1024 / 1024)} MB — Snapchat single upload takes at most 32 MB`;
+  }
   return null;
 }
 
@@ -134,9 +137,9 @@ export function snapDimsNote(dims: { w: number; h: number } | null): string | nu
   return null;
 }
 
-/** The wire shot (real at launch with `mediaUrl`, otherwise the DRY-RUN with a placeholder). */
-export function buildSnapShot(card: SnapCard, ctx: { currency?: string; mediaUrl?: string; desiredKey?: string; accountName?: string }): SnapLaunchShotIn {
-  const f = card.files[0];
+/** The wire shot (real at launch with `mediaUrls` — the Blob URL of every file, in card order —
+ *  otherwise the DRY-RUN with placeholders). */
+export function buildSnapShot(card: SnapCard, ctx: { currency?: string; mediaUrls?: string[]; desiredKey?: string; accountName?: string }): SnapLaunchShotIn {
   return {
     label: `Snap launch · ${ctx.accountName || "account"}`,
     adAccount: card.adAccount,
@@ -150,9 +153,11 @@ export function buildSnapShot(card: SnapCard, ctx: { currency?: string; mediaUrl
     headline: card.headline.trim(),
     brandName: card.brandName.trim(),
     cta: card.cta,
-    mediaUrl: ctx.mediaUrl ?? (f?.kind === "image" ? "https://pending.local/creative.jpg" : "https://pending.local/creative.mp4"),
-    mediaKind: f?.kind === "image" ? "image" : "video",
-    ...(f?.name ? { mediaName: f.name } : {}),
+    media: card.files.map((f, i) => ({
+      url: ctx.mediaUrls?.[i] ?? (f.kind === "image" ? "https://pending.local/creative.jpg" : "https://pending.local/creative.mp4"),
+      kind: f.kind === "image" ? ("image" as const) : ("video" as const),
+      ...(f.name ? { name: f.name } : {}),
+    })),
     geo: card.geo,
     minAge: card.minAge,
     landingId: card.landingId,
@@ -173,7 +178,7 @@ export function snapCardRefusal(card: SnapCard, ctx: { pixelId?: string; profile
     profileId: ctx.profileId,
     name: "preview",
     key: "glo-snp_001",
-    mediaId: "pending",
+    mediaIds: card.files.map(() => "pending"),
     startTimeIso: new Date(0).toISOString(),
   });
   return "refusal" in built ? built.refusal : null;
@@ -317,7 +322,17 @@ export function SnapLaunchCard({
   const copies = snapCardCopies(card);
   const needsPixel = snapGoalNeedsPixel(card.optimizationGoal);
   const [copied, setCopied] = useState(false);
-  const [dropNote, setDropNote] = useState("");
+  // Pixel size per file id, read client-side after the drop (Snap wants 1080×1920, 9:16); null =
+  // unreadable. Display-only, so it lives here and not on the card: a duplicated card re-reads it.
+  const [dims, setDims] = useState<Record<string, { w: number; h: number } | null>>({});
+  const dimsStarted = useRef(new Set<string>());
+  useEffect(() => {
+    for (const f of card.files) {
+      if (dimsStarted.current.has(f.id)) continue; // one read per file, however often the list changes
+      dimsStarted.current.add(f.id);
+      void readMediaDims(f).then((d) => setDims((prev) => ({ ...prev, [f.id]: d })));
+    }
+  }, [card.files]);
 
   const landingBase = card.landingId === "custom" ? (snapLandingBase(card.landingUrl)?.base ?? "") : (SNAP_LANDINGS.find((l) => l.id === card.landingId)?.url ?? "");
   const firstKey = nextKeys[0] ?? "";
@@ -338,16 +353,25 @@ export function SnapLaunchCard({
       .catch(() => {});
   };
 
-  const onFiles = (files: FileItem[]) => {
-    const one = files.filter((f) => f.kind === "video" || f.kind === "image").slice(0, 1);
-    setDropNote("");
-    patch({ files: one, mediaDims: null });
-    if (one[0]) void readMediaDims(one[0]).then((dims) => (dims ? patch({ mediaDims: dims }) : setDropNote("Couldn't read the creative's size — Snap will validate it")));
-  };
+  const onFiles = (files: FileItem[]) => patch({ files: files.filter((f) => f.kind === "video" || f.kind === "image") });
 
   const geoSet = new Set(card.geo);
   const presetActive = (codes: string[]) => codes.length === card.geo.length && codes.every((c) => geoSet.has(c));
-  const dimsNote = snapDimsNote(card.mediaDims);
+  // Per-file soft notes (wrong aspect / too small) — amber frame on the tile + one summary line.
+  const fileWarnings: Record<string, string> = {};
+  const offSpec: string[] = [];
+  let unreadable = 0;
+  card.files.forEach((f, i) => {
+    const d = dims[f.id];
+    if (d === null) unreadable += 1;
+    const note = snapDimsNote(d ?? null);
+    if (!note) return;
+    fileWarnings[f.id] = note;
+    offSpec.push(`#${i + 1} ${d?.w}×${d?.h}`);
+  });
+  const allRead = card.files.length > 0 && card.files.every((f) => dims[f.id]);
+  const totalBytes = card.files.reduce((n, f) => n + f.size, 0);
+  const totalSize = totalBytes < 1024 * 1024 ? `${Math.max(1, Math.round(totalBytes / 1024))} KB` : `${Math.round(totalBytes / 1024 / 1024)} MB`;
   const stateTone = card.state === "error" ? "text-danger" : card.state === "ok" ? "text-launch2" : card.state === "uploading" || card.state === "sending" ? "text-[#9db8ff]" : "text-faint";
 
   return (
@@ -380,7 +404,7 @@ export function SnapLaunchCard({
         <div className="flex items-center gap-2 px-3.5 py-2.5 text-[11px] text-faint">
           <span className="truncate">
             {accountName || "no account"} · {niche} · {card.geo.join("+") || "no geo"} · {sym}
-            {card.budget} · ×{copies}
+            {card.budget} · {card.files.length} creative{card.files.length === 1 ? "" : "s"} · ×{copies}
           </span>
           {card.state !== "idle" ? <span className={"ml-auto truncate font-mono text-[10.5px] " + stateTone}>{card.msg ?? "—"}</span> : null}
         </div>
@@ -445,23 +469,30 @@ export function SnapLaunchCard({
           </div>
 
           {/* ---- CREATIVE ---- */}
-          <section className="grid gap-3 border-t border-line/60 pt-4 lg:grid-cols-[260px_minmax(0,1fr)]">
+          <section className="flex flex-col gap-3 border-t border-line/60 pt-4">
             <div className="flex flex-col gap-1.5">
               <div className="flex items-center justify-between">
-                <span className={micro}>Creative</span>
-                <span className="font-mono text-[10px] text-faint">{card.files[0] ? `${Math.round(card.files[0].size / 1024 / 1024)} MB` : "9:16 · ≤32 MB"}</span>
+                <span className={micro}>Creatives</span>
+                <span className="font-mono text-[10px] text-faint">{card.files.length ? `${card.files.length} file${card.files.length === 1 ? "" : "s"} · ${totalSize} · ${card.files.length} ad${card.files.length === 1 ? "" : "s"} per campaign` : "9:16 · ≤32 MB each · any number"}</span>
               </div>
-              {/* The zone IS a 9:16 phone frame: an empty slot shows the vertical shape the creative
-                  must fill, a dropped file fills it edge to edge (object-contain inside a 9:16 box
-                  letterboxes anything that is not 9:16 — the visual cue next to the dims note). */}
-              <div className="relative mx-auto w-[180px] max-w-full overflow-hidden rounded-[18px] border border-line bg-black/40 shadow-inner" style={{ aspectRatio: "9 / 16" }}>
-                <Dropzone id={`media-${card.id}`} files={card.files} onChange={onFiles} maxFiles={1} accept="any" compact />
-                <span className="pointer-events-none absolute right-2 top-2 rounded-md bg-black/55 px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-white/80 backdrop-blur-sm">9:16</span>
-              </div>
-              {dimsNote ? <p className="text-[10px] leading-snug text-warn">{dimsNote}</p> : card.mediaDims ? <p className="text-[10px] leading-snug text-faint">{card.mediaDims.w}×{card.mediaDims.h} · 9:16 ✓</p> : <p className="text-[10px] leading-snug text-faint">One vertical video (mp4/mov, 3–180 s) or image (png/jpg), 1080×1920.</p>}
-              {dropNote ? <p className="text-[10px] leading-snug text-warn">{dropNote}</p> : null}
+              {/* A strip of 9:16 phone frames, one per creative, the "add" slot being one more frame:
+                  the empty slot shows the vertical shape a creative must fill, a dropped file is
+                  letterboxed inside its frame (anything that is not 9:16 visibly fails to fill it —
+                  the visual cue next to the amber frame and the dims note). No cap on the count. */}
+              <Dropzone id={`media-${card.id}`} files={card.files} onChange={onFiles} accept="any" portrait fileWarnings={fileWarnings} />
+              {offSpec.length ? (
+                <p className="text-[10px] leading-snug text-warn">
+                  {offSpec.length} of {card.files.length} not 1080×1920 (9:16) — Snap may crop or refuse {offSpec.length === 1 ? "it" : "them"}: {offSpec.slice(0, 6).join(", ")}
+                  {offSpec.length > 6 ? ` +${offSpec.length - 6} more` : ""}. A refused creative is skipped; the rest still launch.
+                </p>
+              ) : allRead ? (
+                <p className="text-[10px] leading-snug text-faint">{card.files.length === 1 ? `${dims[card.files[0].id]?.w}×${dims[card.files[0].id]?.h} · 9:16 ✓` : `All ${card.files.length} creatives are 9:16 ✓ — each becomes its own ad in the campaign's ad squad.`}</p>
+              ) : (
+                <p className="text-[10px] leading-snug text-faint">Any number of vertical videos (mp4/mov, 3–180 s) or images (png/jpg), 1080×1920 — each becomes its own ad in the campaign, all on the campaign&apos;s one key.</p>
+              )}
+              {unreadable > 0 ? <p className="text-[10px] leading-snug text-warn">Couldn&apos;t read the size of {unreadable} creative{unreadable === 1 ? "" : "s"} — Snap will validate {unreadable === 1 ? "it" : "them"}.</p> : null}
             </div>
-            <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <Counted label="Headline" value={card.headline} onChange={(v) => patch({ headline: v })} max={SNAP_HEADLINE_MAX} placeholder="Drive it home today" />
               <Counted label="Brand name" value={card.brandName} onChange={(v) => patch({ brandName: v })} max={SNAP_BRAND_MAX} placeholder="GC" />
               <div className="flex flex-col gap-1.5">

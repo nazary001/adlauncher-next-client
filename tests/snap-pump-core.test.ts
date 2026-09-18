@@ -18,9 +18,7 @@ const shotIn = (over: Partial<SnapLaunchShotIn> = {}): SnapLaunchShotIn => ({
   headline: "Hello",
   brandName: "GC",
   cta: "MORE",
-  mediaUrl: "https://blob/v.mp4",
-  mediaKind: "video",
-  mediaName: "v.mp4",
+  media: [{ url: "https://blob/v.mp4", kind: "video", name: "v.mp4" }],
   geo: ["US"],
   minAge: "18",
   landingId: "cars",
@@ -121,20 +119,29 @@ function world(fail: Partial<Record<string, unknown>> = {}) {
           status: "ACTIVE",
           start_time: resolved.startTimeIso,
         },
-        creative: {
-          ad_account_id: resolved.adAccountId,
-          name: resolved.name,
-          type: "WEB_VIEW",
-          ad_product: "SNAP_AD",
-          headline: shot.headline,
-          brand_name: shot.brandName,
-          call_to_action: shot.cta,
-          top_snap_media_id: resolved.mediaId,
-          shareable: true,
-          web_view_properties: { url: `https://azmvhs.com/v/x/?utm_source=stone&utm_campaign=${resolved.key}`, block_preload: false, allow_snap_javascript_sdk: false, use_immersive_mode: false },
-          profile_properties: { profile_id: resolved.profileId },
-        },
-        ad: { name: resolved.name, type: "REMOTE_WEBPAGE", status: "ACTIVE" },
+        ads: resolved.mediaIds.flatMap((mediaId, index) =>
+          mediaId
+            ? [
+                {
+                  index,
+                  creative: {
+                    ad_account_id: resolved.adAccountId,
+                    name: `${resolved.name} #${index + 1}`,
+                    type: "WEB_VIEW" as const,
+                    ad_product: "SNAP_AD" as const,
+                    headline: shot.headline,
+                    brand_name: shot.brandName,
+                    call_to_action: shot.cta,
+                    top_snap_media_id: mediaId,
+                    shareable: true as const,
+                    web_view_properties: { url: `https://azmvhs.com/v/x/?utm_source=stone&utm_campaign=${resolved.key}`, block_preload: false as const, allow_snap_javascript_sdk: false as const, use_immersive_mode: false as const },
+                    profile_properties: { profile_id: resolved.profileId },
+                  },
+                  ad: { name: `${resolved.name} #${index + 1}`, type: "REMOTE_WEBPAGE" as const, status: "ACTIVE" as const },
+                },
+              ]
+            : [],
+        ),
         landingUrl: `https://azmvhs.com/v/x/?utm_source=stone&utm_campaign=${resolved.key}`,
       },
       label: "auto",
@@ -182,7 +189,7 @@ test("happy path: two copies share ONE media upload, each gets its own key, chai
   assert.deepEqual(activations, [["setCampaignStatus", "cmp-2", "ACTIVE"], ["setCampaignStatus", "cmp-6", "ACTIVE"]]);
   const backfills = w.calls.filter((c) => c[0] === "backfillKey");
   assert.equal(backfills.length, 2);
-  assert.deepEqual(backfills[0][2], { status: "active", campaign_id: "cmp-2", adsquad_id: "sq-3", ad_id: "ad-5", name: t1.name });
+  assert.deepEqual(backfills[0][2], { status: "active", campaign_id: "cmp-2", adsquad_id: "sq-3", ad_id: "ad-5", ad_count: 1, name: t1.name });
   // the creative carried the claimed key and the real media id
   const creative = w.calls.find((c) => c[0] === "createCreative");
   assert.match(JSON.stringify(creative), /glo-snp_001/);
@@ -318,7 +325,7 @@ test("a shot whose media wait cannot fit the remaining budget is refused, but a 
     w3.calls.push(["uploadMedia", id]);
     clock += 5;
   };
-  await runSnapPump("nazar", [pumpShot("t1"), pumpShot("t2"), pumpShot("t3", { mediaUrl: "https://blob/other.mp4" })], 1_000_000 + 120_000 + 10 + 3, w3.deps);
+  await runSnapPump("nazar", [pumpShot("t1"), pumpShot("t2"), pumpShot("t3", { media: [{ url: "https://blob/other.mp4", kind: "video" }] })], 1_000_000 + 120_000 + 10 + 3, w3.deps);
   assert.equal(w3.last("t1").status, "done");
   assert.equal(w3.last("t2").status, "done");
   assert.equal(w3.last("t3").status, "error");
@@ -392,4 +399,167 @@ test("flush runs even when a shot throws something the stages did not anticipate
   await assert.rejects(runSnapPump("nazar", [pumpShot("t1"), pumpShot("t2")], 1_000_000 + 700_000, w.deps), /unexpected/);
   assert.equal(w.last("t1").status, "done", "the first copy was fully built before the throw");
   assert.equal(w.flushed(), 1);
+});
+
+// ---------- several creatives on one card: ONE campaign / ad squad / key, one creative + ad per file ----------
+
+const vids = (n: number) => Array.from({ length: n }, (_, i) => ({ url: `https://blob/c${i + 1}.mp4`, kind: "video" as const, name: `c${i + 1}.mp4` }));
+const count = (w: ReturnType<typeof world>, step: string) => w.calls.filter((c) => c[0] === step).length;
+
+test("three creatives: three uploads, ONE campaign and ad squad, three creatives + ads, the row keeps the first ad", async () => {
+  const w = world();
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(3) })], 1_000_000 + 700_000, w.deps);
+  assert.equal(count(w, "claimKey"), 1, "one key for the whole campaign");
+  assert.equal(count(w, "createMedia"), 3);
+  assert.equal(count(w, "uploadMedia"), 3);
+  assert.equal(count(w, "createCampaign"), 1);
+  assert.equal(count(w, "createAdSquad"), 1);
+  assert.equal(count(w, "createCreative"), 3);
+  assert.equal(count(w, "createAd"), 3);
+  assert.deepEqual(w.stages("t1"), ["key", "media", "campaign", "adsquad", "creative", "ad", "creative", "ad", "creative", "ad", "activate", "live"]);
+  const ads = w.calls.filter((c) => c[0] === "createAd");
+  const squad = ads[0][1];
+  assert.ok(ads.every((c) => c[1] === squad), "every ad lands in the campaign's ONE ad squad");
+  assert.deepEqual(ads.map((c) => (c[2] as { name: string }).name.slice(-2)), ["#1", "#2", "#3"]);
+  const creatives = w.calls.filter((c) => c[0] === "createCreative");
+  assert.equal(new Set(creatives.map((c) => (c[2] as { top_snap_media_id: string }).top_snap_media_id)).size, 3, "each creative rides its own media");
+  assert.ok(creatives.every((c) => JSON.stringify(c[2]).includes("utm_campaign=glo-snp_001")), "all on the one key");
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "done");
+  assert.equal(t1.stage, "live");
+  assert.equal(t1.error, "");
+  const bound = w.calls.find((c) => c[0] === "backfillKey")![2] as Record<string, unknown>;
+  assert.equal(bound.ad_count, 3);
+  assert.equal(bound.ad_id, t1.ad_id, "the registry and the row both keep the FIRST ad");  assert.equal(count(w, "setCampaignStatus"), 1, "activated once, after the last ad");
+});
+
+test("copies of a multi-creative card reuse EVERY upload; the same file twice on a card uploads once", async () => {
+  const w = world();
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(2) }), pumpShot("t2", { media: vids(2) })], 1_000_000 + 700_000, w.deps);
+  assert.equal(count(w, "createMedia"), 2, "two files, uploaded once for both copies");
+  assert.equal(count(w, "createAd"), 4);
+  assert.equal(w.last("t2").status, "done");
+  const w2 = world();
+  const twice = [...vids(1), ...vids(1)];
+  await runSnapPump("nazar", [pumpShot("t1", { media: twice })], 1_000_000 + 700_000, w2.deps);
+  assert.equal(count(w2, "createMedia"), 1, "in-flight upload is shared, not raced");
+  assert.equal(count(w2, "createAd"), 2);
+});
+
+test("one bad file does not sink the campaign: its upload is refused, the others go live, the row names it", async () => {
+  const w = world();
+  const upload = w.deps.createMedia;
+  w.deps.createMedia = async (acct, name, type) => {
+    if (name === "c2.mp4") {
+      w.calls.push(["createMedia", acct, name, type]);
+      throw refusal("unsupported codec");
+    }
+    return upload(acct, name, type);
+  };
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(3) })], 1_000_000 + 700_000, w.deps);
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "done");
+  assert.equal(t1.stage, "live");
+  assert.match(String(t1.error), /creative #2 \(c2\.mp4\) skipped.*unsupported codec/);
+  assert.equal(count(w, "createAd"), 2);
+  assert.deepEqual(w.calls.filter((c) => c[0] === "createAd").map((c) => (c[2] as { name: string }).name.slice(-2)), ["#1", "#3"], "the survivors keep their numbers");
+  assert.equal(count(w, "releaseKey"), 0);
+  assert.equal((w.calls.find((c) => c[0] === "backfillKey")![2] as Record<string, unknown>).ad_count, 2);
+});
+
+test("every file failing its upload: key released, row error at stage media, nothing built", async () => {
+  const w = world({ uploadMedia: refusal("media too large") });
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(2) })], 1_000_000 + 700_000, w.deps);
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "error");
+  assert.equal(t1.stage, "media");
+  assert.match(String(t1.error), /all 2 creatives failed.*media too large/);
+  assert.deepEqual(w.calls.filter((c) => c[0] === "releaseKey"), [["releaseKey", "doc-1"]]);
+  assert.equal(count(w, "createCampaign"), 0);
+});
+
+test("a creative Snapchat refuses is skipped with its reason; the rest are built and the campaign goes live", async () => {
+  const w = world();
+  const create = w.deps.createCreative;
+  let n = 0;
+  w.deps.createCreative = async (acct, body) => {
+    if (++n === 2) {
+      w.calls.push(["createCreative", acct, body]);
+      throw refusal("top snap media must be 9:16");
+    }
+    return create(acct, body);
+  };
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(3) })], 1_000_000 + 700_000, w.deps);
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "done");
+  assert.equal(t1.stage, "live");
+  assert.match(String(t1.error), /creative #2 \(c2\.mp4\) refused at the creative: top snap media must be 9:16/);
+  assert.equal(count(w, "createCreative"), 3);
+  assert.equal(count(w, "createAd"), 2);
+  assert.equal((w.calls.find((c) => c[0] === "backfillKey")![2] as Record<string, unknown>).status, "active");
+});
+
+test("every creative refused: nothing can deliver → row error with the first reason, key retired, never activated", async () => {
+  const w = world({ createCreative: refusal("headline violates policy") });
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(2) })], 1_000_000 + 700_000, w.deps);
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "error");
+  assert.equal(t1.stage, "creative");
+  assert.match(String(t1.error), /all 2 creatives were refused.*headline violates policy/);
+  assert.equal((w.calls.find((c) => c[0] === "backfillKey")![2] as Record<string, unknown>).status, "retired");
+  assert.equal(count(w, "setCampaignStatus"), 0);
+});
+
+test("an ambiguous outcome after the first ad exists: never re-sent, the rest are not attempted, the campaign still goes live with a note", async () => {
+  const w = world();
+  const create = w.deps.createAd;
+  let n = 0;
+  w.deps.createAd = async (sq, body) => {
+    if (++n === 2) {
+      w.calls.push(["createAd", sq, body]);
+      throw new Error("fetch failed");
+    }
+    return create(sq, body);
+  };
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(4) })], 1_000_000 + 700_000, w.deps);
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "done");
+  assert.equal(t1.stage, "live");
+  assert.match(String(t1.error), /creative #2 \(c2\.mp4\): ambiguous outcome \(fetch failed\) at the ad.*2 more not sent/);
+  assert.equal(count(w, "createAd"), 2, "the cut ad is never re-sent and #3/#4 are not attempted");
+  assert.equal(count(w, "createCreative"), 2);
+  assert.equal((w.calls.find((c) => c[0] === "backfillKey")![2] as Record<string, unknown>).ad_count, 1);
+});
+
+test("time budget inside the ads loop: the campaign goes live with the ads built so far and says how many are missing", async () => {
+  const w = world();
+  let clock = 1_000_000;
+  w.deps.now = () => clock;
+  const create = w.deps.createAd;
+  w.deps.createAd = async (sq, body) => {
+    clock += 400_000; // each ad eats most of the budget
+    return create(sq, body);
+  };
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(3) })], 1_000_000 + 700_000, w.deps);
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "done");
+  assert.equal(t1.stage, "live");
+  assert.equal(count(w, "createAd"), 2, "#3 no longer fits before the deadline margin");
+  assert.match(String(t1.error), /1 creative not built.*time budget/);
+});
+
+test("time budget inside the media stage: a later upload batch that cannot fit is left out, the uploaded ones launch", async () => {
+  const w = world();
+  let clock = 1_000_000;
+  w.deps.now = () => clock;
+  w.deps.uploadMedia = async (id) => {
+    w.calls.push(["uploadMedia", id]);
+    clock += 200_000;
+  };
+  // deadline − (mediaWaitMs 10 + margin 120 000) = 1 579 990: the first batch of 3 moves the clock to 1 600 000.
+  await runSnapPump("nazar", [pumpShot("t1", { media: vids(5) })], 1_000_000 + 700_000, w.deps);
+  const t1 = w.last("t1");
+  assert.equal(count(w, "createMedia"), 3, "the second batch was never started");
+  assert.equal(t1.status, "done");
+  assert.match(String(t1.error), /creatives #4–#5 not uploaded.*time budget/);
 });

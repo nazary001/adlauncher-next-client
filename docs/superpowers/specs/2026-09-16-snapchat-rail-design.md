@@ -332,3 +332,36 @@ LION (`LION_TOKEN`) works — no new credential for the report.
   data; the auto-mode is a separate phase on top of this rail.
 - **Refresh token lives in env** (`SNAP_REFRESH_TOKEN`), minted through the owner-only OAuth helper;
   no token vault for a single-account rail.
+
+## Addendum 2026-09-18 — any number of creatives per card (owner ask)
+
+The v1 card took ONE creative. A card now takes ANY number; the text above is kept as the record of
+v1 and this section overrides it where they differ.
+
+- **Shape on Snapchat:** one card copy is still one campaign on one partner key with ONE ad squad;
+  every creative of the card becomes its own `WEB_VIEW` creative + `REMOTE_WEBPAGE` ad inside that ad
+  squad, all on the campaign's one landing URL (`…utm_campaign=<key>`). Headline / brand / CTA are the
+  card's and shared by all of them. Campaign and ad squad keep the console name; with several
+  creatives the creative and ad names are `<name> #N` (N = the file's place on the card), verbatim
+  name for a single creative.
+- **Wire:** `SnapLaunchShotIn.media: { url, kind, name? }[]` replaces `mediaUrl/mediaKind/mediaName`
+  (the route still reads the old single-creative shape as a one-item list). `SnapResolved.mediaIds`
+  runs parallel to `shot.media` ("" = a creative the pump skipped); `SnapLaunchWire.ads:
+  { index, creative, ad }[]`. No product cap: `SNAP_MAX_CREATIVES = 200` is an abuse guard — Snapchat
+  documents no limit on ads per ad squad and the pump's time budget ends an overlong list gracefully.
+- **Pump:** the `media` stage uploads the card's files 3 at a time (shared in-flight upload for a
+  repeated URL, still once per (account, URL) per wave; a later batch starts only while a fresh
+  upload's longest wait fits the budget). After the ad squad: `(creative → ad)` per uploaded file.
+  **One bad creative never sinks the campaign:** a failed upload or a 4xx on a creative/ad is skipped
+  and named on the row (`creative #2 (file) refused at the creative: …`); an ambiguous outcome is never
+  re-sent and ends the loop; past the deadline margin no further unit starts. The campaign is
+  activated when at least one ad exists (row `done`, the notes ride in `error` like an activation
+  failure does). Zero ads → the v1 dispositions unchanged (nothing uploaded → key released, `error` at
+  `media`; campaign exists → key retired, PAUSED shell, `error`/`interrupted`). The row and the key
+  binding keep the FIRST ad id; the binding also carries `ad_count`; the row's bid tag reads
+  `auto · 5 creatives`.
+- **Board:** the creative zone is a wrapping strip of numbered 9:16 frames plus an "add" frame (shared
+  `Dropzone` in `portrait` mode, no `maxFiles`); a file that is not 1080×1920 gets an amber frame and
+  is listed in one soft note. At launch every file of a card rides to Vercel Blob once (3 at a time,
+  progress `n/N`), reused by every copy; a card launches with ALL its files or not at all. The bay
+  shows ads per card and the wave's total ads.

@@ -1,7 +1,10 @@
 // Snapchat rail — the after() wave pump ALGORITHM with every side effect injected (lib/snap-pump.ts
 // binds the real Snapchat client, the key registry and the task-store writer). Kept pure so
 // `node --test tests/snap-pump-core.test.ts` proves the dispositions without a network:
-//   key → media → campaign (PAUSED) → adsquad → creative → ad → activate → done
+//   key → media → campaign (PAUSED) → adsquad → (creative → ad) × every creative → activate → done
+// A card carries ANY number of creatives: they all land in the campaign's ONE ad squad, on its ONE
+// key. One bad creative never sinks the campaign — a failed upload or a creative Snapchat refuses is
+// skipped and named on the row; the campaign fails only when NOTHING could be built.
 // A refusal (HTTP 4xx) before the campaign exists releases the key (pool capacity, not history);
 // after it exists the key is RETIRED with the ids so far and the campaign stays a PAUSED shell
 // (nothing delivers). An ambiguous outcome (5xx / network) is reported as "interrupted" and NEVER
@@ -11,7 +14,7 @@
 // wave and never leaves a row without a terminal status — the failure is folded into the row's
 // text (a stuck row invites a re-fire that would build a second campaign).
 
-import type { SnapLaunchShotIn, SnapLaunchWire, SnapResolved } from "./snap-launch";
+import type { SnapAdWire, SnapCreativeWire, SnapLaunchShotIn, SnapLaunchWire, SnapResolved, SnapShotMedia } from "./snap-launch";
 
 export const SNAP_PUMP_BUDGET_MS = 770_000;
 /** The tail a copy admitted at the deadline may still need once its media is uploaded: five creates
@@ -22,6 +25,11 @@ const DEADLINE_MARGIN_MS = 120_000;
 /** The campaign and ad squad start one minute after the claim, so a slow media upload can never
  *  push start_time into the past by the time the create lands (Snap refuses a past start_time). */
 const START_LEAD_MS = 60_000;
+/** Creatives of one shot uploaded to Snapchat at a time: a video's READY wait is mostly idle, so a
+ *  long list costs a third of the wall clock, while at most three ≤32 MB files sit in memory. */
+const MEDIA_CONCURRENCY = 3;
+/** Skipped-creative notes written out in full on a row; the rest are counted ("+N more"). */
+const MAX_CREATIVE_NOTES = 3;
 
 export const SNAP_PUMP_STAGES = ["key", "media", "campaign", "adsquad", "creative", "ad", "activate", "live", "paused", "failed"] as const;
 export type SnapPumpStage = (typeof SNAP_PUMP_STAGES)[number];
@@ -43,8 +51,8 @@ export type SnapPumpDeps = {
   mediaReady(mediaId: string): Promise<boolean>;
   createCampaign(adAccountId: string, body: SnapLaunchWire["campaign"]): Promise<{ id: string }>;
   createAdSquad(campaignId: string, body: SnapLaunchWire["adsquad"] & { campaign_id: string }): Promise<{ id: string }>;
-  createCreative(adAccountId: string, body: SnapLaunchWire["creative"]): Promise<{ id: string }>;
-  createAd(adSquadId: string, body: SnapLaunchWire["ad"] & { ad_squad_id: string; creative_id: string }): Promise<{ id: string }>;
+  createCreative(adAccountId: string, body: SnapCreativeWire): Promise<{ id: string }>;
+  createAd(adSquadId: string, body: SnapAdWire & { ad_squad_id: string; creative_id: string }): Promise<{ id: string }>;
   setCampaignStatus(campaignId: string, status: "ACTIVE" | "PAUSED"): Promise<void>;
   buildWire(shot: SnapLaunchShotIn, resolved: SnapResolved): { wire: SnapLaunchWire; label: string } | { refusal: string };
   buildName(args: { key: string; niche: string; geoLabel: string; tail: string }): string;
@@ -65,25 +73,27 @@ const isRefusal = (e: unknown): boolean => {
 const messageOf = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const jitter = () => 1000 + Math.floor(Math.random() * 2000);
 /** Media cache key — the same creative on the same ad account is uploaded once per wave. */
-const cacheKeyOf = (s: SnapPumpShot): string => `${s.ctx.adAccountId}|${s.shot.mediaUrl}`;
+const cacheKeyOf = (adAccountId: string, m: SnapShotMedia): string => `${adAccountId}|${m.url}`;
+/** How a row names one creative of the card: "#2 (clip.mp4)". */
+const creativeTag = (media: SnapShotMedia[], index: number): string => `#${index + 1}${media[index]?.name ? ` (${media[index].name})` : ""}`;
 /** Error/interrupted rows carry a registry failure as a suffix — Snap's sentence stays first. */
 const withRegistry = (error: string, registry: string): string => (registry ? `${error} · registry: ${registry}` : error);
 
 export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline: number, deps: SnapPumpDeps): Promise<void> {
   // One upload per (ad account, creative URL) per wave: copies of a card reuse the media id.
   const mediaByKey = new Map<string, string>();
+  // Uploads run MEDIA_CONCURRENCY at a time, so the same file listed twice on a card must share the
+  // upload in flight instead of racing a second one. A failed upload is forgotten (a later copy retries).
+  const mediaInFlight = new Map<string, Promise<string>>();
 
-  const ensureMedia = async (s: SnapPumpShot): Promise<string> => {
-    const cacheKey = cacheKeyOf(s);
-    const hit = mediaByKey.get(cacheKey);
-    if (hit) return hit;
-    const file = await deps.fetchBytes(s.shot.mediaUrl);
+  const uploadMedia = async (adAccountId: string, m: SnapShotMedia): Promise<string> => {
+    const file = await deps.fetchBytes(m.url);
     if (file.size > deps.maxMediaBytes) {
       throw Object.assign(new Error(`creative is ${Math.round(file.size / 1024 / 1024)} MB — Snapchat single upload takes at most 32 MB; trim the file`), { status: 400 });
     }
-    const type = s.shot.mediaKind === "image" ? "IMAGE" : "VIDEO";
-    const filename = s.shot.mediaName || (type === "IMAGE" ? "creative.jpg" : "creative.mp4");
-    const { id } = await deps.createMedia(s.ctx.adAccountId, filename, type);
+    const type = m.kind === "image" ? "IMAGE" : "VIDEO";
+    const filename = m.name || (type === "IMAGE" ? "creative.jpg" : "creative.mp4");
+    const { id } = await deps.createMedia(adAccountId, filename, type);
     await deps.uploadMedia(id, file.bytes, filename, file.mime);
     // Bounded by BOTH the wall clock and an attempt count (a frozen test clock must still end).
     const until = deps.now() + deps.mediaWaitMs;
@@ -94,8 +104,23 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
       ready = await deps.mediaReady(id);
     }
     if (!ready) throw Object.assign(new Error(`Snap media ${id} not ready after ${Math.round(deps.mediaWaitMs / 1000)} s — fire again`), { status: 400 });
-    mediaByKey.set(cacheKey, id);
     return id;
+  };
+
+  const ensureMedia = (adAccountId: string, m: SnapShotMedia): Promise<string> => {
+    const cacheKey = cacheKeyOf(adAccountId, m);
+    const hit = mediaByKey.get(cacheKey);
+    if (hit) return Promise.resolve(hit);
+    const running = mediaInFlight.get(cacheKey);
+    if (running) return running;
+    const p = uploadMedia(adAccountId, m)
+      .then((id) => {
+        mediaByKey.set(cacheKey, id);
+        return id;
+      })
+      .finally(() => mediaInFlight.delete(cacheKey));
+    mediaInFlight.set(cacheKey, p);
+    return p;
   };
 
   // Registry writes are best-effort: "" on success, otherwise the failure for the row's text.
@@ -121,9 +146,11 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
     for (const s of shots) {
       // The after() budget is hard (Vercel kills the function past it), so a copy is admitted only
       // when its LONGEST possible run still fits: a fresh upload may wait up to mediaWaitMs for
-      // READY on top of the chain itself; a copy whose media is already uploaded needs only the
+      // READY on top of the chain itself; a copy whose media is ALL already uploaded needs only the
       // chain (the margin). A refused copy costs nothing — no key claimed, no Snap call.
-      const reserve = mediaByKey.has(cacheKeyOf(s)) ? DEADLINE_MARGIN_MS : deps.mediaWaitMs + DEADLINE_MARGIN_MS;
+      const media = Array.isArray(s.shot.media) ? s.shot.media : [];
+      const isCached = (m: SnapShotMedia) => mediaByKey.has(cacheKeyOf(s.ctx.adAccountId, m));
+      const reserve = media.every(isCached) ? DEADLINE_MARGIN_MS : deps.mediaWaitMs + DEADLINE_MARGIN_MS;
       if (deps.now() > deadline - reserve) {
         deps.write(s.taskId, { status: "error", stage: "failed", error: "Not built — the wave's time budget ran out before this copy; fire it again", finished_at: deps.now() });
         continue;
@@ -163,13 +190,41 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
       deps.write(s.taskId, { gcm: key, name: name.slice(0, 250) });
 
       // ---- media (nothing with money exists yet: any failure hands the key back) ----
+      //      Creatives upload MEDIA_CONCURRENCY at a time. A file that fails is SKIPPED and named on
+      //      the row — the campaign is built from the rest; only when none uploaded does the shot fail.
+      //      A later batch starts only while a fresh upload's longest wait still fits the budget.
       deps.write(s.taskId, { stage: "media" });
-      let mediaId: string;
-      try {
-        mediaId = await ensureMedia(s);
-      } catch (e) {
-        await releaseAndFail("media", messageOf(e));
+      const mediaIds: string[] = media.map(() => "");
+      const mediaErrors: { index: number; message: string }[] = [];
+      let unsentFrom = -1;
+      for (let b = 0; b < media.length; b += MEDIA_CONCURRENCY) {
+        const batch = media.slice(b, b + MEDIA_CONCURRENCY);
+        if (b > 0 && !batch.every(isCached) && deps.now() > deadline - (deps.mediaWaitMs + DEADLINE_MARGIN_MS)) {
+          unsentFrom = b;
+          break;
+        }
+        await Promise.all(
+          batch.map(async (m, j) => {
+            try {
+              mediaIds[b + j] = await ensureMedia(s.ctx.adAccountId, m);
+            } catch (e) {
+              mediaErrors.push({ index: b + j, message: messageOf(e) });
+            }
+          }),
+        );
+      }
+      mediaErrors.sort((x, y) => x.index - y.index);
+      if (!mediaIds.some(Boolean)) {
+        const why = mediaErrors[0]?.message ?? "the shot carries no creative — re-attach the files and fire again";
+        await releaseAndFail("media", media.length > 1 ? `all ${media.length} creatives failed — ${creativeTag(media, mediaErrors[0]?.index ?? 0)}: ${why}` : why);
         continue;
+      }
+      /** What the done row says about creatives that did not make it (the campaign still runs). */
+      const notes: string[] = mediaErrors.slice(0, MAX_CREATIVE_NOTES).map((x) => `creative ${creativeTag(media, x.index)} skipped: ${x.message.slice(0, 200)}`);
+      if (mediaErrors.length > MAX_CREATIVE_NOTES) notes.push(`+${mediaErrors.length - MAX_CREATIVE_NOTES} more creatives skipped at the upload`);
+      if (unsentFrom >= 0) {
+        const range = unsentFrom === media.length - 1 ? `creative #${media.length}` : `creatives #${unsentFrom + 1}–#${media.length}`;
+        notes.push(`${range} not uploaded — the wave's time budget ran out; add them in Ads Manager`);
       }
 
       // ---- the real wire (claimed key + real media id). A THROW here is a programming error and
@@ -182,7 +237,7 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
           profileId: s.ctx.profileId,
           name,
           key,
-          mediaId,
+          mediaIds,
           startTimeIso: new Date(deps.now() + START_LEAD_MS).toISOString(),
         });
       } catch (e) {
@@ -215,7 +270,8 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
       }
       deps.write(s.taskId, { campaign_id: campaignId });
 
-      // ---- adsquad → creative → ad (the campaign exists: a failure retires the key, shell stays PAUSED) ----
+      // ---- adsquad → (creative → ad) × N (the campaign exists: a failure that leaves it with NO ad
+      //      retires the key, shell stays PAUSED) ----
       const ids: { adsquad_id?: string; ad_id?: string } = {};
       const failAfterCampaign = async (stage: SnapPumpStage, e: unknown) => {
         const ambiguous = !isRefusal(e);
@@ -228,8 +284,6 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
         });
       };
       let adSquadId = "";
-      let creativeId = "";
-      let adId = "";
       try {
         deps.write(s.taskId, { stage: "adsquad" });
         adSquadId = (await deps.createAdSquad(campaignId, { ...wire.adsquad, campaign_id: campaignId })).id;
@@ -239,22 +293,63 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
         await failAfterCampaign("adsquad", e);
         continue;
       }
-      try {
-        deps.write(s.taskId, { stage: "creative" });
-        creativeId = (await deps.createCreative(s.ctx.adAccountId, wire.creative)).id;
-      } catch (e) {
-        await failAfterCampaign("creative", e);
+      // One creative + ad per uploaded file. A REFUSED unit (4xx — this file, this creative) is
+      // skipped and the next one is tried. An AMBIGUOUS outcome is never re-sent and ends the loop
+      // (the network is the likely cause): with an ad already built the campaign still goes live and
+      // the row says what to check; with none it is the interrupted shell it always was. Past the
+      // deadline margin no further unit is started — the campaign runs with the ads built so far.
+      const adIds: string[] = [];
+      const unitNotes: string[] = [];
+      let refusedUnits = 0;
+      let firstFailure: { stage: "creative" | "ad"; e: unknown; index: number } | null = null;
+      let shellFailed = false;
+      for (let k = 0; k < wire.ads.length; k++) {
+        const unit = wire.ads[k];
+        const left = wire.ads.length - k;
+        if (adIds.length > 0 && deps.now() > deadline - DEADLINE_MARGIN_MS) {
+          unitNotes.push(`${left} creative${left === 1 ? "" : "s"} not built — the wave's time budget ran out; add ${left === 1 ? "it" : "them"} in Ads Manager`);
+          break;
+        }
+        let stage: "creative" | "ad" = "creative";
+        try {
+          deps.write(s.taskId, { stage: "creative" });
+          const creativeId = (await deps.createCreative(s.ctx.adAccountId, unit.creative)).id;
+          stage = "ad";
+          deps.write(s.taskId, { stage: "ad" });
+          const adId = (await deps.createAd(adSquadId, { ...unit.ad, ad_squad_id: adSquadId, creative_id: creativeId })).id;
+          adIds.push(adId);
+          if (adIds.length === 1) {
+            ids.ad_id = adId;
+            deps.write(s.taskId, { ad_id: adId });
+          }
+        } catch (e) {
+          firstFailure ??= { stage, e, index: unit.index };
+          if (isRefusal(e)) {
+            refusedUnits += 1;
+            if (refusedUnits <= MAX_CREATIVE_NOTES) unitNotes.push(`creative ${creativeTag(media, unit.index)} refused at the ${stage}: ${messageOf(e).slice(0, 200)}`);
+            continue;
+          }
+          if (adIds.length === 0) {
+            await failAfterCampaign(stage, e);
+            shellFailed = true;
+          } else {
+            const rest = left - 1;
+            unitNotes.push(`creative ${creativeTag(media, unit.index)}: ambiguous outcome (${messageOf(e).slice(0, 200)}) at the ${stage} — it may exist on Snapchat, check Ads Manager${rest > 0 ? `; ${rest} more not sent` : ""}`);
+          }
+          break;
+        }
+      }
+      if (shellFailed) continue;
+      if (adIds.length === 0) {
+        // Every unit was refused: nothing can deliver. The first refusal is the row's sentence.
+        const f = firstFailure as { stage: "creative" | "ad"; e: unknown; index: number };
+        const e = wire.ads.length > 1 ? Object.assign(new Error(`all ${wire.ads.length} creatives were refused — ${creativeTag(media, f.index)}: ${messageOf(f.e)}`), { status: 400 }) : f.e;
+        await failAfterCampaign(f.stage, e);
         continue;
       }
-      try {
-        deps.write(s.taskId, { stage: "ad" });
-        adId = (await deps.createAd(adSquadId, { ...wire.ad, ad_squad_id: adSquadId, creative_id: creativeId })).id;
-        ids.ad_id = adId;
-        deps.write(s.taskId, { ad_id: adId });
-      } catch (e) {
-        await failAfterCampaign("ad", e);
-        continue;
-      }
+      if (refusedUnits > MAX_CREATIVE_NOTES) unitNotes.push(`+${refusedUnits - MAX_CREATIVE_NOTES} more creatives refused`);
+      notes.push(...unitNotes);
+      const adId = adIds[0];
 
       // ---- activate (unless the buyer wants to review first) ----
       let activationError = "";
@@ -268,7 +363,7 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
       }
 
       // ---- done (the chain exists whatever the registry says: the row always lands here) ----
-      const registry = await safeBackfill(key, { status: "active", campaign_id: campaignId, adsquad_id: adSquadId, ad_id: adId, name });
+      const registry = await safeBackfill(key, { status: "active", campaign_id: campaignId, adsquad_id: adSquadId, ad_id: adId, ad_count: adIds.length, name });
       const registryError = registry ? `registry backfill failed: ${registry} — check the Keys page` : "";
       const live = !s.ctx.startPaused && !activationError;
       deps.write(s.taskId, {
@@ -280,7 +375,7 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
         link: wire.landingUrl,
         gcm: key,
         name: name.slice(0, 250),
-        error: [activationError, registryError].filter(Boolean).join(" · ").slice(0, 1000),
+        error: [activationError, ...notes, registryError].filter(Boolean).join(" · ").slice(0, 1000),
         finished_at: deps.now(),
       });
     }

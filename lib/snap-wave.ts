@@ -18,6 +18,7 @@ import {
   snapShotTaskId,
   todaySaoPauloDotDDMM,
   type SnapLaunchShotIn,
+  type SnapShotMedia,
 } from "./snap-launch";
 import { SnapApiError, snapAdAccounts, snapConfigured, snapDefaults, snapPixels, snapRailEnabled, type SnapAdAccount, type SnapPixel } from "./snap-api";
 import { SNAP_PARTNER, pumpSnapWave } from "./snap-pump";
@@ -46,6 +47,21 @@ function resolvePixel(pixels: SnapPixel[], picked: string, needed: boolean, acco
   return { pixelId: picked };
 }
 
+/** A pre-multi-creative caller's single creative (`mediaUrl` / `mediaKind` / `mediaName`). */
+type LegacyMedia = { mediaUrl?: unknown; mediaKind?: unknown; mediaName?: unknown };
+
+/** The card's creatives as the wire carries them. A body without `media` that still sends the old
+ *  single-creative fields is read as a one-item list, so an open tab from before the deploy (and
+ *  any script built on the old shape) keeps launching. */
+function cleanMedia(x: SnapLaunchShotIn & LegacyMedia): SnapShotMedia[] {
+  const list: unknown[] = Array.isArray(x.media) ? x.media : s(x.mediaUrl) ? [{ url: x.mediaUrl, kind: x.mediaKind, name: x.mediaName }] : [];
+  return list.map((m) => {
+    const r = (m ?? {}) as Record<string, unknown>;
+    const name = s(r.name);
+    return { url: s(r.url), kind: r.kind === "image" ? "image" : "video", ...(name ? { name } : {}) };
+  });
+}
+
 /** The shot as the board sent it, normalized (strings trimmed, geo as strings, booleans coerced). */
 function cleanShot(x: SnapLaunchShotIn): SnapLaunchShotIn {
   return {
@@ -61,9 +77,7 @@ function cleanShot(x: SnapLaunchShotIn): SnapLaunchShotIn {
     headline: s(x.headline),
     brandName: s(x.brandName),
     cta: s(x.cta),
-    mediaUrl: s(x.mediaUrl),
-    mediaKind: x.mediaKind === "image" ? "image" : "video",
-    mediaName: s(x.mediaName),
+    media: cleanMedia(x),
     geo: (Array.isArray(x.geo) ? x.geo : []).map(s).filter(Boolean),
     minAge: s(x.minAge) || "18",
     landingId: x.landingId === "custom" || x.landingId === "dmi" || x.landingId === "cars" ? x.landingId : ("" as SnapLaunchShotIn["landingId"]),
@@ -136,17 +150,17 @@ export async function handleSnapLaunch(req: Request): Promise<NextResponse> {
 
     // The board's placeholder from before its Blob upload finished: a client bug, never a creative —
     // refused here rather than at the pump's download (which would claim and release a key first).
-    if (/^https?:\/\/pending\.local(?:[:/]|$)/i.test(x.mediaUrl)) return bad(`${at}: creative upload did not finish — re-attach the file`);
+    if (x.media.some((m) => /^https?:\/\/pending\.local(?:[:/]|$)/i.test(m.url))) return bad(`${at}: creative upload did not finish — re-attach the file`);
     // The pure validator admits a loopback http creative for the local mock; a production build takes
     // only a public https file (SNAP_ALLOW_LOOPBACK_MEDIA=1 re-admits loopback for a `next start`
     // smoke — never set on Vercel).
-    if (process.env.NODE_ENV === "production" && process.env.SNAP_ALLOW_LOOPBACK_MEDIA !== "1" && !/^https:\/\//i.test(x.mediaUrl)) return bad(`${at}: The creative must be a public https:// file`);
+    if (process.env.NODE_ENV === "production" && process.env.SNAP_ALLOW_LOOPBACK_MEDIA !== "1" && x.media.some((m) => !/^https:\/\//i.test(m.url))) return bad(`${at}: Every creative must be a public https:// file`);
 
     // An empty brand takes SNAP_BRAND_NAME (the spec's default) — the same server-side fallback as
     // the profile and the pixel above, so a card that never touched the field still launches.
     const shot: SnapLaunchShotIn = { ...x, brandName: x.brandName || defaults.brandName, currency: account.currency };
     // Dry-run with placeholders: the validator is pure, so every refusal fires here, before any row exists.
-    const dry = snapLaunchWire(shot, { adAccountId, pixelId: px.pixelId, profileId, name: "preview", key: "glo-snp_001", mediaId: "pending", startTimeIso: nowIso });
+    const dry = snapLaunchWire(shot, { adAccountId, pixelId: px.pixelId, profileId, name: "preview", key: "glo-snp_001", mediaIds: shot.media.map(() => "pending"), startTimeIso: nowIso });
     if ("refusal" in dry) return bad(`${at}: ${dry.refusal}`);
 
     const desiredKey = isSnapKey(x.desiredKey ?? "") ? (x.desiredKey as string) : undefined;
@@ -161,7 +175,8 @@ export async function handleSnapLaunch(req: Request): Promise<NextResponse> {
         shot,
         ctx: { adAccountId, pixelId: px.pixelId, profileId, currency: account.currency, niche: dry.niche, geoLabel: dry.geoLabel, tail: x.suffix, startPaused: Boolean(x.startPaused) },
       },
-      row: { name: provisionalName.slice(0, 250), geo: dry.geoLabel, budget, bid: dry.label, key: desiredKey ?? "" },
+      // The monitor tag says how many ads the campaign carries when the card had several creatives.
+      row: { name: provisionalName.slice(0, 250), geo: dry.geoLabel, budget, bid: shot.media.length > 1 ? `${dry.label} · ${shot.media.length} creatives` : dry.label, key: desiredKey ?? "" },
     });
   }
   return acceptSnapWave(user, waveId, resolved, t0);
