@@ -26,7 +26,7 @@ import { moneyLabel, parseMoney } from "@/lib/types";
 import { tiktokBidPlan, tiktokResolvePixel, type TiktokLaunchShotIn } from "@/lib/tiktok-launch";
 import { readCreative, safeBlobName, uploadCreativeFile } from "./blob-uploader";
 import { UploadingNotice, useUnloadGuard } from "./upload-guard";
-import { CopyIcon, EyeIcon, MinusIcon, PlusIcon, SparklesIcon } from "./icons";
+import { ChevronDownIcon, CopyIcon, EyeIcon, MinusIcon, PlusIcon, SparklesIcon } from "./icons";
 import {
   FIRST_TT_CARD_ID,
   TiktokLaunchCard,
@@ -349,13 +349,18 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
       <Header partner="br" onPartnerChange={changePartner} user={user} platform="tiktok" />
       <TiktokNav active="launch" />
       <main className="flex-1">
-        <div className="mx-auto grid w-full max-w-[1440px] items-start gap-5 px-4 pb-24 pt-6 sm:px-5 lg:grid-cols-[minmax(0,1fr)_340px] lg:gap-6 xl:px-6">
+        <div className="mx-auto grid w-full max-w-[1440px] items-start gap-5 px-4 pb-28 pt-6 sm:px-5 lg:grid-cols-[minmax(0,1fr)_340px] lg:pb-24 lg:gap-6 xl:px-6">
           {/* ---- campaign cards ---- */}
           <section className="flex min-w-0 flex-col gap-4">
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-sm font-semibold text-ink">Campaign Launcher</h1>
-              <span className="rounded-md border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[11px] text-dim">{cards.length}</span>
-              <span className="rounded-md border border-line bg-surface2 px-1.5 py-0.5 text-[10.5px] text-faint">TikTok</span>
+            <div className="flex flex-wrap items-end gap-x-3 gap-y-2.5">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <h1 className="text-[15px] font-semibold text-ink">Campaign Launcher</h1>
+                  <span className="rounded-md border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[11px] text-dim">{cards.length}</span>
+                  <span className="rounded-md border border-line bg-surface2 px-1.5 py-0.5 text-[10.5px] text-faint">TikTok</span>
+                </div>
+                <p className="mt-1 max-w-[60ch] text-[11.5px] leading-snug text-faint">One card is one campaign. Fill the first, then copy it — Autofill makes many at once.</p>
+              </div>
               <div className="ml-auto flex items-center gap-2">
                 <button
                   type="button"
@@ -373,9 +378,10 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
                   disabled={cards.length >= MAX_CARDS || firing}
                   aria-label="Add a copy of the last campaign"
                   title="Add a copy of the last campaign"
-                  className="flex h-9 w-9 items-center justify-center rounded-lg border border-accent/40 bg-accent/15 text-[#9db8ff] transition-all duration-150 hover:border-accent/60 hover:bg-accent/25 active:scale-[0.95] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  className="flex h-9 min-w-9 items-center justify-center gap-1.5 rounded-lg border border-accent/40 bg-accent/15 px-2.5 text-[13px] font-medium text-[#9db8ff] transition-all duration-150 hover:border-accent/60 hover:bg-accent/25 active:scale-[0.95] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 >
                   <PlusIcon className="h-4 w-4" />
+                  <span className="hidden sm:inline">Copy last</span>
                 </button>
                 <button
                   type="button"
@@ -431,7 +437,7 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
           </section>
 
           {/* ---- launch bay ---- */}
-          <aside className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-32">
+          <aside id="tt-launch-bay" className="flex min-w-0 scroll-mt-36 flex-col gap-3 lg:sticky lg:top-32">
             <div className="flex flex-col gap-3 rounded-2xl border border-line bg-surface p-4 lg:max-h-[calc(100vh-9rem)] lg:overflow-y-auto lg:overscroll-contain">
               <div className="flex shrink-0 items-center justify-between">
                 <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-faint">Launch bay</span>
@@ -577,6 +583,27 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
           </aside>
         </div>
       </main>
+
+      {/* Below `lg` the launch bay sits under every card — a long way down on a phone. This bar keeps
+          the wave's state in reach and jumps to the bay; from `lg` up the bay itself is sticky. */}
+      <div className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-surface/95 px-4 py-2.5 backdrop-blur lg:hidden">
+        <div className="mx-auto flex max-w-[1440px] items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <p className={"text-[12.5px] font-semibold " + (readyViews.length === cards.length ? "text-launch2" : "text-warn")}>
+              {readyViews.length}/{cards.length} ready
+            </p>
+            <p className="truncate font-mono text-[10.5px] text-faint">${moneyLabel(totalPerDay)}/day</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => document.getElementById("tt-launch-bay")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+            className="flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-accent/40 bg-accent/15 px-3.5 text-[13px] font-semibold text-[#9db8ff] transition-all duration-150 hover:border-accent/60 hover:bg-accent/25 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          >
+            Launch bay
+            <ChevronDownIcon className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
 
       <TiktokAutofillModal open={autofillOpen && !firing} source={cards[0] ?? null} room={MAX_CARDS - cards.length} onClose={() => setAutofillOpen(false)} onCreate={applyAutofill} />
     </>

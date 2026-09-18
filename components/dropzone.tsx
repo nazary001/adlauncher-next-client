@@ -426,7 +426,7 @@ export function Dropzone({
 
   // ---------- portrait gallery (empty and filled are the same strip) ----------
   if (portrait) {
-    const frame = "w-[132px] max-w-full shrink-0";
+    const frame = "w-[calc((100%-1rem)/3)] min-w-[92px] shrink-0 sm:w-[132px]";
     return (
       <div className="flex flex-col gap-2" {...zoneEvents}>
         {fileInput}
