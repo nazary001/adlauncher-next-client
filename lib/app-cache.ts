@@ -79,3 +79,30 @@ export async function writeAppCache<T>(
     return null;
   }
 }
+
+/**
+ * EVERY row stored under one key, OLDEST first (createdAt, then documentId — the same total order
+ * every reader computes). Strapi's unique constraint has a TOCTOU window (lib/task-store.ts
+ * dedupeTaskRows: two concurrent creates of one unique key were both committed live), so a caller
+ * that uses a key as a CLAIM verifies it here: the oldest row is the one winner. `ok:false` = the
+ * store could not be read (never "no rows").
+ */
+export async function readAppCacheAll<T>(key: string): Promise<{ ok: boolean; rows: AppCacheRow<T>[] }> {
+  if (!STRAPI || !TOKEN) return { ok: false, rows: [] };
+  try {
+    const res = await strapiFetch(
+      `${STRAPI}/api/app-caches?filters[ckey][$eq]=${encodeURIComponent(key)}&sort[0]=createdAt:asc&sort[1]=documentId:asc&pagination[pageSize]=10`,
+      { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
+    );
+    if (!res.ok) return { ok: false, rows: [] };
+    const body = (await res.json().catch(() => ({}))) as {
+      data?: Array<{ documentId?: string; cvalue?: unknown; refreshed_at?: unknown }>;
+    };
+    const rows = (body.data ?? [])
+      .filter((r) => r?.documentId)
+      .map((r) => ({ documentId: String(r.documentId), value: (r.cvalue ?? null) as T | null, refreshedAt: Number(r.refreshed_at) || 0 }));
+    return { ok: true, rows };
+  } catch {
+    return { ok: false, rows: [] };
+  }
+}

@@ -4,7 +4,7 @@
 
 import { NextResponse, after } from "next/server";
 import { sessionFromCookieHeader } from "./session";
-import { readAppCache, writeAppCache } from "./app-cache";
+import { readAppCacheAll, readAppCacheDetailed, writeAppCache } from "./app-cache";
 import { storeConfigured, upsertTaskRow } from "./task-store";
 import { LION_ACR, lionTokenConfigured } from "./lion";
 import { lionTiktokFindCampaigns } from "./lion-tiktok";
@@ -14,6 +14,7 @@ import {
   TIKTOK_CAMPAIGN_ID_RE,
   TIKTOK_WAVE_ID_RE,
   isTiktokLaunchAccount,
+  tiktokClaimVerdict,
   tiktokCloneWire,
   tiktokGeoLabel,
   tiktokJuroWire,
@@ -104,11 +105,30 @@ type ResolvedShot = {
 
 const KIND_TAG: Record<TiktokKind, string> = { launch: "t-launch", clone: "t-clone", juro: "t-juro" };
 
+/** What a wave's claim row holds: who fired it, when, which request wrote it, and how many shots
+ *  it carried (a re-POST of the id with ANOTHER shot count is not a retry). */
+type WaveClaim = { user: string; at: number; nonce: string; n: number };
+
+/** Waves being accepted by THIS instance right now — taken synchronously, before the first await,
+ *  so a twin request can never stamp over rows the first one's pump has already advanced. */
+const inflightWaves = new Set<string>();
+
+/** Rows are stamped this many at a time — one burst of 45 parallel upserts (≈3 store calls each)
+ *  right before the claim is how a claim write times out. */
+const STAMP_BATCH = 8;
+
 /**
- * The accepted-wave tail every TikTok launch shares: idempotency (same-instance set + app-cache
- * claim), stamp rows BEFORE the claim and the answer (the team sees queued rows even if the
- * browser dies now; a crash before the claim re-stamps the SAME task ids on retry), claim (fail
- * CLOSED when unwritable — a retry could otherwise pump twice), after(pump), answer.
+ * The accepted-wave tail every TikTok launch shares. In order:
+ *  1. idempotency — this instance's memory, then the claim row in the shared store. A store that
+ *     can't be READ refuses the wave BEFORE anything is stamped (a blip must not read as "never
+ *     accepted" and let a retry stamp over a wave another instance is pumping);
+ *  2. stamp the rows (the team sees them even if the browser dies now; a crash before the claim
+ *     re-stamps the SAME task ids on retry) — no row stamped = nothing fired;
+ *  3. claim — a POST of a unique key carrying OUR nonce, then a read of every row under the key:
+ *     the OLDEST row is the one winner (lib/tiktok-launch tiktokClaimVerdict). That read is what
+ *     tells "my write landed after its timeout" (→ pump) from "a twin won" (→ alreadyAccepted),
+ *     and what closes Strapi's unique-key TOCTOU window, where both racers' POSTs succeed;
+ *  4. after(pump), answer.
  */
 async function acceptTiktokWave(user: string, waveId: string, resolved: ResolvedShot[], startedAt: number): Promise<NextResponse> {
   const waveKey = `tiktok-wave:${waveId}`;
@@ -116,53 +136,82 @@ async function acceptTiktokWave(user: string, waveId: string, resolved: Resolved
   const alreadyAccepted = () => NextResponse.json({ ok: true, queued: resolved.length, rows, alreadyAccepted: true });
   if (claimedWaves.has(waveId)) return alreadyAccepted();
   if (!storeConfigured()) return bad("task_store_not_configured_wave_not_fired", 503);
-  const prior = await readAppCache<{ user: string; at: number }>(waveKey);
-  if (prior) return alreadyAccepted();
-  const now = Date.now();
-  await Promise.all(
-    resolved.map((r) =>
-      upsertTaskRow(user, r.taskId, {
-        partner: TIKTOK_PARTNER,
-        name: r.row.name,
-        geo: r.row.geo,
-        budget: r.row.budget,
-        status: "running",
-        stage: "submit",
-        gcm: KIND_TAG[r.kind],
-        adset_id: r.row.advertiser,
-        ad_id: r.row.currency,
-        campaign_id: "",
-        link: "",
-        error: "",
-        ...(r.row.bid ? { bid: r.row.bid } : {}),
-        queued_at: now,
-        started_at: now,
-      }),
-    ),
-  );
-  // The claim is a POST of a UNIQUE key, so exactly one of two racing requests gets a row back.
-  const claim = await writeAppCache(waveKey, { user, at: now });
-  if (!claim) {
-    // Lost the race to a twin request (a double submit, a retry that overlapped): the winner is
-    // pumping these very task ids — answer like any other repeat.
-    if (await readAppCache(waveKey)) return alreadyAccepted();
-    // The store really refused the claim: nothing will pump the rows stamped above, so they must
-    // not sit "running" for the team to wonder about (a stuck row invites a blind re-fire).
-    await Promise.all(
-      resolved.map((r) =>
-        upsertTaskRow(user, r.taskId, { partner: TIKTOK_PARTNER, status: "error", stage: "submit", error: "Not fired — the task store refused the wave claim; nothing was sent to LION. Fire the wave again.", finished_at: Date.now() }),
-      ),
-    );
-    return bad("task_store_unavailable_wave_not_fired", 503);
+  if (inflightWaves.has(waveId)) return bad("wave_in_progress: this wave is being accepted right now — check the Task Manager instead of firing it again", 409);
+  inflightWaves.add(waveId);
+  try {
+    const prior = await readAppCacheDetailed<WaveClaim>(waveKey);
+    if (!prior.ok) return bad("task_store_unavailable_wave_not_fired: the task store can't be read — nothing was sent; try again in a moment", 503);
+    if (prior.row) {
+      const n = Number(prior.row.value?.n);
+      if (Number.isFinite(n) && n !== resolved.length) {
+        return bad(`wave_content_changed: this wave was already accepted with ${n} campaign${n === 1 ? "" : "s"}, not ${resolved.length} — check the Task Manager before firing anything again`, 409);
+      }
+      return alreadyAccepted();
+    }
+
+    const now = Date.now();
+    let stamped = 0;
+    for (let i = 0; i < resolved.length; i += STAMP_BATCH) {
+      const results = await Promise.all(
+        resolved.slice(i, i + STAMP_BATCH).map((r) =>
+          upsertTaskRow(user, r.taskId, {
+            partner: TIKTOK_PARTNER,
+            name: r.row.name,
+            geo: r.row.geo,
+            budget: r.row.budget,
+            status: "running",
+            stage: "submit",
+            gcm: KIND_TAG[r.kind],
+            adset_id: r.row.advertiser,
+            ad_id: r.row.currency,
+            campaign_id: "",
+            link: "",
+            error: "",
+            ...(r.row.bid ? { bid: r.row.bid } : {}),
+            queued_at: now,
+            started_at: now,
+          }),
+        ),
+      );
+      stamped += results.filter((x) => x.ok).length;
+    }
+    // A wave nobody could see must not fire: its campaigns would exist with no row to find them by.
+    if (stamped === 0) return bad("task_store_unavailable_wave_not_fired: no task row could be written — nothing was sent; try again in a moment", 503);
+
+    const nonce = crypto.randomUUID();
+    const posted = Boolean(await writeAppCache<WaveClaim>(waveKey, { user, at: now, nonce, n: resolved.length }));
+    const seen = await readAppCacheAll<WaveClaim>(waveKey);
+    const verdict = tiktokClaimVerdict({ posted, readOk: seen.ok, nonces: seen.rows.map((r) => String(r.value?.nonce ?? "")), nonce });
+    // A twin request won the claim (a double submit, a retry that overlapped): it is pumping these
+    // very task ids — answer like any other repeat.
+    if (verdict === "twin") return alreadyAccepted();
+    if (verdict === "refused") {
+      // The store took no claim from anyone: nothing will pump the rows stamped above, so they must
+      // not sit "running" for the team to wonder about (a stuck row invites a blind re-fire).
+      for (let i = 0; i < resolved.length; i += STAMP_BATCH) {
+        await Promise.all(
+          resolved.slice(i, i + STAMP_BATCH).map((r) =>
+            upsertTaskRow(user, r.taskId, { partner: TIKTOK_PARTNER, status: "error", stage: "submit", error: "Not fired — the task store refused the wave claim; nothing was sent to LION. Fire the wave again.", finished_at: Date.now() }),
+          ),
+        );
+      }
+      return bad("task_store_unavailable_wave_not_fired", 503);
+    }
+    // Neither the claim nor its read-back got through: the claim may be ours, a twin's, or nobody's.
+    // Nothing is sent and the rows are left alone — writing "not fired" over rows a twin may be
+    // pumping would invite exactly the duplicate this claim exists to prevent.
+    if (verdict === "unknown") return bad("task_store_unavailable: the wave's claim could not be confirmed — nothing was sent from this request; check the Task Manager before firing again", 503);
+    rememberWave(waveId);
+
+    const shots: TiktokPumpShot[] = resolved.map((r) => ({ taskId: r.taskId, kind: r.kind, campaignId: r.campaignId, body: r.wire, rowKey: r.rowKey }));
+    // The budget is anchored at the REQUEST (validation + stamping already spent part of it).
+    const deadline = startedAt + TIKTOK_PUMP_BUDGET_MS;
+    after(() => pumpTiktokWave(user, shots, deadline));
+
+    return NextResponse.json({ ok: true, queued: resolved.length, rows });
+  } finally {
+    inflightWaves.delete(waveId);
   }
-  rememberWave(waveId);
-
-  const shots: TiktokPumpShot[] = resolved.map((r) => ({ taskId: r.taskId, kind: r.kind, campaignId: r.campaignId, body: r.wire, rowKey: r.rowKey }));
-  // The budget is anchored at the REQUEST (validation + stamping already spent part of it).
-  const deadline = startedAt + TIKTOK_PUMP_BUDGET_MS;
-  after(() => pumpTiktokWave(user, shots, deadline));
-
-  return NextResponse.json({ ok: true, queued: resolved.length, rows });
 }
 
 /** Copies of one board row differ only by `client_reference` — the refusal key ignores it. */

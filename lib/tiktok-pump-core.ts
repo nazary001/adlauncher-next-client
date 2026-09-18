@@ -82,7 +82,7 @@ export async function runTiktokPump(shots: TiktokPumpShot[], deadline: number, d
   const margin = opts.deadlineMarginMs ?? 100_000;
   const jitter = deps.jitter ?? (() => 1000 + Math.floor(Math.random() * 2000));
   const now = () => deps.now();
-  const outOfTime = () => now() > deadline - margin;
+  const outOfTime = () => now() >= deadline - margin;
 
   const fail = (shot: TiktokPumpShot, stage: string, error: string, status: "error" | "interrupted" = "error") =>
     deps.write(shot.taskId, { status, stage, error: error.slice(0, 1000), finished_at: now() });
@@ -92,7 +92,7 @@ export async function runTiktokPump(shots: TiktokPumpShot[], deadline: number, d
   /** Sources that can't be launched from in this wave, with the reason. */
   const sourceFailed = new Map<string, string>();
   /** Cold sources: when their fetch was first triggered, when the probe may go again. */
-  const cold = new Map<string, { first: number; due: number; refetched: boolean }>();
+  const cold = new Map<string, { first: number; due: number; refetched: boolean; said: string }>();
   /** Partner task id → our row id, for every task sent and not yet settled. */
   const pending = new Map<string, string>();
   let lastSubmitAt = now();
@@ -137,7 +137,9 @@ export async function runTiktokPump(shots: TiktokPumpShot[], deadline: number, d
       fail(shot, "submit", shared);
       return "failed";
     }
-    if (!firstSubmit) await deps.sleep(jitter());
+    // Out of time BEFORE the jitter: a long tail of copies must be failed at once, not 1–3 s apiece
+    // out of the seconds the final store writes still need.
+    if (!firstSubmit && !outOfTime()) await deps.sleep(jitter());
     if (outOfTime()) {
       fail(shot, "submit", "Not submitted — the wave's time budget ran out before this copy; fire it again");
       return "failed";
@@ -167,9 +169,10 @@ export async function runTiktokPump(shots: TiktokPumpShot[], deadline: number, d
             fail(shot, "dataset", reason);
             return "failed";
           }
-          cold.set(shot.campaignId, { first: now(), due: now() + firstWaitMs, refetched: false });
+          cold.set(shot.campaignId, { first: now(), due: now() + firstWaitMs, refetched: false, said: messageOf(e) });
         } else {
           state.due = now() + retryMs;
+          state.said = messageOf(e);
         }
         deps.write(shot.taskId, { stage: "dataset" });
         return "deferred";
@@ -231,7 +234,9 @@ export async function runTiktokPump(shots: TiktokPumpShot[], deadline: number, d
         const outcome = await attempt(probe);
         if (outcome === "deferred") {
           if (now() - state.first >= giveUpMs) {
-            const reason = `source ${id}: not in LION's dataset after ${Math.round((now() - state.first) / 1000)} s — re-fetch it on the board and fire again`;
+            // Every clone / JURO 404 is READ as "source not fetched" — the partner's own sentence rides
+            // along, so a 404 that meant something else is not hidden behind ours.
+            const reason = `source ${id}: not in LION's dataset after ${Math.round((now() - state.first) / 1000)} s — re-fetch it on the board and fire again (LION: ${state.said.slice(0, 200)})`;
             sourceFailed.set(id, reason);
             for (const s of mine) fail(s, "dataset", reason);
           } else {

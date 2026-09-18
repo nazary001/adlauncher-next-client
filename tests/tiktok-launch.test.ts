@@ -12,6 +12,7 @@ import {
   parseTiktokRoas,
   tiktokBidPlan,
   tiktokBudgetWire,
+  tiktokClaimVerdict,
   tiktokCloneWire,
   tiktokGeoLabel,
   tiktokJuroWire,
@@ -392,4 +393,30 @@ test("pixel resolution: one → auto, several → a pick that belongs, none → 
   assert.deepEqual(tiktokResolvePixel([A, B], "PXB", "acc"), B);
   assert.match(refusalOf(tiktokResolvePixel([A, B], "PXC", "acc")), /PXC is not on acc/);
   assert.match(refusalOf(tiktokResolvePixel([], "", "acc")), /no usable pixel/);
+});
+
+test("wave claim: the OLDEST row under the key is the one winner", () => {
+  const me = "n-me";
+  // my POST landed and I am the oldest → pump, even with a twin's later row behind me
+  assert.equal(tiktokClaimVerdict({ posted: true, readOk: true, nonces: [me], nonce: me }), "pump");
+  assert.equal(tiktokClaimVerdict({ posted: true, readOk: true, nonces: [me, "n-twin"], nonce: me }), "pump");
+  // both POSTs succeeded (Strapi's unique-key window) but the twin is older → it pumps, not me
+  assert.equal(tiktokClaimVerdict({ posted: true, readOk: true, nonces: ["n-twin", me], nonce: me }), "twin");
+  // my POST lost the unique check to a twin
+  assert.equal(tiktokClaimVerdict({ posted: false, readOk: true, nonces: ["n-twin"], nonce: me }), "twin");
+  // my POST timed out on my side but was COMMITTED — the read-back shows my nonce → I must pump
+  assert.equal(tiktokClaimVerdict({ posted: false, readOk: true, nonces: [me], nonce: me }), "pump");
+  // nobody holds a claim
+  assert.equal(tiktokClaimVerdict({ posted: false, readOk: true, nonces: [], nonce: me }), "refused");
+  assert.equal(tiktokClaimVerdict({ posted: true, readOk: true, nonces: [], nonce: me }), "pump");
+  // the read-back failed: a POST that succeeded is a claim held; anything else is unknowable
+  assert.equal(tiktokClaimVerdict({ posted: true, readOk: false, nonces: [], nonce: me }), "pump");
+  assert.equal(tiktokClaimVerdict({ posted: false, readOk: false, nonces: [], nonce: me }), "unknown");
+});
+
+test("a failed build keeps the campaign shell it left behind; LION's name is clamped to the store's column", () => {
+  const out = tiktokTaskOutcome({ status: "failed", campaignId: "1800000000000009", campaignName: null, errorStep: "ad_create", errorMessage: "rejected" });
+  assert.deepEqual(out, { status: "error", stage: "lion", error: "ad_create: rejected", campaign_id: "1800000000000009" });
+  const long = tiktokTaskOutcome({ status: "completed", campaignId: "1800", campaignName: "x".repeat(400), errorStep: null, errorMessage: null });
+  assert.ok(long && long.status === "done" && long.name?.length === 250);
 });

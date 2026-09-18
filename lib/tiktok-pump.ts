@@ -32,6 +32,8 @@ export async function pumpTiktokWave(user: string, shots: TiktokPumpShot[], dead
     write: (taskId, fields) => writerOf(taskId).write(fields as TaskRowData),
     flush: () => Promise.all([...writers.values()].map((w) => w.flush())),
     sleep: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
-    now: () => Date.now(),
+    // Monotonic: a wall-clock step (NTP, a VM resume) must not stretch or collapse the wave's budget.
+    // Same epoch as Date.now(), so it compares with the route's `deadline` and stamps rows in ms.
+    now: () => Math.round(performance.timeOrigin + performance.now()),
   });
 }

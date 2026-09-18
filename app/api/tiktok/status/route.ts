@@ -3,7 +3,7 @@ import { sessionFromCookieHeader } from "@/lib/session";
 import { tiktokTaskOutcome } from "@/lib/tiktok-launch";
 import { tiktokRailEnabled, tiktokWeaponConfigured, twTasks } from "@/lib/tiktok-weapon";
 import { TIKTOK_PARTNER } from "@/lib/tiktok-pump";
-import { findTaskRow, storeConfigured, upsertTaskRow } from "@/lib/task-store";
+import { storeConfigured, strapiFetch, upsertTaskRow } from "@/lib/task-store";
 
 export const runtime = "nodejs";
 // Bounded read of tiktok-weapon task records (≤5 in flight) + at most one store write per id.
@@ -11,14 +11,34 @@ export const maxDuration = 60;
 
 const MAX_IDS = 60;
 
+const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
+const TOKEN = process.env.STRAPI_TOKEN ?? "";
+
+/** The three facts that decide whether a row may be finished here: whose it is, where it stands,
+ *  and WHICH partner task it was sent as. null = absent or unreadable (either way: don't write). */
+async function readSentRow(taskId: string): Promise<{ owner: string; stage: string; link: string } | null> {
+  try {
+    const res = await strapiFetch(
+      `${STRAPI}/api/launch-tasks?filters[task_id][$eq]=${encodeURIComponent(taskId)}&fields[0]=owner&fields[1]=stage&fields[2]=link&pagination[pageSize]=1`,
+      { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
+    );
+    if (!res.ok) return null;
+    const row = ((await res.json().catch(() => ({}))) as { data?: Array<Record<string, unknown>> }).data?.[0];
+    return row ? { owner: String(row.owner ?? ""), stage: String(row.stage ?? ""), link: String(row.link ?? "") } : null;
+  } catch {
+    return null;
+  }
+}
+
 const bad = (error: string, status = 400) => NextResponse.json({ ok: false, error }, { status });
 
 /**
  * POST { tasks: [{ taskId, lionTaskId }] } → finish the CALLER's "Sent to LION" rows the server
  * pump left behind (its settle pass ended before LION did): the partner task is read, and a FINAL
  * one upgrades the row here, server-side — `done/created` with the real campaign, or `error/lion`
- * with LION's step and sentence. Only a row that is the caller's own AND still at stage "sent" is
- * touched (the store refuses foreign rows anyway), so a stale tab can never rewrite a settled row.
+ * with LION's step and sentence. Only a row that is the caller's own, still at stage "sent", AND
+ * stamped with THIS partner task id is touched — the pairing the client sends is never trusted, so
+ * a stale tab can neither rewrite a settled row nor finish a row with another task's verdict.
  * Answers the partner's view per task so the drawer can show progress without a second read.
  */
 export async function POST(req: Request): Promise<NextResponse> {
@@ -49,8 +69,8 @@ export async function POST(req: Request): Promise<NextResponse> {
       const verdict = tiktokTaskOutcome(p);
       let settled = false;
       if (verdict && storeConfigured()) {
-        const row = await findTaskRow(asked[i].taskId).catch(() => null);
-        if (row && row.owner === user && row.stage === "sent") {
+        const row = await readSentRow(asked[i].taskId);
+        if (row && row.owner === user && row.stage === "sent" && row.link === asked[i].lionTaskId) {
           const res = await upsertTaskRow(user, asked[i].taskId, { ...verdict, partner: TIKTOK_PARTNER, finished_at: Date.now() });
           settled = res.ok;
         }

@@ -33,26 +33,31 @@ export const tiktokWeaponConfigured = (): boolean => Boolean(TOKEN);
  *  POST on a deployment where the rail is meant to be off (prod until the owner enables it). */
 export const tiktokRailEnabled = (): boolean => process.env.NEXT_PUBLIC_TIKTOK_ENABLED === "1";
 
+/** Bases a launch may ALWAYS reach: the contract mock lives on the loopback interface. */
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+
 /**
  * May THIS instance fire a launch at the base it points to? The 14.09 Google incident: a local
- * instance started without the mock override sent a test POST to the partner's LIVE host. Here a
- * launch reaches the production host only from the production deployment (`VERCEL_ENV`) or behind
- * an explicit `TIKTOK_ALLOW_LIVE_LAUNCH=1`; any other base (the contract mock) is free to fire.
+ * instance started without the mock override sent a test POST to the partner's LIVE host. The rule
+ * is an ALLOWLIST, so no spelling of the partner's host (a trailing dot, an IP, a staging alias, a
+ * proxy in front of it) can slip past it: a launch goes out freely only to a LOOPBACK base (the
+ * mock); ANY other base counts as live and is reached only from the production deployment
+ * (`VERCEL_ENV`) or behind an explicit `TIKTOK_ALLOW_LIVE_LAUNCH=1`.
  * Reads are never gated — a local board shows the real advertisers and launches nothing.
  */
 export function tiktokLiveLaunchAllowed(): boolean {
   let host = "";
   try {
-    host = new URL(BASE).hostname;
+    host = new URL(BASE).hostname.toLowerCase();
   } catch {
     host = "";
   }
-  if (host !== PRODUCTION_HOST) return true;
+  if (LOOPBACK_HOSTS.has(host)) return true;
   return process.env.VERCEL_ENV === "production" || process.env.TIKTOK_ALLOW_LIVE_LAUNCH === "1";
 }
 
 export const TIKTOK_LIVE_LAUNCH_BLOCKED =
-  "tiktok_live_launch_blocked: this instance is not production — point TIKTOK_WEAPON_BASE at the mock, or set TIKTOK_ALLOW_LIVE_LAUNCH=1 to fire at the live partner on purpose";
+  "tiktok_live_launch_blocked: this instance is not production — point TIKTOK_WEAPON_BASE at the local mock (a loopback address), or set TIKTOK_ALLOW_LIVE_LAUNCH=1 to fire at a live partner on purpose";
 
 const listOf = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => String(x ?? "")).filter(Boolean) : []);
 
@@ -250,7 +255,8 @@ async function fire(path: string, body: unknown, what: string): Promise<{ taskId
   // Refused BEFORE any I/O — a 4xx-class status so the pump records a clean refusal, not an
   // ambiguous outcome (nothing left the process).
   if (!tiktokLiveLaunchAllowed()) throw new TiktokWeaponError(TIKTOK_LIVE_LAUNCH_BLOCKED, 403);
-  const res = await twFetch(path, { method: "POST", body: JSON.stringify(body) }, 1);
+  // `redirect: "error"`: a launch is sent to the base it was checked against, nowhere else.
+  const res = await twFetch(path, { method: "POST", body: JSON.stringify(body), redirect: "error" }, 1);
   return { taskId: taskIdOf(res, what) };
 }
 

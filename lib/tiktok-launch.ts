@@ -706,6 +706,9 @@ export function tiktokResolvePixel(pixels: TiktokPixelLike[], picked: string, ad
 
 // ---------- task lifecycle ----------
 
+/** The store's `name` column takes 250 characters (every rail clamps its row names to it). */
+export const TIKTOK_ROW_NAME_MAX = 250;
+
 /** The part of a partner task the row disposition reads. */
 export type TiktokTaskLike = { status: string; campaignId: string | null; campaignName: string | null; errorMessage: string | null; errorStep: string | null };
 
@@ -726,17 +729,21 @@ export function tiktokTaskStage(status: string): "queue" | "lion" | "done" | "fa
  */
 export function tiktokTaskOutcome(
   t: TiktokTaskLike,
-): null | { status: "done"; stage: "created"; campaign_id: string; name?: string } | { status: "error"; stage: "lion"; error: string } {
+): null | { status: "done"; stage: "created"; campaign_id: string; name?: string } | { status: "error"; stage: "lion"; error: string; campaign_id?: string } {
   const stage = tiktokTaskStage(t.status);
   if (stage === "done") {
     if (!t.campaignId) return null;
-    return { status: "done", stage: "created", campaign_id: t.campaignId, ...(t.campaignName ? { name: t.campaignName } : {}) };
+    // LION's real name can outgrow the store's column (17 preset geos + a long landing path + the
+    // source marker + the Smart+ tag + our 80-char suffix) — an unclamped one would fail the WHOLE
+    // verdict write, and a built campaign would read "not confirmed" forever.
+    return { status: "done", stage: "created", campaign_id: t.campaignId, ...(t.campaignName ? { name: t.campaignName.slice(0, TIKTOK_ROW_NAME_MAX) } : {}) };
   }
   if (stage === "failed") {
     const message = squash(t.errorMessage ?? "");
     const step = squash(t.errorStep ?? "");
     const error = message ? (step ? `${step}: ${message}` : message) : step ? `failed at ${step}` : "LION failed the build without a reason — check the task in LION";
-    return { status: "error", stage: "lion", error: error.slice(0, 1000) };
+    // A build that failed half-way may have left a campaign shell behind — keep it findable.
+    return { status: "error", stage: "lion", error: error.slice(0, 1000), ...(t.campaignId ? { campaign_id: t.campaignId } : {}) };
   }
   return null;
 }
@@ -750,6 +757,23 @@ export function tiktokShotTaskId(kind: TiktokKind, waveId: string, index: number
 export const TIKTOK_WAVE_ID_RE = /^[a-zA-Z0-9-]{8,64}$/;
 export const TIKTOK_CAMPAIGN_ID_RE = /^\d{10,22}$/;
 export const TIKTOK_ADVERTISER_ID_RE = /^\d{10,22}$/;
+
+// ---------- wave claim ----------
+
+/**
+ * Who pumps a wave, decided from the claim POST and the read-back of EVERY row under the wave's key
+ * (oldest first). The store is not a mutex by itself: a POST can time out on our side AND be
+ * committed, and Strapi's unique check has a window in which two racers' POSTs both succeed.
+ *  - the read worked: no row → nobody holds the claim ("refused" — unless our POST says it landed and
+ *    the read is merely behind → "pump"); the OLDEST row is ours → "pump"; someone else's → "twin";
+ *  - the read failed: a POST that succeeded is a claim we hold → "pump"; otherwise "unknown" — it
+ *    may be ours, a twin's or nobody's, so nothing is sent and nothing is rewritten.
+ */
+export function tiktokClaimVerdict(a: { posted: boolean; readOk: boolean; nonces: string[]; nonce: string }): "pump" | "twin" | "refused" | "unknown" {
+  if (!a.readOk) return a.posted ? "pump" : "unknown";
+  if (a.nonces.length === 0) return a.posted ? "pump" : "refused";
+  return a.nonces[0] === a.nonce ? "pump" : "twin";
+}
 
 // ---------- account predicate (owner decision 2026-09-18) ----------
 

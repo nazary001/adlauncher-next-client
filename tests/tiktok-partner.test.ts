@@ -138,7 +138,7 @@ test("reads retry once on a 5xx; a 4xx is the partner's sentence with its status
 });
 
 test("launches are ONE attempt — a 5xx is never re-sent", async () => {
-  const api = await load("once", "https://tw.test");
+  const api = await load("once", "http://127.0.0.1:3197"); // launches fire freely only at a loopback base
   const s = stubFetch(() => json({ error: "upstream" }, 502));
   try {
     for (const fire of [
@@ -159,7 +159,7 @@ test("launches are ONE attempt — a 5xx is never re-sent", async () => {
 });
 
 test("a 201 hands back the partner task id; an answer without one is an error", async () => {
-  const api = await load("task-id", "https://tw.test");
+  const api = await load("task-id", "http://127.0.0.1:3197");
   const s = stubFetch((_r, n) => (n === 1 ? json({ ok: true, status: "pending", taskId: "65f2a1" }, 201) : json({ ok: true }, 201)));
   try {
     assert.deepEqual(await api.twCloneLaunch({ source_campaign_id: "1900000000000001", budget: "20.00", pixel_code: "PX", name_suffix: "s" }), { taskId: "65f2a1" });
@@ -203,8 +203,21 @@ test("LIVE-LAUNCH GUARD: on the production host a non-production instance reads 
   } finally {
     s.restore();
   }
-  // Any other base (the mock, a staging host) is not the production host → free to fire.
+  // An ALLOWLIST, not a blocklist: only a loopback base (the mock) fires freely — no spelling of
+  // the partner's host, no staging alias and no proxy in front of it slips past.
   assert.equal((await load("mock", "http://127.0.0.1:3197")).tiktokLiveLaunchAllowed(), true);
+  assert.equal((await load("mock-localhost", "http://localhost:3197/")).tiktokLiveLaunchAllowed(), true);
+  for (const [tag, base] of [
+    ["dot", "https://tiktok-weapon.highstakes.tech."],
+    ["upper", "https://TIKTOK-WEAPON.HIGHSTAKES.TECH"],
+    ["port", "https://tiktok-weapon.highstakes.tech:443/"],
+    ["userinfo", "https://127.0.0.1@tiktok-weapon.highstakes.tech"],
+    ["staging", "https://tiktok-weapon-staging.highstakes.tech"],
+    ["ip", "https://203.0.113.7"],
+    ["junk", "not a url"],
+  ] as const) {
+    assert.equal((await load(`guard-${tag}`, base)).tiktokLiveLaunchAllowed(), false, base);
+  }
 });
 
 test("dataset fetch is a POST with the campaign id; its 404 keeps the status for the pump", async () => {
