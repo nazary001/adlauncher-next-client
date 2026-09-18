@@ -1,6 +1,6 @@
 # TikTok rail — launch, clone and JURO through LION's tiktok-weapon
 
-**Date:** 2026-09-18 · **Status:** built + verified locally (unit 57, route smoke 74/74 on dev and on the production bundle, browser run, dormancy 28/28, live-launch guard 7/7) — NOT deployed, no live launch made · design approved by the owner (scope, accounts, row outcome, assets) · **Branch:** `feat/tiktok-rail` — local only, never pushed (a push to `main` auto-deploys on Vercel).
+**Date:** 2026-09-18 · **Status:** built + verified locally (unit 65, route smoke 75/75 on the production bundle, browser run incl. the queued-row guard, dormancy 28/28, live-launch guard 7/7; code review done — 1 critical / 4 important / 8 minor, all fixed) — NOT deployed, no live launch made · design approved by the owner (scope, accounts, row outcome, assets) · **Branch:** `feat/tiktok-rail` — local only, never pushed (a push to `main` auto-deploys on Vercel).
 
 ## 1. Goal
 
@@ -38,7 +38,7 @@ The team's suffix is `DD.MM - <Buyer> - <tail>`; budgets are $20 (97 %), bids $0
 3. **Row outcome:** LION's 201 makes the row terminal at once — `done / sent` ("Sent to LION", Google/HS parity, nobody is left `running`). The pump then **settles**: it polls the partner task and upgrades the row to `done / created` with the real `campaign_id` + `campaign_name`, or flips it to `error / lion` with `error_step: error_message`. A task that outlives the settle window simply stays "Sent to LION"; the row owner's open task manager asks `/api/tiktok/status`, and the SERVER upgrades the row there (only the caller's own row still at stage `sent`; 3 h limit). There is no client upsert route — `/api/tiktok-tasks` is GET + DELETE only.
 4. **Assets:** browser → Vercel Blob → public URLs. The identity avatar is centre-cropped to a 256×256 PNG in the browser before upload (what the partner's own upload endpoint would have produced).
 5. **Dormant on prod:** `NEXT_PUBLIC_TIKTOK_ENABLED=1` lives in `.env.local` only. Without it the tab stays the disabled pill, `/tiktok*` redirects to `/`, every `/api/tiktok*` answers 404 `tiktok_rail_disabled`.
-6. **Live-launch guard** (the 14.09 Google incident must not repeat): the three launch POSTs go out only when the base is NOT the production host, or `VERCEL_ENV === "production"`, or `TIKTOK_ALLOW_LIVE_LAUNCH=1`. A local instance pointed at the live host can read everything and launch nothing (`tiktok_live_launch_blocked`).
+6. **Live-launch guard** (the 14.09 Google incident must not repeat) — an ALLOWLIST, so no spelling of the partner's host (a trailing dot, an IP, a staging alias, a proxy) slips past: a launch POST goes out freely only to a LOOPBACK base (the contract mock); any other base is live and is reached only with `VERCEL_ENV === "production"` or `TIKTOK_ALLOW_LIVE_LAUNCH=1`. Checked twice — the wave routes answer `403 tiktok_live_launch_blocked` before the body is read, and the client refuses with zero network calls; launch POSTs never follow a redirect. A local instance pointed at the live host can read everything and launch nothing.
 
 ## 4. Architecture
 
@@ -85,6 +85,12 @@ One shot at a time, 1–3 s jitter, inside `TIKTOK_PUMP_BUDGET_MS = 770 000` wit
 `/tiktok/clone` — the Google clone board's shape: paste ids / `?ids=&mode=clone|juro`, source facts from LION metrics (name, status, account, budget, bid, geo/lang/landing from the name, Smart+ tag), dataset pre-warm on add + per-row re-fetch, wave-level destination (advertiser + pixel) with per-row override, mode override, bid prefill from the source (all accounts are USD), budget, copies, suffix tail, name preview, JURO pinned to the source's advertiser and refusing Smart+ sources.
 
 Task manager — the Google drawer's twin, but it adds no standing load to the shared store (it polls only on a TikTok page, with the drawer open, or while a build it knows about is moving): shared team view, owner authority, stage labels `Sending → Sent to LION → Created · cmp <id>` / `Failed at <step>`, copy campaign id, client finisher for the owner's own sent rows.
+
+### 4.4 Wave claim (what makes "exactly once" hold across requests)
+
+`acceptTiktokWave`: an in-process in-flight set taken before the first await (a twin request gets `409 wave_in_progress` and can never stamp over rows a pump already advanced) → the claim row is read with a read that distinguishes "absent" from "store unavailable" (unavailable = `503`, nothing stamped) → a prior claim with the same shot count answers `alreadyAccepted`, with another count `409 wave_content_changed` → rows are stamped 8 at a time (no row written = nothing fired) → the claim is POSTed with a nonce and the shot count, then EVERY row under the key is read back oldest-first: the oldest row is the one winner (`tiktokClaimVerdict`). That read-back tells "my write landed after its timeout" (pump) from "a twin won" (alreadyAccepted) and closes Strapi's unique-key TOCTOU window; "unknown" (neither the POST nor the read got through) sends nothing and rewrites nothing.
+
+Boards: the wave id is cut from the READY set and a wave goes out whole or not at all (a failed upload sends nothing; hosted files are cached for the retry), cards are locked while a wave uploads and fires, a queued card / clone row leaves the fireable set until it is edited, and a lost answer says "may have been accepted — check the Task Manager; firing again WITHOUT edits is safe".
 
 ## 5. Error handling
 

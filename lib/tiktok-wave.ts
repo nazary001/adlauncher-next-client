@@ -50,10 +50,12 @@ const CONFIG_CONCURRENCY = 5;
 const bad = (error: string, status = 400, extra: Record<string, unknown> = {}) => NextResponse.json({ ok: false, error, ...extra }, { status });
 const s = (v: unknown): string => (v == null ? "" : String(v)).trim();
 
-const claimedWaves = new Set<string>();
-const rememberWave = (id: string) => {
-  claimedWaves.add(id);
-  if (claimedWaves.size > 500) claimedWaves.delete(claimedWaves.values().next().value as string);
+/** Waves this instance has accepted → how many shots each carried (the store's claim row is the
+ *  truth across instances; this only saves the read for an immediate repeat). */
+const claimedWaves = new Map<string, number>();
+const rememberWave = (id: string, shots: number) => {
+  claimedWaves.set(id, shots);
+  if (claimedWaves.size > 500) claimedWaves.delete(claimedWaves.keys().next().value as string);
 };
 
 /** The advertisers the console OFFERS and ACCEPTS as launch targets (owner decision 18.09: every
@@ -134,7 +136,12 @@ async function acceptTiktokWave(user: string, waveId: string, resolved: Resolved
   const waveKey = `tiktok-wave:${waveId}`;
   const rows = resolved.map((r) => ({ taskId: r.taskId, campaignId: r.campaignId }));
   const alreadyAccepted = () => NextResponse.json({ ok: true, queued: resolved.length, rows, alreadyAccepted: true });
-  if (claimedWaves.has(waveId)) return alreadyAccepted();
+  // A re-POST is a RETRY only when it carries what the accepted wave carried; the same id with
+  // another shot count would otherwise be told "already accepted" for campaigns never launched.
+  const contentChanged = (n: number) =>
+    bad(`wave_content_changed: this wave was already accepted with ${n} campaign${n === 1 ? "" : "s"}, not ${resolved.length} — check the Task Manager before firing anything again`, 409);
+  const known = claimedWaves.get(waveId);
+  if (known !== undefined) return known === resolved.length ? alreadyAccepted() : contentChanged(known);
   if (!storeConfigured()) return bad("task_store_not_configured_wave_not_fired", 503);
   if (inflightWaves.has(waveId)) return bad("wave_in_progress: this wave is being accepted right now — check the Task Manager instead of firing it again", 409);
   inflightWaves.add(waveId);
@@ -143,9 +150,7 @@ async function acceptTiktokWave(user: string, waveId: string, resolved: Resolved
     if (!prior.ok) return bad("task_store_unavailable_wave_not_fired: the task store can't be read — nothing was sent; try again in a moment", 503);
     if (prior.row) {
       const n = Number(prior.row.value?.n);
-      if (Number.isFinite(n) && n !== resolved.length) {
-        return bad(`wave_content_changed: this wave was already accepted with ${n} campaign${n === 1 ? "" : "s"}, not ${resolved.length} — check the Task Manager before firing anything again`, 409);
-      }
+      if (Number.isFinite(n) && n !== resolved.length) return contentChanged(n);
       return alreadyAccepted();
     }
 
@@ -201,7 +206,7 @@ async function acceptTiktokWave(user: string, waveId: string, resolved: Resolved
     // Nothing is sent and the rows are left alone — writing "not fired" over rows a twin may be
     // pumping would invite exactly the duplicate this claim exists to prevent.
     if (verdict === "unknown") return bad("task_store_unavailable: the wave's claim could not be confirmed — nothing was sent from this request; check the Task Manager before firing again", 503);
-    rememberWave(waveId);
+    rememberWave(waveId, resolved.length);
 
     const shots: TiktokPumpShot[] = resolved.map((r) => ({ taskId: r.taskId, kind: r.kind, campaignId: r.campaignId, body: r.wire, rowKey: r.rowKey }));
     // The budget is anchored at the REQUEST (validation + stamping already spent part of it).
