@@ -17,9 +17,10 @@
 //      past `giveUpMs` the source's shots fail with a sentence that names the wait. A 404 from the
 //      FETCH means LION never saw the campaign — every shot of that source fails at once.
 //   3. settle — the sent tasks are polled until LION finishes them (or `settleMs` / the deadline
-//      runs out): completed → "done / created" with the real campaign id and name, failed →
-//      "error / lion" with LION's step and sentence. A read that fails never downgrades a row; a
-//      task that outlives the pass simply stays "Sent to LION".
+//      runs out) — ALSO while the pump sits out a cold source, so one slow dataset never keeps the
+//      rest of the wave at "Sent to LION": completed → "done / created" with the real campaign id
+//      and name, failed → "error / lion" with LION's step and sentence. A read that fails never
+//      downgrades a row; a task that outlives the pass simply stays "Sent to LION".
 
 import type { TiktokKind, TiktokTaskLike } from "./tiktok-launch";
 
@@ -88,9 +89,41 @@ export async function runTiktokPump(shots: TiktokPumpShot[], deadline: number, d
   const sourceFailed = new Map<string, string>();
   /** Cold sources: when their fetch was first triggered, when the probe may go again. */
   const cold = new Map<string, { first: number; due: number; refetched: boolean }>();
-  const sent: Array<{ taskId: string; partnerId: string }> = [];
+  /** Partner task id → our row id, for every task sent and not yet settled. */
+  const pending = new Map<string, string>();
   let lastSubmitAt = now();
   let firstSubmit = true;
+
+  /** One settle pass: read every unsettled task (≤5 in flight) and write the FINAL ones. */
+  const settleOnce = async (): Promise<void> => {
+    const ids = [...pending.keys()];
+    let next = 0;
+    const worker = async () => {
+      while (next < ids.length) {
+        const partnerId = ids[next++];
+        try {
+          const verdict = deps.outcome(await deps.task(partnerId));
+          if (!verdict) continue;
+          deps.write(pending.get(partnerId) as string, { ...verdict, finished_at: now() });
+          pending.delete(partnerId);
+        } catch {
+          // A failed read is not a verdict — the row stays "Sent to LION" and is asked again.
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(SETTLE_CONCURRENCY, ids.length) }, worker));
+  };
+
+  /** Sleep `ms`, settling what was already sent every `settlePollMs` of it. */
+  const sleepSettling = async (ms: number): Promise<void> => {
+    let left = ms;
+    while (left > 0) {
+      const chunk = settleMs > 0 && pending.size > 0 ? Math.min(left, settlePollMs) : left;
+      await deps.sleep(chunk);
+      left -= chunk;
+      if (settleMs > 0 && pending.size > 0) await settleOnce();
+    }
+  };
 
   /** Submit one shot. "deferred" = its source is cold (fetch triggered) — retry it later. */
   const attempt = async (shot: TiktokPumpShot): Promise<"sent" | "failed" | "deferred"> => {
@@ -110,7 +143,7 @@ export async function runTiktokPump(shots: TiktokPumpShot[], deadline: number, d
       const res = await deps.submit(shot.kind, shot.body);
       lastSubmitAt = now();
       deps.write(shot.taskId, { status: "done", stage: "sent", link: res.taskId, error: "", finished_at: now() });
-      sent.push({ taskId: shot.taskId, partnerId: res.taskId });
+      pending.set(res.taskId, shot.taskId);
       return "sent";
     } catch (e) {
       lastSubmitAt = now();
@@ -175,7 +208,7 @@ export async function runTiktokPump(shots: TiktokPumpShot[], deadline: number, d
       const sources = [...new Set(deferred.map((s) => s.campaignId))];
       const nextDue = Math.min(...sources.map((id) => cold.get(id)?.due ?? now()));
       const wait = Math.min(nextDue - now(), deadline - margin - now());
-      if (wait > 0) await deps.sleep(wait);
+      if (wait > 0) await sleepSettling(wait);
       const stillWaiting: TiktokPumpShot[] = [];
       for (const id of sources) {
         const mine = deferred.filter((s) => s.campaignId === id);
@@ -210,26 +243,10 @@ export async function runTiktokPump(shots: TiktokPumpShot[], deadline: number, d
     }
 
     // ---- pass 3: settle — upgrade "Sent to LION" rows to what LION actually built ---------------
-    const pending = new Map(sent.map((s) => [s.partnerId, s.taskId]));
     const settleUntil = Math.min(lastSubmitAt + settleMs, deadline - margin);
     while (pending.size > 0 && now() < settleUntil) {
       await deps.sleep(Math.min(settlePollMs, settleUntil - now()));
-      const ids = [...pending.keys()];
-      let next = 0;
-      const worker = async () => {
-        while (next < ids.length) {
-          const partnerId = ids[next++];
-          try {
-            const verdict = deps.outcome(await deps.task(partnerId));
-            if (!verdict) continue;
-            deps.write(pending.get(partnerId) as string, { ...verdict, finished_at: now() });
-            pending.delete(partnerId);
-          } catch {
-            // A failed read is not a verdict — the row stays "Sent to LION" and is asked again.
-          }
-        }
-      };
-      await Promise.all(Array.from({ length: Math.min(SETTLE_CONCURRENCY, ids.length) }, worker));
+      await settleOnce();
     }
   } finally {
     await deps.flush();

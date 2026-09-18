@@ -245,3 +245,24 @@ test("the store is flushed even when a dependency blows up unexpectedly", async 
   await assert.rejects(runTiktokPump([shot("a", "launch")], h.deadline, h.deps, { settleMs: 0 }));
   assert.equal(h.flushed(), 1);
 });
+
+test("rows sent before a cold source are settled WHILE the pump waits for its dataset", async () => {
+  const SRC = "1900000000000003";
+  const settledAt: Record<string, number> = {};
+  const h = harness({
+    submit: (kind, b, _n, now) => {
+      if (kind === "clone" && now < 100_000) throw httpError(404, "source not in dataset");
+      return { taskId: `p-${b.id}` };
+    },
+  });
+  const write = h.deps.write;
+  h.deps.write = (taskId, fields) => {
+    if (fields.stage === "created") settledAt[taskId] = h.elapsed();
+    write(taskId, fields);
+  };
+  await runTiktokPump([shot("l1", "launch"), shot("c1", "clone", SRC)], h.deadline, h.deps);
+  assert.equal(h.row("l1").stage, "created");
+  assert.equal(h.row("c1").stage, "created");
+  assert.ok(settledAt.l1 < 30_000, `l1 settled at ${settledAt.l1} ms — before the cold source's first retry`);
+  assert.ok(settledAt.c1 > 100_000);
+});
