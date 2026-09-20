@@ -116,6 +116,31 @@ export function ChevronDownIcon(props: P) {
   );
 }
 
+export function ChevronLeftIcon(props: P) {
+  return (
+    <S {...props}>
+      <path d="m15 6-6 6 6 6" />
+    </S>
+  );
+}
+
+export function ChevronRightIcon(props: P) {
+  return (
+    <S {...props}>
+      <path d="m9 6 6 6-6 6" />
+    </S>
+  );
+}
+
+export function CalendarIcon(props: P) {
+  return (
+    <S {...props}>
+      <rect x="3.5" y="5" width="17" height="15.5" rx="2.5" />
+      <path d="M3.5 10h17M8 3v4M16 3v4" />
+    </S>
+  );
+}
+
 export function SparklesIcon(props: P) {
   return (
     <S {...props}>

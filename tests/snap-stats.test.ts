@@ -5,7 +5,7 @@
 // the join with the key registry, the delivery sentence and the sub-cent money format.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { joinSnapLive, parseSnapAccountStats, parseSnapAdReviews, parseSnapCampaignStates, snapDayWindow, snapDeliveryNote, snapLiveTotals, snapMoney } from "../lib/snap-stats.ts";
+import { joinSnapLive, parseSnapAccountStats, parseSnapAdReviews, parseSnapCampaignStates, snapDayWindow, snapDeliveryNote, snapRangeWindow, snapLiveTotals, snapMoney } from "../lib/snap-stats.ts";
 import { snapDefaultReportDay } from "../lib/snap-report.ts";
 
 const STATS_BODY = {
@@ -33,6 +33,11 @@ test("the São Paulo day is asked as a [midnight, next midnight) window with the
   assert.deepEqual(snapDayWindow("2026-12-31"), { start: "2026-12-31T00:00:00.000-03:00", end: "2027-01-01T00:00:00.000-03:00" });
   // Brazil still had DST in early 2019 (−02:00 until 17.02): the offset is read, not assumed.
   assert.equal(snapDayWindow("2019-01-15").start, "2019-01-15T00:00:00.000-02:00");
+});
+
+test("a range of São Paulo days is ONE window: the first day's midnight to the midnight after the last", () => {
+  assert.deepEqual(snapRangeWindow("2026-09-14", "2026-09-20"), { start: "2026-09-14T00:00:00.000-03:00", end: "2026-09-21T00:00:00.000-03:00" });
+  assert.deepEqual(snapRangeWindow("2026-09-18", "2026-09-18"), snapDayWindow("2026-09-18"));
 });
 
 test("account stats: per-campaign numbers, spend from micro to currency", () => {

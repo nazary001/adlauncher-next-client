@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { snapAccountAdsRaw, snapAccountCampaignsRaw, snapAccountStatsRaw, snapAdAccounts, snapConfigured, snapRailEnabled } from "@/lib/snap-api";
-import { isSnapReportPartial, snapReportDate } from "@/lib/snap-report";
+import { isSnapReportPartial, snapReportRange } from "@/lib/snap-report";
 import { listSnapKeys } from "@/lib/snap-keys";
-import { joinSnapLive, parseSnapAccountStats, parseSnapAdReviews, parseSnapCampaignStates, snapDayWindow, snapLiveTotals, type SnapAccountRead } from "@/lib/snap-stats";
+import { joinSnapLive, parseSnapAccountStats, parseSnapAdReviews, parseSnapCampaignStates, snapLiveTotals, snapRangeWindow, type SnapAccountRead } from "@/lib/snap-stats";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -20,9 +20,10 @@ const START_BUDGET_MS = 20_000;
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e)).slice(0, 160);
 
 /**
- * GET ?date= → the SNAPCHAT side of the keys report for that São Paulo day: per bound key what its
- * campaign spent / showed / was swiped (Marketing API stats over the same 24 hours LION's report
- * covers) plus where it stands now — campaign status, delivery flags, ad review counts. Read-only.
+ * GET ?date= | ?from=&to= → the SNAPCHAT side of the keys report for that São Paulo day or range
+ * (one stats window, whatever its length): per bound key what its campaign spent / showed / was
+ * swiped (Marketing API stats over the same hours LION's report covers) plus where it stands NOW —
+ * campaign status, delivery flags, ad review counts. Read-only.
  * Every account is best-effort: a failed read leaves its keys with nulls and is named in `errors`,
  * the rest of the table still answers. The registry is NOT best-effort here — without the bindings
  * there is nothing to join the numbers to.
@@ -31,8 +32,9 @@ export async function GET(req: Request): Promise<NextResponse> {
   if (!sessionFromCookieHeader(req.headers.get("cookie"))) return bad("unauthorized", 401);
   if (!snapRailEnabled()) return bad("snap_rail_disabled", 404);
   if (!snapConfigured()) return bad("snap_not_configured", 500);
-  const date = snapReportDate(new URL(req.url).searchParams.get("date"));
-  if (!date) return bad("bad_date (today | yesterday | YYYY-MM-DD, not in the future)");
+  const sp = new URL(req.url).searchParams;
+  const range = snapReportRange({ date: sp.get("date"), from: sp.get("from"), to: sp.get("to") });
+  if ("error" in range) return bad(range.error);
   const startedAt = Date.now();
 
   let bindings;
@@ -41,7 +43,7 @@ export async function GET(req: Request): Promise<NextResponse> {
   } catch (e) {
     return bad(`registry_unavailable: ${message(e)}`, 502);
   }
-  const window = snapDayWindow(date);
+  const window = snapRangeWindow(range.from, range.to);
   const accountIds = [...new Set(bindings.map((r) => String(r.ad_account)))];
   // Names only make the table and the error lines readable — never worth failing the report for.
   const names = new Map<string, string>();
@@ -84,5 +86,15 @@ export async function GET(req: Request): Promise<NextResponse> {
   await Promise.all(Array.from({ length: Math.min(ACCOUNT_CONCURRENCY, accountIds.length) }, worker));
 
   const keys = joinSnapLive(bindings, reads);
-  return NextResponse.json({ ok: true, date, partial: isSnapReportPartial(date), window, totals: snapLiveTotals(keys), keys, ...(errors.length ? { errors } : {}) });
+  return NextResponse.json({
+    ok: true,
+    ...(range.from === range.to ? { date: range.from } : {}),
+    from: range.from,
+    to: range.to,
+    partial: isSnapReportPartial(range.to),
+    window,
+    totals: snapLiveTotals(keys),
+    keys,
+    ...(errors.length ? { errors } : {}),
+  });
 }

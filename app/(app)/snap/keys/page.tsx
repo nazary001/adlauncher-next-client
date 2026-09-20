@@ -5,18 +5,21 @@ import { SESSION_COOKIE, verifySession } from "@/lib/session";
 import { isOwnerSession } from "@/lib/roles";
 import { SNAP_ENABLED } from "@/lib/partners";
 import { SnapKeysBoard } from "@/components/snap-keys-board";
+import { parseRangeQuery } from "@/lib/date-range";
 
 export const metadata: Metadata = {
   title: "Snapchat — keys & report — Ad Launcher",
 };
 
-export default async function SnapKeysPage() {
+export default async function SnapKeysPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const jar = await cookies();
   const session = verifySession(jar.get(SESSION_COOKIE)?.value);
   if (!session) redirect("/login");
   // Dormant on prod (NEXT_PUBLIC_SNAP_ENABLED unset there): a stale link must not open a
   // half-wired board — bounce to the launcher home.
   if (!SNAP_ENABLED) redirect("/");
+  // The picked days live in the URL (?range=last7 · ?from=…&to=…) — read here so the first paint already shows them.
+  const picked = parseRangeQuery(await searchParams);
 
   return (
     <>
@@ -32,7 +35,7 @@ export default async function SnapKeysPage() {
           }
         />
       </div>
-      <SnapKeysBoard user={{ username: session.username, role: session.role ?? null, owner: isOwnerSession(session) }} />
+      <SnapKeysBoard user={{ username: session.username, role: session.role ?? null, owner: isOwnerSession(session) }} initialSel={picked.sel} initialIncludeToday={picked.includeToday} />
     </>
   );
 }

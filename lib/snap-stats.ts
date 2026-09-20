@@ -56,9 +56,14 @@ const nextISODate = (date: string): string => {
  *  the same 24 hours LION's report covers. The offset is read per boundary, so a DST change (none
  *  in Brazil since 2019) would still land on local midnight. */
 export function snapDayWindow(date: string): { start: string; end: string } {
-  const next = nextISODate(date);
+  return snapRangeWindow(date, date);
+}
+
+/** The São Paulo days `from`…`to` (both included) as ONE [start, end) window: TOTAL takes any
+ *  hour-aligned window, so a range costs the same single stats read per account as a day does. */
+export function snapRangeWindow(from: string, to: string): { start: string; end: string } {
   const at = (d: string) => `${d}T00:00:00.000${zoneOffset("America/Sao_Paulo", new Date(`${d}T12:00:00Z`))}`;
-  return { start: at(date), end: at(next) };
+  return { start: at(from), end: at(nextISODate(to)) };
 }
 
 // ---------- parsers (never throw: junk → empty) ----------

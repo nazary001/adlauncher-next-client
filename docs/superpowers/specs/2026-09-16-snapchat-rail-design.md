@@ -377,3 +377,61 @@ v1 and this section overrides it where they differ.
   uploads before the wave moves on; the size probe releases its media player and files are probed
   one at a time; the shared Dropzone merges a drop into the list as of NOW (a second drop during
   image recoding no longer overwrites the first). `snapShotMediaIn` (pure, unit-tested) reads the wire.
+
+## Addendum 2026-09-20 — the keys page picks a day OR A RANGE (owner ask)
+
+The keys report was one São Paulo day at a time, picked with two buttons and a native
+`<input type="date">` whose calendar the browser draws in the OS language. It is now a date picker
+of our own (`components/date-range-picker.tsx`, arithmetic in the pure `lib/date-range.ts`), English
+by construction, and both sides of the table answer for a RANGE.
+
+- **Picker:** ‹ › move the day / range by its own length; presets Today … Last month, each showing
+  the days it means now, with an "Include today" switch (rolling ranges end today or on the last
+  closed day); two months on a wide screen, one on a narrow one, a bottom sheet on a phone; click a
+  start and an end (the ribbon previews the range), double-click = that one day; From / To take
+  typed days (`2026-09-18`, `18.09`, `18/09/26`, `Sep 18`, `today`); the month title jumps across
+  months and years; keyboard — arrows, PageUp/PageDown (Shift = a year), Home/End, Enter picks then
+  confirms, Esc steps back, `T`/`Y` inside, `[` `]` `D` on the page. The picker reads no clock:
+  "today" is handed in (São Paulo's), days after it and before the rail's first day
+  (`SNAP_REPORT_FIRST_DAY` = 2026-09-16) cannot be picked, a range is at most
+  `SNAP_REPORT_MAX_DAYS` = 31 days. It works on a draft — nothing is asked until Apply.
+- **URL:** the pick lives in the query — a preset stays relative (`?range=last7[&today=0]`), a
+  hand-picked range stays its days (`?from=…&to=…`); `page.tsx` reads it for the first paint.
+- **Routes:** `/api/snap/report` and `/api/snap/stats` take `?from=&to=` next to the old `?date=`
+  (unchanged; Today / Yesterday still go by NAME so the server's clock resolves them). `to` is CUT
+  to today and `from` to the first day; junk, a range wholly outside, or one over the cap is a 400.
+  Answers carry `from` / `to` (`date` only for a single day).
+- **LION side:** a range is its days, read 4 at a time through the per-day cache, each best-effort
+  (20 s inside a range, no day started after 35 s): a day LION did not answer for is named in
+  `missingDays` and left out of every sum — never a day of zero revenue; only a range with no day
+  read is a 502. `mergeSnapReports` (pure): a lone day is returned as LION sent it; several are
+  summed, eCPM recomputed from the sums (LION's own definition, checked live), the forecast counted
+  for the open day only. Settled days (before yesterday) are cached 6 h instead of 10 min, so ranges
+  put LESS load on LION than re-opening single days did. `daily` feeds the board's revenue-by-day
+  strip (a click opens the day, "Back to …" returns).
+- **Snapchat side:** the range is ONE `granularity=TOTAL` window (first midnight → the midnight
+  after the last day) — the same three reads per account as a day. Checked read-only on the real
+  API 20.09: a 3-day window equals the sum of its days to the cent. The stats cache key now carries
+  the window's END (a day and a range can start on the same midnight). Spend has no per-day strip:
+  Snapchat cuts days at the ad account's midnight (Los Angeles), not São Paulo's.
+- **Verification:** `tests/date-range.test.ts` (14) + range cases in `snap-report` / `snap-stats`
+  tests; `_e2e/_adl_snap_ui_dates.mjs` — 38 browser checks under a RUSSIAN locale (English calendar,
+  presets, ‹ ›, keys, typed input, drill-down and back, links, phone sheet, no hydration warnings);
+  `_e2e/_snap_range_probe.mjs` — the read-only window probe.
+- **Review hardening (same day, before the push):** over a range the row's P/L leaves out what the
+  key earned BEFORE its holder claimed it (`revenueBeforeClaim`, pure `snapRevenueBefore`; marked `*`
+  with the amount in the tooltip — a key released and claimed again mid-range carries an earlier
+  campaign's revenue, while spend is only ever read for the campaign bound NOW; the Spend tile says
+  "campaigns bound now" and the footnote spells it out); the report route reads the registry BESIDE
+  the LION days, not after them (together they could outlive `maxDuration`); a lone day that is
+  "tomorrow" for the server is today (a viewer's clock seconds ahead at São Paulo's midnight);
+  letter keys are read by POSITION (`event.code`) — on a Russian / Ukrainian layout the same keys
+  send х ъ в е н; Esc / T / Y answer from the document, so they work when focus has left the popover,
+  and focus falls back to the dialog when there is no day to land on; ‹ › over the months carry the
+  roving day along (the grid always has a Tab stop) and never pull focus off the pressed button; the
+  typed-field hint line is always rendered at a fixed height (a line appearing on blur moved the
+  grid under a click already on its way); an empty preset names no range and the picked preset is
+  the one lit; the popover's edge correction is measured off the unanimated root; `today=0` rides
+  with hand-picked days too; Space is left to the button's own click (Firefox). Probed read-only on
+  the real API: a 31-day TOTAL window is accepted. Known and accepted: settled days are cached 6 h
+  per instance, so a restated old day shows late and two instances can disagree until then.

@@ -322,7 +322,8 @@ async function snapPages(url: string): Promise<unknown[]> {
  *  hour-aligned window — lib/snap-stats.ts says why the day is not asked as DAY). */
 export async function snapAccountStatsRaw(adAccountId: string, startTime: string, endTime: string): Promise<unknown> {
   return cached(
-    `stats:${adAccountId}:${startTime}`,
+    // Both ends: a range and a day can start on the same midnight.
+    `stats:${adAccountId}:${startTime}:${endTime}`,
     () => {
       const q = new URLSearchParams({ granularity: "TOTAL", breakdown: "campaign", start_time: startTime, end_time: endTime, fields: "impressions,swipes,spend" });
       return snapFetch(`${API_BASE}/adaccounts/${encodeURIComponent(adAccountId)}/stats?${q.toString()}`, {}, 1, LIVE_TIMEOUT_MS);
