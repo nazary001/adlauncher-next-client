@@ -6,7 +6,9 @@
 // (52) · conditional bid value / Landing URL + link preview / a READ-ONLY name prefix (LION builds
 // the head) + a custom tail + MOSH / one-or-more repeatable AD GROUPS (pipe-separated Headlines ·
 // Long headlines · Descriptions, CTA, YouTube URLs one-per-line OR uploaded videos + a channel id,
-// Logo URL/upload). Copies are made by the board's Autofill (one shot = one card), not a per-card
+// Logo URL/upload) + a STRUCTURE switch over them (owner ask 21.09): the groups launch as typed,
+// videos together ("1-1-5"), or every video in its own ad group with the same copy ("1-5-5") —
+// fanned out by googleLaunchWire. Copies are made by the board's Autofill (one shot = one card), not a per-card
 // stepper. Every gate is delegated to the SAME validator the server runs (googleLaunchWire) so the
 // card's readiness dot can never disagree with LION's answer. Files stay session-local object URLs
 // here and ride Vercel Blob only at launch (per ad group).
@@ -32,6 +34,7 @@ import {
   GOOGLE_ROAS_MAX,
   GOOGLE_TEXT_ASSETS_MAX,
   GOOGLE_VIDEOS_MAX,
+  googleAdGroupsAtLaunch,
   googleBidKind,
   googleLaunchWire,
   googleLandingBase,
@@ -41,6 +44,7 @@ import {
   googleNameHeadPreview,
   googleNamePreview,
   googleNameSuffix,
+  googleStructureLabel,
   splitLines,
   splitPipes,
   todaySaoPauloDotDDMM,
@@ -99,6 +103,10 @@ export type LaunchCard = {
   mosh: boolean;
   // ad groups (≥1)
   adGroups: AdGroup[];
+  /** Structure switch (owner ask 21.09): false = the ad groups launch as typed, all their videos
+   *  together ("1-1-5"); true = every video launches in its OWN ad group with the same copy/CTA/
+   *  logo ("1-5-5"). The card keeps its typed groups either way — the fan-out is on the wire. */
+  adGroupPerVideo: boolean;
   // launch lifecycle (per card)
   state: "idle" | "uploading" | "sending" | "ok" | "error";
   msg?: string;
@@ -151,6 +159,7 @@ export function freshLaunchCard(id?: string): LaunchCard {
     mosh: false,
     // A deterministic first-ad-group id when the card id is deterministic (the SSR first card).
     adGroups: [freshAdGroup(id ? `${cardId}-ag1` : undefined)],
+    adGroupPerVideo: false,
     state: "idle",
   };
 }
@@ -180,6 +189,13 @@ export function cloneLaunchCard(src: LaunchCard): LaunchCard {
     progress: undefined,
   };
 }
+
+/** Videos each typed ad group carries (links or files, whichever source the group is on). */
+export const launchCardVideoCounts = (card: LaunchCard): number[] =>
+  card.adGroups.map((ag) => (ag.videoMode === "youtube" ? splitLines(ag.youtubeText).length : ag.videoFiles.length));
+
+/** Ad groups the card LAUNCHES with — the typed count, or one per video on the per-video structure. */
+export const launchCardAdGroupCount = (card: LaunchCard): number => googleAdGroupsAtLaunch(launchCardVideoCounts(card), card.adGroupPerVideo);
 
 /** Per-ad-group uploaded asset URLs (resolved at launch). Parallel to card.adGroups. */
 export type AdGroupUpload = { logoUrl?: string; videoUrls?: string[] };
@@ -223,6 +239,7 @@ export function buildLaunchShot(
     ...(card.language ? { language: card.language } : {}),
     ...(card.mosh ? { mosh: true } : {}),
     ads: card.adGroups.map((ag, i) => adGroupWire(ag, ctx.uploaded?.[i])),
+    ...(card.adGroupPerVideo ? { adGroupPerVideo: true } : {}),
     ...(ctx.currency ? { currency: ctx.currency } : {}),
     label: `Google launch · ${ctx.accountName || "account"}`,
   };
@@ -257,6 +274,7 @@ export function launchCardSignature(card: LaunchCard): string {
     g: card.geo,
     lg: card.language,
     m: card.mosh,
+    pv: card.adGroupPerVideo,
     ag: card.adGroups.map((a) => ({
       h: a.headlines,
       lh: a.longHeadlines,
@@ -497,6 +515,10 @@ export function GoogleLaunchCard({
   const clearAllUrls = () => patch({ adGroups: card.adGroups.map((a) => ({ ...a, youtubeText: "", videoFiles: [] })) });
   const removeAllAdGroups = () => patch({ adGroups: [freshAdGroup()] });
 
+  // ---- structure: "1-1-5" (videos together, as typed) vs "1-5-5" (an ad group per video) -----
+  const videoCounts = launchCardVideoCounts(card);
+  const agAtLaunch = googleAdGroupsAtLaunch(videoCounts, card.adGroupPerVideo);
+
   return (
     <div
       id={`glcard-${card.id}`}
@@ -516,7 +538,7 @@ export function GoogleLaunchCard({
           </p>
         </div>
         <span className="hidden shrink-0 rounded-md border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[10px] text-faint sm:inline">
-          {card.adGroups.length} AG
+          {agAtLaunch} AG
         </span>
         <button
           type="button"
@@ -549,8 +571,9 @@ export function GoogleLaunchCard({
       {card.collapsed ? (
         <div className="flex items-center gap-2 px-3.5 py-2.5 text-[11px] text-faint">
           <span className="truncate">
-            {customerOptions.find((o) => o.value === card.customer)?.label ?? "no account"} · {cur} · {card.adGroups.length} ad group
-            {card.adGroups.length === 1 ? "" : "s"}
+            {customerOptions.find((o) => o.value === card.customer)?.label ?? "no account"} · {cur} · {agAtLaunch} ad group
+            {agAtLaunch === 1 ? "" : "s"}
+            {card.adGroupPerVideo ? " (one per video)" : ""}
           </span>
           {card.state !== "idle" ? <span className={"ml-auto truncate font-mono text-[10.5px] " + stateTone}>{card.msg ?? "—"}</span> : null}
         </div>
@@ -790,10 +813,31 @@ export function GoogleLaunchCard({
 
           {/* ---- AD GROUPS ---- */}
           <section className="flex flex-col gap-3 border-t border-line/60 pt-4">
-            <div className="flex items-center justify-between">
-              <span className={micro}>Ad groups</span>
-              <span className="font-mono text-[10px] text-faint">{card.adGroups.length}</span>
+            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+              <span className="flex items-center gap-2">
+                <span className={micro}>Ad groups</span>
+                <span className="font-mono text-[10px] text-faint">{card.adGroups.length}</span>
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="flex items-center gap-1.5">
+                  <span className={micro}>Structure</span>
+                  <InfoDot tip="Campaigns-ad groups-videos. Together: every ad group launches as typed, all its videos in it (1-1-5). Per video: every video launches in its own ad group with the same copy, CTA and logo (1-5-5)." />
+                </span>
+                <Seg
+                  value={card.adGroupPerVideo ? "video" : "group"}
+                  onChange={(k) => patch({ adGroupPerVideo: k === "video" })}
+                  options={[
+                    { key: "group", label: `${googleStructureLabel(videoCounts, false)} · together` },
+                    { key: "video", label: `${googleStructureLabel(videoCounts, true)} · per video` },
+                  ]}
+                />
+              </span>
             </div>
+            <p className="text-[10px] leading-snug text-faint">
+              {card.adGroupPerVideo
+                ? `Launches ${agAtLaunch} ad group${agAtLaunch === 1 ? "" : "s"} — one per video, each with its group's copy, CTA and logo.`
+                : `Launches ${agAtLaunch} ad group${agAtLaunch === 1 ? "" : "s"} as typed — a group's videos stay together.`}
+            </p>
             {card.adGroups.map((ag, i) => (
               <AdGroupCard
                 key={ag.id}

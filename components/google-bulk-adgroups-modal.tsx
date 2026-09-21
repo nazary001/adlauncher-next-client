@@ -43,10 +43,14 @@ function chunk<T>(xs: T[], size: number): T[][] {
 
 export function GoogleBulkAdGroupsModal({
   open,
+  perVideo = false,
   onClose,
   onCreate,
 }: {
   open: boolean;
+  /** The card's structure is "an ad group per video" — the groups built here are split again at
+   *  launch, so the count line says what actually launches. */
+  perVideo?: boolean;
   onClose: () => void;
   /** Hand the built ad groups back to the board; `replace` swaps the card's list vs appends. */
   onCreate: (groups: AdGroup[], replace: boolean) => void;
@@ -275,6 +279,12 @@ export function GoogleBulkAdGroupsModal({
               <span className="font-mono tabular-nums text-ink">{groupCount}</span> ad group{groupCount === 1 ? "" : "s"} will be created
             </span>
           </div>
+          {perVideo && count > 0 ? (
+            <p className="text-[11px] leading-snug text-faint">
+              This campaign&apos;s structure is one ad group per video — it launches{" "}
+              <span className="font-mono tabular-nums text-ink">{count}</span> ad group{count === 1 ? "" : "s"} from these videos.
+            </p>
+          ) : null}
 
           <label className="flex w-fit cursor-pointer items-center gap-2 text-[12px] text-dim">
             <span

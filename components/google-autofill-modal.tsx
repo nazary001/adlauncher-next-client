@@ -20,7 +20,11 @@ const FIELDS: { key: FieldKey; label: string; preview: (c: LaunchCard) => string
   { key: "language", label: "Language", preview: (c) => c.language || "none" },
   { key: "landing", label: "Landing URL", preview: (c) => c.landingUrl || "—" },
   { key: "name", label: "Campaign Name", preview: (c) => c.suffix || "(no custom tail)" },
-  { key: "adGroups", label: "Ad Groups", preview: (c) => `${c.adGroups.length} ad group${c.adGroups.length === 1 ? "" : "s"}` },
+  {
+    key: "adGroups",
+    label: "Ad Groups",
+    preview: (c) => `${c.adGroups.length} ad group${c.adGroups.length === 1 ? "" : "s"}${c.adGroupPerVideo ? " · one per video at launch" : ""}`,
+  },
 ];
 
 /** Apply the ticked fields of `source` onto a fresh card. */
@@ -39,7 +43,10 @@ function copyFields(source: LaunchCard, selected: Set<FieldKey>): LaunchCard {
   if (selected.has("language")) card.language = source.language;
   if (selected.has("landing")) card.landingUrl = source.landingUrl;
   if (selected.has("name")) card.suffix = source.suffix;
-  if (selected.has("adGroups")) card.adGroups = source.adGroups.map(cloneAdGroup);
+  if (selected.has("adGroups")) {
+    card.adGroups = source.adGroups.map(cloneAdGroup);
+    card.adGroupPerVideo = source.adGroupPerVideo; // the structure travels with the groups it splits
+  }
   return card;
 }
 

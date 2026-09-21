@@ -29,6 +29,7 @@ import {
   curSymbol,
   FIRST_CARD_ID,
   freshLaunchCard,
+  launchCardAdGroupCount,
   launchCardRefusal,
   launchCardSignature,
   type AdGroup,
@@ -393,7 +394,7 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[12.5px] font-medium text-ink">{v.target?.name || "No account"}</span>
                       <span className={"block truncate text-[10.5px] " + (v.ready ? "text-faint" : "text-warn")}>
-                        {v.ready ? `${v.currency || "?"} · ${v.card.adGroups.length} AG` : v.why}
+                        {v.ready ? `${v.currency || "?"} · ${launchCardAdGroupCount(v.card)} AG${v.card.adGroupPerVideo ? " · per video" : ""}` : v.why}
                       </span>
                     </span>
                     <span className="shrink-0 font-mono text-[11.5px] tabular-nums text-dim">
@@ -497,7 +498,7 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
                     return (
                       <p key={v.card.id} className="text-[11.5px] leading-snug text-dim">
                         <span className="text-ink">{v.target?.name}</span> → {curSymbol(v.currency)}
-                        {moneyLabel(v.card.budget)}/day · {v.card.adGroups.length} AG
+                        {moneyLabel(v.card.budget)}/day · {launchCardAdGroupCount(v.card)} AG{v.card.adGroupPerVideo ? " (one per video)" : ""}
                         <span className="text-[#9db8ff]"> · {bidText}</span>
                       </p>
                     );
@@ -519,7 +520,12 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
       </main>
 
       <GoogleAutofillModal open={autofillOpen} source={cards[0] ?? null} onClose={() => setAutofillOpen(false)} onCreate={applyAutofill} />
-      <GoogleBulkAdGroupsModal open={bulkCardId !== null} onClose={() => setBulkCardId(null)} onCreate={applyBulk} />
+      <GoogleBulkAdGroupsModal
+        open={bulkCardId !== null}
+        perVideo={cards.find((c) => c.id === bulkCardId)?.adGroupPerVideo ?? false}
+        onClose={() => setBulkCardId(null)}
+        onCreate={applyBulk}
+      />
     </>
   );
 }

@@ -268,6 +268,9 @@ export const GOOGLE_DESCRIPTION_MAX = 90;
 /** Google's Demand Gen asset caps (5 headlines / 5 long headlines / 5 descriptions per ad group). */
 export const GOOGLE_TEXT_ASSETS_MAX = 5;
 export const GOOGLE_VIDEOS_MAX = 5;
+/** Ad groups one campaign may carry on the wire — the bulk ceiling (50 videos) with one ad group
+ *  per video. Guards the per-video structure from fanning a card out without bound. */
+export const GOOGLE_AD_GROUPS_MAX = 50;
 
 export const GOOGLE_CTAS: readonly { value: string; label: string }[] = [
   { value: "", label: "Automatic (Google picks)" },
@@ -335,6 +338,10 @@ export type GoogleLaunchShotIn = {
   language?: string;
   mosh?: boolean;
   ads: GoogleLaunchAdIn[];
+  /** Campaign structure (owner ask 21.09): false/absent = every ad group rides as typed, all its
+   *  videos together ("1-1-5"); true = every video gets its OWN ad group carrying the same
+   *  copy/CTA/logo ("1-5-5"). The fan-out happens in googleLaunchWire. */
+  adGroupPerVideo?: boolean;
   /** Display material the board resolved (currency of the target account). */
   currency?: string;
   label?: string;
@@ -458,6 +465,8 @@ export function googleGeoWire(geo: unknown): { geo?: string[] } | { refusal: str
  * copy limits (40/90/90, 1–5 each), CTA vocabulary, HTTPS logo, EXACTLY ONE of YouTube links /
  * hosted video files (1–5), HTTPS landing, geo/language shapes, budget, and an EXPLICIT bidding
  * strategy with the bid the strategy takes (googleBidPlan mode "launch").
+ * `shot.adGroupPerVideo` fans every ad group out to one wire ad group per video (at most
+ * GOOGLE_AD_GROUPS_MAX on the campaign either way).
  * `customerId`/`pixel`/`nameSuffix` are the route's resolved values.
  */
 export function googleLaunchWire(
@@ -510,15 +519,24 @@ export function googleLaunchWire(
     if (badVid) return { refusal: `Video files must be public https:// URLs${at}` };
     const channelId = String(a.channelId ?? "").trim();
     if (channelId && yt.length > 0) return { refusal: `channel id applies to uploaded videos only${at}` };
-    ads.push({
-      headlines,
-      long_headlines: longHeadlines,
-      descriptions,
-      ...(cta ? { call_to_action: cta } : {}),
-      logo_url: logo,
-      ...(yt.length ? { youtube_urls: yt } : { video_urls: vids }),
-      ...(channelId && vids.length ? { channel_id: channelId } : {}),
-    });
+    // Structure: the group as typed ("1-1-5"), or one wire ad group PER VIDEO carrying the same
+    // copy/CTA/logo ("1-5-5"). Validated above as ONE group, so a refusal names the card's group.
+    const videos = yt.length ? yt : vids;
+    const videoSets = shot.adGroupPerVideo === true ? videos.map((v) => [v]) : [videos];
+    for (const set of videoSets) {
+      ads.push({
+        headlines: [...headlines],
+        long_headlines: [...longHeadlines],
+        descriptions: [...descriptions],
+        ...(cta ? { call_to_action: cta } : {}),
+        logo_url: logo,
+        ...(yt.length ? { youtube_urls: set } : { video_urls: set }),
+        ...(channelId && vids.length ? { channel_id: channelId } : {}),
+      });
+    }
+  }
+  if (ads.length > GOOGLE_AD_GROUPS_MAX) {
+    return { refusal: `At most ${GOOGLE_AD_GROUPS_MAX} ad groups per campaign — this one would launch ${ads.length}${shot.adGroupPerVideo === true ? " (one per video)" : ""}` };
   }
   const wire: GoogleLaunchWire = {
     customer_id: resolved.customerId,
@@ -641,6 +659,20 @@ export function chunkVideosIntoAdGroups<T extends Record<string, unknown>>(video
     out.push({ ...template, youtubeUrls: key === "youtubeUrls" ? chunk : [], videoUrls: key === "videoUrls" ? chunk : [] });
   }
   return out;
+}
+
+/** How many ad groups a campaign LAUNCHES with: the typed groups as they are, or — per-video
+ *  structure — one per video (a group with no video yet still counts as the one it is). */
+export function googleAdGroupsAtLaunch(videosPerGroup: readonly number[], perVideo: boolean): number {
+  return perVideo ? videosPerGroup.reduce((n, v) => n + Math.max(1, v), 0) : videosPerGroup.length;
+}
+
+/** The buyers' structure shorthand "campaigns-ad groups-videos" for one card: "1-1-5" = five videos
+ *  in one ad group, "1-5-5" = an ad group per video. No videos yet → the letter form ("1-N-N"). */
+export function googleStructureLabel(videosPerGroup: readonly number[], perVideo: boolean): string {
+  const videos = videosPerGroup.reduce((n, v) => n + v, 0);
+  if (videos === 0) return perVideo ? "1-N-N" : `1-${Math.max(1, videosPerGroup.length)}-N`;
+  return `1-${googleAdGroupsAtLaunch(videosPerGroup, perVideo)}-${videos}`;
 }
 
 /** The offer word LION derives from the landing's domain ("corquieu.com" → "CORQUIEU"). */
