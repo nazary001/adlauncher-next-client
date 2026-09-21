@@ -4,8 +4,9 @@
 // SETUP (ad account · pixel · Public Profile · name tail) · DELIVERY (goal · bidding · bid ·
 // budget · start paused) · CREATIVES (ANY number of vertical videos/images, ≤32 MB each — every
 // file becomes its own ad inside the campaign's one ad squad · headline ≤34 · brand ≤32 · CTA) ·
-// TARGETING (countries + presets · min age) · LANDING (partner niche or custom https, the final
-// link with the NEXT free key highlighted) · COPIES (N campaigns = N keys). Every gate is
+// TARGETING (countries + presets · min age · devices — Android only by default) · LANDING
+// (partner niche or custom https, the final link with the NEXT free key highlighted) · COPIES
+// (N campaigns = N keys). Every gate is
 // delegated to the SAME validator the server runs (snapLaunchWire) so the readiness dot can never
 // disagree with the route's refusal. Files stay session object URLs here and ride Vercel Blob at
 // launch (the board uploads each file once, reused by every copy).
@@ -25,6 +26,8 @@ import {
   SNAP_BUDGET_MAX,
   SNAP_CTAS,
   SNAP_DEFAULT_BUDGET,
+  SNAP_DEFAULT_DEVICE_OS,
+  SNAP_DEVICE_OPTIONS,
   SNAP_GEO_PRESETS,
   SNAP_HEADLINE_MAX,
   SNAP_LANDINGS,
@@ -39,8 +42,10 @@ import {
   snapLandingBase,
   snapLandingSegments,
   snapLandingUrl,
+  snapDeviceShort,
   snapLaunchWire,
   todaySaoPauloDotDDMM,
+  type SnapDeviceOs,
   type SnapLaunchShotIn,
 } from "@/lib/snap-launch";
 import type { SessionUser } from "./user-menu";
@@ -68,6 +73,8 @@ export type SnapCard = {
   files: FileItem[];
   geo: string[];
   minAge: string;
+  /** Device OS targeting of the ad squad — Android only by default (partner ask 21.09). */
+  deviceOs: SnapDeviceOs;
   landingId: "dmi" | "cars" | "custom";
   landingUrl: string;
   /** "1".."20" — N campaigns from this card, each with its own key. */
@@ -99,6 +106,8 @@ export function freshSnapCard(id?: string, defaults: { adAccount?: string; pixel
     files: [],
     geo: ["US"],
     minAge: "18",
+    // Android only: the partner's hop out of Snapchat's in-app browser works there (ask 21.09).
+    deviceOs: SNAP_DEFAULT_DEVICE_OS,
     landingId: "dmi",
     landingUrl: "",
     copies: "1",
@@ -160,6 +169,7 @@ export function buildSnapShot(card: SnapCard, ctx: { currency?: string; mediaUrl
     })),
     geo: card.geo,
     minAge: card.minAge,
+    deviceOs: card.deviceOs,
     landingId: card.landingId,
     landingUrl: card.landingId === "custom" ? card.landingUrl.trim() : "",
     ...(ctx.desiredKey ? { desiredKey: ctx.desiredKey } : {}),
@@ -200,6 +210,7 @@ export function snapCardSignature(card: SnapCard): string {
     f: card.files.map((x) => x.id),
     geo: card.geo,
     age: card.minAge,
+    os: card.deviceOs,
     l: card.landingId,
     lu: card.landingUrl,
     n: card.copies,
@@ -247,6 +258,7 @@ const GOAL_OPTIONS = SNAP_OPTIMIZATION_GOALS.map((g) => ({ value: g.value, label
 const STRATEGY_OPTIONS = SNAP_BID_STRATEGIES.map((s) => ({ value: s.value, label: s.label }));
 const CTA_OPTIONS = SNAP_CTAS.map((c) => ({ value: c.value, label: c.label }));
 const AGE_OPTIONS = SNAP_MIN_AGES.map((a) => ({ value: a, label: `${a}+` }));
+const DEVICE_OPTIONS: { key: SnapDeviceOs; label: string }[] = SNAP_DEVICE_OPTIONS.map((o) => ({ key: o.value, label: o.label }));
 const LANDING_OPTIONS: { key: SnapCard["landingId"]; label: string }[] = [...SNAP_LANDINGS.map((l) => ({ key: l.id, label: l.niche })), { key: "custom", label: "Custom URL" }];
 
 function Seg<T extends string>({ options, value, onChange }: { options: { key: T; label: string }[]; value: T; onChange: (k: T) => void }) {
@@ -415,7 +427,7 @@ export function SnapLaunchCard({
       {card.collapsed ? (
         <div className="flex items-center gap-2 px-3.5 py-2.5 text-[11px] text-faint">
           <span className="truncate">
-            {accountName || "no account"} · {niche} · {card.geo.join("+") || "no geo"} · {sym}
+            {accountName || "no account"} · {niche} · {card.geo.join("+") || "no geo"}{snapDeviceShort(card.deviceOs) ? ` · ${snapDeviceShort(card.deviceOs)}` : ""} · {sym}
             {card.budget} · {card.files.length} creative{card.files.length === 1 ? "" : "s"} · ×{copies}
           </span>
           {card.state !== "idle" ? <span className={"ml-auto truncate font-mono text-[10.5px] " + stateTone}>{card.msg ?? "—"}</span> : null}
@@ -532,6 +544,15 @@ export function SnapLaunchCard({
                 );
               })}
             </div>
+            <div className="flex flex-wrap items-center gap-3 pt-2">
+              <span className={micro}>Devices</span>
+              <Seg options={DEVICE_OPTIONS} value={card.deviceOs} onChange={(k) => patch({ deviceOs: k })} />
+            </div>
+            <p className={"text-[10px] leading-snug " + (card.deviceOs === "ANDROID" ? "text-faint" : "text-warn")}>
+              {card.deviceOs === "ANDROID"
+                ? "Android only — the partner's hop from Snapchat's in-app browser to the phone's browser works there."
+                : "The partner asked for Android only (21.09): their browser hop does not work on other devices."}
+            </p>
           </section>
 
           {/* ---- LANDING ---- */}

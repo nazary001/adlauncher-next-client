@@ -8,6 +8,8 @@ import assert from "node:assert/strict";
 import {
   SNAP_BID_STRATEGIES,
   SNAP_CTAS,
+  SNAP_DEFAULT_DEVICE_OS,
+  SNAP_DEVICE_OPTIONS,
   SNAP_GEO_PRESETS,
   SNAP_MAX_CREATIVES,
   SNAP_NAME_MAX,
@@ -16,6 +18,8 @@ import {
   snapShotMediaIn,
   snapBidKind,
   snapBidLabel,
+  snapDeviceOs,
+  snapDeviceShort,
   snapGeoWire,
   snapGoalNeedsPixel,
   snapLaunchWire,
@@ -151,7 +155,8 @@ test("happy path: the Snap bodies (one creative → one ad unit) + the final lan
     bid_strategy: "AUTO_BID",
     optimization_goal: "PIXEL_PURCHASE",
     placement_v2: { config: "AUTOMATIC" },
-    targeting: { geos: [{ country_code: "us" }], demographics: [{ min_age: "18" }] },
+    // No deviceOs on the shot = the partner's default: Android only (ask 21.09).
+    targeting: { geos: [{ country_code: "us" }], demographics: [{ min_age: "18" }], devices: [{ os_type: "ANDROID" }] },
     pixel_id: "px-1",
     status: "ACTIVE",
     start_time: "2026-09-16T12:00:00.000Z",
@@ -222,6 +227,7 @@ test("refusal matrix names the field and the fix", () => {
   assert.match(refusal(shot({ media: Array.from({ length: SNAP_MAX_CREATIVES + 1 }, (_, i) => ({ url: `https://x.com/${i}.mp4`, kind: "video" as const })) })), new RegExp(`at most ${SNAP_MAX_CREATIVES}`));
   assert.match(refusal(shot({ geo: [] })), /at least one country/i);
   assert.match(refusal(shot({ minAge: "16" })), /Minimum age/);
+  assert.match(refusal(shot({ deviceOs: "WINDOWS" })), /Devices must be one of Android only \/ iOS only \/ All devices/);
   assert.match(refusal(shot({ landingId: "custom", landingUrl: "http://example.com/" })), /https:\/\/ address/);
   assert.match(refusal(shot({ landingId: "nope" as "dmi" })), /Pick a landing/);
   assert.match(refusal(shot(), { ...resolved, profileId: "" }), /Public Profile/);
@@ -291,4 +297,40 @@ test("snapShotMediaIn: the media list normalized; the pre-multi single-creative 
   assert.deepEqual(snapShotMediaIn(null), []);
   assert.deepEqual(snapShotMediaIn({ media: [null, 7] }), [{ url: "", kind: "video" }, { url: "", kind: "video" }]);
   assert.deepEqual(snapShotMediaIn({ media: "https://b/a.mp4", mediaUrl: "  " }), []);
+});
+
+// ---- devices: Android only by default (partner ask 21.09) ----------------------------------------
+
+test("devices: Android only is the default — on the vocabulary, on a shot that says nothing, in any spelling", () => {
+  assert.equal(SNAP_DEFAULT_DEVICE_OS, "ANDROID");
+  assert.deepEqual(SNAP_DEVICE_OPTIONS.map((o) => o.value), ["ANDROID", "iOS", "ALL"]); // Snap's own os_type words + our "no targeting"
+  assert.equal(snapDeviceOs(undefined), "ANDROID");
+  assert.equal(snapDeviceOs(""), "ANDROID");
+  assert.equal(snapDeviceOs(" android "), "ANDROID");
+  assert.equal(snapDeviceOs("ios"), "iOS"); // Snap spells it "iOS" — the wire must too
+  assert.equal(snapDeviceOs("all"), "ALL");
+  assert.equal(snapDeviceOs("WEB"), null); // Snap has it, the launcher does not offer it
+  assert.equal(snapDeviceOs("windows"), null);
+  assert.equal(snapDeviceShort("ANDROID"), "Android");
+  assert.equal(snapDeviceShort("iOS"), "iOS");
+  assert.equal(snapDeviceShort("ALL"), "");
+});
+
+test("devices ride the ad squad's targeting: ANDROID / iOS as os_type, ALL sends no devices at all", () => {
+  const devices = (deviceOs?: string) => {
+    const r = snapLaunchWire(shot(deviceOs === undefined ? {} : { deviceOs }), resolved);
+    assert.ok(!("refusal" in r), "refusal" in r ? r.refusal : "");
+    if ("refusal" in r) throw new Error(r.refusal);
+    return { targeting: r.wire.adsquad.targeting, os: r.deviceOs };
+  };
+  assert.deepEqual(devices().targeting.devices, [{ os_type: "ANDROID" }]);
+  assert.equal(devices().os, "ANDROID");
+  assert.deepEqual(devices("ANDROID").targeting.devices, [{ os_type: "ANDROID" }]);
+  assert.deepEqual(devices("iOS").targeting.devices, [{ os_type: "iOS" }]);
+  assert.deepEqual(devices("ios").targeting.devices, [{ os_type: "iOS" }]);
+  const all = devices("ALL");
+  assert.equal("devices" in all.targeting, false);
+  assert.equal(all.os, "ALL");
+  // geo and age are untouched by the device choice
+  assert.deepEqual(all.targeting, { geos: [{ country_code: "us" }], demographics: [{ min_age: "18" }] });
 });

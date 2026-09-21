@@ -199,6 +199,28 @@ export const SNAP_GEO_PRESETS: readonly { label: string; codes: string[] }[] = [
 
 export const SNAP_MIN_AGES = ["18", "21", "25"] as const;
 
+/** Device OS targeting of the ad squad (`targeting.devices[].os_type`; Snap's own vocabulary, read
+ *  live 21.09 from /v1/targeting/device/os_type: iOS / ANDROID / WEB). Partner ask 21.09: ANDROID
+ *  ONLY — their "browser killer" (the hop from Snapchat's in-app browser to the phone's browser)
+ *  works on Android, and their deductions are judged on that traffic. "ALL" sends no device
+ *  targeting at all (what every campaign before 21.09 ran on). */
+export type SnapDeviceOs = "ANDROID" | "iOS" | "ALL";
+export const SNAP_DEVICE_OPTIONS: readonly { value: SnapDeviceOs; label: string; short: string }[] = [
+  { value: "ANDROID", label: "Android only", short: "Android" },
+  { value: "iOS", label: "iOS only", short: "iOS" },
+  { value: "ALL", label: "All devices", short: "" },
+] as const;
+export const SNAP_DEFAULT_DEVICE_OS: SnapDeviceOs = "ANDROID";
+/** The shot's device choice, normalized: nothing sent (a tab opened before the deploy, a script on
+ *  the old shape) = the partner's default, Android only; an unknown word = null (refused). */
+export function snapDeviceOs(raw: unknown): SnapDeviceOs | null {
+  const v = String(raw ?? "").trim();
+  if (!v) return SNAP_DEFAULT_DEVICE_OS;
+  return SNAP_DEVICE_OPTIONS.find((o) => o.value.toLowerCase() === v.toLowerCase())?.value ?? null;
+}
+/** Short word for rows and the bay ("Android" / "iOS"); "" when every device is targeted. */
+export const snapDeviceShort = (os: SnapDeviceOs): string => SNAP_DEVICE_OPTIONS.find((o) => o.value === os)?.short ?? "";
+
 // ---------- limits ----------
 
 export const SNAP_DEFAULT_BUDGET = "10,00";
@@ -335,6 +357,8 @@ export type SnapLaunchShotIn = {
   /** ISO-2 codes (Snap has no WW). */
   geo: string[];
   minAge: string;
+  /** "ANDROID" | "iOS" | "ALL"; absent = SNAP_DEFAULT_DEVICE_OS (Android only, partner ask 21.09). */
+  deviceOs?: string;
   landingId: SnapLandingId | "custom";
   /** Custom landing (https, any query dropped); ignored for the partner landings. */
   landingUrl: string;
@@ -356,7 +380,7 @@ export type SnapAdSquadWire = {
   bid_micro?: number;
   optimization_goal: string;
   placement_v2: { config: "AUTOMATIC" };
-  targeting: { geos: { country_code: string }[]; demographics: { min_age: string }[] };
+  targeting: { geos: { country_code: string }[]; demographics: { min_age: string }[]; devices?: { os_type: "ANDROID" | "iOS" }[] };
   pixel_id?: string;
   status: "ACTIVE";
   start_time: string;
@@ -410,13 +434,13 @@ export function snapShotNiche(shot: SnapLaunchShotIn): string {
 /**
  * Build the Snap bodies for ONE shot, refusing with the exact fix when a field can't ride.
  * Order: budget → strategy/bid → goal (+pixel) → headline → brand → CTA → creatives → geo → age →
- * landing → Public Profile → key → name. Pure and deterministic: the board's dry-run (placeholder
+ * devices → landing → Public Profile → key → name. Pure and deterministic: the board's dry-run (placeholder
  * key/media/name) and the pump's real run agree on every refusal.
  */
 export function snapLaunchWire(
   shot: SnapLaunchShotIn,
   resolved: SnapResolved,
-): { wire: SnapLaunchWire; label: string; geoLabel: string; landingBase: string; niche: string; bidMicro?: number } | { refusal: string } {
+): { wire: SnapLaunchWire; label: string; geoLabel: string; landingBase: string; niche: string; deviceOs: SnapDeviceOs; bidMicro?: number } | { refusal: string } {
   const budgetMicro = snapMicro(String(shot.budget ?? ""), SNAP_BUDGET_MIN, SNAP_BUDGET_MAX);
   if (budgetMicro == null) return { refusal: `Daily budget must be between ${SNAP_BUDGET_MIN} and ${SNAP_BUDGET_MAX} in the account currency` };
   const strategy = String(shot.bidStrategy ?? "").trim();
@@ -457,6 +481,8 @@ export function snapLaunchWire(
   if ("refusal" in geo) return { refusal: geo.refusal };
   const minAge = String(shot.minAge ?? "").trim();
   if (!(SNAP_MIN_AGES as readonly string[]).includes(minAge)) return { refusal: `Minimum age must be one of ${SNAP_MIN_AGES.join(" / ")}` };
+  const deviceOs = snapDeviceOs(shot.deviceOs);
+  if (!deviceOs) return { refusal: `Devices must be one of ${SNAP_DEVICE_OPTIONS.map((o) => o.label).join(" / ")}` };
   let landingBase = "";
   if (shot.landingId === "custom") {
     const b = snapLandingBase(String(shot.landingUrl ?? ""));
@@ -516,7 +542,7 @@ export function snapLaunchWire(
       ...(bidMicro != null ? { bid_micro: bidMicro } : {}),
       optimization_goal: goal,
       placement_v2: { config: "AUTOMATIC" },
-      targeting: { geos: geo.geos, demographics: [{ min_age: minAge }] },
+      targeting: { geos: geo.geos, demographics: [{ min_age: minAge }], ...(deviceOs !== "ALL" ? { devices: [{ os_type: deviceOs }] } : {}) },
       ...(resolved.pixelId ? { pixel_id: resolved.pixelId } : {}),
       status: "ACTIVE",
       start_time: resolved.startTimeIso,
@@ -530,6 +556,7 @@ export function snapLaunchWire(
     geoLabel: geo.label,
     landingBase,
     niche: snapShotNiche(shot),
+    deviceOs,
     ...(bidMicro != null ? { bidMicro } : {}),
   };
 }

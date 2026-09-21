@@ -13,6 +13,8 @@ import {
   isSnapKey,
   isSnapLaunchAccount,
   snapCampaignName,
+  snapDeviceOs,
+  snapDeviceShort,
   snapGoalNeedsPixel,
   snapLaunchWire,
   snapShotTaskId,
@@ -65,6 +67,9 @@ function cleanShot(x: SnapLaunchShotIn): SnapLaunchShotIn {
     media: snapShotMediaIn(x),
     geo: (Array.isArray(x.geo) ? x.geo : []).map(s).filter(Boolean),
     minAge: s(x.minAge) || "18",
+    // Nothing sent = the partner's default (Android only); an unknown word rides on to the
+    // validator, which refuses it by name.
+    deviceOs: snapDeviceOs(x.deviceOs) ?? s(x.deviceOs),
     landingId: x.landingId === "custom" || x.landingId === "dmi" || x.landingId === "cars" ? x.landingId : ("" as SnapLaunchShotIn["landingId"]),
     landingUrl: s(x.landingUrl),
     desiredKey: s(x.desiredKey),
@@ -160,8 +165,15 @@ export async function handleSnapLaunch(req: Request): Promise<NextResponse> {
         shot,
         ctx: { adAccountId, pixelId: px.pixelId, profileId, currency: account.currency, niche: dry.niche, geoLabel: dry.geoLabel, tail: x.suffix, startPaused: Boolean(x.startPaused) },
       },
-      // The monitor tag says how many ads the campaign carries when the card had several creatives.
-      row: { name: provisionalName.slice(0, 250), geo: dry.geoLabel, budget, bid: shot.media.length > 1 ? `${dry.label} · ${shot.media.length} creatives` : dry.label, key: desiredKey ?? "" },
+      // The monitor tag names the device restriction, and how many ads the campaign carries when
+      // the card had several creatives: "auto · Android · 5 creatives".
+      row: {
+        name: provisionalName.slice(0, 250),
+        geo: dry.geoLabel,
+        budget,
+        bid: [dry.label, snapDeviceShort(dry.deviceOs), shot.media.length > 1 ? `${shot.media.length} creatives` : ""].filter(Boolean).join(" · "),
+        key: desiredKey ?? "",
+      },
     });
   }
   return acceptSnapWave(user, waveId, resolved, t0);

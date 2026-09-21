@@ -17,7 +17,7 @@ import { useSnapCatalog, useSnapKeys, type SnapCatalogAccount } from "./use-snap
 import { useSnapTaskManager } from "./snap-task-manager";
 import { makeGate } from "@/lib/launch-guards";
 import { moneyLabel, parseMoney } from "@/lib/types";
-import { SNAP_MAX_SHOTS, snapCurrencySymbol, snapGoalNeedsPixel, type SnapLaunchShotIn } from "@/lib/snap-launch";
+import { SNAP_MAX_SHOTS, snapCurrencySymbol, snapDeviceShort, snapGoalNeedsPixel, type SnapLaunchShotIn } from "@/lib/snap-launch";
 import { readCreative, safeBlobName, uploadCreativeFile } from "./blob-uploader";
 import { UploadingNotice, useUnloadGuard } from "./upload-guard";
 import { CopyIcon, EyeIcon, PlusIcon } from "./icons";
@@ -433,7 +433,7 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
                   {readyViews.map((v) => (
                     <p key={v.card.id} className="text-[11.5px] leading-snug text-dim">
                       <span className="text-ink">{v.account?.name}</span> → ×{v.copies} · {v.card.files.length} creative{v.card.files.length === 1 ? "" : "s"} · {snapCurrencySymbol(v.currency || "USD")}
-                      {moneyLabel(v.card.budget)}/day · {v.card.geo.join("+")} · <span className="text-[#f3f0a3]">{v.keys.join(", ")}</span>
+                      {moneyLabel(v.card.budget)}/day · {v.card.geo.join("+")}{snapDeviceShort(v.card.deviceOs) ? ` · ${snapDeviceShort(v.card.deviceOs)}` : " · all devices"} · <span className="text-[#f3f0a3]">{v.keys.join(", ")}</span>
                     </p>
                   ))}
                   <div className="mt-1 border-t border-line pt-1.5 text-[11.5px] text-ink">{totalShots} campaign{totalShots === 1 ? "" : "s"} · {totalAds} ad{totalAds === 1 ? "" : "s"} · fires ONE wave · the tab is safe to close once accepted (uploads finish first).</div>
