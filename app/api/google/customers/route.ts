@@ -21,7 +21,7 @@ export async function GET(req: Request): Promise<NextResponse> {
     return NextResponse.json({ ok: false, error: "google_weapon_not_configured" }, { status: 500 });
   }
   try {
-    // GLO-HS-00N only (owner rule 14.09) — the pickers never see the rest of the partner list.
+    // The owner's active GLO-HS list only (21.09) — the pickers never see the rest of the partner list.
     const customers = await gwLaunchableCustomers();
     // `acr` = the LION user's media-buyer acronym: LION stamps it (lower-cased) as mb=/utm on
     // every Google link — the board previews the final link with it.

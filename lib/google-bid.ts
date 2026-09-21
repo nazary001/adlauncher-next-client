@@ -667,20 +667,23 @@ export function googleNameHeadPreview(args: { accountName: string; acr: string; 
 
 // ---------- account allowlist (owner rule 2026-09-14) ----------
 
-/** The LION MCC our Google launches live on (GLO-HS-00N accounts, BRL). */
+/** The LION MCC our Google launches live on (GLO-HS-NNN accounts, BRL). */
 export const GOOGLE_LAUNCH_MCC = "2678500976";
-export const GOOGLE_LAUNCH_ACCOUNT_RE = /^GLO-HS-\d{3}$/i;
 
-/** Only the GLO-HS-001…010 accounts are offered and accepted for Google launches (owner rule
- *  14.09: the suspended "Ads N" book, GC-Vis and the pixel-less GC-HS-Lion-BR-N stay hidden).
- *  Name pattern + MCC, so a future GLO-HS-011 appears by itself. */
-/** GLO-HS accounts the owner took out of rotation (banned on Google — owner asks 17.09): hidden
- *  from every picker and refused as a launch/clone/JURO target — one predicate, so "not shown"
- *  always means "not launchable". Names compared case-insensitively, trimmed. */
-export const GOOGLE_HIDDEN_LAUNCH_ACCOUNTS: ReadonlySet<string> = new Set(["GLO-HS-001", "GLO-HS-003", "GLO-HS-006", "GLO-HS-007", "GLO-HS-008"]);
+/** The GLO-HS accounts that are ACTIVE for Google launches — the owner's list of 21.09 (004,
+ *  012–017, 019–046; the rest of the GLO-HS book is banned or parked, and the suspended "Ads N"
+ *  book, GC-Vis and the pixel-less GC-HS-Lion-BR-N were never offered). An explicit list, not a
+ *  name pattern: a new account appears only when the owner names it. One predicate feeds every
+ *  picker AND the launch/clone target check, so "not shown" always means "not launchable".
+ *  Names compared case-insensitively, trimmed. */
+export const GOOGLE_ACTIVE_LAUNCH_ACCOUNTS: ReadonlySet<string> = new Set(
+  [
+    4, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41,
+    42, 43, 44, 45, 46,
+  ].map((n) => `GLO-HS-${String(n).padStart(3, "0")}`),
+);
 
 export function isGoogleLaunchAccount(c: { name: string; mccId?: string }): boolean {
-  const name = String(c.name ?? "").trim();
-  if (GOOGLE_HIDDEN_LAUNCH_ACCOUNTS.has(name.toUpperCase())) return false;
-  return GOOGLE_LAUNCH_ACCOUNT_RE.test(name) && (!c.mccId || c.mccId === GOOGLE_LAUNCH_MCC);
+  const name = String(c.name ?? "").trim().toUpperCase();
+  return GOOGLE_ACTIVE_LAUNCH_ACCOUNTS.has(name) && (!c.mccId || c.mccId === GOOGLE_LAUNCH_MCC);
 }

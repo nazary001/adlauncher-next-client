@@ -10,6 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   isGoogleLaunchAccount,
+  GOOGLE_ACTIVE_LAUNCH_ACCOUNTS,
   GOOGLE_LAUNCH_BID_STRATEGIES,
   GOOGLE_GEO_PRESETS,
   GOOGLE_LANGUAGES_FULL,
@@ -232,19 +233,26 @@ test("googleLaunchWire names the offending ad group when a later group is short 
   if ("refusal" in built) assert.match(built.refusal, /ad group 2/);
 });
 
-// ---- isGoogleLaunchAccount: the GLO-HS allowlist (owner rule 14.09) ----------------------------
+// ---- isGoogleLaunchAccount: the active GLO-HS list (owner list 21.09) --------------------------
 
-test("isGoogleLaunchAccount accepts the GLO-HS accounts on the LION MCC minus the hidden ones, and nothing else", () => {
-  assert.equal(isGoogleLaunchAccount({ name: "GLO-HS-002", mccId: "2678500976" }), true);
-  assert.equal(isGoogleLaunchAccount({ name: "GLO-HS-010", mccId: "2678500976" }), true);
-  // Owner asks 17.09: 001/003/006/007/008 are banned on Google — hidden AND refused, any spelling.
-  for (const n of ["GLO-HS-001", "GLO-HS-003", "GLO-HS-006", "GLO-HS-007", "GLO-HS-008"]) assert.equal(isGoogleLaunchAccount({ name: n, mccId: "2678500976" }), false, n);
+test("isGoogleLaunchAccount accepts exactly the owner's active GLO-HS list on the LION MCC, and nothing else", () => {
+  // Owner list 21.09: 004, 012–017, 019–046 — 35 accounts, shown AND accepted, any spelling.
+  const active = [4, ...Array.from({ length: 6 }, (_, i) => 12 + i), ...Array.from({ length: 28 }, (_, i) => 19 + i)].map(
+    (n) => `GLO-HS-${String(n).padStart(3, "0")}`,
+  );
+  assert.equal(active.length, 35);
+  assert.deepEqual([...GOOGLE_ACTIVE_LAUNCH_ACCOUNTS].sort(), [...active].sort());
+  for (const n of active) assert.equal(isGoogleLaunchAccount({ name: n, mccId: "2678500976" }), true, n);
+  assert.equal(isGoogleLaunchAccount({ name: " glo-hs-004 " }), true);
+  // Everything else in the GLO-HS book is out of rotation — hidden AND refused.
+  for (const n of ["GLO-HS-001", "GLO-HS-002", "GLO-HS-003", "GLO-HS-005", "GLO-HS-006", "GLO-HS-007", "GLO-HS-008", "GLO-HS-009", "GLO-HS-010", "GLO-HS-011", "GLO-HS-018"]) {
+    assert.equal(isGoogleLaunchAccount({ name: n, mccId: "2678500976" }), false, n);
+  }
   assert.equal(isGoogleLaunchAccount({ name: " glo-hs-003 " }), false);
-  for (const n of ["GLO-HS-004", "GLO-HS-005", "GLO-HS-009"]) assert.equal(isGoogleLaunchAccount({ name: n, mccId: "2678500976" }), true, n);
-  assert.equal(isGoogleLaunchAccount({ name: "glo-hs-011" }), true); // a future account appears by itself
+  assert.equal(isGoogleLaunchAccount({ name: "GLO-HS-047", mccId: "2678500976" }), false); // a new account waits for the owner's word
   assert.equal(isGoogleLaunchAccount({ name: "GC-HS-Lion-BR-1", mccId: "2678500976" }), false);
   assert.equal(isGoogleLaunchAccount({ name: "Ads 1", mccId: "4904785717" }), false);
   assert.equal(isGoogleLaunchAccount({ name: "GC-Vis-2", mccId: "4904785717" }), false);
-  assert.equal(isGoogleLaunchAccount({ name: "GLO-HS-001", mccId: "4904785717" }), false); // right name, wrong MCC
+  assert.equal(isGoogleLaunchAccount({ name: "GLO-HS-004", mccId: "4904785717" }), false); // right name, wrong MCC
   assert.equal(isGoogleLaunchAccount({ name: "" }), false);
 });
