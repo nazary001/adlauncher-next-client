@@ -121,7 +121,6 @@ const shot = (over: Partial<SnapLaunchShotIn> = {}): SnapLaunchShotIn => ({
   ...over,
 });
 
-const LA_HOURS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23];
 const resolved: SnapResolved = {
   adAccountId: "acct-a",
   pixelId: "px-1",
@@ -130,11 +129,9 @@ const resolved: SnapResolved = {
   key: "glo-snp_003",
   mediaIds: ["media-1"],
   startTimeIso: "2026-09-16T12:00:00.000Z",
-  // The Kyiv working hours as the route/pump resolve them (lib/snap-schedule): LA clock, 90-day flight.
-  schedule: { hours: LA_HOURS, tz: "America/Los_Angeles", flightDays: 90, config: Object.fromEntries(["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"].map((d) => [d, { hour_of_day: LA_HOURS }])) },
 };
 
-test("happy path: the Snap bodies (one creative → one ad unit) + the final landing URL, AUTO_BID sends no bid_micro; the Kyiv schedule rides as a LIFETIME budget + flight + ad_scheduling_config, the campaign capped per day", () => {
+test("happy path: the Snap bodies (one creative → one ad unit) + the final landing URL, AUTO_BID sends no bid_micro", () => {
   const r = snapLaunchWire(shot(), resolved);
   assert.ok(!("refusal" in r), JSON.stringify(r));
   if ("refusal" in r) return;
@@ -143,28 +140,18 @@ test("happy path: the Snap bodies (one creative → one ad unit) + the final lan
   assert.equal(r.niche, "Cars");
   assert.equal(r.landingBase, "https://fast-flow.org/ht/captcha-1/cars/en/");
   assert.equal(r.bidMicro, undefined);
-  assert.deepEqual(r.schedule, { hours: LA_HOURS, tz: "America/Los_Angeles" });
-  assert.equal(r.dailyMicro, 10_000_000);
-  const thirty = snapLaunchWire(shot({ budget: "30,00" }), resolved);
-  if (!("refusal" in thirty)) {
-    assert.equal(thirty.wire.campaign.daily_budget_micro, 30_000_000); // above the floor: the cap is the buyer's amount
-    assert.equal(thirty.wire.adsquad.lifetime_budget_micro, 2_700_000_000);
-  }
   assert.deepEqual(r.wire.campaign, {
     name: resolved.name,
     ad_account_id: "acct-a",
     status: "PAUSED",
     start_time: "2026-09-16T12:00:00.000Z",
-    daily_budget_micro: 20_000_000, // the campaign's daily cap = max(the buyer's $10, Snap's $20 minimum)
   });
   assert.deepEqual(r.wire.adsquad, {
     name: resolved.name,
     type: "SNAP_ADS",
     billing_event: "IMPRESSION",
-    delivery_constraint: "LIFETIME_BUDGET",
-    lifetime_budget_micro: 900_000_000, // $10 × 90 days
-    end_time: "2026-12-15T12:00:00.000Z", // start + 90 days
-    ad_scheduling_config: resolved.schedule!.config,
+    delivery_constraint: "DAILY_BUDGET",
+    daily_budget_micro: 10_000_000,
     bid_strategy: "AUTO_BID",
     optimization_goal: "PIXEL_PURCHASE",
     placement_v2: { config: "AUTOMATIC" },
@@ -370,21 +357,4 @@ test("devices ride the ad squad's targeting: ANDROID / iOS as os_type, ALL sends
   assert.equal(all.os, "ALL");
   // geo and age are untouched by the device choice
   assert.deepEqual(all.targeting, { geos: [{ country_code: "us" }], demographics: [{ min_age: "18" }] });
-});
-
-test("schedule:false → the plain 24/7 ad squad on a daily budget, no cap on the campaign, no flight; a scheduled shot without a resolved schedule is refused", () => {
-  const r = snapLaunchWire(shot({ schedule: false }), resolved);
-  assert.ok(!("refusal" in r));
-  if ("refusal" in r) return;
-  assert.equal(r.schedule, null);
-  assert.equal(r.wire.campaign.daily_budget_micro, undefined);
-  assert.equal(r.wire.adsquad.delivery_constraint, "DAILY_BUDGET");
-  assert.equal(r.wire.adsquad.daily_budget_micro, 10_000_000);
-  assert.equal(r.wire.adsquad.lifetime_budget_micro, undefined);
-  assert.equal(r.wire.adsquad.end_time, undefined);
-  assert.equal(r.wire.adsquad.ad_scheduling_config, undefined);
-  const noSched = snapLaunchWire(shot(), { ...resolved, schedule: null });
-  assert.ok("refusal" in noSched && /Kyiv schedule could not be resolved/.test(noSched.refusal));
-  const empty = snapLaunchWire(shot(), { ...resolved, schedule: { ...resolved.schedule!, hours: [] } });
-  assert.ok("refusal" in empty);
 });

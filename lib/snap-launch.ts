@@ -246,10 +246,6 @@ export const SNAP_DEFAULT_BUDGET = "10,00";
 /** Snap's own floor is USD 5/day (daily_budget_micro ≥ 5 000 000). */
 export const SNAP_BUDGET_MIN = 5;
 export const SNAP_BUDGET_MAX = 10_000;
-/** Snap's floor for a campaign-level daily cap (E1008 "spendCapInMicro … minimum 20000000", read
- *  live 22.09): a scheduled launch caps its campaign at max(daily, this). */
-export const SNAP_CAMPAIGN_CAP_MIN = 20;
-export const snapCampaignCapMicro = (dailyMicro: number): number => Math.max(dailyMicro, SNAP_CAMPAIGN_CAP_MIN * 1_000_000);
 /** Snap's USD bid_micro range 10 000 … 500 000 000. */
 export const SNAP_BID_MIN = 0.01;
 export const SNAP_BID_MAX = 500;
@@ -382,9 +378,6 @@ export type SnapLaunchShotIn = {
   minAge: string;
   /** "ANDROID" | "iOS" | "ALL"; absent = SNAP_DEFAULT_DEVICE_OS (Android only, partner ask 21.09). */
   deviceOs?: string;
-  /** Kyiv working hours on Snap's side (owner rule 22.09). Absent = ON — every launch carries it;
-   *  `false` = a 24/7 daily-budget ad squad as before. */
-  schedule?: boolean;
   /** The pasted landing (https; any pasted query is dropped, Snap's own tags are appended). */
   landingUrl: string;
   /** The key the board previewed; the pump claims it or the next free one. */
@@ -394,19 +387,13 @@ export type SnapLaunchShotIn = {
   currency?: string;
 };
 
-/** `daily_budget_micro` = the campaign-level daily cap — set with the schedule, whose ad squad
- *  carries a lifetime budget (Snap's rule), so the buyer's "per day" still holds. */
-export type SnapCampaignWire = { name: string; ad_account_id: string; status: "PAUSED" | "ACTIVE"; start_time: string; daily_budget_micro?: number };
-export type SnapAdSchedulingConfig = Record<string, { hour_of_day: number[] }>;
+export type SnapCampaignWire = { name: string; ad_account_id: string; status: "PAUSED" | "ACTIVE"; start_time: string };
 export type SnapAdSquadWire = {
   name: string;
   type: "SNAP_ADS";
   billing_event: "IMPRESSION";
-  delivery_constraint: "DAILY_BUDGET" | "LIFETIME_BUDGET";
-  daily_budget_micro?: number;
-  lifetime_budget_micro?: number;
-  end_time?: string;
-  ad_scheduling_config?: SnapAdSchedulingConfig;
+  delivery_constraint: "DAILY_BUDGET";
+  daily_budget_micro: number;
   bid_strategy: string;
   bid_micro?: number;
   optimization_goal: string;
@@ -441,12 +428,7 @@ export type SnapLaunchWire = { campaign: SnapCampaignWire; adsquad: SnapAdSquadW
 /** What the route/pump resolved around the shot. `mediaIds` runs parallel to `shot.media`; an
  *  empty id is a creative the pump skipped (its upload failed) — no unit is built for it. The
  *  board dry-runs with placeholders (key "glo-snp_001", media ids "pending", name "preview"). */
-/** The Kyiv working hours as the caller computed them with lib/snap-schedule (kept out of this
- *  dependency-free module): the account-clock hours and the flight; null/absent = no schedule. */
-export type SnapResolvedSchedule = { hours: number[]; tz: string; flightDays: number; config: SnapAdSchedulingConfig };
-export type SnapResolved = { adAccountId: string; pixelId?: string; profileId: string; name: string; key: string; mediaIds: string[]; startTimeIso: string; schedule?: SnapResolvedSchedule | null };
-/** Every one of our ad accounts (read live 22.09). */
-export const SNAP_DEFAULT_ACCOUNT_TZ = "America/Los_Angeles";
+export type SnapResolved = { adAccountId: string; pixelId?: string; profileId: string; name: string; key: string; mediaIds: string[]; startTimeIso: string };
 
 const isHttps = (u: string): boolean => /^https:\/\/[^\s]+$/i.test(u);
 /** A creative URL: public https — or a LOOPBACK http URL, which only the local e2e mock can serve
@@ -476,7 +458,7 @@ export function snapShotNiche(shot: SnapLaunchShotIn): string {
 export function snapLaunchWire(
   shot: SnapLaunchShotIn,
   resolved: SnapResolved,
-): { wire: SnapLaunchWire; label: string; geoLabel: string; landingBase: string; niche: string; deviceOs: SnapDeviceOs; schedule: { hours: number[]; tz: string } | null; dailyMicro: number; bidMicro?: number } | { refusal: string } {
+): { wire: SnapLaunchWire; label: string; geoLabel: string; landingBase: string; niche: string; deviceOs: SnapDeviceOs; bidMicro?: number } | { refusal: string } {
   const budgetMicro = snapMicro(String(shot.budget ?? ""), SNAP_BUDGET_MIN, SNAP_BUDGET_MAX);
   if (budgetMicro == null) return { refusal: `Daily budget must be between ${SNAP_BUDGET_MIN} and ${SNAP_BUDGET_MAX} in the account currency` };
   const strategy = String(shot.bidStrategy ?? "").trim();
@@ -559,24 +541,14 @@ export function snapLaunchWire(
       ad: { name: unitName, type: "REMOTE_WEBPAGE", status: "ACTIVE" },
     });
   });
-  // The Kyiv schedule (on unless the shot says false; the caller resolves the hours with
-  // lib/snap-schedule): Snap's rule makes it a LIFETIME budget — the daily amount × the flight,
-  // the flight = start + flightDays — and the campaign is capped at the daily amount so "per day"
-  // keeps its meaning.
-  const scheduled = shot.schedule !== false;
-  const sched = resolved.schedule ?? null;
-  if (scheduled && (!sched || sched.hours.length === 0)) return { refusal: "Kyiv schedule could not be resolved for this account — check the account timezone" };
-  const startAt = new Date(resolved.startTimeIso);
-  const endTimeIso = !scheduled || Number.isNaN(startAt.getTime()) ? "" : new Date(startAt.getTime() + sched!.flightDays * 86_400_000).toISOString();
   const wire: SnapLaunchWire = {
-    campaign: { name, ad_account_id: adAccountId, status: "PAUSED", start_time: resolved.startTimeIso, ...(scheduled ? { daily_budget_micro: snapCampaignCapMicro(budgetMicro) } : {}) },
+    campaign: { name, ad_account_id: adAccountId, status: "PAUSED", start_time: resolved.startTimeIso },
     adsquad: {
       name,
       type: "SNAP_ADS",
       billing_event: "IMPRESSION",
-      ...(scheduled && sched
-        ? { delivery_constraint: "LIFETIME_BUDGET" as const, lifetime_budget_micro: budgetMicro * sched.flightDays, end_time: endTimeIso, ad_scheduling_config: sched.config }
-        : { delivery_constraint: "DAILY_BUDGET" as const, daily_budget_micro: budgetMicro }),
+      delivery_constraint: "DAILY_BUDGET",
+      daily_budget_micro: budgetMicro,
       bid_strategy: strategy,
       ...(bidMicro != null ? { bid_micro: bidMicro } : {}),
       optimization_goal: goal,
@@ -596,8 +568,6 @@ export function snapLaunchWire(
     landingBase,
     niche: snapShotNiche(shot),
     deviceOs,
-    schedule: scheduled && sched ? { hours: sched.hours, tz: sched.tz } : null,
-    dailyMicro: budgetMicro,
     ...(bidMicro != null ? { bidMicro } : {}),
   };
 }

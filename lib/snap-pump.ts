@@ -17,8 +17,6 @@ import {
 } from "./snap-api";
 import { backfillSnapKey, claimSnapKey, releaseSnapKey } from "./snap-keys";
 import { runSnapPump, type SnapPumpDeps, type SnapPumpShot } from "./snap-pump-core";
-import { snapResolvedSchedule } from "./snap-schedule";
-import { SNAP_DEFAULT_ACCOUNT_TZ } from "./snap-launch";
 
 export const SNAP_PARTNER = "sn";
 
@@ -48,7 +46,6 @@ export function pumpSnapWave(user: string, shots: SnapPumpShot[], deadline: numb
     createCreative: snapCreateCreative,
     createAd: snapCreateAd,
     setCampaignStatus: snapSetCampaignStatus,
-    resolveSchedule: (tz) => snapResolvedSchedule(tz || SNAP_DEFAULT_ACCOUNT_TZ),
     buildWire: (shot, resolved) => {
       const b = snapLaunchWire(shot, resolved);
       return "refusal" in b ? b : { wire: b.wire, label: b.label };

@@ -51,9 +51,6 @@ import {
   type SnapLaunchShotIn,
 } from "@/lib/snap-launch";
 import type { SessionUser } from "./user-menu";
-import { SNAP_CAMPAIGN_CAP_MIN, SNAP_DEFAULT_ACCOUNT_TZ } from "@/lib/snap-launch";
-import { SNAP_SCHEDULE_ACTIVE_FROM, SNAP_SCHEDULE_ACTIVE_UNTIL, SNAP_SCHEDULE_FLIGHT_DAYS, SNAP_SCHEDULE_NOTE, snapResolvedSchedule, snapScheduleHours, snapScheduleRanges } from "@/lib/snap-schedule";
-import { moneyLabel, parseMoney } from "@/lib/types";
 
 export const FIRST_SNAP_CARD_ID = "sn-1";
 let cardSeq = 1;
@@ -70,8 +67,6 @@ export type SnapCard = {
   bid: string;
   budget: string;
   startPaused: boolean;
-  /** Kyiv working hours on Snap's side (owner rule 22.09) — on by default; off = a 24/7 daily-budget ad squad. */
-  schedule: boolean;
   headline: string;
   brandName: string;
   cta: string;
@@ -107,7 +102,6 @@ export function freshSnapCard(id?: string, defaults: { adAccount?: string; pixel
     bid: "",
     budget: SNAP_DEFAULT_BUDGET,
     startPaused: false,
-    schedule: true,
     headline: "",
     brandName: defaults.brandName ?? "",
     cta: "MORE",
@@ -166,7 +160,6 @@ export function buildSnapShot(card: SnapCard, ctx: { currency?: string; mediaUrl
     bid: card.bid.trim(),
     budget: card.budget,
     startPaused: card.startPaused,
-    schedule: card.schedule,
     headline: card.headline.trim(),
     brandName: card.brandName.trim(),
     cta: card.cta,
@@ -186,7 +179,7 @@ export function buildSnapShot(card: SnapCard, ctx: { currency?: string; mediaUrl
 }
 
 /** The card's blocking refusal (null = launchable): creative gates first, then the shared validator. */
-export function snapCardRefusal(card: SnapCard, ctx: { pixelId?: string; profileId: string; accountTz?: string }): string | null {
+export function snapCardRefusal(card: SnapCard, ctx: { pixelId?: string; profileId: string }): string | null {
   const media = snapMediaIssue(card);
   if (media) return media;
   const built = snapLaunchWire(buildSnapShot(card, {}), {
@@ -197,7 +190,6 @@ export function snapCardRefusal(card: SnapCard, ctx: { pixelId?: string; profile
     key: "glo-snp_001",
     mediaIds: card.files.map(() => "pending"),
     startTimeIso: new Date(0).toISOString(),
-    schedule: snapResolvedSchedule(ctx.accountTz || SNAP_DEFAULT_ACCOUNT_TZ),
   });
   return "refusal" in built ? built.refusal : null;
 }
@@ -212,7 +204,6 @@ export function snapCardSignature(card: SnapCard): string {
     bd: card.bid,
     b: card.budget,
     sp: card.startPaused,
-    sch: card.schedule,
     h: card.headline,
     br: card.brandName,
     c: card.cta,
@@ -309,7 +300,6 @@ export function SnapLaunchCard({
   profileOptions,
   currency,
   accountName,
-  accountTz = "",
   effPixel,
   pixelNeeded,
   noPixel,
@@ -331,8 +321,6 @@ export function SnapLaunchCard({
   profileOptions: RichOption[];
   currency: string;
   accountName: string;
-  /** The picked ad account's timezone — the schedule hours are computed in it. */
-  accountTz?: string;
   /** The pixel that will ride (the card's pick, or the account's only pixel). */
   effPixel: string;
   pixelNeeded: boolean;
@@ -369,8 +357,6 @@ export function SnapLaunchCard({
   }, [card.files]);
 
   const landingBase = snapLandingBase(card.landingUrl)?.base ?? "";
-  const scheduleTz = accountTz || SNAP_DEFAULT_ACCOUNT_TZ;
-  const scheduleRanges = snapScheduleRanges(snapScheduleHours(scheduleTz));
   const firstKey = nextKeys[0] ?? "";
   const segments = landingBase ? snapLandingSegments(landingBase, firstKey) : [];
   const stripped = snapLandingBase(card.landingUrl)?.strippedQuery ?? false;
@@ -501,15 +487,6 @@ export function SnapLaunchCard({
                 <input type="checkbox" checked={card.startPaused} onChange={(e) => patch({ startPaused: e.target.checked })} className="h-3.5 w-3.5 accent-[#FFFC00]" />
                 Start paused (review in Ads Manager first)
               </label>
-              <label className="flex w-fit cursor-pointer items-center gap-2 text-[11px] text-dim" title={`Snap's own ad schedule on the ad squad, in the account's clock (${scheduleTz}): ${scheduleRanges} — the Kyiv window ${SNAP_SCHEDULE_ACTIVE_FROM}–${SNAP_SCHEDULE_ACTIVE_UNTIL} to the nearest whole hour. Snap makes a scheduled ad squad carry a LIFETIME budget: the launcher sends this daily amount × ${SNAP_SCHEDULE_FLIGHT_DAYS} days as the lifetime, a ${SNAP_SCHEDULE_FLIGHT_DAYS}-day flight, and caps the campaign at this amount per day (Snap's minimum cap: ${SNAP_CAMPAIGN_CAP_MIN}).`}>
-                <input type="checkbox" checked={card.schedule} onChange={(e) => patch({ schedule: e.target.checked })} className="h-3.5 w-3.5 accent-[#FFFC00]" />
-                {SNAP_SCHEDULE_NOTE}
-              </label>
-              <p className={"text-[10px] leading-snug " + (card.schedule ? "text-faint" : "text-warn")}>
-                {card.schedule
-                  ? `Snap runs it ${scheduleRanges} ${scheduleTz.replace("America/", "")} time (= Kyiv 00:00–20:00) as a lifetime budget of ${sym}${moneyLabel(parseMoney(card.budget) * SNAP_SCHEDULE_FLIGHT_DAYS)} over ${SNAP_SCHEDULE_FLIGHT_DAYS} days, capped at ${sym}${moneyLabel(Math.max(parseMoney(card.budget), SNAP_CAMPAIGN_CAP_MIN))}/day${parseMoney(card.budget) < SNAP_CAMPAIGN_CAP_MIN ? ` (Snap's minimum cap is ${sym}${SNAP_CAMPAIGN_CAP_MIN})` : ""}.`
-                  : "Off — a 24/7 ad squad on a plain daily budget (the owner's rule is the Kyiv schedule)."}
-              </p>
             </div>
           </div>
 
