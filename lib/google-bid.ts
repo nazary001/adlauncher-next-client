@@ -719,3 +719,40 @@ export function isGoogleLaunchAccount(c: { name: string; mccId?: string }): bool
   const name = String(c.name ?? "").trim().toUpperCase();
   return GOOGLE_ACTIVE_LAUNCH_ACCOUNTS.has(name) && (!c.mccId || c.mccId === GOOGLE_LAUNCH_MCC);
 }
+
+// ---------- diagnostics ----------
+
+/** One line saying what a shot carried — the shape, never the copy: enough to tell two launches
+ *  apart in the task row (`error` is capped at 1000 chars). */
+export function wireDigest(body: Record<string, unknown>): string {
+  const b = body as Record<string, unknown>;
+  const parts: string[] = [];
+  if (Array.isArray(b.ads)) {
+    const ads = b.ads as Record<string, unknown>[];
+    const vids = ads.map((a) => (Array.isArray(a.youtube_urls) ? `yt${a.youtube_urls.length}` : Array.isArray(a.video_urls) ? `up${a.video_urls.length}` : "v0"));
+    const texts = ads.map((a) => `${(a.headlines as unknown[] | undefined)?.length ?? 0}/${(a.long_headlines as unknown[] | undefined)?.length ?? 0}/${(a.descriptions as unknown[] | undefined)?.length ?? 0}`);
+    parts.push(`ads=${ads.length} [${vids.join(",")}] texts=[${texts.join(",")}]`);
+    const ctas = [...new Set(ads.map((a) => String(a.call_to_action ?? "auto")))];
+    parts.push(`cta=${ctas.join("|")}`);
+    const logos = [...new Set(ads.map((a) => hostOf(String(a.logo_url ?? ""))))];
+    parts.push(`logo=${logos.join("|")}`);
+    const chan = ads.some((a) => a.channel_id);
+    if (chan) parts.push("channel");
+  }
+  if (typeof b.landing_url === "string") parts.push(`landing=${hostOf(b.landing_url)}`);
+  if (Array.isArray(b.geo)) parts.push(`geo=${b.geo.length}`);
+  if (b.language) parts.push(`lang=${String(b.language)}`);
+  if (b.mosh) parts.push("mosh");
+  if (b.bid_strategy) parts.push(`${String(b.bid_strategy)}${b.bid_value != null ? "=" + String(b.bid_value) : ""}`);
+  if (b.budget) parts.push(`budget=${String(b.budget)}`);
+  if (typeof b.name_suffix === "string") parts.push(`suffix=${b.name_suffix.length}ch`);
+  return parts.join(" ");
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url ? "bad-url" : "none";
+  }
+}

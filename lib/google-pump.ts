@@ -15,7 +15,7 @@
 //      finished the rest; a build that LION chewed on for an hour and then dropped left the row
 //      "running" all evening for everyone but the owner — the exact thing this removes.)
 
-import { type GoogleMode } from "./google-bid";
+import { type GoogleMode, wireDigest } from "./google-bid";
 import {
   GoogleWeaponError,
   gwCampaignLaunch,
@@ -141,14 +141,19 @@ export async function pumpGoogleWave(
       write(shot.taskId, { status: "done", stage: "sent", link: res.taskId, finished_at: now() });
     } catch (e) {
       const err = e instanceof GoogleWeaponError ? e : null;
+      // What was sent, for the row (a digest) and the server log (the whole body) — a partner refusal
+      // or 5xx can only be argued with the exact wire (22.09: "Failed to create task" on one buyer's
+      // launches while everyone else's went through, and nothing in the row said what differed).
+      const digest = wireDigest(shot.body);
+      console.log(`[google-pump] ${shot.taskId} ${shot.mode} refused by google-weapon HTTP ${err?.status ?? "?"}: ${err?.message ?? String(e)} | body=${JSON.stringify(shot.body)}`);
       if (err?.status && err.status < 500) {
         // Deterministic partner refusal: identical copies would be refused identically.
-        const msg = err.message;
+        const msg = `${err.message} · sent: ${digest}`;
         rowRefusal.set(shot.rowKey, msg);
         fail(shot, "submit", msg);
       } else {
         const msg = e instanceof Error ? e.message : String(e);
-        fail(shot, "submit", `Ambiguous outcome (${msg}) — the task may exist on google-weapon; check the account before re-firing`, "interrupted");
+        fail(shot, "submit", `Ambiguous outcome (${msg}) — the task may exist on google-weapon; check the account before re-firing · sent: ${digest}`, "interrupted");
       }
     }
   }

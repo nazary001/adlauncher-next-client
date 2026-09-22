@@ -332,3 +332,28 @@ test("googleLaunchWire sends the BARE landing (pasted query dropped)", () => {
   assert.ok("wire" in out, JSON.stringify(out));
   if ("wire" in out) assert.equal(out.wire.landing_url, "https://corquieu.com/r/x/");
 });
+
+// ---- wireDigest: what a refused/interrupted row says was sent (22.09 diagnostics) ----------------
+import { wireDigest } from "../lib/google-bid.ts";
+
+test("wireDigest names the shape of a launch (ad groups, video source counts, copy counts, cta, logo host, landing, geo, language, mosh, bid, budget), never the copy", () => {
+  const d = wireDigest({
+    customer_id: "1633475800",
+    budget: "30.00",
+    bid_strategy: "target_cpa",
+    bid_value: 3.12,
+    landing_url: "https://corquieu.com/r/bmo/",
+    geo: ["US", "CA", "GB", "AU", "NZ", "IE"],
+    language: "en",
+    mosh: true,
+    name_suffix: "22.09 OLEKSII GC-Launcher OLEKSII - CREO - ANYMA22",
+    ads: [
+      { headlines: ["a", "b"], long_headlines: ["c"], descriptions: ["d"], call_to_action: "LEARN_MORE", logo_url: "https://blob.vercel-storage.com/x/logo.png", youtube_urls: ["https://youtu.be/a", "https://youtu.be/b"] },
+      { headlines: ["a"], long_headlines: ["c"], descriptions: ["d"], logo_url: "https://blob.vercel-storage.com/x/logo.png", video_urls: ["https://blob.vercel-storage.com/x/v.mp4"], channel_id: "UC1" },
+    ],
+  });
+  assert.equal(d, "ads=2 [yt2,up1] texts=[2/1/1,1/1/1] cta=LEARN_MORE|auto logo=blob.vercel-storage.com channel landing=corquieu.com geo=6 lang=en mosh target_cpa=3.12 budget=30.00 suffix=50ch");
+  assert.ok(!d.includes("ANYMA22") && !d.includes("youtu.be/a"));
+  // a clone body has no ads
+  assert.equal(wireDigest({ source_campaign_id: "1", customer_id: "2", budget: "30.00", bid_strategy: "inherit" } as never), "inherit budget=30.00");
+});
