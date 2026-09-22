@@ -38,6 +38,7 @@ import {
 } from "./google-launch-card";
 import { GoogleAutofillModal } from "./google-autofill-modal";
 import { GoogleBulkAdGroupsModal } from "./google-bulk-adgroups-modal";
+import { GoogleSuspendedNote } from "./google-suspended-note";
 import type { RichOption } from "@/lib/catalog";
 import type { PartnerId } from "@/lib/partners";
 import type { SessionUser } from "./user-menu";
@@ -63,7 +64,7 @@ type CardView = {
 };
 
 export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
-  const { customers, error: custError, retry: retryCustomers, acr } = useGoogleCustomers();
+  const { customers, suspended, error: custError, retry: retryCustomers, acr } = useGoogleCustomers();
   const { setOpen, counts, refresh } = useGoogleTaskManager();
 
   const [cards, setCards] = useState<LaunchCard[]>(() => [freshLaunchCard(FIRST_CARD_ID)]);
@@ -467,6 +468,7 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
                   </button>
                 </div>
               ) : null}
+              <GoogleSuspendedNote suspended={suspended} />
               {noAccountCount > 0 ? (
                 <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
                   {noAccountCount} campaign{noAccountCount === 1 ? " needs" : "s need"} a customer — every launch needs somewhere to land.

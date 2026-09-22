@@ -6,6 +6,7 @@ import { GoogleNav } from "./google-nav";
 import { AutoTextarea, Field } from "./ui";
 import { SearchSelect } from "./search-select";
 import { useGoogleCustomers, type GwCustomer, type GoogleSourceInfo } from "./use-google";
+import { GoogleSuspendedNote } from "./google-suspended-note";
 import { useGoogleTaskManager } from "./google-task-manager";
 import { makeGate } from "@/lib/launch-guards";
 import { limitMoney, limitMoneyCents, moneyCentsLabel, moneyLabel, parseMoney } from "@/lib/types";
@@ -146,7 +147,7 @@ export function GoogleCloneBoard({
   /** Board mode forced by the link (?mode=juro) — wins over the localStorage pick. */
   initialMode?: "clone" | "juro";
 }) {
-  const { customers, error: custError, retry: retryCustomers } = useGoogleCustomers();
+  const { customers, suspended, error: custError, retry: retryCustomers } = useGoogleCustomers();
   const { setOpen, counts, refresh } = useGoogleTaskManager();
 
   const [mode, setMode] = useState<GoogleMode>(initialMode ?? "clone");
@@ -747,6 +748,7 @@ export function GoogleCloneBoard({
                   </button>
                 </div>
               ) : null}
+              <GoogleSuspendedNote suspended={suspended} />
               {needTarget ? (
                 <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
                   Pick a target account (or set one per row) — every clone needs somewhere to land.

@@ -1,17 +1,19 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { GwCustomer } from "@/lib/google-weapon";
+import type { GwCustomer, GwSuspendedCustomer } from "@/lib/google-weapon";
 
 // Re-exported so the board imports every Google client type from one place (these are all
 // `type`-only — google-weapon.ts is server code, but a type import is erased and never pulls the
 // server module into the client bundle).
-export type { GwCustomer } from "@/lib/google-weapon";
+export type { GwCustomer, GwSuspendedCustomer } from "@/lib/google-weapon";
 export type { GoogleDatasetState, GoogleSourceInfo } from "@/lib/google-source";
 
 export type GoogleCustomers = {
   /** The Google Ads accounts our LION user may launch on. null = still loading. */
   customers: GwCustomer[] | null;
+  /** Launch accounts the list leaves out because Google suspended them (the boards name them). */
+  suspended: GwSuspendedCustomer[];
   /** LION user's ACR (lower-cased, e.g. "glo-01") — the mb=/utm prefix LION stamps on links. */
   acr: string;
   /** The last load's error sentence ("" while never-failed) — null when there is none. */
@@ -32,6 +34,7 @@ const MAX_AUTO_ATTEMPTS = 4;
  */
 export function useGoogleCustomers(): GoogleCustomers {
   const [customers, setCustomers] = useState<GwCustomer[] | null>(null);
+  const [suspended, setSuspended] = useState<GwSuspendedCustomer[]>([]);
   const [acr, setAcr] = useState("");
   const [error, setError] = useState<string | null>(null);
   const inflightRef = useRef(false);
@@ -47,10 +50,11 @@ export function useGoogleCustomers(): GoogleCustomers {
     inflightRef.current = true;
     try {
       const res = await fetch("/api/google/customers");
-      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; customers?: GwCustomer[]; acr?: string; error?: string };
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; customers?: GwCustomer[]; suspended?: GwSuspendedCustomer[]; acr?: string; error?: string };
       if (!res.ok || !d?.ok || !Array.isArray(d.customers)) throw new Error(d?.error || `HTTP ${res.status}`);
       doneRef.current = true;
       setCustomers(d.customers);
+      setSuspended(Array.isArray(d.suspended) ? d.suspended : []);
       setAcr(String(d.acr ?? ""));
       setError(null);
     } catch (e) {
@@ -90,5 +94,5 @@ export function useGoogleCustomers(): GoogleCustomers {
     };
   }, [load]);
 
-  return { customers, acr, error, retry };
+  return { customers, suspended, acr, error, retry };
 }

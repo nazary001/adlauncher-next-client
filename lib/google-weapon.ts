@@ -5,6 +5,8 @@
 // ⚠️ Every path ends with a trailing slash — a POST without it is a plain 404.
 
 import { googleWeaponErrorMessage, isGoogleLaunchAccount, type GoogleLaunchWire } from "./google-bid";
+import { googleAccountDeadReason, googleAccountDeadVerdict, type GoogleAccountStatusBook } from "./google-account-status";
+import { lionGoogleAccountStatuses } from "./lion-google";
 import { ensureGoogleDataset, type GoogleEnsureResult } from "./google-source";
 
 const BASE = (process.env.GOOGLE_WEAPON_BASE || "https://google-weapon.highstakes.tech").replace(/\/+$/, "");
@@ -162,10 +164,38 @@ export async function gwCustomers(): Promise<GwCustomer[]> {
   return customersInflight;
 }
 
-/** The accounts the console OFFERS and ACCEPTS as launch targets — the GLO-HS allowlist over the
- *  partner's full list (owner rule 14.09). Read-only lookups (a source's currency) keep gwCustomers. */
+/** A launch account taken off the pickers because Google suspended it (LION's latest verdict). */
+export type GwSuspendedCustomer = { customerId: string; name: string; status: string; day: string; reason: string };
+
+/**
+ * The launch catalog: the accounts the console OFFERS and ACCEPTS as targets — the owner's GLO-HS
+ * list over the partner's full list, minus the ones Google has suspended (owner ask 21.09; the
+ * status comes from LION's metrics, see lib/google-account-status.ts) — and the suspended ones by
+ * name, so a board can say what it hid and a route can refuse with the reason. One catalog for the
+ * pickers AND the wave routes: "not shown" always means "not launchable". The status read is
+ * fail-open (no verdict = offered) and runs beside the customers read, not after it.
+ */
+export async function gwLaunchCatalog(): Promise<{ customers: GwCustomer[]; suspended: GwSuspendedCustomer[]; dead: GwSuspendedCustomer[] }> {
+  const [all, book] = await Promise.all([gwCustomers(), lionGoogleAccountStatuses().catch((): GoogleAccountStatusBook => ({}))]);
+  const customers: GwCustomer[] = [];
+  const suspended: GwSuspendedCustomer[] = [];
+  // EVERY partner account Google has suspended, on the owner's list or not: a JURO lands on its
+  // source's own account, which no picker ever offered — the routes refuse it from this list.
+  const dead: GwSuspendedCustomer[] = [];
+  for (const c of all) {
+    const verdict = googleAccountDeadVerdict(book, c.customerId);
+    const row = verdict ? { customerId: c.customerId, name: c.name, status: verdict.status, day: verdict.day, reason: googleAccountDeadReason(verdict) } : null;
+    if (row) dead.push(row);
+    if (!isGoogleLaunchAccount(c)) continue;
+    if (row) suspended.push(row);
+    else customers.push(c);
+  }
+  return { customers, suspended, dead };
+}
+
+/** Just the launchable accounts of the catalog. Read-only lookups (a source's currency) keep gwCustomers. */
 export async function gwLaunchableCustomers(): Promise<GwCustomer[]> {
-  return (await gwCustomers()).filter(isGoogleLaunchAccount);
+  return (await gwLaunchCatalog()).customers;
 }
 
 export async function gwCustomerById(customerId: string): Promise<GwCustomer | null> {

@@ -22,7 +22,7 @@ import {
   type GoogleMode,
 } from "./google-bid";
 import { googleGeoFromName, splitGoogleName } from "./google-source";
-import { googleRailEnabled, googleWeaponConfigured, gwLaunchableCustomers, type GwCloneBody, type GwCustomer, type GwJuroBody, type GwLaunchBody } from "./google-weapon";
+import { googleRailEnabled, googleWeaponConfigured, gwLaunchCatalog, type GwCloneBody, type GwCustomer, type GwJuroBody, type GwLaunchBody, type GwSuspendedCustomer } from "./google-weapon";
 import { lionConfigured } from "./lion";
 import { lionGoogleFindCampaigns } from "./lion-google";
 import { GOOGLE_PARTNER, GOOGLE_PUMP_BUDGET_MS, pumpGoogleWave, type GooglePumpShot } from "./google-pump";
@@ -67,6 +67,13 @@ const s = (v: unknown): string => (v == null ? "" : String(v)).trim();
 
 /** Pixel to send for a target account: required + validated when it has several, auto when it
  *  has exactly one, omitted when it has none (google-weapon then decides). `null` = refusal. */
+/** Why an account id is refused as a target: Google suspended it (named, with LION's day), or it
+ *  simply is not one of the launch accounts. */
+function notLaunchable(customerId: string, suspendedById: Map<string, GwSuspendedCustomer>): string {
+  const dead = suspendedById.get(customerId);
+  return dead ? `target account ${dead.name} is ${dead.reason} — pick a live account` : `target account ${customerId} is not one of the GLO-HS launch accounts`;
+}
+
 function resolvePixel(target: GwCustomer | null, picked: string): { pixel?: string } | { error: string } {
   if (!target) return picked ? { pixel: picked } : {};
   if (target.pixels.length === 0) return picked ? { pixel: picked } : {};
@@ -99,8 +106,12 @@ export async function handleGoogleWave(req: Request, mode: GoogleMode): Promise<
 
   // ---- catalogs: customers (target validation) + LION metrics (names / geo / source accounts) --
   let customers: GwCustomer[];
+  let suspendedById: Map<string, GwSuspendedCustomer>;
   try {
-    customers = await gwLaunchableCustomers(); // GLO-HS allowlist — anything else is refused below
+    // The owner's GLO-HS list minus the accounts Google suspended — anything else is refused below.
+    const catalog = await gwLaunchCatalog();
+    customers = catalog.customers;
+    suspendedById = new Map(catalog.dead.map((c) => [c.customerId, c])); // every dead account, listed or not
   } catch (e) {
     return bad(`google_weapon_unreachable: ${(e as Error).message}`, 502);
   }
@@ -139,11 +150,14 @@ export async function handleGoogleWave(req: Request, mode: GoogleMode): Promise<
       customerId = s(x.customer) || waveCustomer;
       if (!GOOGLE_CUSTOMER_ID_RE.test(customerId)) return bad(`${at}: target account is required`);
       target = customerById.get(customerId) ?? null;
-      if (!target) return bad(`${at}: target account ${customerId} is not one of the GLO-HS launch accounts`, 400, { customerId });
+      if (!target) return bad(`${at}: ${notLaunchable(customerId, suspendedById)}`, 400, { customerId });
     } else {
       // JURO always lands on the source's own account; we know it only through LION metrics.
       customerId = src?.accountId ?? s(x.sourceAccount);
       target = customerId ? (customerById.get(customerId) ?? null) : null;
+      // A JURO stays on the source's account — one Google suspended cannot take a new campaign.
+      const dead = customerId ? suspendedById.get(customerId) : undefined;
+      if (dead) return bad(`${at}: the source's account ${dead.name} is ${dead.reason} — JURO lands on the source's own account; clone it onto a live account instead`, 400, { customerId });
     }
     // The wave pixel rides only onto targets that actually carry it — a per-row override onto a
     // pixel-less account (GC-HS-Lion-BR-N) must send NO pixel, not the wave's foreign one.
@@ -278,8 +292,12 @@ export async function handleGoogleLaunch(req: Request): Promise<NextResponse> {
   const waveId = GOOGLE_WAVE_ID_RE.test(s(body.waveId)) ? s(body.waveId) : crypto.randomUUID();
 
   let customers: GwCustomer[];
+  let suspendedById: Map<string, GwSuspendedCustomer>;
   try {
-    customers = await gwLaunchableCustomers(); // GLO-HS allowlist — anything else is refused below
+    // The owner's GLO-HS list minus the accounts Google suspended — anything else is refused below.
+    const catalog = await gwLaunchCatalog();
+    customers = catalog.customers;
+    suspendedById = new Map(catalog.dead.map((c) => [c.customerId, c])); // every dead account, listed or not
   } catch (e) {
     return bad(`google_weapon_unreachable: ${(e as Error).message}`, 502);
   }
@@ -293,7 +311,7 @@ export async function handleGoogleLaunch(req: Request): Promise<NextResponse> {
     const customerId = s(x.customer);
     if (!GOOGLE_CUSTOMER_ID_RE.test(customerId)) return bad(`${at}: target account is required`);
     const target = customerById.get(customerId) ?? null;
-    if (!target) return bad(`${at}: target account ${customerId} is not one of the GLO-HS launch accounts`, 400, { customerId });
+    if (!target) return bad(`${at}: ${notLaunchable(customerId, suspendedById)}`, 400, { customerId });
     const px = resolvePixel(target, s(x.pixel));
     if ("error" in px) return bad(`${at}: ${px.error}`, 400, { availablePixels: target.pixels });
     const nameSuffix = googleNameSuffix({ mode: "launch", user, ddmm, tail: s(x.suffix) });
