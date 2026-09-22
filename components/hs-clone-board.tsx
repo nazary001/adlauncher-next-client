@@ -32,7 +32,7 @@ import {
 } from "./icons";
 import { HsTargetingModal } from "./hs-targeting-modal";
 import { HsDestinationModal, type HsRowDest } from "./hs-destination-modal";
-import { hsAllBearersDown, hsTokensAllDown, useHsTokenStatus } from "./hs-token-status";
+import { hsTokensAllDown, useHsTokenStatus } from "./hs-token-status";
 import type { SessionUser } from "./user-menu";
 
 const MAX_COPIES = 20;
@@ -776,12 +776,8 @@ export function HsCloneBoard({
       ? dupSigner.state !== "ok"
       : hsTokensAllDown(tokenStatus.tokens, tokenStatus.loaded)
     : false;
-  // The LION rail's geo-override patch signs with ANY bearer (launch pool or the duplicate
-  // signer — server-side since 09-08), so only EVERY bearer being down blocks override waves
-  // there; JURO on LION API is the token-free way out (its wire carries the geo natively).
-  const bearersDown = hsAllBearersDown(tokenStatus.tokens, tokenStatus.dup, tokenStatus.loaded);
-  const overrideRows = validRows.filter((r) => r.countries.length > 0 || r.locales.length > 0);
-  const lionOverrideBlocked = effDupChannel === "lion" && overrideRows.length > 0 && bearersDown;
+  // A Targeting override on the LION rail rides ON the duplicate wire since 22.09 (LION applies
+  // the countries/locales itself) — no bearer is needed for it any more.
 
   // "Signs as Peter5gc (Peter 5 GC Acc)" — the owner-visible truth of WHO builds token-rail
   // waves (ask 09-03: entering the cloner must show the new token). Falls back honestly while
@@ -837,18 +833,6 @@ export function HsCloneBoard({
         text:
           "All FB launch tokens are rate-limited right now — the FB Token rail is blocked until a cooldown lifts. " +
           "Fire on the LION API rail or wait (see the Tokens widget).",
-      });
-      return;
-    }
-    // Geo-override LION waves need ONE live bearer for the Graph patch (any of them since
-    // 09-08). None left → the LION-native way is JURO: /jurar/ takes the geo in its own wire.
-    if (lionOverrideBlocked) {
-      setFireNote({
-        text:
-          "Every FB bearer (launch pool + duplicate signer) is rate-limited/dead right now — targeting-override " +
-          "clones on the LION API rail need one for the Graph patch. JURO on the LION API rail applies the geo " +
-          "natively without any token: switch these rows to JURO, or clear the overrides, or wait (see the Tokens widget).",
-        juro: true,
       });
       return;
     }
@@ -1708,14 +1692,6 @@ export function HsCloneBoard({
                         ) : (
                           <span className="text-[11px] text-faint">—</span>
                         )}
-                        {effDupChannel === "lion" && (r.countries.length > 0 || r.locales.length > 0) && bearersDown ? (
-                          <span
-                            className="text-[10px] font-semibold leading-snug text-warn"
-                            title="The LION rail patches the geo through our FB token after LION builds the clone — every bearer is down right now. JURO (LION API) carries the geo natively."
-                          >
-                            needs an FB token — or JURO
-                          </span>
-                        ) : null}
                         <span className="inline-flex items-center gap-1 text-[11px] font-medium text-dim transition-colors group-hover/geo:text-[#9db8ff]">
                           <GlobeIcon className="h-3 w-3" />
                           Targeting

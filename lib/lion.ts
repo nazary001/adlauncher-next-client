@@ -277,6 +277,11 @@ export async function lionDuplicate(args: {
   roas_goal?: number;
   /** Event override (PURCHASE / CONTENT_VIEW / …) — omitted = the source's event. */
   conversion_event?: string;
+  /** Targeting override (partner note 22.09, docs #fb-duplicate): ISO codes or ["WORLD"];
+   *  omitted = the source's countries. Applies to every copy; LION names the clone after it. */
+  country_codes?: string[];
+  /** FB locales as { name, id }; omitted = the source's languages, [] = all languages. */
+  locales?: { name: string; id: string }[];
 }): Promise<LionDuplicationResult> {
   const body = (await lionPostOnce("/api/facebook/campaigns/duplicate/", {
     profile_slug: args.profile_slug,
@@ -293,6 +298,8 @@ export async function lionDuplicate(args: {
         ...(args.starting_bid != null ? { starting_bid: args.starting_bid } : {}),
         ...(args.roas_goal != null ? { roas_goal: args.roas_goal } : {}),
         ...(args.conversion_event ? { conversion_event: args.conversion_event } : {}),
+        ...(args.country_codes ? { country_codes: args.country_codes } : {}),
+        ...(args.locales ? { locales: args.locales } : {}),
       },
     ],
   })) as Record<string, unknown> | null;

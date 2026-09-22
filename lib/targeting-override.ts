@@ -1,10 +1,11 @@
 // Per-clone GEO/LOCALES override shared by the duplicate rails (pure — safe for client AND
 // server). The MO clone board rebuilds its targeting from scratch (lib/clone-run), so this is
 // an HS-duplicate concern: the FB Token rail patches the source ad set's targeting BEFORE
-// creating the clone's, and the LION rail patches the born clone's ad set THROUGH the Graph —
-// LION's public duplicate/ silently IGNORES targeting fields (probed live 08-20: country_codes
-// accepted with HTTP 200, clone still targeted the source's geo; its `name` field is equally
-// ignored, hence the Graph rename that rides with the patch).
+// creating the clone's; the LION rail sends it ON THE DUPLICATE WIRE — since 22.09 LION's
+// duplicate/ takes per-campaign `country_codes` (ISO codes or "WORLD") and `locales`
+// ({ name, id } with the FB locale id), applies them to every copy and names the clone after
+// the new country list (partner note + docs #fb-duplicate, 22.09). Before that it silently
+// ignored them (probed live 08-20) and the rail patched the born clone through the Graph.
 
 type Json = Record<string, unknown>;
 
@@ -61,6 +62,32 @@ export function applyGeoOverride(targeting: Json, o: GeoOverride): Json {
  *  create path sends the same pair; further regions self-heal in createAdsetSelfHealing). */
 export function geoOverrideRegionalCategories(o: GeoOverride): string[] {
   return o.countries.includes("WW") ? ["TAIWAN_UNIVERSAL", "SINGAPORE_UNIVERSAL"] : [];
+}
+
+/**
+ * The override as LION's duplicate/ takes it (docs #fb-duplicate, 22.09): `country_codes` = the
+ * ISO codes, or ["WORLD"] for worldwide; `locales` = { name, id } pairs resolved from the picked
+ * profile's own FB locale list (LION rejects a locale without a numeric id per campaign, so an
+ * id the profile does not list is refused here, before any call). An empty side is OMITTED —
+ * omission inherits the source's; `[]` would mean "all languages", which the modal never asks.
+ */
+export function lionDuplicateTargeting(
+  o: GeoOverride,
+  profileLocales: readonly { id: number; name: string }[],
+): { country_codes?: string[]; locales?: { name: string; id: string }[] } | { refusal: string } {
+  const out: { country_codes?: string[]; locales?: { name: string; id: string }[] } = {};
+  if (o.countries.length) out.country_codes = o.countries.includes("WW") ? ["WORLD"] : [...o.countries];
+  if (o.localeIds.length) {
+    const byId = new Map(profileLocales.map((l) => [l.id, l.name]));
+    const locales: { name: string; id: string }[] = [];
+    for (const id of o.localeIds) {
+      const name = byId.get(id);
+      if (!name) return { refusal: `locale_unknown_${id} — not on this profile's FB locale list; re-pick the languages in Targeting` };
+      locales.push({ name, id: String(id) });
+    }
+    out.locales = locales;
+  }
+  return out;
 }
 
 /** Swap the `[CODES]` group of a LION-grammar name for the override's geo — the first bracket
