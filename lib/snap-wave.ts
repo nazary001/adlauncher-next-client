@@ -20,8 +20,10 @@ import {
   snapShotTaskId,
   todaySaoPauloDotDDMM,
   snapShotMediaIn,
+  SNAP_DEFAULT_ACCOUNT_TZ,
   type SnapLaunchShotIn,
 } from "./snap-launch";
+import { snapResolvedSchedule } from "./snap-schedule";
 import { SnapApiError, snapAdAccounts, snapConfigured, snapDefaults, snapPixels, snapRailEnabled, type SnapAdAccount, type SnapPixel } from "./snap-api";
 import { SNAP_PARTNER, pumpSnapWave } from "./snap-pump";
 import { SNAP_PUMP_BUDGET_MS, type SnapPumpShot } from "./snap-pump-core";
@@ -70,7 +72,8 @@ function cleanShot(x: SnapLaunchShotIn): SnapLaunchShotIn {
     // Nothing sent = the partner's default (Android only); an unknown word rides on to the
     // validator, which refuses it by name.
     deviceOs: snapDeviceOs(x.deviceOs) ?? s(x.deviceOs),
-    landingId: x.landingId === "custom" || x.landingId === "dmi" || x.landingId === "cars" ? x.landingId : ("" as SnapLaunchShotIn["landingId"]),
+    // The Kyiv schedule is on unless the card said false (owner rule 22.09; a tab from before it sends nothing → on).
+    schedule: x.schedule !== false,
     landingUrl: s(x.landingUrl),
     desiredKey: s(x.desiredKey),
     suffix: s(x.suffix).replace(/[\r\n]+/g, " "),
@@ -150,11 +153,13 @@ export async function handleSnapLaunch(req: Request): Promise<NextResponse> {
     // the profile and the pixel above, so a card that never touched the field still launches.
     const shot: SnapLaunchShotIn = { ...x, brandName: x.brandName || defaults.brandName, currency: account.currency };
     // Dry-run with placeholders: the validator is pure, so every refusal fires here, before any row exists.
-    const dry = snapLaunchWire(shot, { adAccountId, pixelId: px.pixelId, profileId, name: "preview", key: "glo-snp_001", mediaIds: shot.media.map(() => "pending"), startTimeIso: nowIso });
+    const dry = snapLaunchWire(shot, { adAccountId, pixelId: px.pixelId, profileId, name: "preview", key: "glo-snp_001", mediaIds: shot.media.map(() => "pending"), startTimeIso: nowIso, schedule: snapResolvedSchedule(account.timezone || SNAP_DEFAULT_ACCOUNT_TZ) });
     if ("refusal" in dry) return bad(`${at}: ${dry.refusal}`);
 
     const desiredKey = isSnapKey(x.desiredKey ?? "") ? (x.desiredKey as string) : undefined;
-    const cents = dry.wire.adsquad.daily_budget_micro / 10_000;
+    // The row shows the buyer's DAILY amount either way (a scheduled ad squad's own budget is the
+    // lifetime = daily × the flight; the campaign is capped at max(daily, $20)).
+    const cents = dry.dailyMicro / 10_000;
     const budget = `${Math.floor(cents / 100)},${String(cents % 100).padStart(2, "0")}`;
     const provisionalName = snapCampaignName({ ddmm, niche: dry.niche, geoLabel: dry.geoLabel, key: desiredKey ?? "glo-snp_???", user, tail: x.suffix });
     const taskId = snapShotTaskId(waveId, i);
@@ -163,7 +168,7 @@ export async function handleSnapLaunch(req: Request): Promise<NextResponse> {
       pump: {
         taskId,
         shot,
-        ctx: { adAccountId, pixelId: px.pixelId, profileId, currency: account.currency, niche: dry.niche, geoLabel: dry.geoLabel, tail: x.suffix, startPaused: Boolean(x.startPaused) },
+        ctx: { adAccountId, pixelId: px.pixelId, profileId, currency: account.currency, niche: dry.niche, geoLabel: dry.geoLabel, tail: x.suffix, startPaused: Boolean(x.startPaused), accountTz: account.timezone },
       },
       // The monitor tag names the device restriction, and how many ads the campaign carries when
       // the card had several creatives: "auto · Android · 5 creatives".
@@ -171,7 +176,7 @@ export async function handleSnapLaunch(req: Request): Promise<NextResponse> {
         name: provisionalName.slice(0, 250),
         geo: dry.geoLabel,
         budget,
-        bid: [dry.label, snapDeviceShort(dry.deviceOs), shot.media.length > 1 ? `${shot.media.length} creatives` : ""].filter(Boolean).join(" · "),
+        bid: [dry.label, snapDeviceShort(dry.deviceOs), dry.schedule ? "Kyiv hours" : "", shot.media.length > 1 ? `${shot.media.length} creatives` : ""].filter(Boolean).join(" · "),
         key: desiredKey ?? "",
       },
     });

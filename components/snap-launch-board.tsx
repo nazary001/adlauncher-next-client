@@ -18,6 +18,7 @@ import { useSnapTaskManager } from "./snap-task-manager";
 import { makeGate } from "@/lib/launch-guards";
 import { moneyLabel, parseMoney } from "@/lib/types";
 import { SNAP_MAX_SHOTS, snapCurrencySymbol, snapDeviceShort, snapGoalNeedsPixel, type SnapLaunchShotIn } from "@/lib/snap-launch";
+import { SNAP_SCHEDULE_FLIGHT_DAYS, SNAP_SCHEDULE_NOTE } from "@/lib/snap-schedule";
 import { readCreative, safeBlobName, uploadCreativeFile } from "./blob-uploader";
 import { UploadingNotice, useUnloadGuard } from "./upload-guard";
 import { CopyIcon, EyeIcon, PlusIcon } from "./icons";
@@ -165,7 +166,7 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
     const pixelNeeded = Boolean(needsPixel && account && account.pixels.length > 1 && !effPixel);
     const noPixel = Boolean(needsPixel && account && account.pixels.length === 0);
     const profileId = card.profileId || defaults?.profile || "";
-    const refusal = snapCardRefusal(card, { pixelId: effPixel || undefined, profileId });
+    const refusal = snapCardRefusal(card, { pixelId: effPixel || undefined, profileId, accountTz: account?.timezone });
     const copies = snapCardCopies(card);
     const ready = Boolean(card.adAccount && account && !pixelNeeded && !noPixel && !refusal);
     const cardKeys = ready ? freeKeys.slice(keyCursor, keyCursor + copies) : [];
@@ -325,6 +326,7 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
                 profileOptions={profileOptions}
                 currency={v.currency}
                 accountName={v.account?.name ?? ""}
+                accountTz={v.account?.timezone ?? ""}
                 effPixel={v.effPixel}
                 pixelNeeded={v.pixelNeeded}
                 noPixel={v.noPixel}
@@ -354,6 +356,9 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
                 </span>
               </div>
               <p className="text-[10.5px] leading-snug text-faint">Each copy takes one partner key and becomes its own campaign, born PAUSED and activated once its ads exist — one ad per creative on the card, any number. Creative uploads run from this tab; keep it open until they finish.</p>
+              <p className="text-[10.5px] leading-snug text-faint" title="Snap's own ad schedule on the ad squad, computed in the account's clock so it coincides with the Kyiv window (to the nearest whole hour).">
+                {SNAP_SCHEDULE_NOTE} — set on Snap&apos;s side at launch (a lifetime budget of daily × {SNAP_SCHEDULE_FLIGHT_DAYS} days, capped per day). Campaigns launched before 22.09 keep running 24/7: Snap cannot add a schedule to a daily-budget ad squad.
+              </p>
               <div className="-mx-2 flex flex-col">
                 {view.map((v, i) => (
                   <button key={v.card.id} type="button" onClick={() => jumpTo(v.card.id)} title="Jump to this campaign" className="group flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors duration-150 hover:bg-raise/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">

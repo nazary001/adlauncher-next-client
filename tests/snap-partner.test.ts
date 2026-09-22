@@ -1,14 +1,13 @@
 // Node's built-in runner (v24 strips types natively): `node --test tests/snap-partner.test.ts`.
 // Excluded from the app's tsconfig — the explicit .ts import below is a Node requirement.
-// Snapchat rail — the PARTNER decisions in lib/snap-launch.ts: the 100 fixed keys, the two
-// landings, the exact link shape from the brief, the console campaign name, São Paulo dates.
+// Snapchat rail — the PARTNER decisions in lib/snap-launch.ts: the 100 fixed keys, the pasted
+// landing (no presets since 22.09), the exact link shape from the brief, the console campaign
+// name, São Paulo dates.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   SNAP_KEY_POOL_MAX,
-  SNAP_LANDINGS,
   SNAP_NAME_MAX,
-  isPartnerLanding,
   isSnapKey,
   saoPauloDateISO,
   snapCampaignName,
@@ -16,7 +15,6 @@ import {
   snapKeyIndex,
   snapKeyPool,
   snapLandingBase,
-  snapLandingById,
   snapLandingSegments,
   snapLandingUrl,
   todaySaoPauloDotDDMM,
@@ -44,20 +42,6 @@ test("keys: index parse is strict (prefix, 3 digits, 1..100)", () => {
   assert.equal(snapKeyIndex("gcm_042"), null);
   assert.equal(isSnapKey("glo-snp_001"), true);
   assert.equal(isSnapKey(""), false);
-});
-
-test("landings: exactly the two partner pages, addressable by id", () => {
-  assert.deepEqual(
-    SNAP_LANDINGS.map((l) => [l.id, l.niche, l.url]),
-    [
-      ["dmi", "Digital marketing", "https://azmvhs.com/v/dmi-online-marketing-course/"],
-      ["cars", "Cars", "https://azmvhs.com/v/auto-financing-by-ford/"],
-    ],
-  );
-  assert.equal(snapLandingById("cars")?.url, "https://azmvhs.com/v/auto-financing-by-ford/");
-  assert.equal(snapLandingById("nope"), null);
-  assert.equal(isPartnerLanding("https://azmvhs.com/v/auto-financing-by-ford/"), true);
-  assert.equal(isPartnerLanding("https://example.com/"), false);
 });
 
 test("landing base: https only, pasted query/hash dropped and flagged", () => {

@@ -4,8 +4,10 @@
 // SETUP (ad account · pixel · Public Profile · name tail) · DELIVERY (goal · bidding · bid ·
 // budget · start paused) · CREATIVES (ANY number of vertical videos/images, ≤32 MB each — every
 // file becomes its own ad inside the campaign's one ad squad · headline ≤34 · brand ≤32 · CTA) ·
-// TARGETING (countries + presets · min age · devices — Android only by default) · LANDING
-// (partner niche or custom https, the final link with the NEXT free key highlighted) · COPIES
+// TARGETING (countries + presets · min age · devices — Android only by default) · LANDING (the
+// PASTED landing, as on Facebook — the partner's quiz/captcha pages on fast-flow-like domains; the
+// card appends only Snap's tags utm_source=stone&utm_campaign=<key>, shown as the final link with
+// the NEXT free key highlighted; owner ask 22.09) · COPIES
 // (N campaigns = N keys). Every gate is
 // delegated to the SAME validator the server runs (snapLaunchWire) so the readiness dot can never
 // disagree with the route's refusal. Files stay session object URLs here and ride Vercel Blob at
@@ -30,7 +32,6 @@ import {
   SNAP_DEVICE_OPTIONS,
   SNAP_GEO_PRESETS,
   SNAP_HEADLINE_MAX,
-  SNAP_LANDINGS,
   SNAP_MAX_COPIES,
   SNAP_MEDIA_MAX_BYTES,
   SNAP_MIN_AGES,
@@ -42,6 +43,7 @@ import {
   snapLandingBase,
   snapLandingSegments,
   snapLandingUrl,
+  snapNicheFromLanding,
   snapDeviceShort,
   snapLaunchWire,
   todaySaoPauloDotDDMM,
@@ -49,6 +51,9 @@ import {
   type SnapLaunchShotIn,
 } from "@/lib/snap-launch";
 import type { SessionUser } from "./user-menu";
+import { SNAP_CAMPAIGN_CAP_MIN, SNAP_DEFAULT_ACCOUNT_TZ } from "@/lib/snap-launch";
+import { SNAP_SCHEDULE_ACTIVE_FROM, SNAP_SCHEDULE_ACTIVE_UNTIL, SNAP_SCHEDULE_FLIGHT_DAYS, SNAP_SCHEDULE_NOTE, snapResolvedSchedule, snapScheduleHours, snapScheduleRanges } from "@/lib/snap-schedule";
+import { moneyLabel, parseMoney } from "@/lib/types";
 
 export const FIRST_SNAP_CARD_ID = "sn-1";
 let cardSeq = 1;
@@ -65,6 +70,8 @@ export type SnapCard = {
   bid: string;
   budget: string;
   startPaused: boolean;
+  /** Kyiv working hours on Snap's side (owner rule 22.09) — on by default; off = a 24/7 daily-budget ad squad. */
+  schedule: boolean;
   headline: string;
   brandName: string;
   cta: string;
@@ -75,7 +82,7 @@ export type SnapCard = {
   minAge: string;
   /** Device OS targeting of the ad squad — Android only by default (partner ask 21.09). */
   deviceOs: SnapDeviceOs;
-  landingId: "dmi" | "cars" | "custom";
+  /** The pasted landing (https; any pasted query is dropped — the card appends Snap's own tags). */
   landingUrl: string;
   /** "1".."20" — N campaigns from this card, each with its own key. */
   copies: string;
@@ -100,6 +107,7 @@ export function freshSnapCard(id?: string, defaults: { adAccount?: string; pixel
     bid: "",
     budget: SNAP_DEFAULT_BUDGET,
     startPaused: false,
+    schedule: true,
     headline: "",
     brandName: defaults.brandName ?? "",
     cta: "MORE",
@@ -108,7 +116,6 @@ export function freshSnapCard(id?: string, defaults: { adAccount?: string; pixel
     minAge: "18",
     // Android only: the partner's hop out of Snapchat's in-app browser works there (ask 21.09).
     deviceOs: SNAP_DEFAULT_DEVICE_OS,
-    landingId: "dmi",
     landingUrl: "",
     copies: "1",
     state: "idle",
@@ -159,6 +166,7 @@ export function buildSnapShot(card: SnapCard, ctx: { currency?: string; mediaUrl
     bid: card.bid.trim(),
     budget: card.budget,
     startPaused: card.startPaused,
+    schedule: card.schedule,
     headline: card.headline.trim(),
     brandName: card.brandName.trim(),
     cta: card.cta,
@@ -170,8 +178,7 @@ export function buildSnapShot(card: SnapCard, ctx: { currency?: string; mediaUrl
     geo: card.geo,
     minAge: card.minAge,
     deviceOs: card.deviceOs,
-    landingId: card.landingId,
-    landingUrl: card.landingId === "custom" ? card.landingUrl.trim() : "",
+    landingUrl: card.landingUrl.trim(),
     ...(ctx.desiredKey ? { desiredKey: ctx.desiredKey } : {}),
     suffix: card.suffix.trim(),
     ...(ctx.currency ? { currency: ctx.currency } : {}),
@@ -179,7 +186,7 @@ export function buildSnapShot(card: SnapCard, ctx: { currency?: string; mediaUrl
 }
 
 /** The card's blocking refusal (null = launchable): creative gates first, then the shared validator. */
-export function snapCardRefusal(card: SnapCard, ctx: { pixelId?: string; profileId: string }): string | null {
+export function snapCardRefusal(card: SnapCard, ctx: { pixelId?: string; profileId: string; accountTz?: string }): string | null {
   const media = snapMediaIssue(card);
   if (media) return media;
   const built = snapLaunchWire(buildSnapShot(card, {}), {
@@ -190,6 +197,7 @@ export function snapCardRefusal(card: SnapCard, ctx: { pixelId?: string; profile
     key: "glo-snp_001",
     mediaIds: card.files.map(() => "pending"),
     startTimeIso: new Date(0).toISOString(),
+    schedule: snapResolvedSchedule(ctx.accountTz || SNAP_DEFAULT_ACCOUNT_TZ),
   });
   return "refusal" in built ? built.refusal : null;
 }
@@ -204,6 +212,7 @@ export function snapCardSignature(card: SnapCard): string {
     bd: card.bid,
     b: card.budget,
     sp: card.startPaused,
+    sch: card.schedule,
     h: card.headline,
     br: card.brandName,
     c: card.cta,
@@ -211,7 +220,6 @@ export function snapCardSignature(card: SnapCard): string {
     geo: card.geo,
     age: card.minAge,
     os: card.deviceOs,
-    l: card.landingId,
     lu: card.landingUrl,
     n: card.copies,
     s: card.suffix,
@@ -259,7 +267,6 @@ const STRATEGY_OPTIONS = SNAP_BID_STRATEGIES.map((s) => ({ value: s.value, label
 const CTA_OPTIONS = SNAP_CTAS.map((c) => ({ value: c.value, label: c.label }));
 const AGE_OPTIONS = SNAP_MIN_AGES.map((a) => ({ value: a, label: `${a}+` }));
 const DEVICE_OPTIONS: { key: SnapDeviceOs; label: string }[] = SNAP_DEVICE_OPTIONS.map((o) => ({ key: o.value, label: o.label }));
-const LANDING_OPTIONS: { key: SnapCard["landingId"]; label: string }[] = [...SNAP_LANDINGS.map((l) => ({ key: l.id, label: l.niche })), { key: "custom", label: "Custom URL" }];
 
 function Seg<T extends string>({ options, value, onChange }: { options: { key: T; label: string }[]; value: T; onChange: (k: T) => void }) {
   return (
@@ -302,6 +309,7 @@ export function SnapLaunchCard({
   profileOptions,
   currency,
   accountName,
+  accountTz = "",
   effPixel,
   pixelNeeded,
   noPixel,
@@ -323,6 +331,8 @@ export function SnapLaunchCard({
   profileOptions: RichOption[];
   currency: string;
   accountName: string;
+  /** The picked ad account's timezone — the schedule hours are computed in it. */
+  accountTz?: string;
   /** The pixel that will ride (the card's pick, or the account's only pixel). */
   effPixel: string;
   pixelNeeded: boolean;
@@ -358,11 +368,13 @@ export function SnapLaunchCard({
     }
   }, [card.files]);
 
-  const landingBase = card.landingId === "custom" ? (snapLandingBase(card.landingUrl)?.base ?? "") : (SNAP_LANDINGS.find((l) => l.id === card.landingId)?.url ?? "");
+  const landingBase = snapLandingBase(card.landingUrl)?.base ?? "";
+  const scheduleTz = accountTz || SNAP_DEFAULT_ACCOUNT_TZ;
+  const scheduleRanges = snapScheduleRanges(snapScheduleHours(scheduleTz));
   const firstKey = nextKeys[0] ?? "";
   const segments = landingBase ? snapLandingSegments(landingBase, firstKey) : [];
-  const stripped = card.landingId === "custom" ? (snapLandingBase(card.landingUrl)?.strippedQuery ?? false) : false;
-  const niche = card.landingId === "custom" ? "Custom" : (SNAP_LANDINGS.find((l) => l.id === card.landingId)?.niche ?? "");
+  const stripped = snapLandingBase(card.landingUrl)?.strippedQuery ?? false;
+  const niche = snapNicheFromLanding(card.landingUrl) || "Custom";
   const namePreview = snapCampaignName({ ddmm: todaySaoPauloDotDDMM(), niche, geoLabel: card.geo.join("+"), key: firstKey || "glo-snp_???", user: user?.username ?? "", tail: card.suffix });
 
   const copyLink = () => {
@@ -489,6 +501,15 @@ export function SnapLaunchCard({
                 <input type="checkbox" checked={card.startPaused} onChange={(e) => patch({ startPaused: e.target.checked })} className="h-3.5 w-3.5 accent-[#FFFC00]" />
                 Start paused (review in Ads Manager first)
               </label>
+              <label className="flex w-fit cursor-pointer items-center gap-2 text-[11px] text-dim" title={`Snap's own ad schedule on the ad squad, in the account's clock (${scheduleTz}): ${scheduleRanges} — the Kyiv window ${SNAP_SCHEDULE_ACTIVE_FROM}–${SNAP_SCHEDULE_ACTIVE_UNTIL} to the nearest whole hour. Snap makes a scheduled ad squad carry a LIFETIME budget: the launcher sends this daily amount × ${SNAP_SCHEDULE_FLIGHT_DAYS} days as the lifetime, a ${SNAP_SCHEDULE_FLIGHT_DAYS}-day flight, and caps the campaign at this amount per day (Snap's minimum cap: ${SNAP_CAMPAIGN_CAP_MIN}).`}>
+                <input type="checkbox" checked={card.schedule} onChange={(e) => patch({ schedule: e.target.checked })} className="h-3.5 w-3.5 accent-[#FFFC00]" />
+                {SNAP_SCHEDULE_NOTE}
+              </label>
+              <p className={"text-[10px] leading-snug " + (card.schedule ? "text-faint" : "text-warn")}>
+                {card.schedule
+                  ? `Snap runs it ${scheduleRanges} ${scheduleTz.replace("America/", "")} time (= Kyiv 00:00–20:00) as a lifetime budget of ${sym}${moneyLabel(parseMoney(card.budget) * SNAP_SCHEDULE_FLIGHT_DAYS)} over ${SNAP_SCHEDULE_FLIGHT_DAYS} days, capped at ${sym}${moneyLabel(Math.max(parseMoney(card.budget), SNAP_CAMPAIGN_CAP_MIN))}/day${parseMoney(card.budget) < SNAP_CAMPAIGN_CAP_MIN ? ` (Snap's minimum cap is ${sym}${SNAP_CAMPAIGN_CAP_MIN})` : ""}.`
+                  : "Off — a 24/7 ad squad on a plain daily budget (the owner's rule is the Kyiv schedule)."}
+              </p>
             </div>
           </div>
 
@@ -557,16 +578,21 @@ export function SnapLaunchCard({
 
           {/* ---- LANDING ---- */}
           <section className="flex flex-col gap-2">
-            <div className="flex flex-wrap items-center gap-3">
-              <span className={micro}>Landing</span>
-              <Seg options={LANDING_OPTIONS} value={card.landingId} onChange={(k) => patch({ landingId: k })} />
+            <span className={micro}>Landing</span>
+            <div className="relative">
+              <GlobeIcon className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-faint" />
+              <input
+                value={card.landingUrl}
+                onChange={(e) => patch({ landingUrl: e.target.value.trim() })}
+                placeholder="https://fast-flow.org/ht/age-gate/digital-marketing/en/"
+                aria-label="Landing URL"
+                title="Paste the bare landing — the partner's quiz/captcha page (fast-flow-like domains, as on Facebook). utm_source=stone&utm_campaign=<key> are appended; Snap adds ScCid."
+                className={inp + " pl-9"}
+              />
             </div>
-            {card.landingId === "custom" ? (
-              <div className="relative">
-                <GlobeIcon className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-faint" />
-                <input value={card.landingUrl} onChange={(e) => patch({ landingUrl: e.target.value.trim() })} placeholder="https://…" aria-label="Custom landing URL" className={inp + " pl-9"} />
-              </div>
-            ) : null}
+            <p className="text-[10px] leading-snug text-faint">
+              Paste the bare landing, as on Facebook — the partner&apos;s quiz / captcha page. Only Snap&apos;s tags are appended: utm_source=stone and the campaign&apos;s own key.
+            </p>
             {segments.length ? (
               <div className="overflow-hidden rounded-lg border border-line bg-surface2/50">
                 <div className="max-h-24 select-all overflow-y-auto break-all px-3 py-2 font-mono text-[11px] leading-relaxed">
@@ -578,8 +604,7 @@ export function SnapLaunchCard({
                 </div>
                 <div className="flex items-center justify-between gap-2 border-t border-line bg-surface/50 px-2 py-1.5">
                   <span className="select-none font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-                    Final link · key {firstKey || "next free"}{stripped ? " · pasted query dropped" : ""}
-                    {card.landingId === "custom" ? " · revenue is reported only for the partner's pages" : ""}
+                    Final link · key {firstKey || "next free"}{stripped ? " · pasted query dropped, the key is the campaign's own" : ""}
                   </span>
                   <button type="button" onClick={copyLink} aria-label="Copy the final link" className={"group inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-semibold transition-all duration-200 active:scale-[0.94] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " + (copied ? "animate-copy-flash border-launch/40 bg-launch/15 text-launch2" : "border-line2 bg-raise text-dim hover:border-accent/50 hover:bg-accent/10 hover:text-ink")}>
                     {copied ? <CheckIcon className="h-3.5 w-3.5" /> : <CopyIcon className="h-3.5 w-3.5" />}

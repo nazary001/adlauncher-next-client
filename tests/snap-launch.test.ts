@@ -25,6 +25,7 @@ import {
   snapLaunchWire,
   snapMicro,
   snapMoneyText,
+  snapNicheFromLanding,
   snapShotTaskId,
   type SnapLaunchShotIn,
   type SnapResolved,
@@ -115,12 +116,12 @@ const shot = (over: Partial<SnapLaunchShotIn> = {}): SnapLaunchShotIn => ({
   media: [{ url: "https://blob.vercel-storage.com/snap/x/v.mp4", kind: "video", name: "v.mp4" }],
   geo: ["US"],
   minAge: "18",
-  landingId: "cars",
-  landingUrl: "",
+  landingUrl: "https://fast-flow.org/ht/captcha-1/cars/en/",
   suffix: "",
   ...over,
 });
 
+const LA_HOURS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23];
 const resolved: SnapResolved = {
   adAccountId: "acct-a",
   pixelId: "px-1",
@@ -129,29 +130,41 @@ const resolved: SnapResolved = {
   key: "glo-snp_003",
   mediaIds: ["media-1"],
   startTimeIso: "2026-09-16T12:00:00.000Z",
+  // The Kyiv working hours as the route/pump resolve them (lib/snap-schedule): LA clock, 90-day flight.
+  schedule: { hours: LA_HOURS, tz: "America/Los_Angeles", flightDays: 90, config: Object.fromEntries(["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"].map((d) => [d, { hour_of_day: LA_HOURS }])) },
 };
 
-test("happy path: the Snap bodies (one creative → one ad unit) + the final landing URL, AUTO_BID sends no bid_micro", () => {
+test("happy path: the Snap bodies (one creative → one ad unit) + the final landing URL, AUTO_BID sends no bid_micro; the Kyiv schedule rides as a LIFETIME budget + flight + ad_scheduling_config, the campaign capped per day", () => {
   const r = snapLaunchWire(shot(), resolved);
   assert.ok(!("refusal" in r), JSON.stringify(r));
   if ("refusal" in r) return;
   assert.equal(r.label, "auto");
   assert.equal(r.geoLabel, "US");
   assert.equal(r.niche, "Cars");
-  assert.equal(r.landingBase, "https://azmvhs.com/v/auto-financing-by-ford/");
+  assert.equal(r.landingBase, "https://fast-flow.org/ht/captcha-1/cars/en/");
   assert.equal(r.bidMicro, undefined);
+  assert.deepEqual(r.schedule, { hours: LA_HOURS, tz: "America/Los_Angeles" });
+  assert.equal(r.dailyMicro, 10_000_000);
+  const thirty = snapLaunchWire(shot({ budget: "30,00" }), resolved);
+  if (!("refusal" in thirty)) {
+    assert.equal(thirty.wire.campaign.daily_budget_micro, 30_000_000); // above the floor: the cap is the buyer's amount
+    assert.equal(thirty.wire.adsquad.lifetime_budget_micro, 2_700_000_000);
+  }
   assert.deepEqual(r.wire.campaign, {
     name: resolved.name,
     ad_account_id: "acct-a",
     status: "PAUSED",
     start_time: "2026-09-16T12:00:00.000Z",
+    daily_budget_micro: 20_000_000, // the campaign's daily cap = max(the buyer's $10, Snap's $20 minimum)
   });
   assert.deepEqual(r.wire.adsquad, {
     name: resolved.name,
     type: "SNAP_ADS",
     billing_event: "IMPRESSION",
-    delivery_constraint: "DAILY_BUDGET",
-    daily_budget_micro: 10_000_000,
+    delivery_constraint: "LIFETIME_BUDGET",
+    lifetime_budget_micro: 900_000_000, // $10 × 90 days
+    end_time: "2026-12-15T12:00:00.000Z", // start + 90 days
+    ad_scheduling_config: resolved.schedule!.config,
     bid_strategy: "AUTO_BID",
     optimization_goal: "PIXEL_PURCHASE",
     placement_v2: { config: "AUTOMATIC" },
@@ -174,7 +187,7 @@ test("happy path: the Snap bodies (one creative → one ad unit) + the final lan
     top_snap_media_id: "media-1",
     shareable: true,
     web_view_properties: {
-      url: "https://azmvhs.com/v/auto-financing-by-ford/?utm_source=stone&utm_campaign=glo-snp_003",
+      url: "https://fast-flow.org/ht/captcha-1/cars/en/?utm_source=stone&utm_campaign=glo-snp_003",
       block_preload: false,
       allow_snap_javascript_sdk: false,
       use_immersive_mode: false,
@@ -182,7 +195,7 @@ test("happy path: the Snap bodies (one creative → one ad unit) + the final lan
     profile_properties: { profile_id: "prof-1" },
   });
   assert.deepEqual(r.wire.ads[0].ad, { name: resolved.name, type: "REMOTE_WEBPAGE", status: "ACTIVE" });
-  assert.equal(r.wire.landingUrl, "https://azmvhs.com/v/auto-financing-by-ford/?utm_source=stone&utm_campaign=glo-snp_003");
+  assert.equal(r.wire.landingUrl, "https://fast-flow.org/ht/captcha-1/cars/en/?utm_source=stone&utm_campaign=glo-snp_003");
 });
 
 test("a bid strategy carries bid_micro; a goal without a pixel sends no pixel_id", () => {
@@ -195,12 +208,34 @@ test("a bid strategy carries bid_micro; a goal without a pixel sends no pixel_id
   assert.equal(r.bidMicro, 500_000);
 });
 
-test("custom landing: https base with its own query dropped; niche 'Custom'", () => {
-  const r = snapLaunchWire(shot({ landingId: "custom", landingUrl: "https://example.com/offer/?utm_source=bad#x" }), resolved);
+test("pasted landing: https base with its own query dropped, Snap's tags and the campaign's OWN key appended; the niche is read from the path", () => {
+  const r = snapLaunchWire(shot({ landingUrl: "https://example.com/offer/?utm_source=bad#x" }), resolved);
   assert.ok(!("refusal" in r));
   if ("refusal" in r) return;
-  assert.equal(r.niche, "Custom");
+  assert.equal(r.niche, "Offer");
   assert.equal(r.wire.ads[0].creative.web_view_properties.url, "https://example.com/offer/?utm_source=stone&utm_campaign=glo-snp_003");
+  // The partner's own example (22.09) ends in utm_campaign=glo-snp_001 — pasted whole, it still
+  // launches on THIS campaign's key, with nothing else in the query.
+  const ex = snapLaunchWire(shot({ landingUrl: "https://fast-flow.org/ht/captcha-1/cars/en/?utm_source=stone&utm_campaign=glo-snp_001" }), resolved);
+  assert.ok(!("refusal" in ex));
+  if ("refusal" in ex) return;
+  assert.equal(ex.niche, "Cars");
+  assert.equal(ex.landingBase, "https://fast-flow.org/ht/captcha-1/cars/en/");
+  assert.equal(ex.wire.ads[0].creative.web_view_properties.url, "https://fast-flow.org/ht/captcha-1/cars/en/?utm_source=stone&utm_campaign=glo-snp_003");
+});
+
+test("snapNicheFromLanding reads the niche word past the partner's gate/language segments", () => {
+  assert.equal(snapNicheFromLanding("https://fast-flow.org/ht/age-gate/digital-marketing/en/"), "Digital marketing");
+  assert.equal(snapNicheFromLanding("https://fast-flow.org/ht/captcha-1/cars/en/?utm_source=stone&utm_campaign=glo-snp_001"), "Cars");
+  assert.equal(
+    snapNicheFromLanding("https://fast-flow.org/htai/captcha-1/simparic-trio-what-should-dog-owners-ask-their-vet-before-switching-treatments/"),
+    "Simparic trio what should dog owners as…", // 40 chars with the ellipsis
+  );
+  assert.equal(snapNicheFromLanding("https://azmvhs.com/v/dmi-online-marketing-course/"), "Dmi online marketing course");
+  assert.equal(snapNicheFromLanding("https://fast-flow.org/ht/quiz-2/pt-br/"), "Fast flow"); // nothing but gate words → the domain
+  assert.equal(snapNicheFromLanding("https://fast-flow.org/"), "Fast flow");
+  assert.equal(snapNicheFromLanding("http://fast-flow.org/ht/cars/"), ""); // not https → no landing at all
+  assert.equal(snapNicheFromLanding("not a url"), "");
 });
 
 test("refusal matrix names the field and the fix", () => {
@@ -228,8 +263,10 @@ test("refusal matrix names the field and the fix", () => {
   assert.match(refusal(shot({ geo: [] })), /at least one country/i);
   assert.match(refusal(shot({ minAge: "16" })), /Minimum age/);
   assert.match(refusal(shot({ deviceOs: "WINDOWS" })), /Devices must be one of Android only \/ iOS only \/ All devices/);
-  assert.match(refusal(shot({ landingId: "custom", landingUrl: "http://example.com/" })), /https:\/\/ address/);
-  assert.match(refusal(shot({ landingId: "nope" as "dmi" })), /Pick a landing/);
+  assert.match(refusal(shot({ landingUrl: "http://example.com/" })), /https:\/\/ address/);
+  assert.match(refusal(shot({ landingUrl: "" })), /Landing must be a pasted https/); // no presets any more (22.09)
+  // a tab from before 22.09 sending the old preset id and no URL is refused the same way
+  assert.match(refusal({ ...shot({ landingUrl: "" }), landingId: "cars" } as unknown as SnapLaunchShotIn), /Landing must be a pasted https/);
   assert.match(refusal(shot(), { ...resolved, profileId: "" }), /Public Profile/);
   assert.match(refusal(shot(), { ...resolved, key: "glo-snp_000" }), /not one of the partner keys/);
   assert.match(refusal(shot(), { ...resolved, mediaIds: [""] }), /media id/i);
@@ -333,4 +370,21 @@ test("devices ride the ad squad's targeting: ANDROID / iOS as os_type, ALL sends
   assert.equal(all.os, "ALL");
   // geo and age are untouched by the device choice
   assert.deepEqual(all.targeting, { geos: [{ country_code: "us" }], demographics: [{ min_age: "18" }] });
+});
+
+test("schedule:false → the plain 24/7 ad squad on a daily budget, no cap on the campaign, no flight; a scheduled shot without a resolved schedule is refused", () => {
+  const r = snapLaunchWire(shot({ schedule: false }), resolved);
+  assert.ok(!("refusal" in r));
+  if ("refusal" in r) return;
+  assert.equal(r.schedule, null);
+  assert.equal(r.wire.campaign.daily_budget_micro, undefined);
+  assert.equal(r.wire.adsquad.delivery_constraint, "DAILY_BUDGET");
+  assert.equal(r.wire.adsquad.daily_budget_micro, 10_000_000);
+  assert.equal(r.wire.adsquad.lifetime_budget_micro, undefined);
+  assert.equal(r.wire.adsquad.end_time, undefined);
+  assert.equal(r.wire.adsquad.ad_scheduling_config, undefined);
+  const noSched = snapLaunchWire(shot(), { ...resolved, schedule: null });
+  assert.ok("refusal" in noSched && /Kyiv schedule could not be resolved/.test(noSched.refusal));
+  const empty = snapLaunchWire(shot(), { ...resolved, schedule: { ...resolved.schedule!, hours: [] } });
+  assert.ok("refusal" in empty);
 });

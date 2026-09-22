@@ -21,8 +21,7 @@ const shotIn = (over: Partial<SnapLaunchShotIn> = {}): SnapLaunchShotIn => ({
   media: [{ url: "https://blob/v.mp4", kind: "video", name: "v.mp4" }],
   geo: ["US"],
   minAge: "18",
-  landingId: "cars",
-  landingUrl: "",
+  landingUrl: "https://fast-flow.org/ht/captcha-1/cars/en/",
   suffix: "",
   ...over,
 });

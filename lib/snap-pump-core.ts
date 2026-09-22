@@ -46,7 +46,7 @@ export type SnapPumpShot = {
   taskId: string;
   shot: SnapLaunchShotIn;
   /** What the route resolved and validated once for the whole shot. */
-  ctx: { adAccountId: string; pixelId?: string; profileId: string; currency: string; niche: string; geoLabel: string; tail: string; startPaused: boolean };
+  ctx: { adAccountId: string; pixelId?: string; profileId: string; currency: string; niche: string; geoLabel: string; tail: string; startPaused: boolean; accountTz?: string };
 };
 
 export type SnapPumpDeps = {
@@ -62,6 +62,8 @@ export type SnapPumpDeps = {
   createCreative(adAccountId: string, body: SnapCreativeWire): Promise<{ id: string }>;
   createAd(adSquadId: string, body: SnapAdWire & { ad_squad_id: string; creative_id: string }): Promise<{ id: string }>;
   setCampaignStatus(campaignId: string, status: "ACTIVE" | "PAUSED"): Promise<void>;
+  /** The Kyiv working hours for an account clock (lib/snap-schedule); absent = no schedule resolved. */
+  resolveSchedule?(accountTz: string): SnapResolved["schedule"];
   buildWire(shot: SnapLaunchShotIn, resolved: SnapResolved): { wire: SnapLaunchWire; label: string } | { refusal: string };
   buildName(args: { key: string; niche: string; geoLabel: string; tail: string }): string;
   write(taskId: string, fields: Record<string, unknown>): void;
@@ -192,7 +194,7 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
           user,
           ad_account: s.ctx.adAccountId,
           niche: s.ctx.niche,
-          landing: s.shot.landingId === "custom" ? s.shot.landingUrl : s.shot.landingId,
+          landing: s.shot.landingUrl,
           task_id: s.taskId,
         });
       } catch (e) {
@@ -276,6 +278,7 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
           key,
           mediaIds,
           startTimeIso: new Date(deps.now() + START_LEAD_MS).toISOString(),
+          schedule: deps.resolveSchedule ? deps.resolveSchedule(s.ctx.accountTz ?? "") : null,
         });
       } catch (e) {
         built = { refusal: messageOf(e) };
