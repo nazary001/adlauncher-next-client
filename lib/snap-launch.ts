@@ -9,16 +9,17 @@
 /** The partner tags every landing hit by this utm_source; it never changes per campaign. */
 export const SNAP_UTM_SOURCE = "stone";
 export const SNAP_KEY_PREFIX = "glo-snp_";
-export const SNAP_KEY_POOL_MAX = 100;
+/** 500 since 23.09 — the partner extended the pool from 100 (codes stay 3-digit). Twin: lib/snap-keys.ts POOL_MAX. */
+export const SNAP_KEY_POOL_MAX = 500;
 export const SNAP_KEY_RE = /^glo-snp_(\d{3})$/;
 
-/** Pool index 1..100 → the partner's fixed key ("glo-snp_007"); "" outside the pool. */
+/** Pool index 1..500 → the partner's fixed key ("glo-snp_007"); "" outside the pool. */
 export function snapKeyCode(n: number): string {
   if (!Number.isInteger(n) || n < 1 || n > SNAP_KEY_POOL_MAX) return "";
   return `${SNAP_KEY_PREFIX}${String(n).padStart(3, "0")}`;
 }
 
-/** Key → pool index, null for anything that isn't one of the 100 keys (strict: prefix, 3 digits). */
+/** Key → pool index, null for anything that isn't one of the 500 keys (strict: prefix, 3 digits). */
 export function snapKeyIndex(key: string): number | null {
   const m = SNAP_KEY_RE.exec(String(key ?? "").trim());
   if (!m) return null;
@@ -28,7 +29,7 @@ export function snapKeyIndex(key: string): number | null {
 
 export const isSnapKey = (key: string): boolean => snapKeyIndex(key) !== null;
 
-/** Every key of the pool, in order (the keys page lists all 100, bound or free). */
+/** Every key of the pool, in order (the keys page lists all 500, bound or free). */
 export function snapKeyPool(): string[] {
   return Array.from({ length: SNAP_KEY_POOL_MAX }, (_, i) => snapKeyCode(i + 1));
 }

@@ -32,18 +32,22 @@ const row = (key: string, documentId: string, extra: Record<string, unknown> = {
 });
 
 test("free / next: the pool minus the used keys, desired-or-next with wrap-around", () => {
-  assert.equal(keys.SNAP_KEY_POOL_SIZE, 100);
+  assert.equal(keys.SNAP_KEY_POOL_SIZE, 500); // 500 since 23.09 (100 before)
   assert.equal(keys.snapFreeKeys([]).length, keys.SNAP_KEY_POOL_SIZE, "the reported pool size is the size the arithmetic walks");
   const used = ["glo-snp_001", "glo-snp_003"];
   const free = keys.snapFreeKeys(used);
-  assert.equal(free.length, 98);
+  assert.equal(free.length, 498);
+  assert.equal(free.at(-1), "glo-snp_500");
   assert.equal(free[0], "glo-snp_002");
   assert.equal(keys.snapNextKey(used), "glo-snp_002");
   assert.equal(keys.snapNextKey(used, "glo-snp_003"), "glo-snp_004");
   assert.equal(keys.snapNextKey(used, "glo-snp_050"), "glo-snp_050");
   assert.equal(keys.snapNextKey(used, "glo-snp_100"), "glo-snp_100");
+  assert.equal(keys.snapNextKey(used, "glo-snp_500"), "glo-snp_500");
+  assert.equal(keys.snapNextKey(used, "glo-snp_501"), "glo-snp_002", "outside the pool = no desired key → the first free one");
   assert.equal(keys.snapNextKey(keys.snapFreeKeys([]), "glo-snp_100"), null);
-  assert.deepEqual(keys.snapKeyCandidates(["glo-snp_099"], "glo-snp_099").slice(0, 2), ["glo-snp_100", "glo-snp_001"]);
+  assert.deepEqual(keys.snapKeyCandidates(["glo-snp_099"], "glo-snp_099").slice(0, 2), ["glo-snp_100", "glo-snp_101"]);
+  assert.deepEqual(keys.snapKeyCandidates(["glo-snp_499"], "glo-snp_499").slice(0, 2), ["glo-snp_500", "glo-snp_001"]);
 });
 
 test("listSnapKeys reads the prefix filter, maps rows, and throws on a failed page", async () => {
@@ -133,8 +137,10 @@ test("claim: a lost concurrent race (an older twin row) deletes ours and walks o
 });
 
 test("claim: every key used → pool exhausted without a single POST; a non-400 POST failure aborts", async () => {
-  const all = Array.from({ length: 100 }, (_, i) => row(`glo-snp_${String(i + 1).padStart(3, "0")}`, `d${i + 1}`));
-  const full = stubFetch((r) => (r.method === "GET" ? json({ data: all }) : json({}, 500)));
+  // all 500 keys taken, served the way Strapi pages them (100 per page — the walk must read every page)
+  const all = Array.from({ length: keys.SNAP_KEY_POOL_SIZE }, (_, i) => row(`glo-snp_${String(i + 1).padStart(3, "0")}`, `d${i + 1}`));
+  const pageOf = (url: string) => Number(/pagination\[page\]=(\d+)/.exec(url)?.[1] ?? 1);
+  const full = stubFetch((r) => (r.method === "GET" ? json({ data: all.slice((pageOf(r.url) - 1) * 100, pageOf(r.url) * 100) }) : json({}, 500)));
   try {
     await assert.rejects(keys.claimSnapKey(undefined, { user: "nazar" }), /pool exhausted/);
     assert.equal(full.calls.filter((c) => c.method === "POST").length, 0);

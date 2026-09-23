@@ -1,4 +1,4 @@
-// Snapchat rail — the partner-key REGISTRY (glo-snp_001…100, one key per campaign) over the
+// Snapchat rail — the partner-key REGISTRY (glo-snp_001…500 — 100 until 23.09 — one key per campaign) over the
 // existing Strapi `app-cache` collection: one row per claimed key, ckey "snap-key:<key>" (UNIQUE →
 // a POST on a taken key is a 400 → the claim is atomic without a new Strapi collection), cvalue =
 // the binding. Same race-safe claim-then-verify contract as lib/aif-claim (Strapi's app-level
@@ -20,7 +20,10 @@ export const SNAP_KEY_CKEY_PREFIX = "snap-key:";
 // option: `node --test` resolves a relative import only with an explicit `.ts` extension, which the
 // app's tsconfig does not allow (no allowImportingTsExtensions) — that is why every pure module on
 // this rail is import-free.
-const POOL_MAX = 100;
+const POOL_MAX = 500; // 500 since 23.09 (partner extended the pool from 100); twin of SNAP_KEY_POOL_MAX
+/** Registry pages the list walks (100 rows each, Strapi Cloud's clamp): enough for every pool key plus one
+ *  spare page for transient duplicate rows — a cap of 2 pages hid keys 201+ once the pool grew past 200. */
+const LIST_PAGES = Math.ceil(POOL_MAX / 100) + 1;
 const KEY_RE = /^glo-snp_(\d{3})$/;
 const keyCode = (n: number): string => `glo-snp_${String(n).padStart(3, "0")}`;
 const keyIndex = (key: string): number | null => {
@@ -106,7 +109,7 @@ export function snapNextKey(used: Iterable<string>, desired?: string): string | 
  *  page — a partial registry must never masquerade as the whole. */
 export async function listSnapKeys(): Promise<SnapKeyRow[]> {
   const out: SnapKeyRow[] = [];
-  for (let page = 1; page <= 2; page++) {
+  for (let page = 1; page <= LIST_PAGES; page++) {
     const res = await strapi(
       `${STRAPI}/api/app-caches?filters[ckey][$startsWith]=${encodeURIComponent(SNAP_KEY_CKEY_PREFIX)}&pagination[page]=${page}&pagination[pageSize]=100&sort[0]=ckey:asc`,
     );

@@ -3,7 +3,7 @@
 //   GET /api/high-adx-cluster-utms/snapchat-report/?date=YYYY-MM-DD →
 //   { date, affiliate:"globecoders", utm_prefix:"glo-snp_",
 //     totals:    { revenue, forecasted_revenue, impressions, ecpm, triggered, fired, visitors, conversions },
-//     campaigns: [ { utm_campaign:"glo-snp_001", …same metrics… } × 100 ] }
+//     campaigns: [ { utm_campaign:"glo-snp_001", …same metrics… } × up to 500 ] }
 // "Today's numbers are partial and include a forecast; a day is final the next morning" — the
 // day boundary is São Paulo like the rest of LION.
 

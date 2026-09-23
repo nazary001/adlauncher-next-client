@@ -1,4 +1,4 @@
-# Snapchat rail — launch on our own Snapchat Ads account, partner keys `glo-snp_001…100`, LION daily report
+# Snapchat rail — launch on our own Snapchat Ads account, partner keys `glo-snp_001…500` (100 until 23.09), LION daily report
 
 **Date:** 2026-09-16 · **Status:** built + verified locally on 2026-09-16 (six unit suites,
 tsc/eslint/next build, mock smoke 41/41 with Strapi + LION live, dormancy proof); NOT merged, NOT
@@ -134,7 +134,8 @@ LION (`LION_TOKEN`) works — no new credential for the report.
   forward then wrap, `POST /api/app-caches` per candidate (a unique-`ckey` violation = taken → next), then
   `wonClaim` re-reads the key's rows oldest-first and deletes our row if an earlier one exists (Strapi's
   app-level uniqueness has the proven TOCTOU window). Returns `{ key, documentId }`; throws
-  `snap key pool exhausted — no free key glo-snp_001…100` when none is left.
+  `snap key pool exhausted — no free key glo-snp_001…500` when none is left (pool 500 since 23.09 —
+  `SNAP_KEY_POOL_MAX` / `POOL_MAX`, the twin constants; codes stay 3-digit).
 - `backfillSnapKey(documentId, patch)` (ids after the create, `status:"retired"` + notes on a kept
   row), `releaseSnapKey(documentId)` (DELETE — a key that never carried traffic is pool capacity).
 - Owner release from the keys page: `DELETE /api/snap/keys?key=` deletes the row after a confirm; the

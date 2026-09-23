@@ -1,6 +1,6 @@
 // Node's built-in runner (v24 strips types natively): `node --test tests/snap-partner.test.ts`.
 // Excluded from the app's tsconfig — the explicit .ts import below is a Node requirement.
-// Snapchat rail — the PARTNER decisions in lib/snap-launch.ts: the 100 fixed keys, the pasted
+// Snapchat rail — the PARTNER decisions in lib/snap-launch.ts: the 500 fixed keys (100 until 23.09), the pasted
 // landing (no presets since 22.09), the exact link shape from the brief, the console campaign
 // name, São Paulo dates.
 import { test } from "node:test";
@@ -20,23 +20,27 @@ import {
   todaySaoPauloDotDDMM,
 } from "../lib/snap-launch.ts";
 
-test("keys: 3-digit zero-padded, pool 1..100, nothing outside", () => {
+test("keys: 3-digit zero-padded, pool 1..500 (100 until 23.09), nothing outside", () => {
   assert.equal(snapKeyCode(1), "glo-snp_001");
   assert.equal(snapKeyCode(7), "glo-snp_007");
   assert.equal(snapKeyCode(100), "glo-snp_100");
+  assert.equal(snapKeyCode(500), "glo-snp_500");
   assert.equal(snapKeyCode(0), "");
-  assert.equal(snapKeyCode(101), "");
+  assert.equal(snapKeyCode(501), "");
   assert.equal(snapKeyCode(1.5), "");
-  assert.equal(SNAP_KEY_POOL_MAX, 100);
-  assert.equal(snapKeyPool().length, 100);
+  assert.equal(SNAP_KEY_POOL_MAX, 500);
+  assert.equal(snapKeyPool().length, 500);
   assert.equal(snapKeyPool()[99], "glo-snp_100");
+  assert.equal(snapKeyPool()[499], "glo-snp_500");
 });
 
-test("keys: index parse is strict (prefix, 3 digits, 1..100)", () => {
+test("keys: index parse is strict (prefix, 3 digits, 1..500)", () => {
   assert.equal(snapKeyIndex("glo-snp_042"), 42);
   assert.equal(snapKeyIndex(" glo-snp_100 "), 100);
+  assert.equal(snapKeyIndex("glo-snp_101"), 101);
+  assert.equal(snapKeyIndex("glo-snp_500"), 500);
   assert.equal(snapKeyIndex("glo-snp_000"), null);
-  assert.equal(snapKeyIndex("glo-snp_101"), null);
+  assert.equal(snapKeyIndex("glo-snp_501"), null);
   assert.equal(snapKeyIndex("glo-snp_42"), null);
   assert.equal(snapKeyIndex("GLO-SNP_042"), null);
   assert.equal(snapKeyIndex("gcm_042"), null);

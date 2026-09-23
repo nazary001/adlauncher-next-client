@@ -15,7 +15,7 @@ const bad = (error: string, status = 400) => NextResponse.json({ ok: false, erro
 
 /**
  * GET ?date= | ?from=&to= → LION's per-key revenue for that São Paulo day — or for every day of the
- * range, summed — joined with the key registry: one row per pool key (100), bound or not. `partial`
+ * range, summed — joined with the key registry: one row per pool key (500), bound or not. `partial`
  * flags a range that reaches today (still accumulating + forecast). `daily` is the same money per
  * day; a day LION did not answer for is named in `missingDays` and left out of the sums (only a
  * range with NO day read is an error). The registry is best-effort here (a Strapi blip must not

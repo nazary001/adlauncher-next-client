@@ -1,6 +1,6 @@
 "use client";
 
-// Snapchat KEYS · REPORT page — the 100 partner keys as one table: who holds each (registry),
+// Snapchat KEYS · REPORT page — the 500 partner keys (100 until 23.09) as one table: who holds each (registry),
 // what its campaign SPENT on the picked São Paulo day (Snapchat's own stats: spend, impressions,
 // swipes + where the campaign stands with delivery and ad review), what it EARNED over the same
 // 24 hours (LION's report: revenue, forecast while the day is partial, ad impressions, eCPM,
