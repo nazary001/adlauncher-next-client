@@ -14,6 +14,7 @@ import {
   SNAP_MAX_CREATIVES,
   SNAP_NAME_MAX,
   SNAP_OPTIMIZATION_GOALS,
+  SNAP_DEFAULT_GOAL,
   snapAdUnitName,
   snapShotMediaIn,
   snapBidKind,
@@ -47,11 +48,13 @@ test("vocabulary: three bid strategies (no MIN_ROAS), five goals, PIXEL_* need a
   ]);
   assert.equal(snapBidKind("MIN_ROAS"), "unknown");
   assert.equal(snapBidKind("TARGET_COST"), "bid");
-  assert.deepEqual(
-    SNAP_OPTIMIZATION_GOALS.map((g) => g.value),
-    ["PIXEL_PURCHASE", "PIXEL_PAGE_VIEW", "LANDING_PAGE_VIEW", "SWIPES", "IMPRESSIONS"],
-  );
+  // Owner ask 23.09: ONLY Pixel purchase and Landing page view — Swipes (clicks), Pixel page view
+  // and Impressions left the vocabulary, so the validator refuses them (checked in the refusal matrix).
+  assert.deepEqual(SNAP_OPTIMIZATION_GOALS.map((g) => g.value), ["PIXEL_PURCHASE", "LANDING_PAGE_VIEW"]);
+  assert.equal(SNAP_DEFAULT_GOAL, "PIXEL_PURCHASE");
+  assert.ok(SNAP_OPTIMIZATION_GOALS.some((g) => g.value === SNAP_DEFAULT_GOAL));
   assert.equal(snapGoalNeedsPixel("PIXEL_PURCHASE"), true);
+  assert.equal(snapGoalNeedsPixel("LANDING_PAGE_VIEW"), false);
   assert.equal(snapGoalNeedsPixel("SWIPES"), false);
   assert.equal(snapGoalNeedsPixel("NOPE"), false);
   assert.equal(SNAP_CTAS[0].value, "MORE");
@@ -186,7 +189,7 @@ test("happy path: the Snap bodies (one creative → one ad unit) + the final lan
 });
 
 test("a bid strategy carries bid_micro; a goal without a pixel sends no pixel_id", () => {
-  const r = snapLaunchWire(shot({ bidStrategy: "LOWEST_COST_WITH_MAX_BID", bid: "0,50", optimizationGoal: "SWIPES", pixel: "" }), { ...resolved, pixelId: undefined });
+  const r = snapLaunchWire(shot({ bidStrategy: "LOWEST_COST_WITH_MAX_BID", bid: "0,50", optimizationGoal: "LANDING_PAGE_VIEW", pixel: "" }), { ...resolved, pixelId: undefined });
   assert.ok(!("refusal" in r));
   if ("refusal" in r) return;
   assert.equal(r.wire.adsquad.bid_micro, 500_000);
@@ -236,6 +239,10 @@ test("refusal matrix names the field and the fix", () => {
   assert.match(refusal(shot({ bidStrategy: "TARGET_COST", bid: "600" })), /0,01.*500/);
   assert.match(refusal(shot({ bidStrategy: "AUTO_BID", bid: "1" })), /takes no bid/);
   assert.match(refusal(shot({ optimizationGoal: "NOPE" })), /Unknown optimization goal/);
+  // the goals removed 23.09 are refused by name, with the two that remain spelled out
+  for (const gone of ["SWIPES", "PIXEL_PAGE_VIEW", "IMPRESSIONS"]) {
+    assert.match(refusal(shot({ optimizationGoal: gone, pixel: "" })), new RegExp(`Unknown optimization goal "${gone}" — only Pixel purchase or Landing page view`));
+  }
   assert.match(refusal(shot(), { ...resolved, pixelId: undefined }), /Pixel purchase needs a conversion pixel/);
   assert.match(refusal(shot({ headline: "" })), /Headline is required/);
   assert.match(refusal(shot({ headline: "x".repeat(35) })), /Headline.*34/);

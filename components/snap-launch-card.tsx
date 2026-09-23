@@ -36,6 +36,7 @@ import {
   SNAP_MEDIA_MAX_BYTES,
   SNAP_MIN_AGES,
   SNAP_OPTIMIZATION_GOALS,
+  SNAP_DEFAULT_GOAL,
   snapBidKind,
   snapCampaignName,
   snapCurrencySymbol,
@@ -94,10 +95,10 @@ export function freshSnapCard(id?: string, defaults: { adAccount?: string; pixel
     adAccount: defaults.adAccount ?? "",
     pixel: defaults.pixel ?? "",
     profileId: defaults.profileId ?? "",
-    // Swipes by default: Snap refuses a pixel goal until that pixel already receives the event
-    // (E3017 "event source is ineligible") — a fresh pixel launches on Swipes, the pixel goals
-    // come back once the partner's events flow.
-    optimizationGoal: "SWIPES",
+    // Pixel purchase by default (owner ask 23.09: only Pixel purchase and Landing page view exist,
+    // Swipes/clicks are gone). The partner's Purchase events reach the pixel since 17.09, so Snap's
+    // E3017 "ineligible" no longer bites; Landing page view is the no-pixel alternative.
+    optimizationGoal: SNAP_DEFAULT_GOAL,
     bidStrategy: "AUTO_BID",
     bid: "",
     budget: SNAP_DEFAULT_BUDGET,
@@ -442,7 +443,7 @@ export function SnapLaunchCard({
               <span className={micro}>Pixel</span>
               <SearchSelect value={effPixel} onChange={(v) => patch({ pixel: v })} options={pixelOptions} placeholder="Search pixel" warn={pixelNeeded} emptyHint={!card.adAccount ? "Pick an account first" : "No pixels on this account"} ariaLabel="Snap Pixel" />
               <p className="text-[10px] leading-snug text-faint">
-                {!card.adAccount ? "Pick an account first" : !needsPixel ? "This goal needs no pixel" : noPixel ? "No pixel — pick a non-pixel goal" : pixelNeeded ? "Several pixels — pick one" : "One pixel — auto-picked"}
+                {!card.adAccount ? "Pick an account first" : !needsPixel ? "This goal needs no pixel" : noPixel ? "No pixel — choose Landing page view" : pixelNeeded ? "Several pixels — pick one" : "One pixel — auto-picked"}
               </p>
             </div>
             <div className="flex flex-col gap-1.5">
@@ -460,7 +461,7 @@ export function SnapLaunchCard({
             <div className="flex flex-col gap-1.5">
               <span className={micro}>Optimization goal</span>
               <Select value={card.optimizationGoal} onChange={(e) => patch({ optimizationGoal: e.target.value })} options={GOAL_OPTIONS} aria-label="Optimization goal" />
-              {needsPixel ? <span className="text-[10px] leading-snug text-warn">Snap accepts a pixel goal only once the pixel already receives that event (E3017 otherwise) — start on Swipes until the partner&apos;s events flow.</span> : null}
+              {needsPixel ? <span className="text-[10px] leading-snug text-warn">Snap accepts Pixel purchase only once the pixel already receives Purchase events (E3017 otherwise) — Landing page view needs no pixel.</span> : null}
             </div>
             <div className="flex flex-col gap-1.5">
               <span className={micro}>Bidding</span>

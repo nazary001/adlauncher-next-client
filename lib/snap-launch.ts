@@ -177,14 +177,17 @@ const STRATEGY_BY_VALUE = new Map(SNAP_BID_STRATEGIES.map((s) => [s.value, s]));
 export const snapBidKind = (v: string): SnapBidKind | "unknown" => STRATEGY_BY_VALUE.get(v)?.kind ?? "unknown";
 export const snapStrategyLabel = (v: string): string => STRATEGY_BY_VALUE.get(v)?.label ?? v;
 
-/** Ad squad optimization goals the launcher offers; PIXEL_* need the account's pixel. */
+/** Ad squad optimization goals the launcher offers — ONLY Pixel purchase and Landing page view
+ *  (owner ask 23.09: Swipes/clicks, Pixel page view and Impressions are gone). Any other value on
+ *  the wire is refused by snapLaunchWire, so a tab opened before the change cannot launch on
+ *  clicks. PIXEL_* needs the account's pixel. */
 export const SNAP_OPTIMIZATION_GOALS: readonly { value: string; label: string; needsPixel: boolean }[] = [
   { value: "PIXEL_PURCHASE", label: "Pixel purchase", needsPixel: true },
-  { value: "PIXEL_PAGE_VIEW", label: "Pixel page view", needsPixel: true },
   { value: "LANDING_PAGE_VIEW", label: "Landing page view", needsPixel: false },
-  { value: "SWIPES", label: "Swipes (clicks)", needsPixel: false },
-  { value: "IMPRESSIONS", label: "Impressions", needsPixel: false },
 ] as const;
+/** The card's default. Pixel purchase again (the partner's Purchase events reach the pixel since
+ *  17.09, so Snap's E3017 "ineligible" no longer bites); Landing page view is the no-pixel way. */
+export const SNAP_DEFAULT_GOAL = "PIXEL_PURCHASE";
 const GOAL_BY_VALUE = new Map(SNAP_OPTIMIZATION_GOALS.map((g) => [g.value, g]));
 export const snapGoalNeedsPixel = (v: string): boolean => GOAL_BY_VALUE.get(v)?.needsPixel ?? false;
 export const snapGoalLabel = (v: string): string => GOAL_BY_VALUE.get(v)?.label ?? v;
@@ -475,8 +478,8 @@ export function snapLaunchWire(
     return { refusal: `${snapStrategyLabel(strategy)} takes no bid — clear the bid` };
   }
   const goal = String(shot.optimizationGoal ?? "").trim();
-  if (!GOAL_BY_VALUE.has(goal)) return { refusal: `Unknown optimization goal "${goal}"` };
-  if (snapGoalNeedsPixel(goal) && !resolved.pixelId) return { refusal: `${snapGoalLabel(goal)} needs a conversion pixel — pick one or choose a non-pixel goal` };
+  if (!GOAL_BY_VALUE.has(goal)) return { refusal: `Unknown optimization goal "${goal}" — only Pixel purchase or Landing page view` };
+  if (snapGoalNeedsPixel(goal) && !resolved.pixelId) return { refusal: `${snapGoalLabel(goal)} needs a conversion pixel — pick one or choose Landing page view` };
   const headline = squashText(shot.headline);
   if (!headline) return { refusal: "Headline is required" };
   if (headline.length > SNAP_HEADLINE_MAX) return { refusal: `Headline is over ${SNAP_HEADLINE_MAX} characters (${headline.length})` };

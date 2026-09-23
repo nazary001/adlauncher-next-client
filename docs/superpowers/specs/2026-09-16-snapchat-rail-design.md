@@ -435,3 +435,15 @@ by construction, and both sides of the table answer for a RANGE.
   with hand-picked days too; Space is left to the button's own click (Firefox). Probed read-only on
   the real API: a 31-day TOTAL window is accepted. Known and accepted: settled days are cached 6 h
   per instance, so a restated old day shows late and two instances can disagree until then.
+
+## Addendum 2026-09-23 — optimization goals: only Pixel purchase and Landing page view
+
+Owner ask 23.09: the launcher no longer offers Swipes (clicks), Pixel page view or Impressions.
+`SNAP_OPTIMIZATION_GOALS` = `PIXEL_PURCHASE` (the card's default again, `SNAP_DEFAULT_GOAL` — the
+partner's Purchase events reach the pixel since 17.09, so Snap's E3017 no longer bites) ·
+`LANDING_PAGE_VIEW` (no pixel). Any other value on the wire is refused by `snapLaunchWire`
+(`Unknown optimization goal "SWIPES" — only Pixel purchase or Landing page view`), so a tab opened
+before the deploy cannot launch on clicks; the mock smoke sends a SWIPES shot and expects the 400.
+The live campaigns still on SWIPES were deleted on Snapchat's side (`_e2e/_snap_goal_purge.mjs`:
+DELETE /v1/campaigns/{id}, cascade to ad squads + ads verified by re-GET) and their keys released
+through the usual reconcile → release recipe (`_e2e/README-snap.md`).

@@ -170,7 +170,7 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
     const ready = Boolean(card.adAccount && account && !pixelNeeded && !noPixel && !refusal);
     const cardKeys = ready ? freeKeys.slice(keyCursor, keyCursor + copies) : [];
     if (ready) keyCursor += copies;
-    const why = !card.adAccount ? "pick an ad account" : !account ? "account not in our list" : noPixel ? "no pixel on this account — pick a non-pixel goal" : pixelNeeded ? "pick a Snap Pixel" : refusal ? refusal : "";
+    const why = !card.adAccount ? "pick an ad account" : !account ? "account not in our list" : noPixel ? "no pixel on this account — choose Landing page view" : pixelNeeded ? "pick a Snap Pixel" : refusal ? refusal : "";
     view.push({ card, account, currency, effPixel, pixelNeeded, noPixel, profileId, refusal, ready, why, copies, keys: cardKeys, pixelOptions: pixelOptionsFor(account) });
   }
 

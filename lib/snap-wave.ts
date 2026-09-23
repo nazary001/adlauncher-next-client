@@ -43,7 +43,7 @@ function resolvePixel(pixels: SnapPixel[], picked: string, needed: boolean, acco
   const ids = pixels.map((p) => p.id);
   if (picked && !ids.includes(picked)) return { error: `pixel ${picked} is not on ${accountName}` };
   if (!needed) return picked ? { pixelId: picked } : {};
-  if (ids.length === 0) return { error: `${accountName} has no Snap Pixel — pick a non-pixel goal or create a pixel in Ads Manager` };
+  if (ids.length === 0) return { error: `${accountName} has no Snap Pixel — choose Landing page view or create a pixel in Ads Manager` };
   if (ids.length === 1) return { pixelId: ids[0] };
   if (!picked) return { error: `${accountName} has ${ids.length} pixels — pick one` };
   return { pixelId: picked };
