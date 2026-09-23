@@ -104,7 +104,7 @@ function world(fail: Partial<Record<string, unknown>> = {}) {
     },
     buildWire: (shot, resolved) => ({
       wire: {
-        campaign: { name: resolved.name, ad_account_id: resolved.adAccountId, status: "PAUSED", start_time: resolved.startTimeIso },
+        campaign: { name: resolved.name, ad_account_id: resolved.adAccountId, status: "PAUSED", start_time: resolved.startTimeIso, objective_v2_properties: { objective_v2_type: "SALES" } },
         adsquad: {
           name: resolved.name,
           type: "SNAP_ADS",

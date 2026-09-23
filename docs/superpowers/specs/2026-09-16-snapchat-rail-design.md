@@ -63,7 +63,9 @@ LION (`LION_TOKEN`) works — no new credential for the report.
   Video mp4/mov 1080×1920 (9:16), 3–180 s for Snap Ads; image PNG/JPG 1080×1920 ≤5 MB.
 - Campaign: `POST /adaccounts/{id}/campaigns {name ≤375, ad_account_id, status ACTIVE|PAUSED, start_time
   (ISO, required), daily_budget_micro?, lifetime_spend_cap_micro?, buy_model? (AUCTION default)}`;
-  `objective` is rejected since 2025 — `objective_v2_properties` is optional and **omitted**.
+  `objective` is rejected since 2025 — `objective_v2_properties: { objective_v2_type }` rides on EVERY create
+  (the card's objective, Sales by default — addendum 23.09 below; left out, Snap stamps the legacy
+  BRAND_AWARENESS / "Awareness" with `is_auto_generated: true`).
   Update = `PUT /adaccounts/{id}/campaigns` with the **whole object** (`id, name, ad_account_id,
   status, start_time, buy_model, objective_v2_properties` — omitted attributes reset to defaults), so a
   status flip is GET `/campaigns/{id}` → PUT the read object with `status` changed.
@@ -189,7 +191,7 @@ LION (`LION_TOKEN`) works — no new credential for the report.
   `SNAP_BUDGET_MIN = 5` … `10 000` per day (Snap's own floor is USD 5), default `SNAP_DEFAULT_BUDGET =
   "10,00"`; bid `0,01 … 500` (Snap's USD bid_micro range). Refusals name the field and the fix.
 - `snapShotTaskId(waveId, i) → "snl-<wave>-NN"`; `SNAP_WAVE_ID_RE` as Google's; `SNAP_MAX_SHOTS = 45`.
-- `SnapLaunchShotIn { label?, adAccount, pixel?, profileId?, optimizationGoal, bidStrategy, bid, budget,
+- `SnapLaunchShotIn { label?, adAccount, pixel?, profileId?, objective?, optimizationGoal, bidStrategy, bid, budget,
   startPaused, headline, brandName, cta, mediaUrl, mediaKind:"video"|"image", mediaName, geo: string[],
   minAge, landingId: "dmi"|"cars"|"custom", landingUrl, desiredKey?, suffix, currency? }`.
 - `snapLaunchWire(shot, resolved: { adAccountId, pixelId?, profileId, nameParts }) → { wire:
@@ -447,3 +449,29 @@ before the deploy cannot launch on clicks; the mock smoke sends a SWIPES shot an
 The live campaigns still on SWIPES were deleted on Snapchat's side (`_e2e/_snap_goal_purge.mjs`:
 DELETE /v1/campaigns/{id}, cascade to ad squads + ads verified by re-GET) and their keys released
 through the usual reconcile → release recipe (`_e2e/README-snap.md`).
+
+## Addendum 2026-09-23 — campaign objective: Sales by default, following the goal
+
+Owner report 23.09 (a buyer cloning in Ads Manager): our campaigns show the objective "Awareness",
+under which Ads Manager offers no page-view / purchase goal — "as if the API takes one objective and
+sets the event from another". Root cause: the create body carried no `objective_v2_properties`, and
+Snap stamps the legacy default `BRAND_AWARENESS` → `{ objective_v2_type: AWARENESS_AND_ENGAGEMENT,
+is_auto_generated: true }` (read-only probe 23.09: 74/74 live campaigns). The ad squad's
+`optimization_goal` (PIXEL_PURCHASE / LANDING_PAGE_VIEW) is accepted regardless — the objective steers
+no delivery, only Ads Manager's business logic (the goals it offers on the campaign and on a clone).
+
+Now the wire always carries `objective_v2_properties: { objective_v2_type }`:
+- `SNAP_OPTIMIZATION_GOALS[].objective` = the objective a goal implies (Ads Manager's own pairing):
+  PIXEL_PURCHASE → SALES, LANDING_PAGE_VIEW → TRAFFIC. The card's Objective select follows the goal
+  and can override it; `SNAP_DEFAULT_OBJECTIVE = SALES` (the default goal's).
+- `SNAP_OBJECTIVES` = SALES (Pixel purchase + Landing page view) · TRAFFIC · LEADS (Landing page view) —
+  the WEB rows of Snap's objective → optimization-goal matrix (docs read 23.09) that admit a launcher
+  goal; Awareness & Engagement / App promotion admit none and are not offered.
+- `snapLaunchWire`: an unknown objective is refused by name; a goal the matrix does not admit under
+  the objective → `Pixel purchase is not offered under the Traffic objective — choose Landing page
+  view or the Sales objective`; nothing sent (a tab opened before the deploy) → the goal's own objective.
+- Mock: rejects the legacy `objective`, validates `objective_v2_type`, stamps the auto-generated
+  Awareness when the field is missing (as Snap does); the smoke asserts SALES on the happy wave,
+  TRAFFIC on a Landing-page-view shot sent without an objective, and the two 400s.
+- The 74 campaigns born before this keep "Awareness" in Ads Manager (a PUT of the whole object with
+  the objective can be tried on the owner's word); their delivery is unaffected.

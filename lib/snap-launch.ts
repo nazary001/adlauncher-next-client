@@ -181,9 +181,11 @@ export const snapStrategyLabel = (v: string): string => STRATEGY_BY_VALUE.get(v)
  *  (owner ask 23.09: Swipes/clicks, Pixel page view and Impressions are gone). Any other value on
  *  the wire is refused by snapLaunchWire, so a tab opened before the change cannot launch on
  *  clicks. PIXEL_* needs the account's pixel. */
-export const SNAP_OPTIMIZATION_GOALS: readonly { value: string; label: string; needsPixel: boolean }[] = [
-  { value: "PIXEL_PURCHASE", label: "Pixel purchase", needsPixel: true },
-  { value: "LANDING_PAGE_VIEW", label: "Landing page view", needsPixel: false },
+export const SNAP_OPTIMIZATION_GOALS: readonly { value: string; label: string; needsPixel: boolean; objective: string }[] = [
+  // `objective` = the campaign objective the goal implies — Ads Manager's own pairing (Purchases live
+  // under Sales, Landing page views under Traffic); the card follows it, the wire defaults to it.
+  { value: "PIXEL_PURCHASE", label: "Pixel purchase", needsPixel: true, objective: "SALES" },
+  { value: "LANDING_PAGE_VIEW", label: "Landing page view", needsPixel: false, objective: "TRAFFIC" },
 ] as const;
 /** The card's default. Pixel purchase again (the partner's Purchase events reach the pixel since
  *  17.09, so Snap's E3017 "ineligible" no longer bites); Landing page view is the no-pixel way. */
@@ -191,6 +193,34 @@ export const SNAP_DEFAULT_GOAL = "PIXEL_PURCHASE";
 const GOAL_BY_VALUE = new Map(SNAP_OPTIMIZATION_GOALS.map((g) => [g.value, g]));
 export const snapGoalNeedsPixel = (v: string): boolean => GOAL_BY_VALUE.get(v)?.needsPixel ?? false;
 export const snapGoalLabel = (v: string): string => GOAL_BY_VALUE.get(v)?.label ?? v;
+/** The campaign objective a goal implies (undefined for an unknown goal). */
+export const snapObjectiveForGoal = (goal: string): string | undefined => GOAL_BY_VALUE.get(goal)?.objective;
+
+/** Campaign objective — Snap's "Objectives 2.0" (`objective_v2_properties.objective_v2_type`). Pure Ads
+ *  Manager business logic: it steers no delivery, but it decides which optimization goals Ads Manager
+ *  offers on the campaign and on a CLONE of it. Left out, Snap stamps the legacy default
+ *  BRAND_AWARENESS → "Awareness" with is_auto_generated: true (read-only probe 23.09: 74/74 live
+ *  campaigns), and a buyer cloning in Ads Manager finds no Purchase / Landing page view (owner report
+ *  23.09). So the wire always carries one: the card's pick, which follows the goal (Sales for Pixel
+ *  purchase — the default — Traffic for Landing page view; owner ask 23.09) and can be overridden.
+ *  `goals` = the launcher goals Snap's matrix admits under the objective for a WEB conversion (docs read
+ *  23.09: SALES → PIXEL_PURCHASE + LANDING_PAGE_VIEW; TRAFFIC / LEADS → LANDING_PAGE_VIEW). Awareness &
+ *  Engagement and App promotion admit none of the launcher's goals, so they are not offered. */
+export const SNAP_OBJECTIVES: readonly { value: string; label: string; goals: readonly string[] }[] = [
+  { value: "SALES", label: "Sales", goals: ["PIXEL_PURCHASE", "LANDING_PAGE_VIEW"] },
+  { value: "TRAFFIC", label: "Traffic", goals: ["LANDING_PAGE_VIEW"] },
+  { value: "LEADS", label: "Leads", goals: ["LANDING_PAGE_VIEW"] },
+] as const;
+/** The default card's objective = what its default goal implies (Sales). */
+export const SNAP_DEFAULT_OBJECTIVE = "SALES";
+const OBJECTIVE_BY_VALUE = new Map(SNAP_OBJECTIVES.map((o) => [o.value, o]));
+export const snapObjectiveLabel = (v: string): string => OBJECTIVE_BY_VALUE.get(v)?.label ?? v;
+/** The launcher goals an objective admits (none for an unknown objective). */
+export const snapGoalsFor = (objective: string): readonly string[] => OBJECTIVE_BY_VALUE.get(objective)?.goals ?? [];
+/** The shot's objective: the one sent, else the one its goal implies (a tab opened before the field
+ *  existed, an API caller), else Sales. */
+export const snapObjectiveOf = (shot: { objective?: string; optimizationGoal?: string }): string =>
+  String(shot.objective ?? "").trim() || snapObjectiveForGoal(String(shot.optimizationGoal ?? "").trim()) || SNAP_DEFAULT_OBJECTIVE;
 
 /** Calls to action Snap accepts on a WEB_VIEW creative (a curated ten of its list). */
 export const SNAP_CTAS: readonly { value: string; label: string }[] = [
@@ -367,6 +397,8 @@ export type SnapLaunchShotIn = {
   adAccount: string;
   pixel?: string;
   profileId?: string;
+  /** Campaign objective (SNAP_OBJECTIVES); absent = the one the goal implies (Sales for Pixel purchase). */
+  objective?: string;
   optimizationGoal: string;
   bidStrategy: string;
   bid: string;
@@ -390,7 +422,7 @@ export type SnapLaunchShotIn = {
   currency?: string;
 };
 
-export type SnapCampaignWire = { name: string; ad_account_id: string; status: "PAUSED" | "ACTIVE"; start_time: string };
+export type SnapCampaignWire = { name: string; ad_account_id: string; status: "PAUSED" | "ACTIVE"; start_time: string; objective_v2_properties: { objective_v2_type: string } };
 export type SnapAdSquadWire = {
   name: string;
   type: "SNAP_ADS";
@@ -454,7 +486,7 @@ export function snapShotNiche(shot: SnapLaunchShotIn): string {
 
 /**
  * Build the Snap bodies for ONE shot, refusing with the exact fix when a field can't ride.
- * Order: budget → strategy/bid → goal (+pixel) → headline → brand → CTA → creatives → geo → age →
+ * Order: budget → strategy/bid → objective → goal (+pixel) → headline → brand → CTA → creatives → geo → age →
  * devices → landing → Public Profile → key → name. Pure and deterministic: the board's dry-run (placeholder
  * key/media/name) and the pump's real run agree on every refusal.
  */
@@ -477,8 +509,11 @@ export function snapLaunchWire(
   } else if (typedBid) {
     return { refusal: `${snapStrategyLabel(strategy)} takes no bid — clear the bid` };
   }
+  const objective = snapObjectiveOf(shot);
+  if (!OBJECTIVE_BY_VALUE.has(objective)) return { refusal: `Unknown campaign objective "${objective}" — only ${SNAP_OBJECTIVES.map((o) => o.label).join(" / ")}` };
   const goal = String(shot.optimizationGoal ?? "").trim();
   if (!GOAL_BY_VALUE.has(goal)) return { refusal: `Unknown optimization goal "${goal}" — only Pixel purchase or Landing page view` };
+  if (!snapGoalsFor(objective).includes(goal)) return { refusal: `${snapGoalLabel(goal)} is not offered under the ${snapObjectiveLabel(objective)} objective — choose ${snapGoalsFor(objective).map(snapGoalLabel).join(" / ")} or the Sales objective` };
   if (snapGoalNeedsPixel(goal) && !resolved.pixelId) return { refusal: `${snapGoalLabel(goal)} needs a conversion pixel — pick one or choose Landing page view` };
   const headline = squashText(shot.headline);
   if (!headline) return { refusal: "Headline is required" };
@@ -545,7 +580,7 @@ export function snapLaunchWire(
     });
   });
   const wire: SnapLaunchWire = {
-    campaign: { name, ad_account_id: adAccountId, status: "PAUSED", start_time: resolved.startTimeIso },
+    campaign: { name, ad_account_id: adAccountId, status: "PAUSED", start_time: resolved.startTimeIso, objective_v2_properties: { objective_v2_type: objective } },
     adsquad: {
       name,
       type: "SNAP_ADS",
