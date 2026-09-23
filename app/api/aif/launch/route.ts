@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { type Campaign, bidAmountMissing, bidKind, bidTag, normalizeRoasGoal, parseMoney } from "@/lib/types";
+import { type Campaign, bidAmountMissing, bidKind, bidTag, normalizeRoasGoal, parseMoney, withPartnerMark } from "@/lib/types";
 import { AIF_VALUE_PIXEL, type PartnerId, aifOfferablePixels, fullLandingUrl, partnerConfig, pickAifPixel } from "@/lib/partners";
 import { AIF_FLOWS, aifFlowOf } from "@/lib/aif-link";
 import {
@@ -355,7 +355,9 @@ export async function POST(req: Request) {
   // word, not the truth): objective SALES, event Purchase — the only event the CAPI forwarder
   // ever sends into the AIF pixel.
   const serverCampaign: Campaign = { ...campaign, objective: "OUTCOME_SALES", conversionEvent: "PURCHASE" };
-  const name = `${serverCampaign.namePrefix}${serverCampaign.name}`.trim();
+  // The partner mark in the prefix is the ROUTE's, not the client's: a card that kept its MO
+  // prefix across a partner switch still launches here as "(AIF)" (live bug 23.09).
+  const name = withPartnerMark(`${serverCampaign.namePrefix}${serverCampaign.name}`.trim(), partner.label);
 
   const encoder = new TextEncoder();
   const stream = withFbBudget({ deadlineAt: Date.now() + FB_BUDGET_MS, retries: FB_BUDGET_RETRIES }, () =>

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Campaign, FileItem } from "@/lib/types";
-import { bidKind, firstMedia, fullName, isLaunchable, makeCampaign, moEnsureSocMark, todayPrefixDDMM } from "@/lib/types";
+import { bidKind, firstMedia, fullName, isLaunchable, makeCampaign, moEnsureSocMark, todayPrefixDDMM, pinNamePrefix } from "@/lib/types";
 import { geoSummary } from "@/lib/catalog";
 import {
   GCM_POOL_MAX,
@@ -72,7 +72,10 @@ const HS_CHANNEL_LS = "adlauncher.hs.channel";
 function normalize(rows: Campaign[], partner: PartnerConfig, reserved: Set<string> | null): Campaign[] {
   const pool = markerPool(partner);
   const withGcm = pool ? assignPoolCodes(rows, reserved, pool) : rows;
-  return applyPartnerLocks(withGcm, partner);
+  // The fixed name prefix follows the ACTIVE partner: a card born on MO and launched after the
+  // buyer switched to AIF must read "(AIF)" — it kept "(MO)" and every list showed the AIF
+  // wave as MO runs (live bug 23.09). HS has no prefix (LION's grammar builds its own).
+  return applyPartnerLocks(pinNamePrefix(withGcm, namePrefixFor(partner, todayDDMM())), partner);
 }
 
 /** Fresh card with the partner's own defaults on top of makeCampaign's (e.g. HS is born with the

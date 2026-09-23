@@ -111,6 +111,30 @@ export function moEnsureSocMark(name: string): string {
   return m ? `${m[1]}${MO_SOC_MARK}${m[2]}` : `${MO_SOC_MARK}${name}`;
 }
 
+/** The fixed name prefix follows the ACTIVE partner, never the one the card was born on: a card
+ *  built on MO and launched after a switch to AIF must read "(AIF)" everywhere the name shows
+ *  (live bug 23.09: AIF launches went out as "[DD/MM] (MO) - …" and read as MO runs in every
+ *  list). Pure — the SAME array comes back when every prefix already matches, so the board's
+ *  normalize never cascades. `prefix` is namePrefixFor(partner, today) — "" for HS. */
+export function pinNamePrefix(rows: Campaign[], prefix: string): Campaign[] {
+  let changed = false;
+  const next = rows.map((c) => {
+    if (c.namePrefix === prefix) return c;
+    changed = true;
+    return { ...c, namePrefix: prefix };
+  });
+  return changed ? next : rows;
+}
+
+/** Server-side belt for the partner mark inside a prefix-shaped name (`[DD/MM] (X) - …`): the
+ *  route that CREATES the campaign stamps its own partner's label into the parentheses, so a
+ *  stale or tampered client prefix can never name an AIF campaign "(MO)" (or vice versa).
+ *  Names without the prefix grammar pass through untouched; the SOC marker after the prefix is
+ *  kept (it composes with moEnsureSocMark either way round). */
+export function withPartnerMark(name: string, label: string): string {
+  return name.replace(/^(\[\d{2}[./]\d{2}\]\s*)\(([^)]*)\)(\s*-\s*)/, (_m, a: string, _b: string, c: string) => `${a}(${label})${c}`);
+}
+
 export function parseMoney(v: string): number {
   const s = String(v ?? "").replace(/\s/g, "");
   // Mixed "1,234.56" reads the comma as a thousands separator; otherwise every comma is a

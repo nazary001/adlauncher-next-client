@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { type Campaign, bidAmountMissing, bidKind, bidTag, moEnsureSocMark, normalizeRoasGoal, parseMoney } from "@/lib/types";
+import { type Campaign, bidAmountMissing, bidKind, bidTag, moEnsureSocMark, normalizeRoasGoal, parseMoney, withPartnerMark } from "@/lib/types";
 import { conversionEventsFor } from "@/lib/catalog";
 import { ROAS_PIXEL, partnerConfig, fullLandingUrl, type PartnerId } from "@/lib/partners";
 import { resolveMoSigner } from "@/lib/mo-soc";
@@ -403,7 +403,9 @@ export async function POST(req: Request) {
   // Soc-born runs carry the fixed SOC marker in the name (server-side truth — an old/tampered
   // client may send an unmarked one), mirroring the HS token rail's ` TOKEN - ` convention.
   // Alternate SYSTEM users (entry.system) are system-class signers, not соцы — no marker.
-  const baseName = `${campaign.namePrefix}${campaign.name}`.trim();
+  // The partner mark in the prefix is the ROUTE's, not the client's (a card born on AIF and
+  // launched here after a switch keeps "(AIF)" otherwise — twin of the AIF route's belt).
+  const baseName = withPartnerMark(`${campaign.namePrefix}${campaign.name}`.trim(), partner.label);
   const name = !signer.sys ? moEnsureSocMark(baseName) : baseName;
   // &fire=click follows the optimization — and min-ROAS ALWAYS optimizes purchase value, so the
   // funnel must fire Purchase on click regardless of what optimization the client sent (the UI
