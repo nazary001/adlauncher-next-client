@@ -464,9 +464,12 @@ Now the wire always carries `objective_v2_properties: { objective_v2_type }`:
 - `SNAP_OPTIMIZATION_GOALS[].objective` = the objective a goal implies (Ads Manager's own pairing):
   PIXEL_PURCHASE → SALES, LANDING_PAGE_VIEW → TRAFFIC. The card's Objective select follows the goal
   and can override it; `SNAP_DEFAULT_OBJECTIVE = SALES` (the default goal's).
-- `SNAP_OBJECTIVES` = SALES (Pixel purchase + Landing page view) · TRAFFIC · LEADS (Landing page view) —
-  the WEB rows of Snap's objective → optimization-goal matrix (docs read 23.09) that admit a launcher
-  goal; Awareness & Engagement / App promotion admit none and are not offered.
+- `SNAP_OBJECTIVES` = SALES «purchase» (Pixel purchase + Landing page view) · TRAFFIC «page view»
+  (Landing page view) — the two launch kinds (owner ask 23.09, second pass), both always listed in the
+  card's Objective select as "Sales (purchase)" / "Traffic (page view)"; picking Traffic moves a
+  Pixel-purchase card to Landing page view, picking Sales keeps the goal. The WEB rows of Snap's
+  objective → optimization-goal matrix (docs read 23.09) back the pairs; Leads (Landing page view only),
+  Awareness & Engagement and App promotion are not offered.
 - `snapLaunchWire`: an unknown objective is refused by name; a goal the matrix does not admit under
   the objective → `Pixel purchase is not offered under the Traffic objective — choose Landing page
   view or the Sales objective`; nothing sent (a tab opened before the deploy) → the goal's own objective.

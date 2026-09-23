@@ -203,13 +203,14 @@ export const snapObjectiveForGoal = (goal: string): string | undefined => GOAL_B
  *  campaigns), and a buyer cloning in Ads Manager finds no Purchase / Landing page view (owner report
  *  23.09). So the wire always carries one: the card's pick, which follows the goal (Sales for Pixel
  *  purchase — the default — Traffic for Landing page view; owner ask 23.09) and can be overridden.
- *  `goals` = the launcher goals Snap's matrix admits under the objective for a WEB conversion (docs read
- *  23.09: SALES → PIXEL_PURCHASE + LANDING_PAGE_VIEW; TRAFFIC / LEADS → LANDING_PAGE_VIEW). Awareness &
- *  Engagement and App promotion admit none of the launcher's goals, so they are not offered. */
-export const SNAP_OBJECTIVES: readonly { value: string; label: string; goals: readonly string[] }[] = [
-  { value: "SALES", label: "Sales", goals: ["PIXEL_PURCHASE", "LANDING_PAGE_VIEW"] },
-  { value: "TRAFFIC", label: "Traffic", goals: ["LANDING_PAGE_VIEW"] },
-  { value: "LEADS", label: "Leads", goals: ["LANDING_PAGE_VIEW"] },
+ *  Exactly the two launch kinds the owner runs (ask 23.09, second pass): Sales (purchase) and Traffic
+ *  (page view) — the card lists both, always. `goals` = the launcher goals Snap's matrix admits under
+ *  the objective for a WEB conversion (docs read 23.09: SALES → PIXEL_PURCHASE + LANDING_PAGE_VIEW;
+ *  TRAFFIC → LANDING_PAGE_VIEW); `note` = the launch kind in the buyer's words, shown next to the label.
+ *  Leads (Landing page view only), Awareness & Engagement and App promotion are not offered. */
+export const SNAP_OBJECTIVES: readonly { value: string; label: string; note: string; goals: readonly string[] }[] = [
+  { value: "SALES", label: "Sales", note: "purchase", goals: ["PIXEL_PURCHASE", "LANDING_PAGE_VIEW"] },
+  { value: "TRAFFIC", label: "Traffic", note: "page view", goals: ["LANDING_PAGE_VIEW"] },
 ] as const;
 /** The default card's objective = what its default goal implies (Sales). */
 export const SNAP_DEFAULT_OBJECTIVE = "SALES";

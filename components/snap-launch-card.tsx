@@ -266,6 +266,8 @@ const micro = "text-[10px] font-semibold uppercase tracking-[0.16em] text-faint 
 
 const COUNTRY_OPTIONS = COUNTRIES.filter((c) => c.code !== "WW").map((c) => ({ value: c.code, label: c.name }));
 const GOAL_OPTIONS = SNAP_OPTIMIZATION_GOALS.map((g) => ({ value: g.value, label: g.label }));
+// Both launch kinds, always listed: "Sales (purchase)" / "Traffic (page view)".
+const OBJECTIVE_OPTIONS = SNAP_OBJECTIVES.map((o) => ({ value: o.value, label: `${o.label} (${o.note})` }));
 const STRATEGY_OPTIONS = SNAP_BID_STRATEGIES.map((s) => ({ value: s.value, label: s.label }));
 const CTA_OPTIONS = SNAP_CTAS.map((c) => ({ value: c.value, label: c.label }));
 const AGE_OPTIONS = SNAP_MIN_AGES.map((a) => ({ value: a, label: `${a}+` }));
@@ -353,10 +355,6 @@ export function SnapLaunchCard({
   const sym = snapCurrencySymbol(currency || "USD");
   const copies = snapCardCopies(card);
   const needsPixel = snapGoalNeedsPixel(card.optimizationGoal);
-  // The objectives Snap's matrix admits for the card's goal (all of them when the goal is unknown, so
-  // a stale card still shows its choice and the validator names the problem).
-  const admitting = SNAP_OBJECTIVES.filter((o) => o.goals.includes(card.optimizationGoal));
-  const objectiveOptions = (admitting.length ? admitting : SNAP_OBJECTIVES).map((o) => ({ value: o.value, label: o.label }));
   const [copied, setCopied] = useState(false);
   // Pixel size per file id, read client-side after the drop (Snap wants 1080×1920, 9:16); null =
   // unreadable. Display-only, so it lives here and not on the card: a duplicated card re-reads it.
@@ -479,15 +477,15 @@ export function SnapLaunchCard({
                 value={card.objective}
                 onChange={(e) => {
                   const objective = e.target.value;
-                  // Only objectives admitting the goal are listed; should a stale card hold another, keep
-                  // the goal when admitted, else the first goal the objective does admit.
+                  // Both objectives are always listed: keep the goal when the new objective admits it (Sales
+                  // admits both), else move to the first goal it does admit (Traffic → Landing page view).
                   const allowed = snapGoalsFor(objective);
                   patch({ objective, optimizationGoal: allowed.includes(card.optimizationGoal) ? card.optimizationGoal : (allowed[0] ?? card.optimizationGoal) });
                 }}
-                options={objectiveOptions}
+                options={OBJECTIVE_OPTIONS}
                 aria-label="Campaign objective"
               />
-              <span className="text-[10px] leading-snug text-faint">Follows the goal (Sales for Pixel purchase, Traffic for Landing page view) — what Ads Manager shows and clones by.</span>
+              <span className="text-[10px] leading-snug text-faint">Sales by default; Traffic = the page-view launch. Follows the goal (Pixel purchase → Sales, Landing page view → Traffic) — Ads Manager shows the campaign under it and clones by it.</span>
             </div>
             <div className="flex flex-col gap-1.5">
               <span className={micro}>Optimization goal</span>
