@@ -2,6 +2,7 @@ import type { ComponentType, SVGProps } from "react";
 import { BrazilFlag, IndiaFlag, UsaFlag } from "@/components/icons";
 import type { Campaign } from "./types";
 import { bidKind } from "./types";
+import { type AifFlow, AIF_RW_BASE, aifFlowOf, aifLinkSegments } from "./aif-link";
 
 export type Bound = { id: string; name: string };
 
@@ -13,6 +14,9 @@ export type Landing = {
   lang: "EN" | "ES" | "AR";
   /** Niche section the landing picker groups under (Cars / Loans / MK Digital / …). */
   niche: string;
+  /** AIF only: which Airfind account + page shape the article launches on (lib/aif-link) — the
+   *  Quiz Flow articles live on another domain under another clientId. Unset = RW. */
+  flow?: AifFlow;
 };
 
 export type PartnerConfig = {
@@ -179,14 +183,18 @@ const MO_DEFAULT_PIXEL: Bound = VD_C1_HS_11;
  *  and /api/clone/run. The AIF rail's pin — AIF_VALUE_PIXEL — is the same pixel. */
 export const ROAS_PIXEL: Bound = VD_C1_HS_11;
 
-// ---- AIF (Airfind "Google Rewarded Web") ----------------------------------------------------
+// ---- AIF (Airfind "Google Rewarded Web" + "Quiz Flow Rewarded Web") -------------------------
 // Link contract from the partner's implementation guide (GC-coding/AIF, 2026-08): traffic goes to
 // the RW page with our clientId, a brand marker for revenue segmentation and the article slug in
 // `destination`. `ppid={{campaign.id}}` is ours: the RW page echoes every query param into the
 // postback (→ our CAPI forwarder), so the macro auto-ties each conversion to its campaign and
-// feeds the partner's click-spam report. FB appends fbclid itself.
-export const AIF_RW_BASE = "https://content.honeyandhues.com/rewarded";
-export const AIF_CLIENT_ID = "52105";
+// feeds the partner's click-spam report. FB appends fbclid itself. Since 23.09 a SECOND partner
+// account carries the Quiz Flow articles (another domain, clientId 52149, same echo postback):
+// the shapes, bases and ids of BOTH flows live in lib/aif-link.ts (pure — shared with the route
+// and `node --test`) and are re-exported here for the existing import sites. The flow is a
+// property of the catalog entry (Landing.flow) — see the Quiz Flow section of AIF_LANDINGS.
+export { AIF_RW_BASE, AIF_CLIENT_ID, AIF_QUIZ_BASE, AIF_QUIZ_CLIENT_ID, AIF_FLOWS } from "./aif-link";
+export type { AifFlow } from "./aif-link";
 /** The AIF rail's value pixel «VD-C1-HS-11» — the VD-C1 admin shared it to all 12 AIF cabinets
  *  on 09-02 (the rail's sibling of MO's VD-C1-HS-1), and a validate_only probe the same day
  *  confirmed it VO-ELIGIBLE (VALUE + roas_average_floor accepted) → min-ROAS pins THIS pixel
@@ -253,6 +261,11 @@ const AIF_LANDINGS: Landing[] = [
   { slug: "skill-verification-and-micro-credentials-vs-traditional-degrees", title: "Micro-Credentials vs Traditional Degrees", lang: "EN", niche: "Education" },
   { slug: "assisted-living-for-seniors", title: "Assisted Living for Seniors", lang: "EN", niche: "Lifestyle" },
   { slug: "these-2026-bathroom-design-features-are-getting-attention", title: "2026 Bathroom Design Features", lang: "EN", niche: "Lifestyle" },
+  // Quiz Flow (partner account 52149 on swiftsearch.co — partner message 23.09): the article opens
+  // in the quiz layout and the reward ad plays after the quiz. Own contiguous section, tagged QUIZ
+  // in the picker. The partner's catalog for this flow is ONE article so far — extend here as
+  // they send more (flow: "quiz" is what switches the link shape + account, nothing else).
+  { slug: "baseball-usa-2026", title: "Baseball USA 2026 — The Game Plan", lang: "EN", niche: "Quiz Flow", flow: "quiz" },
 ];
 
 /** Google is a PLATFORM tab (not a PartnerId): the console's Google rail runs entirely through
@@ -440,18 +453,10 @@ export function landingUrlSegments(
   // campaign's pixel rides along too (09-02): the postback→CAPI forwarder routes the Purchase
   // into that pixel (absent/unknown → its default, the AIF postback pixel). No fire param — the
   // conversion side lives entirely in the forwarder, not on the landing.
-  if (p.aifLaunch) {
-    const segs: LinkSegment[] = [
-      { text: `${p.landingBase}?destination=`, role: "base" },
-      { text: slug, role: "slug" },
-      { text: `&clientId=${AIF_CLIENT_ID}`, role: "params" },
-      { text: "&brand=", role: "gcmKey" },
-      { text: gcm, role: "gcm" },
-      { text: "&ppid={{campaign.id}}", role: "params" },
-    ];
-    if (isPixelId(pixel)) segs.push({ text: `&pixel=${pixel}`, role: "pixel" });
-    return segs;
-  }
+  // WHICH Airfind account the link lands on (RW / Quiz Flow) is the article's property, read
+  // from the catalog entry — so the card's preview and the launched link can never disagree
+  // with the server's own catalog check (lib/aif-link builds both shapes).
+  if (p.aifLaunch) return aifLinkSegments(aifFlowOf(p.landings, slug), slug, gcm, pixel);
   const medium = p.nameTier ? `&utm_medium=${p.nameTier}` : "";
   const segs: LinkSegment[] = [
     { text: `${p.landingBase}/`, role: "base" },

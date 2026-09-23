@@ -27,6 +27,7 @@ import {
 import { hsFinalLink, hsLinkSegments, hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { AIF_VALUE_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifOfferablePixels, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
+import { aifFlowOf } from "@/lib/aif-link";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
 import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-adaccounts";
@@ -404,12 +405,14 @@ function CampaignCardBase({
   // Fanpages (Indians) come from the partner, not the profile; other partners use profile pages.
   const pageOptions = partner.fanpages.length ? partner.fanpages : pagesFor(c.profile);
   // Niche section headers + language tags in the picker; searching "dental" / "es" narrows.
+  // AIF Quiz Flow articles (another partner account + domain — lib/aif-link) wear a QUIZ tag in
+  // place of the language, so the buyer sees which link shape the card is about to launch.
   const landingOptions = partner.landings.map((l) => ({
     value: l.slug,
     label: l.title,
     group: l.niche,
-    tag: l.lang,
-    tagTone: l.lang === "ES" ? ("ok" as const) : ("dim" as const),
+    tag: l.flow === "quiz" ? "QUIZ" : l.lang,
+    tagTone: l.flow === "quiz" ? ("warn" as const) : l.lang === "ES" ? ("ok" as const) : ("dim" as const),
   }));
   const conversions = c.optimization === "conversions";
   // AIF: the cabinet's OFFERABLE pixels (token catalog minus the retired «GC for AIF» / «GC
@@ -1070,7 +1073,7 @@ function CampaignCardBase({
                   ) : aifMode ? (
                     <Field
                       label="Destination article"
-                      hint="the partner's standard articles — the RW link carries the bare slug"
+                      hint="the partner's standard articles — RW links carry the bare slug; QUIZ-tagged articles launch on the Quiz Flow account (swiftsearch.co, clientId 52149)"
                     >
                       <div>
                         <SearchSelect
@@ -1094,7 +1097,7 @@ function CampaignCardBase({
                             </div>
                             <div className="flex items-center justify-between gap-2 border-t border-line bg-surface/50 px-2 py-1.5">
                               <span className="select-none font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-                                RW link
+                                {aifFlowOf(partner.landings, c.landing) === "quiz" ? "Quiz Flow link" : "RW link"}
                               </span>
                               <CopyLinkButton
                                 copied={copied}

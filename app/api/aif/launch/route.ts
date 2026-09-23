@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { type Campaign, bidAmountMissing, bidKind, bidTag, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { AIF_VALUE_PIXEL, type PartnerId, aifOfferablePixels, fullLandingUrl, partnerConfig, pickAifPixel } from "@/lib/partners";
+import { AIF_FLOWS, aifFlowOf } from "@/lib/aif-link";
 import {
   type LaunchBinds,
   SUPPORTED_BID_STRATEGIES,
@@ -71,7 +72,9 @@ async function resolveLocales(names: string[], rail: AifRail): Promise<number[]>
  * for stage (same NDJSON events, same Task Manager pipeline, up to 5 creatives per campaign —
  * one campaign → one ad set → one ad per creative, 09-02), with the rail's own pieces:
  * the tree is built on the AIF token, the marker comes from the BRAND registry (aif-maps,
- * test01..test700), the ad link is the partner's RW page with the destination slug, and the
+ * test01..test700), the ad link is the partner's RW page with the destination slug — or, for a
+ * catalog article marked flow "quiz", the Quiz Flow article page on the partner's second
+ * account (lib/aif-link; same echo postback, same forwarder) — and the
  * pixel comes from the cabinet's OFFERABLE list (token catalog minus retired — owner call
  * 09-02 pt3): min-ROAS pins the rail's value pixel VD-C1-HS-11, plain conversions bind the
  * buyer's pick (or the pickAifPixel auto-default), and the bound pixel rides the RW link's
@@ -243,6 +246,10 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
+  // The article's FLOW decides which Airfind account the link (and its postback) lands on — RW
+  // (52105) or the Quiz Flow (52149) — read from the same catalog entry the slug was just
+  // validated against, never from the client.
+  const flow = aifFlowOf(partner.landings, slug);
   if (medias.length === 0 || medias.some((m) => !m.url)) {
     return NextResponse.json({ ok: false, stage: "media", error: "media_required" }, { status: 400 });
   }
@@ -390,7 +397,9 @@ export async function POST(req: Request) {
         claim = await claimBrand(serverCampaign.gcm, {
           campaign_name: name,
           destination: slug,
-          notes: "claimed via adlauncher launch",
+          // The flow + partner clientId ride the registry note: this brand's revenue shows up in
+          // THAT client's reporting, and the note says which one to look in.
+          notes: `claimed via adlauncher launch (${AIF_FLOWS[flow].label} · clientId ${AIF_FLOWS[flow].clientId})`,
         });
         const brand = claim.brand;
         // The pixel rides the RW link (echoed into the postback) so the CAPI forwarder lands
@@ -500,7 +509,7 @@ export async function POST(req: Request) {
           gcm: brand, // the shared task row's marker column carries the brand on this rail
           error: null,
         });
-        send({ ok: true, stage: "done", gcm: brand, link, page_id: binds.pageId, ...created });
+        send({ ok: true, stage: "done", gcm: brand, link, flow, page_id: binds.pageId, ...created });
       } catch (e) {
         const err = e as FbError;
         // Free the account's launch slot when NO campaign was created — the window only meters
