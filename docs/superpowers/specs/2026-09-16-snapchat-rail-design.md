@@ -64,7 +64,7 @@ LION (`LION_TOKEN`) works — no new credential for the report.
 - Campaign: `POST /adaccounts/{id}/campaigns {name ≤375, ad_account_id, status ACTIVE|PAUSED, start_time
   (ISO, required), daily_budget_micro?, lifetime_spend_cap_micro?, buy_model? (AUCTION default)}`;
   `objective` is rejected since 2025 — `objective_v2_properties: { objective_v2_type }` rides on EVERY create
-  (the card's objective, Sales by default — addendum 23.09 below; left out, Snap stamps the legacy
+  (always SALES — addendum 23.09 below; left out, Snap stamps the legacy
   BRAND_AWARENESS / "Awareness" with `is_auto_generated: true`).
   Update = `PUT /adaccounts/{id}/campaigns` with the **whole object** (`id, name, ad_account_id,
   status, start_time, buy_model, objective_v2_properties` — omitted attributes reset to defaults), so a
@@ -191,7 +191,7 @@ LION (`LION_TOKEN`) works — no new credential for the report.
   `SNAP_BUDGET_MIN = 5` … `10 000` per day (Snap's own floor is USD 5), default `SNAP_DEFAULT_BUDGET =
   "10,00"`; bid `0,01 … 500` (Snap's USD bid_micro range). Refusals name the field and the fix.
 - `snapShotTaskId(waveId, i) → "snl-<wave>-NN"`; `SNAP_WAVE_ID_RE` as Google's; `SNAP_MAX_SHOTS = 45`.
-- `SnapLaunchShotIn { label?, adAccount, pixel?, profileId?, objective?, optimizationGoal, bidStrategy, bid, budget,
+- `SnapLaunchShotIn { label?, adAccount, pixel?, profileId?, optimizationGoal, bidStrategy, bid, budget,
   startPaused, headline, brandName, cta, mediaUrl, mediaKind:"video"|"image", mediaName, geo: string[],
   minAge, landingId: "dmi"|"cars"|"custom", landingUrl, desiredKey?, suffix, currency? }`.
 - `snapLaunchWire(shot, resolved: { adAccountId, pixelId?, profileId, nameParts }) → { wire:
@@ -478,3 +478,12 @@ Now the wire always carries `objective_v2_properties: { objective_v2_type }`:
   TRAFFIC on a Landing-page-view shot sent without an objective, and the two 400s.
 - The 74 campaigns born before this keep "Awareness" in Ads Manager (a PUT of the whole object with
   the objective can be tried on the owner's word); their delivery is unaffected.
+
+### Third pass, same day — no Objective select; the wire always sends SALES
+
+Owner ask 23.09 (third pass): keep the Optimization goal select with both goals always pickable, drop
+the Objective select, and send `objective_v2_properties: { objective_v2_type: SALES }` on every campaign
+whatever the goal. `SNAP_CAMPAIGN_OBJECTIVE = "SALES"` replaces `SNAP_OBJECTIVES` / `snapObjectiveOf` /
+the card's `objective` field; Snap's SALES/web row admits both launcher goals, so no goal-vs-objective
+refusal remains. A stray `objective` on a shot (a tab from the window when the card had the select) is
+ignored. The mock smoke asserts SALES on the happy wave and on a Landing-page-view shot.

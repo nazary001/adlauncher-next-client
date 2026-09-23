@@ -15,11 +15,7 @@ import {
   SNAP_NAME_MAX,
   SNAP_OPTIMIZATION_GOALS,
   SNAP_DEFAULT_GOAL,
-  SNAP_OBJECTIVES,
-  SNAP_DEFAULT_OBJECTIVE,
-  snapGoalsFor,
-  snapObjectiveForGoal,
-  snapObjectiveLabel,
+  SNAP_CAMPAIGN_OBJECTIVE,
   snapAdUnitName,
   snapShotMediaIn,
   snapBidKind,
@@ -62,28 +58,9 @@ test("vocabulary: three bid strategies (no MIN_ROAS), five goals, PIXEL_* need a
   assert.equal(snapGoalNeedsPixel("LANDING_PAGE_VIEW"), false);
   assert.equal(snapGoalNeedsPixel("SWIPES"), false);
   assert.equal(snapGoalNeedsPixel("NOPE"), false);
-  // Campaign objective (owner ask 23.09): each goal implies one (Ads Manager's pairing) — Sales for
-  // Pixel purchase (the default), Traffic for Landing page view; the vocabulary = the two launch kinds,
-  // Sales (purchase) and Traffic (page view), both always listed — Leads / Awareness / App promotion are
-  // not offered (Snap's WEB matrix, docs 23.09, backs the pairs).
-  assert.deepEqual(SNAP_OPTIMIZATION_GOALS.map((g) => [g.value, g.objective]), [
-    ["PIXEL_PURCHASE", "SALES"],
-    ["LANDING_PAGE_VIEW", "TRAFFIC"],
-  ]);
-  assert.equal(snapObjectiveForGoal("PIXEL_PURCHASE"), "SALES");
-  assert.equal(snapObjectiveForGoal("NOPE"), undefined);
-  assert.deepEqual(SNAP_OBJECTIVES.map((o) => [o.value, o.note, [...o.goals]]), [
-    ["SALES", "purchase", ["PIXEL_PURCHASE", "LANDING_PAGE_VIEW"]],
-    ["TRAFFIC", "page view", ["LANDING_PAGE_VIEW"]],
-  ]);
-  assert.equal(SNAP_DEFAULT_OBJECTIVE, "SALES");
-  assert.equal(SNAP_DEFAULT_OBJECTIVE, snapObjectiveForGoal(SNAP_DEFAULT_GOAL));
-  // every goal's implied objective admits it
-  for (const g of SNAP_OPTIMIZATION_GOALS) assert.ok(snapGoalsFor(g.objective).includes(g.value), g.value);
-  assert.deepEqual(snapGoalsFor("AWARENESS_AND_ENGAGEMENT"), []);
-  assert.deepEqual(snapGoalsFor("LEADS"), []);
-  assert.equal(snapObjectiveLabel("TRAFFIC"), "Traffic");
-  assert.equal(snapObjectiveLabel("NOPE"), "NOPE");
+  // Campaign objective (owner ask 23.09, third pass): ALWAYS Sales on the wire, no objective field on the
+  // card — Snap's SALES/web row admits both launcher goals (docs 23.09).
+  assert.equal(SNAP_CAMPAIGN_OBJECTIVE, "SALES");
   assert.equal(SNAP_CTAS[0].value, "MORE");
   assert.ok(SNAP_CTAS.every((c) => /^[A-Z_]+$/.test(c.value)));
   assert.deepEqual(SNAP_GEO_PRESETS.map((p) => p.label), ["US", "Anglo", "LATAM", "Franco", "EU"]);
@@ -219,15 +196,15 @@ test("happy path: the Snap bodies (one creative → one ad unit) + the final lan
   assert.equal(r.wire.landingUrl, "https://fast-flow.org/ht/captcha-1/cars/en/?utm_source=stone&utm_campaign=glo-snp_003");
 });
 
-test("a bid strategy carries bid_micro; a goal without a pixel sends no pixel_id; no objective sent → the goal's own (Landing page view → Traffic), a sent one rides as is", () => {
+test("a bid strategy carries bid_micro; a goal without a pixel sends no pixel_id; the campaign objective is Sales whatever the goal (a stray objective on the shot is ignored)", () => {
   const r = snapLaunchWire(shot({ bidStrategy: "LOWEST_COST_WITH_MAX_BID", bid: "0,50", optimizationGoal: "LANDING_PAGE_VIEW", pixel: "" }), { ...resolved, pixelId: undefined });
   assert.ok(!("refusal" in r));
   if ("refusal" in r) return;
-  assert.deepEqual(r.wire.campaign.objective_v2_properties, { objective_v2_type: "TRAFFIC" });
+  assert.deepEqual(r.wire.campaign.objective_v2_properties, { objective_v2_type: "SALES" });
   assert.equal(r.wire.adsquad.optimization_goal, "LANDING_PAGE_VIEW");
-  const overridden = snapLaunchWire(shot({ objective: "SALES", optimizationGoal: "LANDING_PAGE_VIEW", pixel: "" }), { ...resolved, pixelId: undefined });
-  assert.ok(!("refusal" in overridden));
-  if (!("refusal" in overridden)) assert.deepEqual(overridden.wire.campaign.objective_v2_properties, { objective_v2_type: "SALES" });
+  const stray = snapLaunchWire({ ...shot({ optimizationGoal: "LANDING_PAGE_VIEW", pixel: "" }), objective: "TRAFFIC" } as SnapLaunchShotIn, { ...resolved, pixelId: undefined });
+  assert.ok(!("refusal" in stray));
+  if (!("refusal" in stray)) assert.deepEqual(stray.wire.campaign.objective_v2_properties, { objective_v2_type: "SALES" });
   assert.equal(r.wire.adsquad.bid_micro, 500_000);
   assert.equal(r.wire.adsquad.pixel_id, undefined);
   assert.equal(r.label, "max $0,5");
@@ -275,15 +252,6 @@ test("refusal matrix names the field and the fix", () => {
   assert.match(refusal(shot({ bidStrategy: "TARGET_COST", bid: "600" })), /0,01.*500/);
   assert.match(refusal(shot({ bidStrategy: "AUTO_BID", bid: "1" })), /takes no bid/);
   assert.match(refusal(shot({ optimizationGoal: "NOPE" })), /Unknown optimization goal/);
-  // campaign objective (23.09): unknown → by name with the three offered; a goal Snap's matrix does not
-  // admit under the objective → the goals it does, or Sales; nothing sent = the goal's own objective
-  assert.equal(refusal(shot({ objective: "AWARENESS_AND_ENGAGEMENT" })), "Unknown campaign objective \"AWARENESS_AND_ENGAGEMENT\" — only Sales / Traffic");
-  assert.equal(refusal(shot({ objective: "LEADS", optimizationGoal: "LANDING_PAGE_VIEW", pixel: "" })), "Unknown campaign objective \"LEADS\" — only Sales / Traffic");
-  assert.equal(refusal(shot({ objective: "TRAFFIC" })), "Pixel purchase is not offered under the Traffic objective — choose Landing page view or the Sales objective");
-  assert.equal(refusal(shot({ objective: "TRAFFIC", optimizationGoal: "LANDING_PAGE_VIEW", pixel: "" })), "");
-  assert.equal(refusal(shot({ objective: "SALES", optimizationGoal: "LANDING_PAGE_VIEW", pixel: "" })), "");
-  assert.equal(refusal(shot({ objective: "" })), "");
-  assert.equal(refusal(shot({ objective: " SALES " })), "");
   // the goals removed 23.09 are refused by name, with the two that remain spelled out
   for (const gone of ["SWIPES", "PIXEL_PAGE_VIEW", "IMPRESSIONS"]) {
     assert.match(refusal(shot({ optimizationGoal: gone, pixel: "" })), new RegExp(`Unknown optimization goal "${gone}" — only Pixel purchase or Landing page view`));
