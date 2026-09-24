@@ -15,7 +15,9 @@ import {
   SNAP_NAME_MAX,
   SNAP_OPTIMIZATION_GOALS,
   SNAP_DEFAULT_GOAL,
-  SNAP_CAMPAIGN_OBJECTIVE,
+  SNAP_OBJECTIVES,
+  SNAP_DEFAULT_OBJECTIVE,
+  snapObjectiveOf,
   snapAdUnitName,
   snapShotMediaIn,
   snapBidKind,
@@ -58,9 +60,17 @@ test("vocabulary: three bid strategies (no MIN_ROAS), five goals, PIXEL_* need a
   assert.equal(snapGoalNeedsPixel("LANDING_PAGE_VIEW"), false);
   assert.equal(snapGoalNeedsPixel("SWIPES"), false);
   assert.equal(snapGoalNeedsPixel("NOPE"), false);
-  // Campaign objective (owner ask 23.09, third pass): ALWAYS Sales on the wire, no objective field on the
-  // card — Snap's SALES/web row admits both launcher goals (docs 23.09).
-  assert.equal(SNAP_CAMPAIGN_OBJECTIVE, "SALES");
+  // Campaign objective (owner ask 24.09): the card picks it again — "Awareness & Engagement" = how every
+  // campaign launched before 23.09 (nothing on the wire, Snap stamps its own default) and "Sales" (sent
+  // explicitly). Awareness & Engagement is the default; both admit both launcher goals.
+  assert.deepEqual(SNAP_OBJECTIVES.map((o) => [o.value, o.label, o.wire]), [
+    ["AWARENESS_AND_ENGAGEMENT", "Awareness & Engagement", null],
+    ["SALES", "Sales", "SALES"],
+  ]);
+  assert.equal(SNAP_DEFAULT_OBJECTIVE, "AWARENESS_AND_ENGAGEMENT");
+  assert.equal(snapObjectiveOf({}), "AWARENESS_AND_ENGAGEMENT");
+  assert.equal(snapObjectiveOf({ objective: "" }), "AWARENESS_AND_ENGAGEMENT");
+  assert.equal(snapObjectiveOf({ objective: " sales " }), "SALES");
   assert.equal(SNAP_CTAS[0].value, "MORE");
   assert.ok(SNAP_CTAS.every((c) => /^[A-Z_]+$/.test(c.value)));
   assert.deepEqual(SNAP_GEO_PRESETS.map((p) => p.label), ["US", "Anglo", "LATAM", "Franco", "EU"]);
@@ -152,11 +162,11 @@ test("happy path: the Snap bodies (one creative → one ad unit) + the final lan
     ad_account_id: "acct-a",
     status: "PAUSED",
     start_time: "2026-09-16T12:00:00.000Z",
-    // Sales at the campaign level (owner ask 23.09): omitted, Snap stamps BRAND_AWARENESS / "Awareness"
-    // (probe 23.09: 74/74 live campaigns is_auto_generated) and Ads Manager offers no Purchase /
-    // Landing page view on a clone. SALES + web allows both launcher goals (docs 23.09).
-    objective_v2_properties: { objective_v2_type: "SALES" },
+    // Awareness & Engagement by default (owner ask 24.09: "as before") = NO objective on the wire —
+    // Snap stamps its own BRAND_AWARENESS / Awareness & Engagement (is_auto_generated, probe 23.09:
+    // 74/74 live campaigns) and takes PIXEL_PURCHASE / LANDING_PAGE_VIEW squads under it regardless.
   });
+  assert.equal("objective_v2_properties" in r.wire.campaign, false);
   assert.deepEqual(r.wire.adsquad, {
     name: resolved.name,
     type: "SNAP_ADS",
@@ -196,19 +206,42 @@ test("happy path: the Snap bodies (one creative → one ad unit) + the final lan
   assert.equal(r.wire.landingUrl, "https://fast-flow.org/ht/captcha-1/cars/en/?utm_source=stone&utm_campaign=glo-snp_003");
 });
 
-test("a bid strategy carries bid_micro; a goal without a pixel sends no pixel_id; the campaign objective is Sales whatever the goal (a stray objective on the shot is ignored)", () => {
+test("a bid strategy carries bid_micro; a goal without a pixel sends no pixel_id; Awareness & Engagement keeps the objective off the wire whatever the goal", () => {
   const r = snapLaunchWire(shot({ bidStrategy: "LOWEST_COST_WITH_MAX_BID", bid: "0,50", optimizationGoal: "LANDING_PAGE_VIEW", pixel: "" }), { ...resolved, pixelId: undefined });
   assert.ok(!("refusal" in r));
   if ("refusal" in r) return;
-  assert.deepEqual(r.wire.campaign.objective_v2_properties, { objective_v2_type: "SALES" });
+  assert.equal(r.wire.campaign.objective_v2_properties, undefined);
   assert.equal(r.wire.adsquad.optimization_goal, "LANDING_PAGE_VIEW");
-  const stray = snapLaunchWire({ ...shot({ optimizationGoal: "LANDING_PAGE_VIEW", pixel: "" }), objective: "TRAFFIC" } as SnapLaunchShotIn, { ...resolved, pixelId: undefined });
-  assert.ok(!("refusal" in stray));
-  if (!("refusal" in stray)) assert.deepEqual(stray.wire.campaign.objective_v2_properties, { objective_v2_type: "SALES" });
   assert.equal(r.wire.adsquad.bid_micro, 500_000);
   assert.equal(r.wire.adsquad.pixel_id, undefined);
   assert.equal(r.label, "max $0,5");
   assert.equal(r.bidMicro, 500_000);
+});
+
+test("objective Sales rides on the wire explicitly, with either goal; an unknown objective is refused by name", () => {
+  const sales = snapLaunchWire(shot({ objective: "SALES" }), resolved);
+  assert.ok(!("refusal" in sales), JSON.stringify(sales));
+  if (!("refusal" in sales)) {
+    assert.deepEqual(sales.wire.campaign.objective_v2_properties, { objective_v2_type: "SALES" });
+    assert.equal(sales.wire.adsquad.optimization_goal, "PIXEL_PURCHASE");
+  }
+  const salesLpv = snapLaunchWire(shot({ objective: "SALES", optimizationGoal: "LANDING_PAGE_VIEW", pixel: "" }), { ...resolved, pixelId: undefined });
+  assert.ok(!("refusal" in salesLpv), JSON.stringify(salesLpv));
+  if (!("refusal" in salesLpv)) {
+    assert.deepEqual(salesLpv.wire.campaign.objective_v2_properties, { objective_v2_type: "SALES" });
+    assert.equal(salesLpv.wire.adsquad.optimization_goal, "LANDING_PAGE_VIEW");
+  }
+  // Awareness & Engagement named explicitly = the default = nothing on the wire, Pixel purchase included.
+  const aware = snapLaunchWire(shot({ objective: "AWARENESS_AND_ENGAGEMENT" }), resolved);
+  assert.ok(!("refusal" in aware), JSON.stringify(aware));
+  if (!("refusal" in aware)) {
+    assert.equal(aware.wire.campaign.objective_v2_properties, undefined);
+    assert.equal(aware.wire.adsquad.optimization_goal, "PIXEL_PURCHASE");
+    assert.equal(aware.wire.adsquad.pixel_id, "px-1");
+  }
+  const bad = snapLaunchWire(shot({ objective: "TRAFFIC" }), resolved);
+  assert.ok("refusal" in bad);
+  if ("refusal" in bad) assert.match(bad.refusal, /Unknown campaign objective "TRAFFIC" — only Awareness & Engagement \/ Sales/);
 });
 
 test("pasted landing: https base with its own query dropped, Snap's tags and the campaign's OWN key appended; the niche is read from the path", () => {

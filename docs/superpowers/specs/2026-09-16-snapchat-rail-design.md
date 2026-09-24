@@ -488,3 +488,25 @@ whatever the goal. `SNAP_CAMPAIGN_OBJECTIVE = "SALES"` replaces `SNAP_OBJECTIVES
 the card's `objective` field; Snap's SALES/web row admits both launcher goals, so no goal-vs-objective
 refusal remains. A stray `objective` on a shot (a tab from the window when the card had the select) is
 ignored. The mock smoke asserts SALES on the happy wave and on a Landing-page-view shot.
+
+### Fourth pass, 2026-09-24 — the Objective select is back: Awareness & Engagement (as before) or Sales
+
+Owner ask 24.09: launch "as we did before" and let the buyer pick the objective (Ads Manager's own
+"Awareness & Engagement" row), while the Optimization goal select (Pixel purchase / Landing page view,
+with its E3017 hint) keeps working under either choice.
+
+- `SNAP_OBJECTIVES` = AWARENESS_AND_ENGAGEMENT «Awareness & Engagement» (`wire: null`) · SALES «Sales»
+  (`wire: "SALES"`); `SNAP_DEFAULT_OBJECTIVE = AWARENESS_AND_ENGAGEMENT`; `snapObjectiveOf(shot)` = the
+  sent value (trimmed, upper-cased) or the default. The card's DELIVERY row opens with the Objective
+  select (five columns again) and a one-line note under it; the shot carries `objective`
+  (`buildSnapShot`, the signature, `cleanShot` in the wave).
+- Wire: `objective_v2_properties` rides ONLY for Sales. Awareness & Engagement sends nothing — exactly
+  the pre-23.09 body — so Snap stamps its own `BRAND_AWARENESS` / `{ AWARENESS_AND_ENGAGEMENT,
+  is_auto_generated: true }` and takes PIXEL_PURCHASE / LANDING_PAGE_VIEW squads under it, as the 74
+  live campaigns prove. It is deliberately not sent by name: named, Snap would validate its own matrix
+  for that objective (impressions / swipes / video views), which has no purchase or page-view goal.
+  `SnapCampaignWire.objective_v2_properties` is optional; an unknown objective is refused by name
+  (`Unknown campaign objective "TRAFFIC" — only Awareness & Engagement / Sales`); no goal-vs-objective
+  refusal exists (both objectives admit both launcher goals).
+- Mock smoke: the happy wave asserts the auto-generated Awareness (nothing sent), the paused shot sends
+  `objective: SALES` with Landing page view and asserts SALES set by us; TRAFFIC → 400.

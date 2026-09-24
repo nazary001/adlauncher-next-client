@@ -192,16 +192,26 @@ export const SNAP_DEFAULT_GOAL = "PIXEL_PURCHASE";
 const GOAL_BY_VALUE = new Map(SNAP_OPTIMIZATION_GOALS.map((g) => [g.value, g]));
 export const snapGoalNeedsPixel = (v: string): boolean => GOAL_BY_VALUE.get(v)?.needsPixel ?? false;
 export const snapGoalLabel = (v: string): string => GOAL_BY_VALUE.get(v)?.label ?? v;
-/** Campaign objective on the wire — ALWAYS Sales (owner ask 23.09, third pass: no objective field on the
- *  card, the buyer picks the goal alone). Snap's `objective_v2_properties.objective_v2_type` is pure Ads
- *  Manager business logic: it steers no delivery, but it decides which optimization goals Ads Manager
- *  offers on the campaign and on a CLONE of it. Left out, Snap stamps the legacy default BRAND_AWARENESS →
- *  "Awareness" with is_auto_generated: true (read-only probe 23.09: 74/74 live campaigns), and a buyer
- *  cloning in Ads Manager finds no Purchase / Landing page view (owner report 23.09). SALES admits both
- *  launcher goals for a WEB conversion (docs read 23.09: SWIPES, STORY_OPENS, PIXEL_PURCHASE,
- *  PIXEL_SIGNUP, PIXEL_ADD_TO_CART, PIXEL_PAGE_VIEW, LANDING_PAGE_VIEW). A stray `objective` on a shot
- *  (a tab from the two-hour window when the card had the select) is ignored. */
-export const SNAP_CAMPAIGN_OBJECTIVE = "SALES";
+/** Campaign objective — the card picks it again (owner ask 24.09). "Awareness & Engagement" is how every
+ *  campaign launched before 23.09: NOTHING on the wire, Snap stamps its own legacy default BRAND_AWARENESS →
+ *  `{ objective_v2_type: AWARENESS_AND_ENGAGEMENT, is_auto_generated: true }` (read-only probe 23.09: 74/74
+ *  live campaigns) and takes PIXEL_PURCHASE / LANDING_PAGE_VIEW ad squads under it regardless — the
+ *  objective steers no delivery, only which goals Ads Manager offers on the campaign and on a clone.
+ *  "Sales" rides explicitly in `objective_v2_properties`; Snap's SALES/web row admits both launcher goals
+ *  (docs read 23.09). `wire` = what goes into objective_v2_properties (null = omitted, Snap's own default).
+ *  Awareness & Engagement is deliberately NOT sent by name: named, Snap would check its own matrix for
+ *  that objective (impressions / swipes / video views), which has no purchase or page-view goal. */
+export const SNAP_OBJECTIVES: readonly { value: string; label: string; note: string; wire: string | null }[] = [
+  { value: "AWARENESS_AND_ENGAGEMENT", label: "Awareness & Engagement", note: "As before — Snap's own default; either goal works.", wire: null },
+  { value: "SALES", label: "Sales", note: "Sent explicitly — a clone in Ads Manager offers Purchase / Landing page view.", wire: "SALES" },
+] as const;
+/** The card's default — how the rail launched before 23.09 (owner ask 24.09: "as before"). */
+export const SNAP_DEFAULT_OBJECTIVE = "AWARENESS_AND_ENGAGEMENT";
+const OBJECTIVE_BY_VALUE = new Map(SNAP_OBJECTIVES.map((o) => [o.value, o]));
+export const snapObjectiveLabel = (v: string): string => OBJECTIVE_BY_VALUE.get(v)?.label ?? v;
+/** The shot's objective: the one sent (trimmed, upper-cased), else the default (a tab opened before the
+ *  field returned, or a shot that never carried one). */
+export const snapObjectiveOf = (shot: { objective?: string }): string => String(shot.objective ?? "").trim().toUpperCase() || SNAP_DEFAULT_OBJECTIVE;
 
 /** Calls to action Snap accepts on a WEB_VIEW creative (a curated ten of its list). */
 export const SNAP_CTAS: readonly { value: string; label: string }[] = [
@@ -378,6 +388,8 @@ export type SnapLaunchShotIn = {
   adAccount: string;
   pixel?: string;
   profileId?: string;
+  /** Campaign objective (SNAP_OBJECTIVES); absent = Awareness & Engagement, as before 23.09. */
+  objective?: string;
   optimizationGoal: string;
   bidStrategy: string;
   bid: string;
@@ -401,7 +413,9 @@ export type SnapLaunchShotIn = {
   currency?: string;
 };
 
-export type SnapCampaignWire = { name: string; ad_account_id: string; status: "PAUSED" | "ACTIVE"; start_time: string; objective_v2_properties: { objective_v2_type: string } };
+/** `objective_v2_properties` rides only for an objective with a `wire` value (Sales); Awareness & Engagement
+ *  leaves it out and Snap stamps its own (see SNAP_OBJECTIVES). */
+export type SnapCampaignWire = { name: string; ad_account_id: string; status: "PAUSED" | "ACTIVE"; start_time: string; objective_v2_properties?: { objective_v2_type: string } };
 export type SnapAdSquadWire = {
   name: string;
   type: "SNAP_ADS";
@@ -465,8 +479,8 @@ export function snapShotNiche(shot: SnapLaunchShotIn): string {
 
 /**
  * Build the Snap bodies for ONE shot, refusing with the exact fix when a field can't ride.
- * Order: budget → strategy/bid → goal (+pixel) → headline → brand → CTA → creatives → geo → age →
- * devices → landing → Public Profile → key → name. Pure and deterministic: the board's dry-run (placeholder
+ * Order: budget → strategy/bid → goal (+pixel) → objective → headline → brand → CTA → creatives → geo →
+ * age → devices → landing → Public Profile → key → name. Pure and deterministic: the board's dry-run (placeholder
  * key/media/name) and the pump's real run agree on every refusal.
  */
 export function snapLaunchWire(
@@ -491,6 +505,9 @@ export function snapLaunchWire(
   const goal = String(shot.optimizationGoal ?? "").trim();
   if (!GOAL_BY_VALUE.has(goal)) return { refusal: `Unknown optimization goal "${goal}" — only Pixel purchase or Landing page view` };
   if (snapGoalNeedsPixel(goal) && !resolved.pixelId) return { refusal: `${snapGoalLabel(goal)} needs a conversion pixel — pick one or choose Landing page view` };
+  const objective = snapObjectiveOf(shot);
+  const objectiveDef = OBJECTIVE_BY_VALUE.get(objective);
+  if (!objectiveDef) return { refusal: `Unknown campaign objective "${objective}" — only ${SNAP_OBJECTIVES.map((o) => o.label).join(" / ")}` };
   const headline = squashText(shot.headline);
   if (!headline) return { refusal: "Headline is required" };
   if (headline.length > SNAP_HEADLINE_MAX) return { refusal: `Headline is over ${SNAP_HEADLINE_MAX} characters (${headline.length})` };
@@ -556,7 +573,14 @@ export function snapLaunchWire(
     });
   });
   const wire: SnapLaunchWire = {
-    campaign: { name, ad_account_id: adAccountId, status: "PAUSED", start_time: resolved.startTimeIso, objective_v2_properties: { objective_v2_type: SNAP_CAMPAIGN_OBJECTIVE } },
+    campaign: {
+      name,
+      ad_account_id: adAccountId,
+      status: "PAUSED",
+      start_time: resolved.startTimeIso,
+      // Sales rides by name; Awareness & Engagement = nothing here, Snap stamps its own (as before 23.09).
+      ...(objectiveDef.wire ? { objective_v2_properties: { objective_v2_type: objectiveDef.wire } } : {}),
+    },
     adsquad: {
       name,
       type: "SNAP_ADS",

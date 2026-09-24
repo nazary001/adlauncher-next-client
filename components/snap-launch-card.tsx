@@ -1,8 +1,8 @@
 "use client";
 
 // One Snapchat web-campaign card for the launcher (the Google card's structure, Snap's fields):
-// SETUP (ad account · pixel · Public Profile · name tail) · DELIVERY (goal · bidding · bid ·
-// budget · start paused — the campaign objective is always Sales on the wire) · CREATIVES (ANY number of vertical videos/images, ≤32 MB each — every
+// SETUP (ad account · pixel · Public Profile · name tail) · DELIVERY (objective — Awareness &
+// Engagement as before, or Sales · goal · bidding · bid · budget · start paused) · CREATIVES (ANY number of vertical videos/images, ≤32 MB each — every
 // file becomes its own ad inside the campaign's one ad squad · headline ≤34 · brand ≤32 · CTA) ·
 // TARGETING (countries + presets · min age · devices — Android only by default) · LANDING (the
 // PASTED landing, as on Facebook — the partner's quiz/captcha pages on fast-flow-like domains; the
@@ -35,6 +35,8 @@ import {
   SNAP_MAX_COPIES,
   SNAP_MEDIA_MAX_BYTES,
   SNAP_MIN_AGES,
+  SNAP_OBJECTIVES,
+  SNAP_DEFAULT_OBJECTIVE,
   SNAP_OPTIMIZATION_GOALS,
   SNAP_DEFAULT_GOAL,
   snapBidKind,
@@ -63,6 +65,9 @@ export type SnapCard = {
   adAccount: string;
   pixel: string;
   profileId: string;
+  /** Campaign objective (SNAP_OBJECTIVES): Awareness & Engagement = as before (nothing on the wire, Snap's
+   *  own default), Sales = sent explicitly. Either one takes either optimization goal. */
+  objective: string;
   optimizationGoal: string;
   bidStrategy: string;
   bid: string;
@@ -98,6 +103,8 @@ export function freshSnapCard(id?: string, defaults: { adAccount?: string; pixel
     // Pixel purchase by default (owner ask 23.09: only Pixel purchase and Landing page view exist,
     // Swipes/clicks are gone). The partner's Purchase events reach the pixel since 17.09, so Snap's
     // E3017 "ineligible" no longer bites; Landing page view is the no-pixel alternative.
+    // Awareness & Engagement by default (owner ask 24.09: launch as before — Snap's own default objective).
+    objective: SNAP_DEFAULT_OBJECTIVE,
     optimizationGoal: SNAP_DEFAULT_GOAL,
     bidStrategy: "AUTO_BID",
     bid: "",
@@ -156,6 +163,7 @@ export function buildSnapShot(card: SnapCard, ctx: { currency?: string; mediaUrl
     adAccount: card.adAccount,
     ...(card.pixel ? { pixel: card.pixel } : {}),
     ...(card.profileId ? { profileId: card.profileId } : {}),
+    objective: card.objective,
     optimizationGoal: card.optimizationGoal,
     bidStrategy: card.bidStrategy,
     bid: card.bid.trim(),
@@ -200,6 +208,7 @@ export function snapCardSignature(card: SnapCard): string {
     a: card.adAccount,
     px: card.pixel,
     pr: card.profileId,
+    o: card.objective,
     g: card.optimizationGoal,
     bs: card.bidStrategy,
     bd: card.bid,
@@ -254,6 +263,7 @@ const inp =
 const micro = "text-[10px] font-semibold uppercase tracking-[0.16em] text-faint select-none";
 
 const COUNTRY_OPTIONS = COUNTRIES.filter((c) => c.code !== "WW").map((c) => ({ value: c.code, label: c.name }));
+const OBJECTIVE_OPTIONS = SNAP_OBJECTIVES.map((o) => ({ value: o.value, label: o.label }));
 const GOAL_OPTIONS = SNAP_OPTIMIZATION_GOALS.map((g) => ({ value: g.value, label: g.label }));
 const STRATEGY_OPTIONS = SNAP_BID_STRATEGIES.map((s) => ({ value: s.value, label: s.label }));
 const CTA_OPTIONS = SNAP_CTAS.map((c) => ({ value: c.value, label: c.label }));
@@ -457,8 +467,15 @@ export function SnapLaunchCard({
           </div>
 
           {/* ---- DELIVERY ---- */}
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="flex flex-col gap-1.5">
+          {/* Objective and goal carry the long labels ("Awareness & Engagement", "Landing page view") → two
+              columns each of seven, so neither clips on a 1440-wide screen; bidding / bid / budget take one. */}
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-7">
+            <div className="flex flex-col gap-1.5 lg:col-span-2">
+              <span className={micro}>Objective</span>
+              <Select value={card.objective} onChange={(e) => patch({ objective: e.target.value })} options={OBJECTIVE_OPTIONS} aria-label="Campaign objective" />
+              <span className="text-[10px] leading-snug text-faint">{SNAP_OBJECTIVES.find((o) => o.value === card.objective)?.note ?? "Unknown objective — pick one"}</span>
+            </div>
+            <div className="flex flex-col gap-1.5 lg:col-span-2">
               <span className={micro}>Optimization goal</span>
               <Select value={card.optimizationGoal} onChange={(e) => patch({ optimizationGoal: e.target.value })} options={GOAL_OPTIONS} aria-label="Optimization goal" />
               {needsPixel ? <span className="text-[10px] leading-snug text-warn">Snap accepts Pixel purchase only once the pixel already receives Purchase events (E3017 otherwise) — Landing page view needs no pixel.</span> : null}

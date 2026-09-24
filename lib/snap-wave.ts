@@ -57,6 +57,7 @@ function cleanShot(x: SnapLaunchShotIn): SnapLaunchShotIn {
     pixel: s(x.pixel),
     profileId: s(x.profileId),
     optimizationGoal: s(x.optimizationGoal),
+    objective: s(x.objective),
     bidStrategy: s(x.bidStrategy),
     bid: s(x.bid),
     budget: s(x.budget),
