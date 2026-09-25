@@ -5,8 +5,6 @@
 
 import { lionGet } from "./lion";
 import { mapLionGoogleRow, saoPauloDate, type LionGoogleRow } from "./google-source";
-import { readAppCacheDetailed, writeAppCache } from "./app-cache";
-import { cleanGoogleAccountBook, mergeGoogleAccountBooks, mergeGoogleAccountDay, type GoogleAccountStatusBook } from "./google-account-status";
 
 type CacheEntry = { at: number; rows: LionGoogleRow[] };
 const TTL_MS = 10 * 60_000;
@@ -59,62 +57,4 @@ export async function lionGoogleFindCampaigns(ids: string[], days = 7, now: Date
     }
   }
   return found;
-}
-
-// ---------- account statuses (which launch accounts are suspended) ----------
-
-/** The remembered book — one app-cache row shared by every instance (and outliving the scan
- *  window: a suspended account has no metrics rows a few days after the ban). */
-export const GOOGLE_ACCOUNT_STATUS_KEY = "google-account-status";
-const STATUS_SCAN_DAYS = 7;
-const STATUS_TTL_MS = 10 * 60_000;
-/** The catalog route answers in 30 s and LION may hang for 60: past this the scan is abandoned
- *  for THIS answer (it keeps running and warms the per-day cache for the next one). */
-const STATUS_BUDGET_MS = 9_000;
-let statusCache: { at: number; book: GoogleAccountStatusBook } | null = null;
-let statusInflight: Promise<GoogleAccountStatusBook> | null = null;
-
-async function scanGoogleAccountStatuses(now: Date): Promise<GoogleAccountStatusBook> {
-  const stored = await readAppCacheDetailed<unknown>(GOOGLE_ACCOUNT_STATUS_KEY);
-  const remembered = cleanGoogleAccountBook(stored.row?.value);
-  const days = Array.from({ length: STATUS_SCAN_DAYS }, (_, d) => saoPauloDate(d, now));
-  const reads = await Promise.allSettled(days.map((d) => lionGoogleMetrics(d)));
-  let book = remembered;
-  let changed = false;
-  reads.forEach((r, i) => {
-    if (r.status !== "fulfilled") return; // a day LION could not serve changes nothing
-    const m = mergeGoogleAccountDay(book, days[i], r.value);
-    book = m.book;
-    changed = changed || m.changed;
-  });
-  // Never write over a row that could not be read (a Strapi blip would wipe the memory). Awaited:
-  // a floating write dies with the serverless response; the caller's budget bounds the wait.
-  if (changed && stored.ok) await writeAppCache(GOOGLE_ACCOUNT_STATUS_KEY, book, stored.row?.documentId ?? null);
-  return book;
-}
-
-/**
- * customer id → the latest account status LION's metrics showed (last 7 São Paulo days folded over
- * the remembered book). Cached 10 min per instance. FAIL-OPEN by design: LION lag must never block
- * a launch — when the scan fails or runs out of time the last book this instance knew is served,
- * and with nothing known at all no account is hidden.
- */
-export async function lionGoogleAccountStatuses(now: Date = new Date()): Promise<GoogleAccountStatusBook> {
-  if (statusCache && Date.now() - statusCache.at < STATUS_TTL_MS) return statusCache.book;
-  if (!statusInflight) {
-    statusInflight = scanGoogleAccountStatuses(now)
-      .then((book) => {
-        statusCache = { at: Date.now(), book: mergeGoogleAccountBooks(statusCache?.book ?? {}, book) };
-        return statusCache.book;
-      })
-      .finally(() => {
-        statusInflight = null;
-      });
-  }
-  const fallback = statusCache?.book ?? {};
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const outOfTime = new Promise<GoogleAccountStatusBook>((resolve) => {
-    timer = setTimeout(() => resolve(fallback), STATUS_BUDGET_MS);
-  });
-  return Promise.race([statusInflight.catch(() => fallback), outOfTime]).finally(() => clearTimeout(timer));
 }

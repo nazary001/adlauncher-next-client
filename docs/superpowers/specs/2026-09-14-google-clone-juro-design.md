@@ -248,3 +248,29 @@ ended `failed` "Execution ended before a complete result was confirmed", leaving
 `running` all evening for everyone but the owner) is checked in LION itself. The task manager
 reads `Sent to LION` for a done row without a campaign id; legacy rows keep `Created on LION ·
 cmp …`. Sections above that describe the poll/finisher flow are historical.
+
+## Addendum 25.09 — account status rides on `/customers/`; the campaign-derived book is gone
+
+- **Partner change (probed live 25.09):** every account of `GET /api/external/customers/` now
+  carries `status` — Google's CustomerStatus passed through (`ENABLED` | `SUSPENDED`; 74 accounts,
+  16 ENABLED, of the 45 GLO-HS only 004, 016, 025, 031 ENABLED at the time of the read). This is
+  option (в) of the 21.09 note: LION added the status to google-weapon.
+- **Rule (owner ask 25.09, "only active accounts are shown"):** the pickers list an allowlisted
+  account only when its `status` is `ENABLED`. Any other word — SUSPENDED, CANCELED, CLOSED or one
+  we have never seen — hides it (`googleCustomerStatusVerdict`), and so does a row WITHOUT a status
+  (stamped `NO_STATUS`, reason "without a status on LION's list (DD.MM) — not known to be active"):
+  nothing is guessed alive. The verdict is read live with the list (same 10-min cache), no scan.
+- **The 21.09 book is REMOVED (owner call 25.09: "not needed any more"):** `lionGoogleAccountStatuses`,
+  the 7-day metrics scan, `mergeGoogleAccountDay` / `cleanGoogleAccountBook` /
+  `mergeGoogleAccountBooks` / `googleAccountDeadVerdict` and the app-cache key
+  `google-account-status` are gone from the code; `lib/lion-google.ts` keeps only the metrics
+  reader the sources route needs. The Strapi app-cache row `google-account-status` is orphaned
+  (nothing reads or writes it) and may be deleted by hand.
+- **One fold for pickers and routes:** `foldGoogleLaunchCatalog(all, day, isGoogleLaunchAccount)`
+  (pure, `tests/google-account-status.test.ts`) → `{ customers, suspended, dead }`; `gwLaunchCatalog`
+  binds the I/O. The owner's allowlist (`GOOGLE_ACTIVE_LAUNCH_ACCOUNTS`) still gates what is offered;
+  `dead` names EVERY inactive partner account, so a JURO on an inactive source account is refused.
+- **Board note:** "30 suspended accounts hidden from the pickers — GLO-HS-012, 013, … +20 more"
+  (ten names in the line, every name with its reason in the tooltip; "inactive" once a non-SUSPENDED
+  word joins). Refusals read as before: "target account GLO-HS-012 is suspended on Google (LION saw
+  it 25.09) — pick a live account".

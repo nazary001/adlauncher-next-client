@@ -4,8 +4,8 @@ import { GoogleWeaponError, googleRailEnabled, googleWeaponConfigured, gwLaunchC
 import { LION_ACR } from "@/lib/lion";
 
 export const runtime = "nodejs";
-// Two cached upstream reads side by side (gwCustomers + LION's account statuses, 10 min each; the
-// status read gives up after 9 s and fails open) — a tight cap is plenty.
+// One cached upstream read (gwCustomers, 10 min — the account status rides on it since 25.09) —
+// a tight cap is plenty.
 export const maxDuration = 30;
 
 /**
@@ -22,8 +22,9 @@ export async function GET(req: Request): Promise<NextResponse> {
     return NextResponse.json({ ok: false, error: "google_weapon_not_configured" }, { status: 500 });
   }
   try {
-    // The owner's active GLO-HS list only (21.09), minus the accounts Google has suspended — the
-    // pickers never see the rest. `suspended` names what was hidden so the board can say so.
+    // The owner's active GLO-HS list only (21.09), minus the accounts that are not ENABLED on Google
+    // (the partner's own status word, 25.09) — the pickers never see the rest. `suspended` names
+    // what was hidden so the board can say so.
     const { customers, suspended } = await gwLaunchCatalog();
     // `acr` = the LION user's media-buyer acronym: LION stamps it (lower-cased) as mb=/utm on
     // every Google link — the board previews the final link with it.
