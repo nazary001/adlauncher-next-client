@@ -13,7 +13,9 @@ import { TiktokTaskManagerButton } from "./tiktok-task-manager";
 import { UserMenu, type SessionUser } from "./user-menu";
 import { GOOGLE_ENABLED, SNAP_ENABLED, TIKTOK_ENABLED, partnerConfig, type PartnerId } from "@/lib/partners";
 
-type Platform = "facebook" | "tiktok" | "google" | "snapchat";
+/** "console" = an owner tool page (e.g. /sessions) that belongs to no ad platform: no tab is
+ *  active, the partner switcher gives way to a static label, the FB widgets stay hidden. */
+type Platform = "facebook" | "tiktok" | "google" | "snapchat" | "console";
 
 function Logo() {
   return (
@@ -138,6 +140,7 @@ export function Header({
   onPartnerChange,
   user,
   platform = "facebook",
+  consoleLabel,
 }: {
   partner: PartnerId;
   onPartnerChange: (id: PartnerId) => void;
@@ -146,14 +149,18 @@ export function Header({
    *  pinned to HS (both rails run through LION only) and the FB-only widgets give way to that
    *  platform's task manager. On "snapchat" there is no
    *  partner axis at all (our own ad account): the switcher becomes a static label and the queue
-   *  button is the Snapchat task manager. Default keeps FB behaviour. */
+   *  button is the Snapchat task manager. On "console" (owner tools such as /sessions) the
+   *  switcher is the `consoleLabel` and there is no queue button. Default keeps FB behaviour. */
   platform?: Platform;
+  /** The static label shown in place of the partner switcher on platform="console". */
+  consoleLabel?: React.ReactNode;
 }) {
   const isGoogle = platform === "google";
   const isSnap = platform === "snapchat";
   const isTiktok = platform === "tiktok";
+  const isConsole = platform === "console";
   // Every non-FB platform hides the FB-only widgets (HS token pool, per-account launch limit).
-  const pinned = isGoogle || isSnap || isTiktok;
+  const pinned = isGoogle || isSnap || isTiktok || isConsole;
   return (
     <header className="sticky top-0 z-40 border-b border-line bg-bg/75 backdrop-blur-md">
       <div className="mx-auto grid h-16 w-full max-w-[1440px] grid-cols-[1fr_auto_1fr] items-center gap-3 px-4 sm:px-6">
@@ -162,7 +169,11 @@ export function Header({
         </div>
         {/* Google runs through LION (HS) only — the switcher is pinned, other partners disabled.
             Snapchat has no partner axis at all (our own ad account) — a static label instead. */}
-        {isSnap ? (
+        {isConsole ? (
+          <span className="flex items-center gap-2 rounded-full border border-line bg-surface px-3 py-1.5 text-[11px] font-medium text-dim">
+            {consoleLabel}
+          </span>
+        ) : isSnap ? (
           <span className="flex items-center gap-2 rounded-full border border-line bg-surface px-3 py-1.5 text-[11px] font-medium text-dim" title="Snapchat runs on our own ad account — there is no partner rail to pick">
             <SnapMark className="h-3.5 w-3.5" />
             Own Snapchat ad account
@@ -187,7 +198,7 @@ export function Header({
               manager; on FB, HS (LION submits) has its own manager, everyone else shares the team
               Tasks queue. Every provider stays mounted in the app layout, so the hidden queue keeps
               working. */}
-          {isSnap ? (
+          {isConsole ? null : isSnap ? (
             <SnapTaskManagerButton />
           ) : isGoogle ? (
             <GoogleTaskManagerButton />

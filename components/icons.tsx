@@ -269,6 +269,33 @@ export function KeyIcon(props: P) {
   );
 }
 
+/** A browser window with an identity dot — the owner menu's "Ads Manager sessions" entry. */
+export function SessionsIcon(props: P) {
+  return (
+    <S {...props}>
+      <rect x="3" y="4" width="18" height="16" rx="2.5" />
+      <path d="M3 9h18" />
+      <circle cx="6.5" cy="6.5" r="0.6" fill="currentColor" />
+      <circle cx="9" cy="6.5" r="0.6" fill="currentColor" />
+      <circle cx="10" cy="14" r="2" />
+      <path d="M6.5 18c.5-1.6 1.9-2.5 3.5-2.5s3 .9 3.5 2.5" />
+      <path d="M15.5 13h3" />
+      <path d="M15.5 16h3" />
+    </S>
+  );
+}
+
+/** Arrow out of a box — opens the tool itself in a new tab. */
+export function ExternalLinkIcon(props: P) {
+  return (
+    <S {...props}>
+      <path d="M14 4h6v6" />
+      <path d="M20 4 10 14" />
+      <path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5" />
+    </S>
+  );
+}
+
 export function LogoutIcon(props: P) {
   return (
     <S {...props}>
