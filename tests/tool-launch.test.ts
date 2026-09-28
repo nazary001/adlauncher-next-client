@@ -469,6 +469,46 @@ test("runToolPublish: network/5xx on submit → pending (ambiguous, nothing prov
   assert.ok(!r.ok && r.pending === true);
 });
 
+// review find 28.09: which terminal failures are DEFINITE (the caller frees slot + gcm/brand) and
+// which are ambiguous (pending — keep everything). A kept marker for a job that provably built
+// nothing leaks a code from the pool; a freed marker under a half-built tree double-books it.
+test("runToolPublish: terminal error / canceled with no ids → definite failure (not pending)", async () => {
+  for (const status of ["error", "canceled"]) {
+    const { deps } = fakeDeps({
+      createCampaign: () => ok({ id: 7, status: "queued" }, 202),
+      getJob: () => ok({ id: 7, status, error: "Facebook error HTTP 400 code=100: Invalid parameter", result: null }),
+    });
+    const r = await tl.runToolPublish(deps, "acct", publishBody, { deadlineAt: Date.now() + 60_000 });
+    assert.ok(!r.ok && !r.pending && r.jobId === 7 && !r.created, status);
+  }
+});
+
+test("runToolPublish: partial / unknown with no ids → pending (ambiguous), with ids → failed carrying created", async () => {
+  for (const status of ["partial", "unknown"]) {
+    const { deps } = fakeDeps({
+      createCampaign: () => ok({ id: 8, status: "queued" }, 202),
+      getJob: () => ok({ id: 8, status, error: "half way", result: null }),
+    });
+    const r = await tl.runToolPublish(deps, "acct", publishBody, { deadlineAt: Date.now() + 60_000 });
+    assert.ok(!r.ok && r.pending === true && r.jobId === 8, status);
+  }
+  const { deps } = fakeDeps({
+    createCampaign: () => ok({ id: 9, status: "queued" }, 202),
+    getJob: () => ok({ id: 9, status: "partial", error: "ads failed", result: { created: { campaign_id: "120200000000009", adset_ids: ["a9"], ad_ids: [] } } }),
+  });
+  const r = await tl.runToolPublish(deps, "acct", publishBody, { deadlineAt: Date.now() + 60_000 });
+  assert.ok(!r.ok && !r.pending && r.created?.campaignId === "120200000000009");
+});
+
+test("runToolPublish: done without a campaign id → pending, never a success with an empty id", async () => {
+  const { deps } = fakeDeps({
+    createCampaign: () => ok({ id: 10, status: "queued" }, 202),
+    getJob: () => ok({ id: 10, status: "done", stage: "SUCCEEDED", result: { created: {} } }),
+  });
+  const r = await tl.runToolPublish(deps, "acct", publishBody, { deadlineAt: Date.now() + 60_000 });
+  assert.ok(!r.ok && r.pending === true && r.jobId === 10);
+});
+
 test("runToolPublish: deadline while running → pending with the jobId", async () => {
   const clock = { t: 0 };
   const { deps } = fakeDeps({
@@ -497,4 +537,99 @@ test("runToolDuplicate: 4xx submit → refusal (not pending)", async () => {
   const { deps } = fakeDeps({ createDuplicates: () => fail(400, "bad_request", "no source") });
   const r = await tl.runToolDuplicate(deps, "acct", { source_campaign_id: "x", targets: [] } satisfies DuplicateRequest, { deadlineAt: Date.now() + 60_000 });
   assert.ok(!r.ok && !r.pending && /no source/.test(r.error));
+});
+
+// ================================================================================================
+// transient status-poll failures (review find 28.09): after a good submit the job is REAL, so a
+// FAILED getJob (4xx incl. 401/429, post-submit 404, 5xx, network) is transient — keep polling to the
+// deadline, then PENDING (jobId kept). Never a clean "nothing created" refusal that would free the
+// gcm/slot while TOOL finishes a live ACTIVE campaign carrying that gcm's link.
+// ================================================================================================
+
+test("runToolPublish: 429 on the status poll then done → ok with ids (rate-limit is transient, keeps polling)", async () => {
+  const jobs: ToolCallResult[] = [fail(429, "rate_limited", "slow down"), ok(doneJob({ id: 5 }))];
+  const { deps, calls } = fakeDeps({
+    createCampaign: () => ok({ id: 5, status: "queued" }, 202),
+    getJob: () => jobs.shift() ?? ok(doneJob({ id: 5 })),
+  });
+  const r = await tl.runToolPublish(deps, "acct", publishBody, { deadlineAt: Date.now() + 60_000 });
+  assert.ok(r.ok && r.jobId === 5 && r.campaignId === "120253810228480635" && r.adIds.length === 2);
+  assert.equal(calls.getJob.length, 2); // did NOT refuse after the single 429 read
+});
+
+test("runToolPublish: persistent 404 on the status poll → pending at the deadline with the jobId (never a clean failure)", async () => {
+  const clock = { t: 0 };
+  const { deps, calls } = fakeDeps({
+    createCampaign: () => ok({ id: 8, status: "queued" }, 202),
+    getJob: () => fail(404, "not_found", "no such job"),
+    clock,
+    advanceOnSleep: 2500,
+  });
+  const r = await tl.runToolPublish(deps, "acct", publishBody, { deadlineAt: 6000 });
+  assert.ok(!r.ok && r.pending === true && r.jobId === 8);
+  assert.match(r.ok ? "" : r.error, /job #8/); // "could not be read … may still appear"
+  assert.ok(calls.getJob.length >= 2); // polled through the 404, did not refuse on the first read
+});
+
+test("runToolPublish: 401 mid-poll (auth blip) → pending with the jobId, not a refusal", async () => {
+  const clock = { t: 0 };
+  const jobs: ToolCallResult[] = [ok({ id: 3, status: "running", kind: "campaign.create" })];
+  const { deps } = fakeDeps({
+    createCampaign: () => ok({ id: 3, status: "queued" }, 202),
+    getJob: () => jobs.shift() ?? fail(401, "unauthorized", "token blip"),
+    clock,
+    advanceOnSleep: 2500,
+  });
+  const r = await tl.runToolPublish(deps, "acct", publishBody, { deadlineAt: 5000 });
+  assert.ok(!r.ok && r.pending === true && r.jobId === 3);
+});
+
+// ================================================================================================
+// onSubmitted contract (review find 28.09): fires exactly once, with the job id, the instant TOOL
+// accepted the submit — BEFORE any poll — and NEVER on a refused submit.
+// ================================================================================================
+
+test("runToolPublish: onSubmitted fires once with the job id, before the first poll", async () => {
+  const seen: number[] = [];
+  let getJobsWhenSubmitted = -1;
+  const jobs: ToolCallResult[] = [ok({ id: 5, status: "running", kind: "campaign.create" }), ok(doneJob({ id: 5 }))];
+  const { deps, calls } = fakeDeps({
+    createCampaign: () => ok({ id: 5, status: "queued" }, 202),
+    getJob: () => jobs.shift() ?? ok(doneJob({ id: 5 })),
+  });
+  const r = await tl.runToolPublish(deps, "acct", publishBody, {
+    deadlineAt: Date.now() + 60_000,
+    onSubmitted: (id) => { seen.push(id); getJobsWhenSubmitted = calls.getJob.length; },
+  });
+  assert.ok(r.ok);
+  assert.deepEqual(seen, [5]); // exactly once, with the id
+  assert.equal(getJobsWhenSubmitted, 0); // before ANY getJob poll
+});
+
+test("runToolPublish: onSubmitted never fires on a refused submit (4xx / missing_context / no-job-id 5xx)", async () => {
+  let fired = 0;
+  const bump = () => { fired++; };
+  const d1 = fakeDeps({ createCampaign: () => fail(422, "validation_failed", "bad") }).deps;
+  await tl.runToolPublish(d1, "acct", publishBody, { deadlineAt: Date.now() + 60_000, onSubmitted: bump });
+  const d2 = fakeDeps({ createCampaign: () => ok({ problems: [{ error: "missing_context", field: "f", message: "m" }] }) }).deps;
+  await tl.runToolPublish(d2, "1702978257719186", publishBody, { deadlineAt: Date.now() + 60_000, onSubmitted: bump });
+  const d3 = fakeDeps({ createCampaign: () => fail(502, "tool_unreachable", "down") }).deps;
+  await tl.runToolPublish(d3, "acct", publishBody, { deadlineAt: Date.now() + 60_000, onSubmitted: bump });
+  assert.equal(fired, 0);
+});
+
+test("runToolDuplicate: onSubmitted fires once with the child job id on accept, never on a refused submit", async () => {
+  const seen: number[] = [];
+  const jobs: ToolCallResult[] = [ok(doneJob({ id: 11, kind: "campaign.duplicate" }))];
+  const { deps } = fakeDeps({
+    createDuplicates: () => ok({ batch_id: "b1", status: "queued", jobs: [{ id: 11, status: "queued" }] }, 201),
+    getJob: () => jobs.shift() ?? ok(doneJob({ id: 11 })),
+  });
+  const r = await tl.runToolDuplicate(deps, "acct", duplicateBody, { deadlineAt: Date.now() + 60_000, onSubmitted: (id) => seen.push(id) });
+  assert.ok(r.ok);
+  assert.deepEqual(seen, [11]);
+  const seen2: number[] = [];
+  const d2 = fakeDeps({ createDuplicates: () => fail(400, "bad_request", "no source") }).deps;
+  await tl.runToolDuplicate(d2, "acct", duplicateBody, { deadlineAt: Date.now() + 60_000, onSubmitted: (id) => seen2.push(id) });
+  assert.deepEqual(seen2, []); // refused submit → onSubmitted silent
 });

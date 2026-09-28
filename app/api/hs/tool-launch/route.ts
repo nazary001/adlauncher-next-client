@@ -110,7 +110,11 @@ export async function POST(req: Request): Promise<Response> {
   const taskId = typeof body.taskId === "string" && /^[\w-]{6,64}$/.test(body.taskId) ? body.taskId : null;
   const c = body.campaign;
   if (!c || typeof c !== "object") return bad("campaign_required");
-  const parsed = parseTokenCreatives(body.creatives);
+  // remoteImages: TOOL pulls every creative URL itself via media/from-url (this server never
+  // downloads image bytes on the TOOL rail), so the token rail's own-Blob SSRF fence on paste-URL
+  // images does not apply here — a paste-URL image the LION rail already accepts rides TOOL too
+  // (https still required for every URL). (review find 28.09)
+  const parsed = parseTokenCreatives(body.creatives, { remoteImages: true });
   if ("error" in parsed) return bad(parsed.error);
   const creatives: HsTokenCreative[] = parsed.creatives;
 
@@ -192,7 +196,18 @@ export async function POST(req: Request): Promise<Response> {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (o: Json) => controller.enqueue(encoder.encode(JSON.stringify(o) + "\n"));
+      // No-throw (review find 28.09): this route is TOOL-only, so a buyer that closed the tab
+      // mid-run makes controller.enqueue throw — swallow it entirely (mirror clone/run's send
+      // guard). The shared HS task row carries the truth to the drawer either way, and an enqueue
+      // throw must NEVER unwind into the registry-cleanup catch below (freeing a slot / overwriting
+      // a done row) while TOOL finishes the launch server-side.
+      const send = (o: Json) => {
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(o) + "\n"));
+        } catch {
+          /* stream gone — the task row keeps the team informed */
+        }
+      };
       // Mirror progress into the shared HS task row. Statics ride on EVERY write so a save racing an
       // admin row-deletion never resurrects a nameless stub (same rule as the token rail). gcm="tool"
       // is the channel marker in the reused column; started_at rides too (an interrupted run still
@@ -217,6 +232,10 @@ export async function POST(req: Request): Promise<Response> {
 
       const deadlineAt = Date.now() + TOOL_DEADLINE_MS;
       let acctSlot: { documentId: string } | null = null;
+      // Set the instant TOOL accepts the create submit and returns a job id (onSubmitted, before any
+      // poll). Once it is set the create job is in flight server-side and a campaign may be (or is
+      // about to be) live — the catch must then NOT release the slot (review find 28.09).
+      let submittedJobId: number | null = null;
       // Ads that provably landed on Facebook — reported to the fanka ledger in the finally (partial
       // runs included), exactly like the token rail.
       let landedAdIds: string[] = [];
@@ -295,6 +314,9 @@ export async function POST(req: Request): Promise<Response> {
         const run = await runToolPublish(toolDeps, accountId, built.body, {
           deadlineAt,
           onStage,
+          onSubmitted: (jobId) => {
+            submittedJobId = jobId;
+          },
           ...(taskId ? { idempotencyKey: taskId } : {}),
         });
 
@@ -364,9 +386,17 @@ export async function POST(req: Request): Promise<Response> {
           },
         });
       } catch (e) {
-        // Unexpected (e.g. claimAcctSlot AcctLimitedError / registry down). No campaign exists on this
-        // path (the claim throws before any TOOL call), so the slot — if somehow claimed — goes back.
-        if (acctSlot) await releaseAcctSlot(acctSlot.documentId);
+        // A throw AFTER a terminal row was written (the done/error branches all set `settled` then
+        // return) must not overwrite that settle — the row stands; fall straight through to finally
+        // (beat clear + fanka ledger + flush + close). (review find 28.09)
+        if (settled) return;
+        // Pre-terminal throw (claimAcctSlot AcctLimitedError, registry down, a helper throwing before
+        // submit). Free the slot ONLY when nothing was created: once TOOL accepted the submit
+        // (submittedJobId set, before any poll) the create job is in flight server-side and a
+        // campaign may be live — releasing the slot then would under-count the 5/30 window and let an
+        // over-limit launch through. Mirrors token-launch's `!created.campaign_id` guard (a known
+        // campaign id implies a submitted job).
+        if (acctSlot && submittedJobId == null) await releaseAcctSlot(acctSlot.documentId);
         acctSlot = null;
         settled = true;
         const msg = (e as Error).message ?? String(e);

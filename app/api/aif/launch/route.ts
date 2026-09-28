@@ -418,7 +418,18 @@ export async function POST(req: Request) {
   const stream = withFbBudget({ deadlineAt: Date.now() + FB_BUDGET_MS, retries: FB_BUDGET_RETRIES }, () =>
     new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (o: Json) => controller.enqueue(encoder.encode(JSON.stringify(o) + "\n"));
+      // review find 28.09: on the TOOL path a client that closed the tab makes controller.enqueue
+      // throw — swallow it so a disconnect never unwinds the TOOL branch mid-poll. TOOL creates AND
+      // activates server-side, so an unwind into the catch would free the brand + acct-slot out from
+      // under a campaign that is being born live. The Graph path MUST keep throwing exactly as
+      // before (its tree is not settled server-side when the stream dies, so the catch must run).
+      const send = (o: Json) => {
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(o) + "\n"));
+        } catch (e) {
+          if (!viaTool) throw e;
+        }
+      };
       // Mirror progress into the shared launch-task row — the team keeps seeing the truth even
       // if this browser dies mid-run. partner="us" on every write: the row must land in the AIF
       // drawer's scope even when this writer is the one that creates it.
@@ -437,6 +448,10 @@ export async function POST(req: Request) {
       const created: Json = {};
       let claim: { brand: string; documentId: string | null } | null = null;
       let acctSlot: { documentId: string } | null = null;
+      // review find 28.09 (belt): set by runToolPublish's onSubmitted the instant TOOL returns a job
+      // id (before any poll). Once set, a throw reaching the catch with no known campaign id settles
+      // as PENDING (keep slot + brand), never freed — the job may still be creating the live campaign.
+      let toolSubmittedJob: number | null = null;
       try {
         // 0) claim the ACCOUNT's launch slot — at most 5 campaigns per ad account per 30-min
         // window, across every user and channel (owner rule 2026-08-18). Released below on any
@@ -488,6 +503,12 @@ export async function POST(req: Request) {
               created.campaign_id = opts.created.campaignId;
               if (opts.created.adsetIds[0]) created.adset_id = opts.created.adsetIds[0];
             }
+            // toolFail only ever sees DEFINITE outcomes — pre-submit refusals, a 4xx on submit, or a
+            // terminal error / canceled job that reported no ids (runToolPublish turns every
+            // ambiguous end — partial / unknown without ids, done without a campaign, deadline —
+            // into `pending`, handled below). So nothing created here really means nothing: free the
+            // slot + the brand (a kept brand would leak from the pool — review find 28.09).
+            // Unexpected THROWS after the submit are the shared catch's job (toolSubmittedJob belt).
             if (acctSlot && !created.campaign_id) await releaseAcctSlot(acctSlot.documentId);
             if (claim?.documentId) {
               if (created.campaign_id)
@@ -566,7 +587,16 @@ export async function POST(req: Request) {
 
           // 3t) submit the create job and follow it to a terminal state (poll ~2.5 s).
           progress("campaign");
-          const pub = await runToolPublish(toolDeps, binds.accountId, built.body, { idempotencyKey, deadlineAt, onStage });
+          const pub = await runToolPublish(toolDeps, binds.accountId, built.body, {
+            idempotencyKey,
+            deadlineAt,
+            onStage,
+            // review find 28.09 (belt): record the job id the instant TOOL accepts the submit, before
+            // any poll — so a throw after this point never frees the brand/slot under a live campaign.
+            onSubmitted: (jobId) => {
+              toolSubmittedJob = jobId;
+            },
+          });
 
           if (pub.ok) {
             created.campaign_id = pub.campaignId;
@@ -742,6 +772,22 @@ export async function POST(req: Request) {
         send({ ok: true, stage: "done", gcm: brand, link, flow, page_id: binds.pageId, ...created });
       } catch (e) {
         const err = e as FbError;
+        // review find 28.09 (TOOL belt): if TOOL accepted the submit (onSubmitted set
+        // toolSubmittedJob) but no campaign id is known, a throw reaching here must NOT free the
+        // slot/brand — TOOL may be creating AND activating the campaign server-side. Settle exactly
+        // like the TOOL PENDING terminal above (keep the slot, keep the brand with a "pending tool
+        // job #N" note, free NOTHING). The guarded send already stops a client disconnect from
+        // unwinding the TOOL branch; this covers any other post-submit throw (and a throw AFTER the
+        // done row was written cannot reach here to overwrite it — the guarded send removed the only
+        // statement past the done write that could throw on the TOOL path).
+        if (viaTool && toolSubmittedJob != null && !created.campaign_id) {
+          const pendingMsg = `pending tool job #${toolSubmittedJob} — check Ads Manager sessions → Jobs`;
+          if (claim?.documentId) await backfillBrand(claim.documentId, { notes: pendingMsg }).catch(() => {});
+          settled = true;
+          tw.write({ status: "error", stage: lastStage, finished_at: Date.now(), error: pendingMsg });
+          send({ ok: false, stage: "error", pending: true, via: "tool", tool_job_id: toolSubmittedJob, error: err.message ?? String(e) });
+          return;
+        }
         // Free the account's launch slot when NO campaign was created — the window only meters
         // campaigns that actually exist on FB. Once one exists the slot stays consumed.
         if (acctSlot && !created.campaign_id) await releaseAcctSlot(acctSlot.documentId);

@@ -624,8 +624,17 @@ export const HS_TOKEN_MAX_CREATIVES = 10;
  * string (mirrors the launch guards' style). Videos may live on any https host — Meta fetches
  * those bytes itself, exactly as it does for LION's URLs. Images must be OUR Blob uploads: the
  * route downloads them server-side, and an arbitrary URL there would be an SSRF hole.
+ *
+ * `remoteImages` (review find 28.09) lifts the own-Blob fence on IMAGE creatives for a rail that
+ * does NOT download image bytes on our server but hands the URL to the platform to fetch (the TOOL
+ * rail: media/from-url). Default false = today's token-rail fence unchanged. https is still
+ * required for every URL, and the video-cover fence is untouched (a cover, when present, is still
+ * an own-Blob upload).
  */
-export function parseTokenCreatives(raw: unknown): { creatives: HsTokenCreative[] } | { error: string } {
+export function parseTokenCreatives(
+  raw: unknown,
+  opts: { remoteImages?: boolean } = {},
+): { creatives: HsTokenCreative[] } | { error: string } {
   if (!Array.isArray(raw) || raw.length === 0) return { error: "creatives_required" };
   if (raw.length > HS_TOKEN_MAX_CREATIVES) {
     return { error: `too_many_creatives — the FB Token rail builds at most ${HS_TOKEN_MAX_CREATIVES} ads per campaign; use the LION rail for bigger decks` };
@@ -637,7 +646,7 @@ export function parseTokenCreatives(raw: unknown): { creatives: HsTokenCreative[
     const kind = o.kind === "image" ? "image" : o.kind === "video" ? "video" : null;
     if (!kind) return { error: "creative_kind_invalid" };
     if (!isHttpsUrl(url)) return { error: "creative_url_invalid" };
-    if (kind === "image" && !isOwnBlobUrl(url)) {
+    if (kind === "image" && !opts.remoteImages && !isOwnBlobUrl(url)) {
       return { error: "image_url_not_allowed — paste-URL images can't ride the FB Token rail (drop the file instead, or use the LION rail)" };
     }
     const name = typeof o.name === "string" ? o.name.slice(0, 120) : "";

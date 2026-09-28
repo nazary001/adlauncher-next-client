@@ -18,7 +18,7 @@ import {
 } from "@/lib/acct-limit";
 import { type ShotBinds, acctLimitRefusal, bindsKey, demandByAccount, distinctBy, resolveShotBinds } from "@/lib/hs-shot-binds";
 import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
-import { LionError, lionAccountPixels, lionConfigured, lionProfileData } from "@/lib/lion";
+import { LionError, lionAccountPixels, lionConfigured, lionProfileData, lionSetCampaignStatus } from "@/lib/lion";
 import { hsTokenStartTime } from "@/lib/hs-token-launch";
 import { buildToolDuplicate, runToolDuplicate, toolEnsureMark } from "@/lib/tool-launch";
 import { toolDeps, toolLaunchReady } from "@/lib/tool-run";
@@ -236,16 +236,36 @@ export async function POST(req: Request): Promise<NextResponse> {
   // on the first call. Refuse blind targets up front (one force-refresh in case an owner just
   // refreshed a session) — the TOOL analog of the token rail's hsDupTokenAccountIds precheck.
   {
-    const visible = new Set(ready.accounts.map((a) => a.account_id));
+    // The roster the visibility + currency checks read (force-refreshed once on a blind miss).
+    let roster = ready.accounts;
+    let visible = new Set(roster.map((a) => a.account_id));
     let blind = accounts.filter((a) => !visible.has(acctKey(a)));
     if (blind.length > 0) {
       const r2 = await toolLaunchReady(true);
-      const v2 = r2.ok ? new Set(r2.accounts.map((a) => a.account_id)) : visible;
-      blind = accounts.filter((a) => !v2.has(acctKey(a)));
+      if (r2.ok) {
+        roster = r2.accounts;
+        visible = new Set(roster.map((a) => a.account_id));
+      }
+      blind = accounts.filter((a) => !visible.has(acctKey(a)));
     }
     if (blind.length > 0) {
       return bad(
         `account_not_visible_to_tool — no live TOOL session sees ${blind.join(", ")}; an owner refreshes/adds one on Ads Manager sessions (or clone those rows on the LION API rail)`,
+      );
+    }
+    // TOOL money is USD (spec §3) — refuse BY NAME any target whose TOOL-roster currency is a known
+    // non-USD before a single row is stamped, the same USD-only policy buildToolCampaign enforces on
+    // launch (a non-USD cabinet would read budget/ROAS against the wrong basis). Latent today (every
+    // TOOL-visible account is USD) but MO/AIF sessions may add non-USD cabinets. A blank/unknown
+    // currency fails OPEN — never refuse off missing roster data. (review find 28.09)
+    const currencyOf = new Map(roster.map((a) => [a.account_id, a.currency]));
+    const nonUsd = accounts.filter((a) => {
+      const cur = currencyOf.get(acctKey(a));
+      return cur ? cur.toUpperCase() !== "USD" : false;
+    });
+    if (nonUsd.length > 0) {
+      return bad(
+        `account_currency_not_usd — TOOL money is USD; ${nonUsd.join(", ")} is not a USD account (clone those rows on the LION API rail)`,
       );
     }
   }
@@ -266,24 +286,6 @@ export async function POST(req: Request): Promise<NextResponse> {
   }
   const currency = validated.values().next().value?.currency ?? "USD";
 
-  // Account launch-limit precheck — EVERY account the wave targets must take its share (5/30min per
-  // account, owner rule 2026-08-18; per-row destinations 09-08). Runs BEFORE stamping rows.
-  {
-    let snap;
-    try {
-      snap = await acctLimitSnapshot();
-    } catch {
-      return bad("acct_limit_unavailable — wave blocked (launch registry unreachable)", 503);
-    }
-    const refusal = acctLimitRefusal(
-      demandByAccount(shots, (s) => s.binds.account),
-      snap.accounts,
-      ACCT_LIMIT,
-      acctLimitMessage,
-    );
-    if (refusal) return bad(refusal.error, refusal.status);
-  }
-
   const alreadyAccepted = () =>
     NextResponse.json({
       ok: true,
@@ -299,6 +301,28 @@ export async function POST(req: Request): Promise<NextResponse> {
   if (existing?.value?.at) {
     rememberWave(waveId);
     return alreadyAccepted();
+  }
+
+  // ---- account launch-limit precheck (5 campaigns / 30 min per ad account, owner rule 2026-08-18):
+  // EVERY account the wave targets must take its share (per-row destinations, 09-08), else the wave
+  // is refused up front with the countdown instead of stamping rows destined to fail. Runs AFTER the
+  // wave-idempotency checks (a re-POST of an already-pumped wave must answer alreadyAccepted, not 429
+  // off its own consumed slots — the exact ordering /api/hs/duplicate documents; review find 28.09).
+  // The per-shot claim in the pump stays the authority.
+  {
+    let snap;
+    try {
+      snap = await acctLimitSnapshot();
+    } catch {
+      return bad("acct_limit_unavailable — wave blocked (launch registry unreachable)", 503);
+    }
+    const refusal = acctLimitRefusal(
+      demandByAccount(shots, (s) => s.binds.account),
+      snap.accounts,
+      ACCT_LIMIT,
+      acctLimitMessage,
+    );
+    if (refusal) return bad(refusal.error, refusal.status);
   }
 
   // Rows land in the shared store BEFORE the claim and the response (team visibility + retry
@@ -489,18 +513,33 @@ async function runToolShot(user: string, s: ToolDupShot, index: number, deadline
       return;
     }
 
-    // Clean failure. TOOL creates PAUSED and activates last, so a partial is already PAUSED — nothing
-    // to pause here (unlike the Graph rails). Release the slot ONLY when TOOL proved nothing landed.
+    // Clean failure. buildToolDuplicate sends the target status/ad_status ACTIVE and DuplicateTarget
+    // carries NO create-PAUSED-then-activate-last guarantee (that is only CampaignSpec's contract —
+    // spec §4), so a partial that reports a created campaign id may be a LIVE clone that starts
+    // delivering at the +30 min start_time under a row that says "error". Pause it best-effort through
+    // LION (HS accounts are LION's) before settling, and name the outcome in the row so a human knows
+    // whether spend can still land. Release the slot ONLY when TOOL proved nothing landed. (review
+    // find 28.09 — replaces the old "a partial is already PAUSED, nothing to pause" claim.)
     const created = run.created;
     const landed = created?.adIds ?? [];
     if (slot && !created?.campaignId && landed.length === 0) {
       await releaseAcctSlot(slot.documentId);
       slot = null;
     }
+    let pauseNote = "";
+    if (created?.campaignId) {
+      const paused = await lionSetCampaignStatus(created.campaignId, "PAUSED").then(
+        (r) => r.ok,
+        () => false,
+      );
+      pauseNote = paused
+        ? " — partial clone was PAUSED; verify it in Ads Manager before re-firing"
+        : " — WARNING: partial clone may be LIVE (LION pause failed); pause it by hand in Ads Manager";
+    }
     s.settled = true;
     await rowWrite(user, s.taskId, {
       status: "error",
-      error: run.error,
+      error: `${run.error}${pauseNote}`,
       ...(created?.campaignId ? { campaign_id: created.campaignId } : {}),
       ...(created?.adsetIds[0] ? { adset_id: created.adsetIds[0] } : {}),
       ...(landed.length ? { ad_id: String(landed.length) } : {}),

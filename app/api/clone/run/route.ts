@@ -47,7 +47,7 @@ import {
 // TOOL channel (owner ask 28.09): the same clone RECREATE, but built through the HS Ads Manager
 // sessions service instead of direct Graph — USD money + ROAS coefficient, everything PAUSED.
 import { buildToolCampaign, runToolMedia, runToolPublish, toolEnsureMark, type ToolMediaRefOut } from "@/lib/tool-launch";
-import { toolAccountVisible, toolDeps, toolInputFromCampaign } from "@/lib/tool-run";
+import { toolAccountVisible, toolDeps, toolInputFromCampaign, toolLaunchReady } from "@/lib/tool-run";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -301,6 +301,13 @@ export async function POST(req: Request) {
         let claim: { gcm: string; documentId: string | null } | null = null;
         let acctSlot: { documentId: string } | null = null;
         const created: Json = {};
+        // review find 28.09 (belt): set by runToolPublish's onSubmitted the instant TOOL returns a
+        // job id (before any poll). Once set, the per-clone catch treats "no campaign id known" as
+        // PENDING (keep marker + slot), never a freed code/slot — the job may still be creating it.
+        let toolSubmittedJob: number | null = null;
+        // Set just before the deliberate rethrow of a DEFINITE TOOL failure (error / canceled job
+        // with no ids) — the belt must not turn that into a kept marker + slot (review find 28.09).
+        let toolDefiniteFail = false;
         try {
           send({ idx, stage: "start", name: edit.name });
 
@@ -448,6 +455,17 @@ export async function POST(req: Request) {
               { campaignId: edit.campaignId },
             );
           }
+          // review find 28.09: read the BUILD account's real currency from the TOOL ready roster
+          // (accounts[].currency — the SAME source app/api/launch reads) so a clone inherits
+          // buildToolCampaign's account_currency_not_usd refusal, instead of assuming USD. Default
+          // USD ONLY when the roster row is genuinely missing (a 60s-roster refresh race; TOOL's own
+          // validate step re-checks currency regardless). Live 28.09 every TOOL account is USD, so
+          // this is latent until an MO/AIF (non-USD) cabinet becomes TOOL-visible.
+          let toolAcctCurrency = "USD";
+          if (via === "tool") {
+            const roster = await toolLaunchReady();
+            if (roster.ok) toolAcctCurrency = roster.accounts.find((a) => a.account_id === binds.accountId)?.currency || "USD";
+          }
 
           // Account launch slot (5 campaigns / 30 min per ad account, all channels — owner rule
           // 2026-08-18), claimed BEFORE the costly media migration so a full account fails fast;
@@ -532,8 +550,9 @@ export async function POST(req: Request) {
 
             // Assemble the normalized TOOL input from the SAME cloneToCampaign object the Graph build
             // uses (so geo / bid / budget / category / placement / age stay identical), with the
-            // rebuilt creative + registered media. Clones are PAUSED. accountCurrency is USD — every
-            // TOOL account is USD (TOOL_LIVE_NOTES; the account is TOOL-visible, checked above).
+            // rebuilt creative + registered media. Clones are PAUSED. accountCurrency is the BUILD
+            // account's real roster currency (review find 28.09) so a non-USD cabinet is refused the
+            // same way the launch routes refuse it — USD only when the roster row is genuinely missing.
             const built = buildToolCampaign(
               toolInputFromCampaign(campaign, {
                 name: edit.name,
@@ -541,7 +560,7 @@ export async function POST(req: Request) {
                 pixelId: editBinds.pixelId,
                 localeIds,
                 status: "PAUSED",
-                accountCurrency: "USD",
+                accountCurrency: toolAcctCurrency,
                 creatives: [
                   {
                     name: edit.name,
@@ -567,6 +586,12 @@ export async function POST(req: Request) {
             const run = await runToolPublish(toolDeps, binds.accountId, built.body, {
               idempotencyKey: idemKey,
               deadlineAt: streamDeadlineAt,
+              // review find 28.09 (belt): record the job id the instant TOOL accepts the submit,
+              // before any poll — so the per-clone catch never frees the marker/slot under a live
+              // clone TOOL is still creating server-side.
+              onSubmitted: (jobId) => {
+                toolSubmittedJob = jobId;
+              },
               onStage: (stage) => {
                 if (stage === "done" || stage === "error") return;
                 progress(stage === "video" || stage === "processing" ? "media" : stage);
@@ -580,16 +605,21 @@ export async function POST(req: Request) {
                 // row stays "running" (honest — the job is genuinely in flight).
                 if (run.jobId) created.tool_job_id = run.jobId;
                 if (run.created?.campaignId) created.campaign_id = run.created.campaignId;
-                const note = `pending tool job #${run.jobId ?? "?"}`;
+                const note = `pending tool job #${run.jobId ?? "?"} — check Ads Manager sessions → Jobs`;
                 if (claim.documentId) {
                   const patch = { notes: note, ...(created.campaign_id ? { campaign_id: created.campaign_id } : {}) };
                   if (aif) await backfillBrand(claim.documentId, patch);
                   else await backfillGcm(claim.documentId, patch, claim.gcm);
                 }
                 settled = true;
+                // Terminal row, like the launch rails: this synchronous stream never revisits it, so
+                // a "running" row would sit in the team drawer forever (review find 28.09). The
+                // client reads pending:true and offers no retry; the note names the TOOL job.
                 tw.write({
-                  status: "running",
+                  status: "error",
                   stage: "ad",
+                  finished_at: Date.now(),
+                  error: note,
                   ...(created.campaign_id ? { campaign_id: created.campaign_id } : {}),
                   ...(run.jobId ? { link: String(run.jobId) } : {}),
                 });
@@ -603,6 +633,10 @@ export async function POST(req: Request) {
               if (run.created?.campaignId) created.campaign_id = run.created.campaignId;
               if (run.created?.adsetIds[0]) created.adset_id = run.created.adsetIds[0];
               if (run.jobId) created.tool_job_id = run.jobId;
+              // A DEFINITE outcome (runToolPublish reports every ambiguous end as `pending`, handled
+              // above) — mark it so the catch's submitted-job belt lets the free/retire policy run
+              // instead of keeping a marker + slot for a clone that provably never landed.
+              toolDefiniteFail = true;
               throw new FbError(run.jobId ? `${run.error} (tool job #${run.jobId})` : run.error, { campaignId: edit.campaignId });
             }
 
@@ -694,8 +728,31 @@ export async function POST(req: Request) {
           // `...created` already carries tool_job_id on the TOOL path; add the channel tag on top.
           send({ idx, ok: true, stage: "done", gcm, ...created, ...(via === "tool" ? { via: "tool" } : {}) });
         } catch (e) {
-          failed++;
           const err = e as FbError;
+          // review find 28.09 (TOOL belt): once TOOL accepted the submit (onSubmitted set
+          // toolSubmittedJob) but no campaign id came back, a throw here (the definite-failure
+          // rethrow, or any other) must NOT free the marker/slot — TOOL may still be creating the
+          // clone server-side. Settle it exactly like the pending terminal above (keep marker + slot,
+          // "pending tool job #N" note, row stays running with the job id in `link`); the job is in
+          // flight, so it is NOT counted as failed. backfill is .catch-guarded here because we are
+          // already inside the catch (a Strapi throw must not escape past the finally).
+          if (via === "tool" && toolSubmittedJob != null && !created.campaign_id && !toolDefiniteFail) {
+            if (created.tool_job_id == null) created.tool_job_id = toolSubmittedJob;
+            const note = `pending tool job #${toolSubmittedJob} — check Ads Manager sessions → Jobs`;
+            if (claim?.documentId) {
+              const patch = { notes: note };
+              if (aif) await backfillBrand(claim.documentId, patch).catch(() => {});
+              else await backfillGcm(claim.documentId, patch, claim.gcm).catch(() => {});
+            }
+            settled = true;
+            // Terminal row (the launch rails do the same): nothing in this synchronous stream will
+            // ever advance it, so "running" would sit in the team drawer forever.
+            tw.write({ status: "error", stage: "ad", finished_at: Date.now(), error: note, link: String(toolSubmittedJob) });
+            send({ idx, ok: false, stage: "ad", pending: true, via: "tool", tool_job_id: toolSubmittedJob, error: err.message ?? String(e), ...created });
+            // `continue` runs the loop's finally (clearInterval + tw.flush) before advancing.
+            continue;
+          }
+          failed++;
           // Free the account's launch slot when NO campaign was created (limit meters only
           // campaigns that exist); once one exists the slot stays consumed.
           if (acctSlot && !created.campaign_id) await releaseAcctSlot(acctSlot.documentId);

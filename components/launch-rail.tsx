@@ -298,11 +298,19 @@ export function LaunchRail({
                 })}
               </div>
               <p className="text-center text-[10px] leading-relaxed text-faint">
-                {hsChannel === "tool"
+                {/* Caption gates on the EFFECTIVE channel (nameChannel), never the raw pick
+                    (review find 28.09): a "tool"/"token" pick restored from localStorage while
+                    the server flips the rail not-ready renders disabled-but-highlighted, yet
+                    launchWave falls back to LION — so the caption must not claim TOOL/Token. A
+                    picked-but-not-ready TOOL shows the server's reason plus that the wave fires
+                    on the LION API; a stale token pick folds into the LION caption. */}
+                {nameChannel === "tool"
                   ? `Launches through TOOL · ${tool?.accounts.size ?? 0} account${(tool?.accounts.size ?? 0) === 1 ? "" : "s"} · delivery +30 min`
-                  : hsChannel === "token"
-                    ? "Our FB token builds the tree · delivery starts +30 min"
-                    : "LION profiles build the tree on the weapon side"}
+                  : hsChannel === "tool"
+                    ? `${tool?.message || "TOOL not ready"} · wave fires on the LION API`
+                    : nameChannel === "token"
+                      ? "Our FB token builds the tree · delivery starts +30 min"
+                      : "LION profiles build the tree on the weapon side"}
               </p>
             </div>
           ) : null}

@@ -787,6 +787,9 @@ export type ToolDeps = {
 
 const MEDIA_POLL_MS = 2500;
 const JOB_POLL_MS = 2500;
+/** Ceiling for the status-poll backoff on a 429 (review find 28.09) — the shared glo-01 session is
+ *  rate-limited under load; the interval doubles up to this so a 429 storm never spins. */
+const MAX_JOB_POLL_MS = 10_000;
 
 export type ToolMediaItem = { url: string; kind: "image" | "video"; name?: string; coverUrl?: string };
 export type ToolMediaRefOut = { media: ToolMediaRef; thumbnail?: ToolMediaRef };
@@ -874,32 +877,57 @@ export type ToolPublishRun =
   | { ok: true; jobId: number; campaignId: string; adsetId: string; adIds: string[] }
   | { ok: false; error: string; jobId?: number; created?: ToolCreated; pending?: boolean };
 
-/** Poll ONE job (campaign.create or a duplicate child) to a terminal state (spec §2.1(f)). Reads
- *  events only while the job is still running, and at most every other poll, to feed onStage. */
+/**
+ * Poll ONE job (campaign.create or a duplicate child) to a terminal state (spec §2.1(f)). Reads
+ * events only while the job is still running, and at most every other poll, to feed onStage.
+ *
+ * review find 28.09: the submit already succeeded, so the job is REAL — a FAILED *status* read is
+ * NEVER a clean "nothing created". Every 4xx (incl. 401/403/404/408/429), 5xx and network error on
+ * getJob is transient: we keep polling until the deadline, then return `pending:true` with the jobId
+ * (the caller keeps its acct-slot + gcm and reconciles). Treating a 429 / post-submit 404 as a hard
+ * failure here would free the code + slot while TOOL finishes creating a live ACTIVE campaign that
+ * carries that gcm's link. Only a 4xx on the SUBMIT call (runToolPublish/runToolDuplicate) is a safe
+ * refusal. A 429 backs the interval off (double up to ~10 s) so the shared glo-01 session's
+ * rate-limiting never spins.
+ */
 async function pollJob(
   deps: ToolDeps,
   jobId: number,
   accountId: string,
   opts: { deadlineAt: number; onStage?: StageCb; pollMs?: number },
 ): Promise<ToolPublishRun> {
-  const pollMs = opts.pollMs ?? JOB_POLL_MS;
+  const basePollMs = opts.pollMs ?? JOB_POLL_MS;
+  let pollMs = basePollMs;
   let tick = 0;
   let events: unknown;
+  let readOk = false; // did the LATEST status read succeed? drives the deadline sentence (review find 28.09)
   for (;;) {
     const jr = await deps.getJob(jobId);
+    readOk = jr.ok;
     if (jr.ok) {
+      pollMs = basePollMs; // recovered — drop any 429 backoff
       const job = jr.data;
       const status = str(rec(job).status).toLowerCase();
       if (isToolJobTerminal(status)) {
         const outcome = toolJobOutcome(job);
         if (outcome.state === "done") {
+          // review find 28.09: a "done" that names no campaign cannot be settled either way — the
+          // tree may exist without ids we can backfill. PENDING (keep slot + marker), never success.
+          if (!outcome.campaignId) {
+            return { ok: false, error: `TOOL job #${jobId} finished without reporting a campaign id — check Ads Manager sessions → Jobs`, jobId, pending: true };
+          }
           opts.onStage?.("done");
           return { ok: true, jobId, campaignId: outcome.campaignId, adsetId: outcome.adsetIds[0] ?? "", adIds: outcome.adIds };
         }
         // failed (or, defensively, an outcome that never reached done)
         const failedError = outcome.state === "failed" ? outcome.error : "TOOL job ended without a campaign";
         const created = outcome.state === "failed" ? outcome.created : undefined;
-        return { ok: false, error: toolFailureText(str(rec(job).error) || failedError, accountId), jobId, created };
+        const error = toolFailureText(str(rec(job).error) || failedError, accountId);
+        // review find 28.09: only error / canceled WITHOUT created ids prove nothing landed (the
+        // caller then frees slot + marker). partial / unknown without ids are ambiguous — TOOL may
+        // have built part of the tree — so they settle as PENDING, never as a freed marker.
+        if (!created && (status === "partial" || status === "unknown")) return { ok: false, error, jobId, pending: true };
+        return { ok: false, error, jobId, created };
       }
       if (opts.onStage) {
         if (tick % 2 === 0) {
@@ -908,13 +936,18 @@ async function pollJob(
         }
         opts.onStage(toolStageOf(job, events));
       }
-    } else if (jr.status >= 400 && jr.status < 500) {
-      // The job read hard-failed (e.g. 404) — cannot continue polling.
-      return { ok: false, error: toolFailureText(jr, accountId), jobId };
+    } else if (jr.status === 429) {
+      // review find 28.09: rate-limited on the shared session — back off (double up to ~10 s), still
+      // transient (keep polling), never a refusal.
+      pollMs = Math.min(pollMs * 2, MAX_JOB_POLL_MS);
     }
-    // else: transient (5xx / network) — keep polling until the deadline.
+    // review find 28.09: a failed read (any 4xx/5xx/network) is transient after a good submit — keep
+    // polling until the deadline, then PENDING (jobId kept so the caller keeps its slot + gcm).
     if (deps.now() >= opts.deadlineAt) {
-      return { ok: false, error: "TOOL is still working past the deadline", jobId, pending: true };
+      const error = readOk
+        ? "TOOL is still working past the deadline"
+        : `TOOL could not be read for job #${jobId} before the deadline — the campaign may still appear`;
+      return { ok: false, error, jobId, pending: true };
     }
     await deps.sleep(pollMs);
     tick++;
@@ -930,12 +963,17 @@ const jobIdOf = (data: unknown): number => num(rec(data).id);
  * missing_context shape TOOL answers with) — is a clean REFUSAL, nothing created. A network / 5xx
  * on submit gives no job id and no proof either way, so it is PENDING (the caller keeps its claim
  * and reconciles), never silently called a refusal.
+ *
+ * review find 28.09: `onSubmitted(jobId)` fires exactly once, synchronously, the instant TOOL
+ * accepted the submit and returned a real job id — BEFORE any polling, and NEVER on a refused submit.
+ * The route records the id right then, so a client-disconnect enqueue-throw mid-poll cannot make its
+ * cleanup catch free the gcm/slot while the already-submitted job creates the live campaign.
  */
 export async function runToolPublish(
   deps: ToolDeps,
   accountId: string,
   body: CampaignRequest,
-  opts: { idempotencyKey?: string; deadlineAt: number; onStage?: StageCb; pollMs?: number },
+  opts: { idempotencyKey?: string; deadlineAt: number; onStage?: StageCb; pollMs?: number; onSubmitted?: (jobId: number) => void },
 ): Promise<ToolPublishRun> {
   const sub = await deps.createCampaign(accountId, body, { idempotencyKey: opts.idempotencyKey });
   if (!sub.ok) {
@@ -948,19 +986,21 @@ export async function runToolPublish(
     if (problems.length) return { ok: false, error: toolFailureText(problems, accountId) };
     return { ok: false, error: "TOOL accepted the request but returned no job id", pending: true };
   }
+  opts.onSubmitted?.(jobId); // accepted with a real job id — tell the caller BEFORE polling (review find 28.09)
   return pollJob(deps, jobId, accountId, opts);
 }
 
 /**
  * Submit a one-target duplicate batch and follow its single child job. Same refusal / ambiguity
  * rule as runToolPublish; the child result.created shape is read defensively (no duplicate job has
- * ever run live — spec §4).
+ * ever run live — spec §4). `onSubmitted(jobId)` fires exactly once before polling, and never on a
+ * refused submit — same disconnect-safety contract as runToolPublish (review find 28.09).
  */
 export async function runToolDuplicate(
   deps: ToolDeps,
   accountId: string,
   body: DuplicateRequest,
-  opts: { idempotencyKey?: string; deadlineAt: number; onStage?: StageCb; pollMs?: number },
+  opts: { idempotencyKey?: string; deadlineAt: number; onStage?: StageCb; pollMs?: number; onSubmitted?: (jobId: number) => void },
 ): Promise<ToolPublishRun> {
   const sub = await deps.createDuplicates(accountId, body, { idempotencyKey: opts.idempotencyKey });
   if (!sub.ok) {
@@ -974,5 +1014,6 @@ export async function runToolDuplicate(
     if (problems.length) return { ok: false, error: toolFailureText(problems, accountId) };
     return { ok: false, error: "TOOL accepted the duplicate but returned no child job", pending: true };
   }
+  opts.onSubmitted?.(jobId); // accepted with a real child job id — tell the caller BEFORE polling (review find 28.09)
   return pollJob(deps, jobId, accountId, opts);
 }
