@@ -168,3 +168,33 @@ or `{ok:false, stage:"error", error, created, tool_job_id?, pending?}`.
 - DSA beneficiary/payor (EU / WW reach) has no TOOL field — unknown whether TOOL fills it.
 - Duplicate jobs never ran live on TOOL — the child-job result shape is read defensively.
 - Prod needs `TOOL_SESSIONS_API_KEY` in the Vercel env (not set) — until then `ready:false` everywhere.
+
+## 5. Addendum 28.09 — as built (implementation + seven-lens review)
+
+- **Outcome rule (core, `runToolPublish` / `runToolDuplicate`).** A 4xx on SUBMIT (or a 2xx with
+  `problems` and no job id — the `missing_context` shape) = clean refusal, nothing created. After TOOL
+  accepted the submit every failed status read (429 with backoff up to 10 s, 404, 401/403, 5xx,
+  network) keeps polling; the deadline → `pending`. Terminal `error` / `canceled` without ids =
+  definite failure (routes free the acct slot + gcm/brand). `partial` / `unknown` without ids and
+  `done` without a campaign id = `pending` (routes keep slot + marker with a `pending tool job #N`
+  note). `onSubmitted(jobId)` fires once on accept.
+- **Disconnect safety.** On the TOOL path the NDJSON `send` swallows enqueue errors (a closed tab
+  never unwinds into the cleanup catch); the Graph path still throws as before. A throw after the
+  submit with no campaign id known is settled as pending by the shared catch (belt), never a freed
+  marker. Pending rows are terminal (`error` + note) on every rail; the clients read `pending:true`
+  and offer no Retry.
+- **Stages.** MO/AIF/clone emit the existing stage keys (gcm → video → processing → campaign → adset →
+  creative → ad); HS tool-launch emits token-launch's keys (submit / campaign / adset / ads).
+- **HS tool-duplicate.** Body identical to token-duplicate; rows stamped like token-duplicate
+  (`kind duplicate`, `lionTaskId ""`); cap 20 shots per wave (client + server); acct-limit precheck
+  after the wave-idempotency short-circuits; non-USD target refused; `status`/`ad_status` ACTIVE with
+  start +30 min, and a child job that fails while reporting a campaign is paused through LION
+  (`lionSetCampaignStatus`), the row says whether the pause landed. Path account = the TARGET
+  account (to confirm on the first live wave).
+- **MO/AIF clone board on TOOL** offers only concrete TOOL-visible accounts (no "From each source":
+  the client cannot prove the source account is TOOL-visible); the server's `toolAccountVisible`
+  stays the final gate.
+- **HS TOOL launch** accepts paste-URL images (TOOL pulls the URL itself); the token rail keeps its
+  own-Blob fence.
+- **Media** carries no Idempotency-Key on launches (TOOL content-addresses media); clone media uses
+  `<taskId>:media`; every campaign create / duplicate carries the task / shot id.
