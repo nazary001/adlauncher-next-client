@@ -72,10 +72,23 @@ export async function avSites(force = false): Promise<AvSite[]> {
   return me.sites;
 }
 
+/**
+ * Where a host stands among our sites: `exact` = the listed site it IS (or its www), `parent` = the
+ * listed site it is a subdomain of — the ROOT-most one, so the answer never depends on the order of
+ * GET /me. A host may have both: ActiveView may list a site's chat subdomain as a site of its own.
+ */
+function placeOfHost(host: string, sites: AvSite[]): { exact: AvSite | null; parent: AvSite | null } {
+  const h = host.toLowerCase();
+  const exact = sites.find((s) => h === s.domain || h === `www.${s.domain}`) ?? null;
+  const parents = sites.filter((s) => h.endsWith(`.${s.domain}`) && h !== `www.${s.domain}`);
+  const parent = parents.sort((a, b) => a.domain.length - b.domain.length)[0] ?? null;
+  return { exact, parent };
+}
+
 /** The site a host belongs to: the site itself, www.<site>, or a subdomain of it (redirect.<site>). */
 export function siteOfHost(host: string, sites: AvSite[]): AvSite | null {
-  const h = host.toLowerCase();
-  return sites.find((s) => h === s.domain || h.endsWith(`.${s.domain}`)) ?? null;
+  const { exact, parent } = placeOfHost(host, sites);
+  return parent ?? exact;
 }
 
 async function fetchText(url: string, timeoutMs = 10_000): Promise<{ status: number; text: string; finalUrl: string }> {
@@ -219,10 +232,15 @@ export function invalidateAvRedirects(): void {
 }
 
 /** Everything the card's Destination picker shows. Sites must load (else AvApiError); articles and
- *  redirects degrade independently with their own error text; the chat hosts are a DNS + gateway
- *  probe that never throws (a host it cannot confirm is simply not listed). */
+ *  redirects degrade independently with their own error text; the chat hosts are a probe that
+ *  never throws (a host it could not check is listed with that reason) and runs alongside the
+ *  rest — a chat host that does not answer must not hold the articles back. */
 export async function avDestinationCatalog(opts: { force?: boolean; titles?: boolean } = {}): Promise<AvDestinationCatalog> {
   const sites = await avSites(opts.force);
+  // chat.<site> is probed for the ROOT sites only: a site's own subdomain that AV lists as a site
+  // (its chat host, say) has no chat.<subdomain> of its own.
+  const roots = sites.filter((s) => !sites.some((o) => s.domain.endsWith(`.${o.domain}`))).map((s) => s.domain);
+  const chats = avChatHosts(roots, opts.force).catch((): AvChatHostOption[] => []);
   const articles: AvArticle[] = [];
   const errors: string[] = [];
   for (const s of sites) {
@@ -251,7 +269,7 @@ export async function avDestinationCatalog(opts: { force?: boolean; titles?: boo
     ...(errors.length ? { articlesError: `articles unavailable — ${errors.join("; ")}` } : {}),
     redirects,
     ...(redirectsError ? { redirectsError: `redirect paths unavailable — ${redirectsError}` } : {}),
-    chats: await avChatHosts(sites.map((s) => s.domain), opts.force),
+    chats: await chats,
   };
 }
 
@@ -298,8 +316,9 @@ export async function resolveAvDestination(raw: string): Promise<AvResolved> {
   } catch (e) {
     return { ok: false, error: `destination_check_failed — ${errText(e)}`, status: 502 };
   }
-  const site = siteOfHost(b.host, sites);
-  if (!site) {
+  const { exact, parent } = placeOfHost(b.host, sites);
+  const owner = parent ?? exact;
+  if (!owner) {
     return { ok: false, error: `destination_not_av — ${b.host} is not an ActiveView site of ours (${sites.map((s) => s.domain).join(", ") || "none"})`, status: 400 };
   }
   let redirects: AvRedirectOption[] = [];
@@ -315,19 +334,24 @@ export async function resolveAvDestination(raw: string): Promise<AvResolved> {
     if (!live.live) return { ok: false, error: `redirect_not_live — ${live.reason}`, status: 400 };
     const p = rd.paths.find((x) => x.path === b.path);
     if (!p) return { ok: false, error: `redirect_path_unknown — ${b.path} is not a path of ${rd.domain} (create it on the card first)`, status: 400 };
-    return { ok: true, kind: "redirect", base: b.base, site: site.domain, domainId: rd.domainId, pathId: p.id, mappings: p.mappings };
+    return { ok: true, kind: "redirect", base: b.base, site: owner.domain, domainId: rd.domainId, pathId: p.id, mappings: p.mappings };
   }
-  if (b.host !== site.domain && b.host !== `www.${site.domain}`) {
-    // A subdomain that is no redirect domain we know: a Chat Builder host (its CNAME says so, whatever
-    // the redirect list did) or nothing of ours. While the redirect list is unavailable a host that
-    // is NOT a chat may still be a redirect domain we could not see — a failed check, not a refusal.
-    const chat = await resolveAvChat(b, site.domain);
-    if (!chat.ok && redirectsFailed && chat.error.startsWith("destination_not_av")) {
-      return { ok: false, error: `destination_check_failed — redirect paths unavailable (${redirectsFailed})`, status: 502 };
+  if (parent) {
+    // A subdomain of one of our sites that is no redirect domain we know: a Chat Builder host — its
+    // CNAME says so, whatever the redirect list did and whether or not ActiveView ALSO lists the
+    // host as a site of its own (a chat host must never reach an ad through the article branch,
+    // past the chat's gate). Its verdict stands unless the host is simply not a chat host.
+    const chat = await resolveAvChat(b, parent.domain);
+    if (chat.ok || !chat.error.startsWith("destination_not_av")) return chat;
+    if (!exact) {
+      // While the redirect list is unavailable the host may still be a redirect domain we could not
+      // see — a failed check, not a refusal.
+      if (redirectsFailed) return { ok: false, error: `destination_check_failed — redirect paths unavailable (${redirectsFailed})`, status: 502 };
+      return chat;
     }
-    return chat;
   }
-  // On the site itself only a PAGE is a destination — a chat's address (root + ?asst=) belongs to the
+  const site = exact as AvSite;
+  // On a site itself only a PAGE is a destination — a chat's address (root + ?asst=) belongs to a
   // chat subdomain, and here it is just the home page.
   if (b.path === "/") {
     return { ok: false, error: `destination_invalid — pick an article (or a redirect path), not the home page (a chat lives on the chat subdomain of ${site.domain})`, status: 400 };

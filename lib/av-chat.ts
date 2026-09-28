@@ -6,13 +6,16 @@
 //
 // AV's external API (the AV_API_KEY one, lib/av-api) knows NO chats: they are built in the dashboard
 // (Chat Builder → Subdomains & chats), so nothing here can be picked from a catalog and the chat's
-// URL is pasted. What a request CAN prove is the HOST (read live 29.09 on AV's other chat hosts):
+// URL is pasted. What a request CAN prove is the HOST (all read live 29.09 on AV's chat hosts):
 //   - its CNAME points at AV's chat gateway;
 //   - the gateway routes it — before the Chat Builder activation is finished it answers
-//     404 {"message":"no Route matched with those values"};
-//   - it SHOWS ADS: the host's public /worker.js names the ad script AV assigns after its review.
-//     Until then the chat is "Pending monetization" and every visitor earns nothing — a launch is
-//     refused rather than buying that traffic.
+//     404 {"message":"no Route matched with those values"} behind its default certificate;
+//   - it SHOWS ADS. The host's public /worker.js is its settings + a loader: the page starts only
+//     with a chat key and the parts the loader requires, and takes its ads from ONE file, the ad
+//     script the settings name, off AV's script CDN. AV assigns and publishes that script by hand
+//     after its review ("Pending monetization" until then) — hosts were seen with no script, with
+//     the template's placeholder, and with a name whose file the CDN does not have. Each of those
+//     shows no ads: every visitor bought for it earns nothing, so the launch is refused.
 // What a request can NOT prove is the chat itself: the gateway serves one static shell, so ANY
 // well-formed id answers 200. The id is the buyer's to copy from Chat Builder.
 //
@@ -24,12 +27,29 @@ import { avChatUrl } from "./av-link";
 const UA = "Mozilla/5.0 (compatible; adlauncher-av/1.0)";
 /** The CNAME target the Chat Builder wizard hands out (step 2 "Copy your DNS keys", read 29.09). */
 const DEFAULT_GATEWAYS = ["assistant-quiz-infrastructure-gateway.activeview.app"];
+/** Where every chat host's loader takes its ad script from (`${base}/${script}.js`, nothing encoded). */
+const DEFAULT_SCRIPT_CDN = "https://scr.actview.net";
+/** What the loader's validateSettings wants before the page starts — the ad script included. */
+const REQUIRED_SETTINGS = ["key", "terms", "theme", "config", "botNames"] as const;
+/** The template's default ad script: a name no host's own script carries (on the CDN it is another
+ *  publisher's file). */
+const PLACEHOLDER_SCRIPTS = new Set(["localhost"]);
+/** A script name is remote content that becomes part of a URL: a plain file name or nothing. */
+const SCRIPT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
+const HOST_RE = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/;
+
 const HOST_TTL_MS = 5 * 60_000;
 const READY_TTL_MS = 5 * 60_000;
+const HINT_TTL_MS = 60_000;
 const PAGE_OK_TTL_MS = 10 * 60_000;
-const PAGE_TIMEOUT_MS = 10_000;
-const SETTINGS_TIMEOUT_MS = 8_000;
+const PAGE_OK_MAX = 500;
+const DNS_TIMEOUT_MS = 3_000;
 const DOH_TIMEOUT_MS = 5_000;
+const SETTINGS_TIMEOUT_MS = 8_000;
+const SCRIPT_TIMEOUT_MS = 5_000;
+const PAGE_TIMEOUT_MS = 8_000;
+const SETTINGS_MAX_BYTES = 256 * 1024;
+const DOH_MAX_BYTES = 64 * 1024;
 
 export type AvChatShape = { base: string; host: string; path: string };
 export type AvChatHostVerdict = { chat: true; gateway: string } | { chat: false; failed: boolean; reason?: string };
@@ -40,8 +60,9 @@ export type AvChatResolved = { ok: true; kind: "chat"; base: string; site: strin
 type Ready = { ready: true } | { ready: false; failed: boolean; error: string };
 
 type Cached<T> = { at: number; value: T };
-const hostCache = new Map<string, Cached<AvChatHostVerdict>>();
+const hostCache = new Map<string, Cached<{ chat: true; gateway: string }>>();
 const readyCache = new Map<string, number>();
+const hintCache = new Map<string, Cached<Ready>>();
 const pageOkCache = new Map<string, number>();
 
 const normHost = (h: unknown): string => String(h ?? "").trim().toLowerCase().replace(/\.+$/, "");
@@ -64,6 +85,31 @@ const CERT_ERRORS = new Set([
   "ERR_TLS_CERT_ALTNAME_INVALID",
 ]);
 
+/** A response body as text, read only as far as `max` bytes — the rest is never downloaded. */
+async function textUpTo(res: Response, max: number): Promise<string> {
+  const reader = res.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (size < max) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      size += value.byteLength;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks).subarray(0, max));
+}
+
+/** One GET of the check: never follows a redirect (what it may name is not ours to request),
+ *  bounded in time and — for the bodies that are read — in size. */
+function get(url: string, accept: string, timeoutMs: number): Promise<Response> {
+  return fetch(url, { headers: { "User-Agent": UA, Accept: accept }, redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(timeoutMs) });
+}
+
 /** The gateway hosts a chat subdomain's CNAME may point at. AV_CHAT_GATEWAYS (comma-separated)
  *  REPLACES the built-in one when set — AV moving its gateway must not need a deploy. */
 function gateways(): string[] {
@@ -71,18 +117,48 @@ function gateways(): string[] {
   return own.length ? own : DEFAULT_GATEWAYS;
 }
 
+/** The origin the ad scripts are served from. AV_CHAT_SCRIPT_CDN (an https origin) REPLACES the
+ *  built-in one when set — the twin of AV_CHAT_GATEWAYS. */
+function scriptCdn(): string {
+  const own = String(process.env.AV_CHAT_SCRIPT_CDN ?? "").trim().replace(/\/+$/, "").toLowerCase();
+  return /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(own) ? own : DEFAULT_SCRIPT_CDN;
+}
+
+/** The host's CNAMEs from the runtime's resolver, given up after 3 s: left to itself the resolver
+ *  waits about half a minute for a name server that does not answer (measured), longer than a
+ *  route may run. */
+async function cnamesFromResolver(host: string): Promise<string[]> {
+  const resolver = new dns.Resolver({ timeout: DNS_TIMEOUT_MS, tries: 1 });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      resolver.resolveCname(host),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          resolver.cancel();
+          reject(Object.assign(new Error(`the name server did not answer in ${DNS_TIMEOUT_MS / 1000} s`), { code: "ETIMEOUT" }));
+        }, DNS_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * The host's CNAMEs over DNS-over-HTTPS (Google's JSON API) — the fallback for a runtime whose own
- * resolver cannot be asked (seen 29.09: dns.resolveCname answered ECONNREFUSED on a machine whose
- * system lookups worked). NOERROR / NXDOMAIN are answers; anything else throws.
+ * resolver cannot be asked (seen 29.09: ECONNREFUSED on a machine whose system lookups worked).
+ * NOERROR / NXDOMAIN are answers; anything else throws.
  */
 async function cnamesOverHttps(host: string): Promise<string[]> {
-  const res = await fetch(`https://dns.google/resolve?name=${host}&type=CNAME`, {
-    headers: { Accept: "application/dns-json" },
-    cache: "no-store",
-    signal: AbortSignal.timeout(DOH_TIMEOUT_MS),
-  });
-  const body = (await res.json().catch(() => null)) as { Status?: unknown; Answer?: { type?: unknown; data?: unknown }[] } | null;
+  const res = await get(`https://dns.google/resolve?name=${encodeURIComponent(host)}&type=CNAME`, "application/dns-json", DOH_TIMEOUT_MS);
+  const text = await textUpTo(res, DOH_MAX_BYTES);
+  let body: { Status?: unknown; Answer?: { type?: unknown; data?: unknown }[] } | null = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    /* not an answer */
+  }
   if (!res.ok || !body || (body.Status !== 0 && body.Status !== 3)) {
     throw new Error(`DNS over HTTPS answered ${res.status}${body && body.Status !== undefined ? ` / status ${String(body.Status)}` : ""}`);
   }
@@ -93,7 +169,7 @@ async function cnamesOverHttps(host: string): Promise<string[]> {
  *  resolver could not be asked. Throws only when neither could answer. */
 async function cnamesOf(host: string): Promise<string[]> {
   try {
-    return (await dns.resolveCname(host)).map(normHost);
+    return (await cnamesFromResolver(host)).map(normHost);
   } catch (e) {
     const code = String((e as { code?: unknown })?.code ?? "");
     if (code === "ENOTFOUND" || code === "ENODATA") return [];
@@ -106,14 +182,17 @@ async function cnamesOf(host: string): Promise<string[]> {
 }
 
 /**
- * Is `host` an ActiveView chat host — does its CNAME point at AV's chat gateway? A clean DNS answer
- * (including "no such record") is a verdict and is cached 5 min; a DNS outage is a FAILED check:
- * it says nothing about the host, so it is never cached and never reads as "not a chat".
+ * Is `host` an ActiveView chat host — does its CNAME point at AV's chat gateway? Only a YES is
+ * cached (5 min): a CNAME that was added a moment ago must be seen at once, and a DNS outage says
+ * nothing about the host — it is a FAILED check, never "not a chat". A string that is not a host
+ * name is answered without asking anyone.
  */
 export async function avChatHost(host: string, force = false): Promise<AvChatHostVerdict> {
   const h = normHost(host);
+  if (!HOST_RE.test(h)) return { chat: false, failed: false };
   const c = hostCache.get(h);
   if (!force && c && Date.now() - c.at < HOST_TTL_MS) return c.value;
+  hostCache.delete(h);
   let cnames: string[];
   try {
     cnames = await cnamesOf(h);
@@ -121,50 +200,82 @@ export async function avChatHost(host: string, force = false): Promise<AvChatHos
     return { chat: false, failed: true, reason: `the DNS lookup of ${h} failed (${errText(e)})` };
   }
   const gateway = gateways().find((g) => cnames.includes(g));
-  const v: AvChatHostVerdict = gateway ? { chat: true, gateway } : { chat: false, failed: false };
-  hostCache.set(h, { at: Date.now(), value: v });
-  return v;
+  if (!gateway) return { chat: false, failed: false };
+  const verdict = { chat: true as const, gateway };
+  hostCache.set(h, { at: Date.now(), value: verdict });
+  return verdict;
 }
 
 /**
- * The two ad settings of a chat host out of its /worker.js: `script` (the ad script's name — "" until
- * AV assigns one) and `config.disable`. The file is `const assistantQuizSettings = {…};` followed by
- * the loader code; read live 29.09 the literal is JSON-style with QUOTED keys. Only the literal is
- * read (the loader names `script` / `disable` too), with either key style; null = not that file.
+ * A chat host's settings out of its /worker.js: `const assistantQuizSettings = {…};` followed by
+ * the loader. Only the literal is read (the loader names `script` / `disable` too), with either key
+ * style — live hosts serve quoted keys, the unpublished template bare ones. A missing `script` is
+ * no script and a missing `disable` is false, exactly as the loader reads them; `missing` lists the
+ * parts the loader requires and does not find. null = not that file.
  */
-function adSettings(js: string): { script: string; disable: boolean } | null {
-  const at = js.indexOf("assistantQuizSettings");
+function chatSettings(js: string): { key: string; script: string; disable: boolean; missing: string[] } | null {
+  const at = js.search(/\bassistantQuizSettings\s*=\s*\{/);
   if (at < 0) return null;
   const end = js.indexOf("};", at);
   const literal = end < 0 ? js.slice(at) : js.slice(at, end + 1);
-  const script = /(?:^|[\s{,])["']?script["']?\s*:\s*(["'])(.*?)\1/.exec(literal);
-  const disable = /(?:^|[\s{,])["']?disable["']?\s*:\s*(true|false)\b/.exec(literal);
-  if (!script || !disable) return null;
-  return { script: script[2].trim(), disable: disable[1] === "true" };
+  const name = (n: string) => `(?:^|[\\s{,])["']?${n}["']?\\s*:\\s*`;
+  const text = (n: string) => (new RegExp(`${name(n)}(["'])(.*?)\\1`).exec(literal)?.[2] ?? "").trim();
+  const present: Record<(typeof REQUIRED_SETTINGS)[number], boolean> = {
+    key: text("key") !== "",
+    terms: new RegExp(`${name("terms")}\\{`).test(literal),
+    theme: new RegExp(`${name("theme")}\\{`).test(literal),
+    config: new RegExp(`${name("config")}\\{`).test(literal),
+    botNames: new RegExp(`${name("botNames")}\\[\\s*["']`).test(literal),
+  };
+  return {
+    key: text("key"),
+    script: text("script"),
+    disable: new RegExp(`${name("disable")}true\\b`).test(literal),
+    missing: REQUIRED_SETTINGS.filter((part) => !present[part]),
+  };
 }
 
-/**
- * May traffic be bought for this chat host — is it activated and does it show ads? Reads the host's
- * public /worker.js (AV generates it per host: `script` = the ad script's name, `config.disable` =
- * ads switched off). Only a READY verdict is cached (5 min): a host that was just activated or
- * approved must be launchable at once.
- */
-async function chatHostReady(host: string, force = false): Promise<Ready> {
-  const seen = readyCache.get(host);
-  if (!force && seen && Date.now() - seen < READY_TTL_MS) return { ready: true };
-  readyCache.delete(host);
+/** Is the ad script the host names actually SERVED by AV's CDN? The address is built exactly as the
+ *  host's loader builds it. A file the CDN does not have answers 403 (read live) or 404 — the
+ *  buyer's fix; anything else that is not a served script is a check that could not be made (a CDN
+ *  outage must not send the buyer to ActiveView about a script that may be fine). */
+async function adScriptServed(host: string, script: string): Promise<Ready> {
+  if (!SCRIPT_NAME_RE.test(script)) {
+    return { ready: false, failed: true, error: `destination_check_failed — the ad script of ${host} is named ${JSON.stringify(script)}, which is no file name` };
+  }
+  const url = `${scriptCdn()}/${script}.js`;
+  let status: number;
+  let type: string;
+  try {
+    const res = await get(url, "application/javascript,*/*;q=0.8", SCRIPT_TIMEOUT_MS);
+    status = res.status;
+    type = res.headers.get("content-type") ?? "";
+    await res.body?.cancel().catch(() => {});
+  } catch (e) {
+    return { ready: false, failed: true, error: `destination_check_failed — the ad script of ${host} could not be checked (${url}: ${errText(e)})` };
+  }
+  if (status === 403 || status === 404) {
+    return {
+      ready: false,
+      failed: false,
+      error: `chat_not_monetized — ${host} names the ad script "${script}" but ActiveView has not published it (${url} answered ${status}), so the chat shows no ads — ask ActiveView to publish it before buying traffic`,
+    };
+  }
+  if (status !== 200 || !/javascript|ecmascript/i.test(type)) {
+    return { ready: false, failed: true, error: `destination_check_failed — the ad script of ${host} could not be checked (${url} answered ${status} ${type || "without a content type"})` };
+  }
+  return { ready: true };
+}
+
+/** May traffic be bought for this chat host — is it activated, published, and does it show ads? */
+async function probeChatHost(host: string): Promise<Ready> {
   const url = `https://${host}/worker.js`;
   let status: number;
   let body: string;
   try {
-    const res = await fetch(url, {
-      headers: { "User-Agent": UA, Accept: "application/javascript,*/*;q=0.8" },
-      redirect: "manual",
-      cache: "no-store",
-      signal: AbortSignal.timeout(SETTINGS_TIMEOUT_MS),
-    });
+    const res = await get(url, "application/javascript,*/*;q=0.8", SETTINGS_TIMEOUT_MS);
     status = res.status;
-    body = await res.text().catch(() => "");
+    body = await textUpTo(res, SETTINGS_MAX_BYTES);
   } catch (e) {
     if (CERT_ERRORS.has(causeCode(e))) {
       return {
@@ -178,9 +289,12 @@ async function chatHostReady(host: string, force = false): Promise<Ready> {
   if (status === 404 && /no Route matched/i.test(body)) {
     return { ready: false, failed: false, error: `chat_not_live — AV's chat gateway has no route for ${host} yet: finish the activation in ActiveView → Chat Builder` };
   }
-  const settings = status === 200 ? adSettings(body) : null;
+  const settings = status === 200 ? chatSettings(body) : null;
   if (!settings) {
     return { ready: false, failed: true, error: `destination_check_failed — the ad settings of ${host} could not be read (${url} answered ${status})` };
+  }
+  if (!settings.key) {
+    return { ready: false, failed: false, error: `chat_not_live — ${host} has no chat key yet (its settings are still the template's): publish the chat in ActiveView → Chat Builder` };
   }
   if (!settings.script) {
     return {
@@ -189,37 +303,69 @@ async function chatHostReady(host: string, force = false): Promise<Ready> {
       error: `chat_not_monetized — ${host} shows no ads yet: ActiveView has not assigned its ad script (the chat is "Pending monetization") — ask ActiveView to finish the review before buying traffic`,
     };
   }
+  if (PLACEHOLDER_SCRIPTS.has(settings.script.toLowerCase())) {
+    return {
+      ready: false,
+      failed: false,
+      error: `chat_not_monetized — ${host} still names the template's placeholder ad script ("${settings.script}"), not its own — ask ActiveView to assign it before buying traffic`,
+    };
+  }
   if (settings.disable) {
     return { ready: false, failed: false, error: `chat_not_monetized — ads are switched off on ${host} (Chat Builder → the subdomain's ad settings)` };
   }
-  readyCache.set(host, Date.now());
-  return { ready: true };
+  if (settings.missing.length) {
+    return {
+      ready: false,
+      failed: false,
+      error: `chat_not_monetized — the settings of ${host} are incomplete (no ${settings.missing.join(", ")}): its page stops before it loads the ad script, so the chat shows no ads — ask ActiveView to regenerate them`,
+    };
+  }
+  return adScriptServed(host, settings.script);
 }
 
-/** Does the chat's address answer 200 on its own host? (Cached 10 min once proven, like an article.) */
-async function chatLive(base: string, host: string): Promise<{ ok: true } | { ok: false; error: string }> {
+/**
+ * The launch's gate. Only a READY verdict is remembered (5 min): a host that was just activated,
+ * approved or fixed is launchable at once, and a refusal is re-checked every time.
+ */
+async function chatHostReady(host: string, force = false): Promise<Ready> {
+  const seen = readyCache.get(host);
+  if (!force && seen !== undefined && Date.now() - seen < READY_TTL_MS) return { ready: true };
+  readyCache.delete(host);
+  const verdict = await probeChatHost(host);
+  if (verdict.ready) {
+    readyCache.set(host, Date.now());
+    hintCache.delete(host);
+  } else {
+    hintCache.set(host, { at: Date.now(), value: verdict });
+  }
+  return verdict;
+}
+
+/** The card's hint of the same verdict. A NOT-ready one is remembered for a minute — the catalog is
+ *  read on every card load by every AV buyer, and a host that does not answer costs its whole
+ *  timeout — but only here: a launch never reads this memory. */
+async function chatHostHint(host: string, force = false): Promise<Ready> {
+  const c = hintCache.get(host);
+  if (!force && c && Date.now() - c.at < HINT_TTL_MS) return c.value;
+  return chatHostReady(host, force);
+}
+
+/** Does the chat's address answer 200 — itself, not something it redirects to? (Remembered 10 min
+ *  once proven, like an article; bounded, since any id answers and ids are the buyer's to type.) */
+async function chatLive(base: string): Promise<{ ok: true } | { ok: false; error: string }> {
   const seen = pageOkCache.get(base);
-  if (seen && Date.now() - seen < PAGE_OK_TTL_MS) return { ok: true };
-  let res: Response;
+  if (seen !== undefined && Date.now() - seen < PAGE_OK_TTL_MS) return { ok: true };
+  pageOkCache.delete(base);
+  let status: number;
   try {
-    res = await fetch(base, {
-      headers: { "User-Agent": UA, Accept: "text/html,*/*;q=0.8" },
-      redirect: "follow",
-      cache: "no-store",
-      signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),
-    });
+    const res = await get(base, "text/html,*/*;q=0.8", PAGE_TIMEOUT_MS);
+    status = res.status;
+    await res.body?.cancel().catch(() => {});
   } catch (e) {
     return { ok: false, error: `destination_check_failed — ${base} did not answer (${errText(e)})` };
   }
-  await res.body?.cancel().catch(() => {});
-  if (res.status !== 200) return { ok: false, error: `chat_not_live — ${base} answered ${res.status}` };
-  let finalHost = host;
-  try {
-    finalHost = new URL(res.url || base).hostname.toLowerCase();
-  } catch {
-    /* an unparseable final URL keeps the requested host */
-  }
-  if (finalHost !== host) return { ok: false, error: `destination_invalid — ${base} redirects off the chat host (${finalHost})` };
+  if (status !== 200) return { ok: false, error: `chat_not_live — ${base} answered ${status}` };
+  if (pageOkCache.size >= PAGE_OK_MAX) pageOkCache.delete(pageOkCache.keys().next().value as string);
   pageOkCache.set(base, Date.now());
   return { ok: true };
 }
@@ -234,7 +380,7 @@ async function chatLive(base: string, host: string): Promise<{ ok: true } | { ok
 export async function resolveAvChat(shape: AvChatShape, site: string): Promise<AvChatResolved> {
   const host = normHost(shape.host);
   const s = normHost(site);
-  if (!s || !host.endsWith(`.${s}`) || host === `www.${s}`) {
+  if (!s || !HOST_RE.test(host) || !host.endsWith(`.${s}`) || host === `www.${s}`) {
     return { ok: false, status: 400, error: `destination_not_av — ${host} is not a chat subdomain of ${s || "an ActiveView site of ours"}` };
   }
   const verdict = await avChatHost(host);
@@ -248,9 +394,11 @@ export async function resolveAvChat(shape: AvChatShape, site: string): Promise<A
   }
   const url = avChatUrl(shape.base);
   if (!url.ok) return { ok: false, status: 400, error: url.error };
+  // Everything below is requested from the address's OWN host — which must be the one just proven.
+  if (url.host !== host) return { ok: false, status: 400, error: `destination_invalid — ${shape.base} is not an address of ${host}` };
   const ready = await chatHostReady(host);
   if (!ready.ready) return { ok: false, status: ready.failed ? 502 : 400, error: ready.error };
-  const live = await chatLive(url.base, host);
+  const live = await chatLive(url.base);
   if (!live.ok) return { ok: false, status: live.error.startsWith("destination_check_failed") ? 502 : 400, error: live.error };
   return { ok: true, kind: "chat", base: url.base, site: s };
 }
@@ -258,26 +406,27 @@ export async function resolveAvChat(shape: AvChatShape, site: string): Promise<A
 /**
  * The card's hint: which of our sites have a chat host, and whether traffic may be bought for it.
  * Only the conventional `chat.<site>` is probed (the API lists none and a subdomain cannot be
- * enumerated) — a chat on any other subdomain still resolves when its URL is pasted. A site without
- * one, or a failed DNS check, is left out. `force` re-reads past the caches (the card's Retry).
+ * enumerated) — a chat on any other subdomain still resolves when its URL is pasted. A site with no
+ * chat host is left out; a host that could not be CHECKED is listed as such, never dropped (that
+ * would read as "there is none"). `force` re-reads past every cache (the card's Retry).
  */
 export async function avChatHosts(sites: string[], force = false): Promise<AvChatHostOption[]> {
-  const out: AvChatHostOption[] = [];
-  for (const raw of sites) {
-    const site = normHost(raw);
-    if (!site) continue;
-    const host = `chat.${site}`;
-    const verdict = await avChatHost(host, force);
-    if (!verdict.chat) continue;
-    const ready = await chatHostReady(host, force);
-    out.push({ host, site, live: ready.ready, ...(ready.ready ? {} : { liveReason: ready.error }) });
-  }
-  return out;
+  const probed = await Promise.all(
+    [...new Set(sites.map(normHost).filter(Boolean))].map(async (site): Promise<AvChatHostOption | null> => {
+      const host = `chat.${site}`;
+      const verdict = await avChatHost(host, force);
+      if (!verdict.chat) return verdict.failed ? { host, site, live: false, liveReason: `destination_check_failed — ${verdict.reason}` } : null;
+      const ready = await chatHostHint(host, force);
+      return { host, site, live: ready.ready, ...(ready.ready ? {} : { liveReason: ready.error }) };
+    }),
+  );
+  return probed.filter((h): h is AvChatHostOption => h !== null);
 }
 
 /** Test seam: drop every per-instance cache. */
 export function _resetAvChatCaches(): void {
   hostCache.clear();
   readyCache.clear();
+  hintCache.clear();
   pageOkCache.clear();
 }

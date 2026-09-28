@@ -6,6 +6,7 @@ import {
   AV_KEY_POOL_MAX,
   avArticleTitle,
   avChatUrl,
+  avCheckOutcome,
   avDestinationBase,
   avDestinationKind,
   avKeyCode,
@@ -190,38 +191,98 @@ test("a pasted chat URL is normalized to its one canonical address from either f
   }
 });
 
-test("a URL that names no chat id is not a chat URL", () => {
-  for (const raw of [
-    "",
-    "https://chat.thecadrion.com/",
-    "https://chat.thecadrion.com/6a2312cef9f4e11b130fc52",
-    "https://chat.thecadrion.com/6a2312cef9f4e11b130fc5233",
-    "https://chat.thecadrion.com/6a2312cef9f4e11b130fc52g",
-    "https://chat.thecadrion.com/a/6a2312cef9f4e11b130fc523",
-    "https://chat.thecadrion.com/some-article?asst=6a2312cef9f4e11b130fc523",
-    "ftp://chat.thecadrion.com/6a2312cef9f4e11b130fc523",
-    "https://user:pw@chat.thecadrion.com/6a2312cef9f4e11b130fc523",
-  ]) {
+test("a URL that names no chat id is not a chat URL, and says which way it is wrong", () => {
+  const cases: [string, RegExp][] = [
+    ["", /^destination_required — /],
+    ["https://chat.thecadrion.com/", /^chat_url_invalid — /],
+    ["https://chat.thecadrion.com/6a2312cef9f4e11b130fc52", /^chat_url_invalid — /],
+    ["https://chat.thecadrion.com/6a2312cef9f4e11b130fc5233", /^chat_url_invalid — /],
+    ["https://chat.thecadrion.com/6a2312cef9f4e11b130fc52g", /^chat_url_invalid — /],
+    ["https://chat.thecadrion.com/a/6a2312cef9f4e11b130fc523", /^chat_url_invalid — /],
+    ["https://chat.thecadrion.com/some-article?asst=6a2312cef9f4e11b130fc523", /^chat_url_invalid — /],
+    ["https://chat.thecadrion.com/?ASST=6a2312cef9f4e11b130fc523", /^chat_url_invalid — /],
+    ["ftp://chat.thecadrion.com/6a2312cef9f4e11b130fc523", /^destination_invalid — http\(s\) only/],
+    ["https://user:pw@chat.thecadrion.com/6a2312cef9f4e11b130fc523", /^destination_invalid — no credentials/],
+    ["https://chat.thecadrion.com:8443/?asst=6a2312cef9f4e11b130fc523", /^destination_invalid — no credentials or port/],
+  ];
+  for (const [raw, want] of cases) {
     const r = avChatUrl(raw);
     assert.equal(r.ok, false, raw);
-    assert.match(!r.ok ? r.error : "", /^(chat_url_invalid|destination_required|destination_invalid) — /, raw);
+    assert.match(!r.ok ? r.error : "", want, raw);
   }
 });
 
-test("destination kind for the card caption: article on the site, redirect on a redirect domain, chat on any other subdomain", () => {
-  const known = { sites: ["thecadrion.com"], redirectDomains: ["redirect.thecadrion.com"] };
-  assert.equal(avDestinationKind("https://thecadrion.com/some-article", known), "article");
-  assert.equal(avDestinationKind("https://www.thecadrion.com/some-article", known), "article");
-  assert.equal(avDestinationKind("https://redirect.thecadrion.com/jobs", known), "redirect");
-  assert.equal(avDestinationKind(CHAT, known), "chat");
-  assert.equal(avDestinationKind("https://CHAT.thecadrion.com/?asst=6a2312cef9f4e11b130fc523", known), "chat", "host case does not matter");
+test("when an address names two chat ids, the one the chat page itself reads is kept (the path, then the FIRST asst)", () => {
+  const other = "0123456789abcdef01234567";
+  const want = { ok: true, base: CHAT, host: "chat.thecadrion.com", id: CHAT_ID };
+  assert.deepEqual(avChatUrl(`https://chat.thecadrion.com/${CHAT_ID}/?asst=${other}`), want);
+  assert.deepEqual(avChatUrl(`https://chat.thecadrion.com/?asst=${CHAT_ID}&asst=${other}`), want);
+});
+
+// ---------- what a stored destination IS, for the card (display only — the server decides) ----------
+
+const KNOWN = { sites: ["thecadrion.com"], redirectDomains: ["redirect.thecadrion.com"] };
+
+test("destination kind: an article on the site, a path on a redirect domain, a chat by its address", () => {
+  assert.equal(avDestinationKind("https://thecadrion.com/some-article", KNOWN), "article");
+  assert.equal(avDestinationKind("https://www.thecadrion.com/some-article", KNOWN), "article");
+  assert.equal(avDestinationKind("https://redirect.thecadrion.com/jobs", KNOWN), "redirect");
+  assert.equal(avDestinationKind(CHAT, KNOWN), "chat");
+  assert.equal(avDestinationKind("https://CHAT.thecadrion.com/?asst=6a2312cef9f4e11b130fc523", KNOWN), "chat", "host case does not matter");
+  assert.equal(avDestinationKind(`https://chat.thecadrion.com/${CHAT_ID}/`, KNOWN), "chat", "the dashboard's path form");
+});
+
+test("a chat is known by its address alone — before the catalog has loaded, and whatever the catalog lists", () => {
+  assert.equal(avDestinationKind(CHAT, { sites: [], redirectDomains: [] }), "chat");
+  assert.equal(avDestinationKind(CHAT, { sites: ["thecadrion.com", "chat.thecadrion.com"], redirectDomains: [] }), "chat", "a chat host that is also listed as a site");
+});
+
+test("a path on a subdomain is a redirect path even while the redirect list is unavailable — never a chat", () => {
+  assert.equal(avDestinationKind("https://redirect.thecadrion.com/jobs", { sites: ["thecadrion.com"], redirectDomains: [] }), "redirect");
+});
+
+test("a subdomain that is a site of its own keeps its articles", () => {
+  const known = { sites: ["thecadrion.com", "blog.thecadrion.com"], redirectDomains: [] };
+  assert.equal(avDestinationKind("https://blog.thecadrion.com/some-post", known), "article");
+  assert.equal(avDestinationKind("https://www.blog.thecadrion.com/some-post", known), "article");
 });
 
 test("destination kind falls back to article for anything it cannot place", () => {
-  const known = { sites: ["thecadrion.com"], redirectDomains: ["redirect.thecadrion.com"] };
-  assert.equal(avDestinationKind("", known), "article");
-  assert.equal(avDestinationKind("not a url", known), "article");
-  assert.equal(avDestinationKind(`https://chat.other-site.com/?asst=${CHAT_ID}`, known), "article", "a subdomain of a foreign domain is not our chat");
-  assert.equal(avDestinationKind("https://notthecadrion.com/x", known), "article", "a suffix match is not a subdomain");
-  assert.equal(avDestinationKind(CHAT, { sites: [], redirectDomains: [] }), "article", "no catalog yet");
+  assert.equal(avDestinationKind("", KNOWN), "article");
+  assert.equal(avDestinationKind("not a url", KNOWN), "article");
+  assert.equal(avDestinationKind("https://notthecadrion.com/x", KNOWN), "article", "a suffix match is not a subdomain");
+  assert.equal(avDestinationKind("https://sub.other-site.com/x", KNOWN), "article", "a subdomain of a foreign domain");
+  assert.equal(avDestinationKind("https://redirect.thecadrion.com/jobs", { sites: [], redirectDomains: [] }), "article", "no catalog yet");
+});
+
+// ---------- a check's answer arrives seconds after the click ----------
+
+test("a check's answer is applied when nothing changed meanwhile, and the tab follows it", () => {
+  const asked = { value: "https://thecadrion.com/a", mode: "chat" as const, picks: 3 };
+  assert.deepEqual(avCheckOutcome(asked, { ...asked, mounted: true }), { act: "apply", followTab: true });
+});
+
+test("a check's answer writes nothing once the field is gone", () => {
+  const asked = { value: "", mode: "chat" as const, picks: 0 };
+  assert.deepEqual(avCheckOutcome(asked, { ...asked, mounted: false }), { act: "drop", followTab: false });
+});
+
+test("a destination picked while the check was running stands: the late answer is not applied", () => {
+  const asked = { value: "", mode: "chat" as const, picks: 0 };
+  assert.deepEqual(avCheckOutcome(asked, { value: "https://thecadrion.com/picked", mode: "article", picks: 1, mounted: true }), { act: "superseded", followTab: false });
+});
+
+test("a pick that was made and undone meanwhile still counts: the value is the same, the late answer is not applied", () => {
+  const asked = { value: "https://thecadrion.com/a", mode: "article" as const, picks: 1 };
+  assert.deepEqual(avCheckOutcome(asked, { value: "https://thecadrion.com/a", mode: "article", picks: 3, mounted: true }), { act: "superseded", followTab: false });
+});
+
+test("a destination changed from OUTSIDE the field (copy settings) supersedes the late answer too", () => {
+  const asked = { value: "https://thecadrion.com/a", mode: "chat" as const, picks: 0 };
+  assert.deepEqual(avCheckOutcome(asked, { value: "https://thecadrion.com/copied", mode: "chat", picks: 0, mounted: true }), { act: "superseded", followTab: false });
+});
+
+test("a buyer who moved to another tab keeps that tab: the answer is applied, the tab is not pulled", () => {
+  const asked = { value: "", mode: "article" as const, picks: 0 };
+  assert.deepEqual(avCheckOutcome(asked, { value: "", mode: "redirect", picks: 0, mounted: true }), { act: "apply", followTab: false });
 });

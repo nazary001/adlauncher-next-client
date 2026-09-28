@@ -3,9 +3,10 @@
 // AV rail — the CHAT destination (ActiveView → Chat Builder): a chat lives on a subdomain of an AV
 // site whose CNAME points at AV's chat gateway (chat.thecadrion.com →
 // assistant-quiz-infrastructure-gateway.activeview.app, live 29.09). The external API lists no chats,
-// so the host is recognized by that CNAME, and the launch is refused unless the host SHOWS ADS: its
-// public /worker.js names the ad script AV assigns after its review (empty = "Pending monetization",
-// traffic would earn nothing). DNS and the two GETs are the only doubles (all external).
+// so the host is recognized by that CNAME, and a launch is refused unless the host SHOWS ADS: its
+// public /worker.js must carry a chat key, name an ad script of its own, and that script must be
+// served by AV's CDN. Everything here is read live off AV's chat hosts (29.09); DNS and the GETs are
+// the only doubles (all external).
 import "./_resolve-hook.ts";
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
@@ -19,18 +20,43 @@ const ID = "6a2312cef9f4e11b130fc523";
 /** The canonical chat address: the id rides the query (the form every AV chat host answers). */
 const BASE = `https://${HOST}/?asst=${ID}`;
 const WORKER_URL = `https://${HOST}/worker.js`;
+const SCRIPT = "chatthecadrion";
+const SCRIPT_URL = `https://scr.actview.net/${SCRIPT}.js`;
 /** What lib/av-destination hands over: lib/av-link's shape of the stored URL. */
 const SHAPE = { base: BASE, host: HOST, path: "/" };
+const KEY = "aq_00000000000000000000000000000000:0000000000000000";
 
 /** The gateway's own answer for a host it has no route for (read live 29.09, chat.thecadrion.com
  *  before the Chat Builder activation was finished). */
 const NO_ROUTE = '{\n  "message":"no Route matched with those values",\n  "request_id":"e3472a6a44d7bb6634c54158b1ac6d13"\n}';
+/** AV's script CDN for a file it does not have (read live 29.09: 403, application/xml). */
+const NO_SCRIPT = '<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>';
 
-/** A chat host's /worker.js as AV serves it (read live 29.09 on other publishers' chat hosts): the
- *  settings are a JSON-style literal with QUOTED keys, followed by the loader code — which itself
- *  mentions `script` and `disable`, so only the settings literal may be read. */
-const worker = (script: string, disable = false) => `const assistantQuizSettings = {
-  "key": "aq_00000000000000000000000000000000:0000000000000000",
+/** The loader every worker.js carries below its settings — it names `script` and `disable` too. */
+const LOADER = `
+function validateSettings(settings) {
+  const requiredFields = ["key", "terms", "theme", "config", "botNames"];
+  const missingFields = requiredFields.filter((field) => !settings[field]);
+  return missingFields.length === 0;
+}
+
+function loadRemoteScript({ disable, fileName, baseUrl = "https://scr.actview.net" }) {
+  if (disable || fileName === "") {
+    console.log("[AV Assistant] Remote script loading is disabled");
+    return Promise.resolve();
+  }
+  const script = document.createElement("script");
+  script.src = \`\${baseUrl}/\${fileName.trim()}.js\`;
+  document.head.appendChild(script);
+}
+
+loadRemoteScript({ disable: Boolean(assistantQuizSettings?.config?.disable), fileName: assistantQuizSettings.script });
+`;
+
+/** A chat host's /worker.js as AV serves it for a configured host (read live 29.09): the settings
+ *  are a JSON-style literal with QUOTED keys, followed by the loader. */
+const worker = (script: string, disable = false, key = KEY) => `const assistantQuizSettings = {
+  "key": "${key}",
   "script": "${script}",
   "botNames": [
     "Anna",
@@ -56,85 +82,154 @@ const worker = (script: string, disable = false) => `const assistantQuizSettings
     "disableTopAndContent": false
   }
 };
+${LOADER}`;
 
-function loadRemoteScript({ disable, fileName, baseUrl = "https://scr.actview.net" }) {
-  if (disable || fileName === "") {
-    console.log("[AV Assistant] Remote script loading is disabled");
-    return Promise.resolve();
+/** The default TEMPLATE a host serves until its chat is published (read live 29.09 on five hosts):
+ *  BARE keys, `config` before `botNames`, trailing commas, an empty key and an empty script. */
+const template = (key = "", script = "") => `const assistantQuizSettings = {
+  key: "${key}",
+  script: "${script}",
+  config: {
+    disable: false,
+    disableTopAndContent: false,
+    disableContent: false,
+    quantityResponses: 2,
+  },
+  botNames: ["Assistant AI"],
+  profileImageUrl: "",
+  terms: {
+    company: "20XX Acme Inc",
+    footer: "Usage implies acceptance of",
+    terms: "Terms",
+    termsUrl: "#",
+    privacy: "Privacy",
+    privacyUrl: "#",
+  },
+  theme: {
+    "chat-background": "#f4f4f5",
+    "ad-label": "rgb(107, 114, 128)",
   }
-  const script = document.createElement("script");
-  script.src = \`\${baseUrl}/\${fileName.trim()}.js\`;
-  document.head.appendChild(script);
-}
+};
+${LOADER}`;
 
-loadRemoteScript({ disable: Boolean(assistantQuizSettings?.config?.disable), fileName: assistantQuizSettings.script });
-`;
+/** Read live 29.09: a settings literal WITHOUT `script` (config present). */
+const NO_SCRIPT_KEY = `const assistantQuizSettings = {
+  "key": "${KEY}",
+  "botNames": [
+    "teste"
+  ],
+  "terms": {
+    "company": "",
+    "footer": "by using this, you accept",
+    "terms": "Terms",
+    "termsUrl": "#",
+    "privacy": "Privacy",
+    "privacyUrl": "#"
+  },
+  "theme": {
+    "chat-background": "#f4f4f5"
+  },
+  "config": {
+    "disable": false,
+    "disableTopAndContent": false,
+    "quantityResponses": 2
+  }
+};
+${LOADER}`;
+
+/** Read live 29.09: a settings literal with neither `script` nor `config`. */
+const KEY_AND_NAMES_ONLY = `const assistantQuizSettings = {
+  "key": "${KEY}",
+  "botNames": [
+    "John",
+    "James"
+  ]
+};
+${LOADER}`;
 
 const dnsError = (code: string) => Object.assign(new Error(`queryCname ${code}`), { code });
 
-/** Replace dns.resolveCname for one test; `answers` maps a host to its CNAMEs or an error code. */
+/** Replace the resolver's CNAME lookup for one test; `answers` maps a host to its CNAMEs, an error
+ *  code, or "hang" (a name server that never answers). */
 function stubCname(answers: Record<string, string[] | string>) {
   const calls: string[] = [];
-  const m = mock.method(dns, "resolveCname", async (host: string) => {
+  const m = mock.method(dns.Resolver.prototype, "resolveCname", async (host: string) => {
     calls.push(host);
     const a = answers[host];
     if (a === undefined) throw dnsError("ENOTFOUND");
+    if (a === "hang") return new Promise<string[]>(() => {});
     if (typeof a === "string") throw dnsError(a);
     return a;
   });
-  return { calls, restore: () => m.mock.restore() };
+  const cancel = mock.method(dns.Resolver.prototype, "cancel", () => {});
+  return {
+    calls,
+    restore: () => {
+      m.mock.restore();
+      cancel.mock.restore();
+    },
+  };
 }
 
-type Page = { status: number; finalUrl?: string; body?: string } | "throw" | "tls";
+type Page = { status: number; finalUrl?: string; body?: string; type?: string; location?: string } | "throw" | "tls";
 
 /** What fetch throws for a host still behind the gateway's default certificate (read live 29.09:
  *  chat.thecadrion.com served Kong's self-signed CN=localhost before its activation). */
 const tlsError = () =>
   Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("self-signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }) });
 
-/** Replace fetch for one test; `pages` maps a URL to its answer (+ the URL fetch finally landed on). */
+/** Replace fetch for one test; `pages` maps a URL to its answer. Every request's init is kept. */
 function stubPages(pages: Record<string, Page>) {
   const calls: string[] = [];
+  const inits: Record<string, RequestInit | undefined> = {};
   const real = globalThis.fetch;
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     calls.push(url);
+    inits[url] = init;
     const p = pages[url];
     if (p === undefined) throw new Error(`unexpected fetch ${url}`);
     if (p === "throw") throw new Error("connect ETIMEDOUT");
     if (p === "tls") throw tlsError();
-    const res = new Response(p.body ?? "<html><title>Assistant Chat</title></html>", { status: p.status });
+    const headers: Record<string, string> = {};
+    if (p.type) headers["content-type"] = p.type;
+    if (p.location) headers.location = p.location;
+    const res = new Response(p.status === 301 || p.status === 302 ? null : (p.body ?? "<html><title>Assistant Chat</title></html>"), { status: p.status, headers });
     Object.defineProperty(res, "url", { value: p.finalUrl ?? url });
     return res;
   }) as typeof fetch;
-  return { calls, restore: () => (globalThis.fetch = real) };
+  return { calls, inits, restore: () => (globalThis.fetch = real) };
 }
 
 /** DNS-over-HTTPS is the resolver's fallback; what a test asserts on is the requests to the HOST. */
 const DOH = (host: string) => `https://dns.google/resolve?name=${host}&type=CNAME`;
 const toHost = (calls: string[], host: string) => calls.filter((u) => new URL(u).hostname === host);
 
+const ENV = ["AV_CHAT_GATEWAYS", "AV_CHAT_SCRIPT_CDN"] as const;
+
 async function withStubs<T>(
   cnames: Record<string, string[] | string>,
   pages: Record<string, Page>,
-  run: (s: { dnsCalls: string[]; pageCalls: string[] }) => Promise<T>,
+  run: (s: { dnsCalls: string[]; pageCalls: string[]; inits: Record<string, RequestInit | undefined> }) => Promise<T>,
 ): Promise<T> {
   chat._resetAvChatCaches();
+  const prev = ENV.map((k) => process.env[k]);
+  for (const k of ENV) delete process.env[k];
   const d = stubCname(cnames);
   const p = stubPages(pages);
-  const prevEnv = process.env.AV_CHAT_GATEWAYS;
   try {
-    return await run({ dnsCalls: d.calls, pageCalls: p.calls });
+    return await run({ dnsCalls: d.calls, pageCalls: p.calls, inits: p.inits });
   } finally {
     d.restore();
     p.restore();
-    if (prevEnv === undefined) delete process.env.AV_CHAT_GATEWAYS;
-    else process.env.AV_CHAT_GATEWAYS = prevEnv;
+    ENV.forEach((k, i) => (prev[i] === undefined ? delete process.env[k] : (process.env[k] = prev[i])));
   }
 }
 
-/** The world where the chat is fully set up: activated host, ads enabled, chat page answering. */
-const READY = { [WORKER_URL]: { status: 200, body: worker("chatthecadrion") }, [BASE]: { status: 200 } };
+const SERVED: Page = { status: 200, body: "/* the chat host's ad script */ (()=>{})();", type: "application/javascript" };
+/** The world where the chat is fully set up: activated host, its ad script served, the address answering. */
+const READY: Record<string, Page> = { [WORKER_URL]: { status: 200, body: worker(SCRIPT) }, [SCRIPT_URL]: SERVED, [BASE]: { status: 200 } };
+const refused = (r: { ok: boolean }) => assert.equal(r.ok, false);
 
 // ---------- is the host a chat host? ----------
 
@@ -188,6 +283,26 @@ test("when the local resolver cannot be asked, the CNAME is read over DNS-over-H
   });
 });
 
+test("a name server that never answers is given up after 3 s for DNS-over-HTTPS, not after the resolver's own half minute", async () => {
+  const answer = JSON.stringify({ Status: 0, Answer: [{ name: "chat.thecadrion.com.", type: 5, TTL: 300, data: `${GATEWAY}.` }] });
+  chat._resetAvChatCaches();
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const d = stubCname({ [HOST]: "hang" });
+  const p = stubPages({ [DOH(HOST)]: { status: 200, body: answer } });
+  try {
+    const verdict = chat.avChatHost(HOST);
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(p.calls, [], "the fallback waits for the resolver's bound");
+    mock.timers.tick(3_000);
+    assert.deepEqual(await verdict, { chat: true, gateway: GATEWAY });
+    assert.deepEqual(p.calls, [DOH(HOST)]);
+  } finally {
+    mock.timers.reset();
+    d.restore();
+    p.restore();
+  }
+});
+
 test("DNS-over-HTTPS saying the host has no CNAME is a verdict, not a failure", async () => {
   const nxdomain = JSON.stringify({ Status: 3, Question: [{ name: "nope.thecadrion.com.", type: 5 }], Authority: [{ name: "thecadrion.com.", type: 6, TTL: 1800, data: "noor.ns.cloudflare.com." }] });
   const noRecord = JSON.stringify({ Status: 0, Question: [{ name: "blog.thecadrion.com.", type: 5 }], Authority: [{ name: "thecadrion.com.", type: 6, TTL: 1800, data: "noor.ns.cloudflare.com." }] });
@@ -222,6 +337,17 @@ test("a host the local resolver answers for is never asked over HTTPS", async ()
   });
 });
 
+test("a string that is not a host name reaches neither DNS nor DNS-over-HTTPS", async () => {
+  for (const junk of ["chat.thecadrion.com/x?y=1", "chat.thecadrion.com&type=A", "chat thecadrion.com", "chat.thecadrion.com:8443", "", "localhost"]) {
+    await withStubs({}, {}, async ({ dnsCalls, pageCalls }) => {
+      const r = await chat.avChatHost(junk);
+      assert.equal(r.chat, false, junk);
+      assert.deepEqual(dnsCalls, [], junk);
+      assert.deepEqual(pageCalls, [], junk);
+    });
+  }
+});
+
 test("AV_CHAT_GATEWAYS overrides the gateway list", async () => {
   await withStubs({ [HOST]: ["chat-gw.new-av.example"], "old.thecadrion.com": [GATEWAY] }, {}, async () => {
     process.env.AV_CHAT_GATEWAYS = " Chat-GW.new-av.example. , second-gw.example ";
@@ -230,12 +356,28 @@ test("AV_CHAT_GATEWAYS overrides the gateway list", async () => {
   });
 });
 
-test("the chat-host verdict is cached: a second resolve does not query DNS again", async () => {
+test("a chat-host verdict is cached: a second resolve does not query DNS again", async () => {
   await withStubs({ [HOST]: [GATEWAY] }, {}, async ({ dnsCalls }) => {
     await chat.avChatHost(HOST);
     await chat.avChatHost(HOST);
     assert.deepEqual(dnsCalls, [HOST]);
   });
+});
+
+test("'not a chat host' is never served from the cache: a CNAME added a moment ago is seen at once", async () => {
+  chat._resetAvChatCaches();
+  const before = stubCname({});
+  try {
+    assert.equal((await chat.avChatHost(HOST)).chat, false);
+  } finally {
+    before.restore();
+  }
+  const after = stubCname({ [HOST]: [GATEWAY] });
+  try {
+    assert.deepEqual(await chat.avChatHost(HOST), { chat: true, gateway: GATEWAY });
+  } finally {
+    after.restore();
+  }
 });
 
 test("a failed DNS check is NOT cached — the next resolve asks again", async () => {
@@ -248,9 +390,17 @@ test("a failed DNS check is NOT cached — the next resolve asks again", async (
 
 // ---------- may an ad point at this chat? ----------
 
-test("a chat on an activated host with ads enabled resolves as kind chat", async () => {
-  await withStubs({ [HOST]: [GATEWAY] }, READY, async () => {
+test("a chat on an activated host whose ad script is served resolves as kind chat", async () => {
+  await withStubs({ [HOST]: [GATEWAY] }, READY, async ({ pageCalls }) => {
     assert.deepEqual(await chat.resolveAvChat(SHAPE, "thecadrion.com"), { ok: true, kind: "chat", base: BASE, site: "thecadrion.com" });
+    assert.deepEqual(pageCalls, [WORKER_URL, SCRIPT_URL, BASE]);
+  });
+});
+
+test("no request of the check follows a redirect", async () => {
+  await withStubs({ [HOST]: [GATEWAY] }, READY, async ({ inits }) => {
+    await chat.resolveAvChat(SHAPE, "thecadrion.com");
+    for (const url of [WORKER_URL, SCRIPT_URL, BASE]) assert.equal(inits[url]?.redirect, "manual", url);
   });
 });
 
@@ -258,51 +408,195 @@ test("the path form of a chat address resolves to the canonical ?asst= address, 
   const pathForm = { base: `https://${HOST}/${ID}`, host: HOST, path: `/${ID}` };
   await withStubs({ [HOST]: [GATEWAY] }, READY, async ({ pageCalls }) => {
     assert.deepEqual(await chat.resolveAvChat(pathForm, "thecadrion.com"), { ok: true, kind: "chat", base: BASE, site: "thecadrion.com" });
-    assert.deepEqual(pageCalls, [WORKER_URL, BASE]);
+    assert.deepEqual(pageCalls, [WORKER_URL, SCRIPT_URL, BASE]);
   });
 });
 
+test("a chat on any other chat subdomain of the site resolves too (the label is the publisher's choice)", async () => {
+  for (const host of ["ai.thecadrion.com", "c1.talk.thecadrion.com"]) {
+    const base = `https://${host}/?asst=${ID}`;
+    await withStubs({ [host]: [GATEWAY] }, { [`https://${host}/worker.js`]: { status: 200, body: worker(SCRIPT) }, [SCRIPT_URL]: SERVED, [base]: { status: 200 } }, async () => {
+      assert.deepEqual(await chat.resolveAvChat({ base, host, path: "/" }, "thecadrion.com"), { ok: true, kind: "chat", base, site: "thecadrion.com" }, host);
+    });
+  }
+});
+
+test("a host that still serves the template (no chat key) is an unpublished chat: refused, nothing else fetched", async () => {
+  for (const body of [template(), template("", "localhost")]) {
+    await withStubs({ [HOST]: [GATEWAY] }, { [WORKER_URL]: { status: 200, body }, [BASE]: { status: 200 } }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 400);
+      assert.match(!r.ok ? r.error : "", /^chat_not_live — chat\.thecadrion\.com has no chat key.*Chat Builder/);
+      assert.deepEqual(pageCalls, [WORKER_URL]);
+    });
+  }
+});
+
 test("a chat host AV has not enabled ads on yet (no ad script = Pending monetization) is refused", async () => {
-  await withStubs({ [HOST]: [GATEWAY] }, { [WORKER_URL]: { status: 200, body: worker("") }, [BASE]: { status: 200 } }, async ({ pageCalls }) => {
+  for (const body of [worker(""), worker(" "), template(KEY, ""), NO_SCRIPT_KEY, KEY_AND_NAMES_ONLY]) {
+    await withStubs({ [HOST]: [GATEWAY] }, { [WORKER_URL]: { status: 200, body }, [BASE]: { status: 200 } }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 400, body.slice(0, 120));
+      assert.match(!r.ok ? r.error : "", /^chat_not_monetized — chat\.thecadrion\.com .*Pending monetization/, body.slice(0, 120));
+      assert.deepEqual(pageCalls, [WORKER_URL], "neither the script CDN nor the chat page is asked");
+    });
+  }
+});
+
+test("a chat host that still names the template's placeholder ad script is refused without asking the CDN", async () => {
+  await withStubs({ [HOST]: [GATEWAY] }, { [WORKER_URL]: { status: 200, body: worker("LocalHost") }, [BASE]: { status: 200 } }, async ({ pageCalls }) => {
     const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
-    assert.equal(r.ok, false);
+    refused(r);
     assert.equal(!r.ok && r.status, 400);
-    assert.match(!r.ok ? r.error : "", /^chat_not_monetized — chat\.thecadrion\.com/);
-    assert.deepEqual(pageCalls, [WORKER_URL], "the chat page is not even fetched");
+    assert.match(!r.ok ? r.error : "", /^chat_not_monetized — .*placeholder/);
+    assert.deepEqual(pageCalls, [WORKER_URL]);
+  });
+});
+
+test("a chat host whose ads are switched off in its config is refused", async () => {
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: worker(SCRIPT, true) } }, async ({ pageCalls }) => {
+    const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+    refused(r);
+    assert.equal(!r.ok && r.status, 400);
+    assert.match(!r.ok ? r.error : "", /^chat_not_monetized — ads are switched off on chat\.thecadrion\.com/);
+    assert.deepEqual(pageCalls, [WORKER_URL]);
+  });
+});
+
+test("settings the page itself would refuse (a part its loader requires is missing) are refused: it never loads the ad script", async () => {
+  const noConfig = worker(SCRIPT).replace(/,\s*"config": \{[^}]*\}/, "");
+  const noTerms = worker(SCRIPT).replace(/\s*"terms": \{[^}]*\},/, "");
+  const noNames = worker(SCRIPT).replace(/\s*"botNames": \[[^\]]*\],/, "");
+  for (const [body, part] of [
+    [noConfig, "config"],
+    [noTerms, "terms"],
+    [noNames, "botNames"],
+  ] as const) {
+    assert.ok(!new RegExp(`"${part}"`).test(body.slice(0, body.indexOf("};"))), `the fixture really has no ${part}`);
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 400, part);
+      assert.match(!r.ok ? r.error : "", new RegExp(`^chat_not_monetized — .*\\b${part}\\b`), part);
+      assert.deepEqual(pageCalls, [WORKER_URL], part);
+    });
+  }
+});
+
+test("an ad script that is NAMED but not served (AV's CDN answers 403 / 404) is refused: the chat loads no ad code", async () => {
+  for (const status of [403, 404]) {
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [SCRIPT_URL]: { status, body: NO_SCRIPT, type: "application/xml" } }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 400, String(status));
+      assert.match(!r.ok ? r.error : "", /^chat_not_monetized — chat\.thecadrion\.com names the ad script "chatthecadrion" but .*not published/, String(status));
+      assert.deepEqual(pageCalls, [WORKER_URL, SCRIPT_URL], "the chat page is not even fetched");
+    });
+  }
+});
+
+test("a script CDN that cannot vouch for the script (down, erroring, answering a page) is a failed check (502)", async () => {
+  for (const page of ["throw", { status: 503, body: "" }, { status: 200, body: "<html>maintenance</html>", type: "text/html" }, { status: 301, location: "https://elsewhere.example/x.js" }] as Page[]) {
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [SCRIPT_URL]: page }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 502, JSON.stringify(page));
+      assert.match(!r.ok ? r.error : "", /^destination_check_failed — the ad script of chat\.thecadrion\.com/, JSON.stringify(page));
+      assert.deepEqual(pageCalls, [WORKER_URL, SCRIPT_URL], JSON.stringify(page));
+    });
+  }
+});
+
+test("an ad script name that is not a file name is never turned into a request", async () => {
+  for (const name of ["../thecadrion", "a/b", "x?y=1", "chat thecadrion", "https://evil.example/x", "x#y", "%2e%2e"]) {
+    await withStubs({ [HOST]: [GATEWAY] }, { [WORKER_URL]: { status: 200, body: worker(name) }, [BASE]: { status: 200 } }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 502, name);
+      assert.match(!r.ok ? r.error : "", /^destination_check_failed — /, name);
+      assert.deepEqual(pageCalls, [WORKER_URL], name);
+    });
+  }
+});
+
+test("a script name with a dot is a file name (read live: \"chatcuponseamostras.com\")", async () => {
+  const name = "chatthecadrion.com";
+  const url = `https://scr.actview.net/${name}.js`;
+  await withStubs({ [HOST]: [GATEWAY] }, { [WORKER_URL]: { status: 200, body: worker(name) }, [url]: SERVED, [BASE]: { status: 200 } }, async ({ pageCalls }) => {
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+    assert.deepEqual(pageCalls, [WORKER_URL, url, BASE]);
+  });
+});
+
+test("AV_CHAT_SCRIPT_CDN overrides where the ad script is looked for (an https origin only)", async () => {
+  const moved = `https://cdn.new-av.example/${SCRIPT}.js`;
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [moved]: SERVED }, async ({ pageCalls }) => {
+    process.env.AV_CHAT_SCRIPT_CDN = "https://CDN.new-av.example/";
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+    assert.deepEqual(pageCalls, [WORKER_URL, moved, BASE]);
+  });
+  await withStubs({ [HOST]: [GATEWAY] }, READY, async ({ pageCalls }) => {
+    process.env.AV_CHAT_SCRIPT_CDN = "http://10.0.0.1/scripts";
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+    assert.deepEqual(pageCalls, [WORKER_URL, SCRIPT_URL, BASE], "anything but an https origin is ignored");
   });
 });
 
 test("the ad settings are read from the settings literal only, whichever way its keys are written", async () => {
-  // The same settings with bare keys (the literal as a formatter prints it) — and a loader below
-  // that names an EMPTY script, which must not be mistaken for the host's.
-  const bareKeys = `const assistantQuizSettings = {
-  key: "aq_0000:0000",
-  script: 'chatthecadrion',
+  // Decoys on BOTH sides of the literal: a defaults object above it that names no script and
+  // switches ads off, and the same below it — neither may be mistaken for the host's settings.
+  const decoy = `{ key: "", script: "", config: { disable: true } }`;
+  const bareKeys = `const defaults = ${decoy};
+const assistantQuizSettings = {
+  key: '${KEY}',
+  script: '${SCRIPT}',
   botNames: ["Anna"],
   terms: { company: "Thecadrion" },
   theme: {},
   config: { disable: false, disableContent: true, quantityResponses: 2 },
 };
-const fallback = { script: "", config: { disable: true } };
-`;
-  await withStubs({ [HOST]: [GATEWAY] }, { [WORKER_URL]: { status: 200, body: bareKeys }, [BASE]: { status: 200 } }, async () => {
+const fallback = ${decoy};
+${LOADER}`;
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: bareKeys } }, async () => {
     assert.deepEqual(await chat.resolveAvChat(SHAPE, "thecadrion.com"), { ok: true, kind: "chat", base: BASE, site: "thecadrion.com" });
   });
 });
 
-test("a chat host whose ads are switched off in its config is refused", async () => {
-  await withStubs({ [HOST]: [GATEWAY] }, { [WORKER_URL]: { status: 200, body: worker("chatthecadrion", true) }, [BASE]: { status: 200 } }, async () => {
-    const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
-    assert.equal(r.ok, false);
-    assert.equal(!r.ok && r.status, 400);
-    assert.match(!r.ok ? r.error : "", /^chat_not_monetized — /);
-  });
+test("the settings file is read only as far as the settings need, whatever its size", async () => {
+  const head = new TextEncoder().encode(worker(SCRIPT));
+  const filler = new TextEncoder().encode(`// ${"x".repeat(64 * 1024 - 4)}\n`);
+  let served = 0;
+  const endless = () =>
+    new ReadableStream<Uint8Array>({
+      pull(c) {
+        served += 1;
+        c.enqueue(served === 1 ? head : filler);
+      },
+    });
+  chat._resetAvChatCaches();
+  const d = stubCname({ [HOST]: [GATEWAY] });
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    const res = url === WORKER_URL ? new Response(endless(), { status: 200 }) : new Response(url === SCRIPT_URL ? "/* ad script */" : "<html></html>", { status: 200, headers: url === SCRIPT_URL ? { "content-type": "application/javascript" } : {} });
+    Object.defineProperty(res, "url", { value: url });
+    return res;
+  }) as typeof fetch;
+  try {
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+    assert.ok(served * 64 * 1024 <= 1024 * 1024, `read ${served} chunks of an endless file`);
+  } finally {
+    globalThis.fetch = real;
+    d.restore();
+  }
 });
 
 test("a chat host the gateway has no route for (activation unfinished) is the buyer's fix", async () => {
   await withStubs({ [HOST]: [GATEWAY] }, { [WORKER_URL]: { status: 404, body: NO_ROUTE } }, async () => {
     const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
-    assert.equal(r.ok, false);
+    refused(r);
     assert.equal(!r.ok && r.status, 400);
     assert.match(!r.ok ? r.error : "", /^chat_not_live — .*Chat Builder/);
   });
@@ -311,7 +605,7 @@ test("a chat host the gateway has no route for (activation unfinished) is the bu
 test("a chat host still behind the gateway's default certificate is an unfinished activation (400)", async () => {
   await withStubs({ [HOST]: [GATEWAY] }, { [WORKER_URL]: "tls" }, async () => {
     const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
-    assert.equal(r.ok, false);
+    refused(r);
     assert.equal(!r.ok && r.status, 400);
     assert.match(!r.ok ? r.error : "", /^chat_not_live — chat\.thecadrion\.com .*certificate.*Chat Builder/);
   });
@@ -327,7 +621,7 @@ test("a failed request names its cause, not just 'fetch failed'", async () => {
   }) as typeof fetch;
   try {
     const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
-    assert.equal(r.ok, false);
+    refused(r);
     assert.equal(!r.ok && r.status, 502);
     assert.match(!r.ok ? r.error : "", /^destination_check_failed — .*EAI_AGAIN/);
   } finally {
@@ -337,38 +631,33 @@ test("a failed request names its cause, not just 'fetch failed'", async () => {
 });
 
 test("ad settings that cannot be read are a failed check (502): an unconfirmed chat never launches", async () => {
-  for (const page of ["throw", { status: 500, body: "upstream error" }, { status: 200, body: "<html>not the settings file</html>" }] as Page[]) {
-    await withStubs({ [HOST]: [GATEWAY] }, { [WORKER_URL]: page, [BASE]: { status: 200 } }, async () => {
+  for (const page of ["throw", { status: 500, body: "upstream error" }, { status: 200, body: "<html>not the settings file</html>" }, { status: 301, location: "https://elsewhere.example/worker.js" }] as Page[]) {
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: page }, async ({ pageCalls }) => {
       const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
-      assert.equal(r.ok, false, JSON.stringify(page));
+      refused(r);
       assert.equal(!r.ok && r.status, 502, JSON.stringify(page));
-      assert.match(!r.ok ? r.error : "", /^destination_check_failed — /);
+      assert.match(!r.ok ? r.error : "", /^destination_check_failed — /, JSON.stringify(page));
+      assert.deepEqual(pageCalls, [WORKER_URL], JSON.stringify(page));
     });
   }
 });
 
-test("a chat address that answers anything but 200 is refused", async () => {
-  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [BASE]: { status: 404, body: "<Error><Code>NoSuchKey</Code></Error>" } }, async () => {
-    const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
-    assert.equal(r.ok, false);
-    assert.equal(!r.ok && r.status, 400);
-    assert.match(!r.ok ? r.error : "", /^chat_not_live — https:\/\/chat\.thecadrion\.com\/\?asst=6a2312cef9f4e11b130fc523 answered 404/);
-  });
-});
-
-test("a chat URL that redirects off the chat host is refused", async () => {
-  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [BASE]: { status: 200, finalUrl: "https://elsewhere.example/landing" } }, async () => {
-    const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
-    assert.equal(r.ok, false);
-    assert.equal(!r.ok && r.status, 400);
-    assert.match(!r.ok ? r.error : "", /^destination_invalid — .*elsewhere\.example/);
-  });
+test("a chat address that answers anything but 200 is refused — a redirect included, which is never followed", async () => {
+  for (const page of [{ status: 404, body: "<Error><Code>NoSuchKey</Code></Error>" }, { status: 301, location: "https://elsewhere.example/landing" }, { status: 302, location: `https://${HOST}/other` }] as Page[]) {
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [BASE]: page }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 400, JSON.stringify(page));
+      assert.match(!r.ok ? r.error : "", new RegExp(`^chat_not_live — https://chat\\.thecadrion\\.com/\\?asst=6a2312cef9f4e11b130fc523 answered ${(page as { status: number }).status}`), JSON.stringify(page));
+      assert.deepEqual(pageCalls, [WORKER_URL, SCRIPT_URL, BASE], "nothing past the chat address is requested");
+    });
+  }
 });
 
 test("a chat that does not answer is a failed check (502), not the buyer's fix", async () => {
   await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [BASE]: "throw" }, async () => {
     const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
-    assert.equal(r.ok, false);
+    refused(r);
     assert.equal(!r.ok && r.status, 502);
     assert.match(!r.ok ? r.error : "", /^destination_check_failed — /);
   });
@@ -378,9 +667,20 @@ test("a path on the chat host that names no chat id is refused before anything i
   const shape = { base: `https://${HOST}/some-article`, host: HOST, path: "/some-article" };
   await withStubs({ [HOST]: [GATEWAY] }, READY, async ({ pageCalls }) => {
     const r = await chat.resolveAvChat(shape, "thecadrion.com");
-    assert.equal(r.ok, false);
+    refused(r);
     assert.equal(!r.ok && r.status, 400);
     assert.match(!r.ok ? r.error : "", /^chat_url_invalid — /);
+    assert.deepEqual(pageCalls, []);
+  });
+});
+
+test("a shape whose address names another host than the one it claims is refused before anything is fetched", async () => {
+  const shape = { base: `https://evil.example/?asst=${ID}`, host: HOST, path: "/" };
+  await withStubs({ [HOST]: [GATEWAY], "evil.example": [GATEWAY] }, { ...READY, [`https://evil.example/?asst=${ID}`]: { status: 200 } }, async ({ pageCalls }) => {
+    const r = await chat.resolveAvChat(shape, "thecadrion.com");
+    refused(r);
+    assert.equal(!r.ok && r.status, 400);
+    assert.match(!r.ok ? r.error : "", /^destination_invalid — /);
     assert.deepEqual(pageCalls, []);
   });
 });
@@ -389,7 +689,7 @@ test("a subdomain that is not a chat host is destination_not_av and nothing of i
   const shape = { base: "https://blog.thecadrion.com/post", host: "blog.thecadrion.com", path: "/post" };
   await withStubs({ "blog.thecadrion.com": ["some-cdn.example"] }, {}, async ({ pageCalls }) => {
     const r = await chat.resolveAvChat(shape, "thecadrion.com");
-    assert.equal(r.ok, false);
+    refused(r);
     assert.equal(!r.ok && r.status, 400);
     assert.match(!r.ok ? r.error : "", /^destination_not_av — blog\.thecadrion\.com/);
     assert.deepEqual(pageCalls, []);
@@ -399,7 +699,7 @@ test("a subdomain that is not a chat host is destination_not_av and nothing of i
 test("a DNS outage while resolving a chat is a failed check (502) and nothing of the host is fetched", async () => {
   await withStubs({ [HOST]: "ESERVFAIL" }, { [DOH(HOST)]: "throw" }, async ({ pageCalls }) => {
     const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
-    assert.equal(r.ok, false);
+    refused(r);
     assert.equal(!r.ok && r.status, 502);
     assert.match(!r.ok ? r.error : "", /^destination_check_failed — /);
     assert.deepEqual(toHost(pageCalls, HOST), []);
@@ -411,7 +711,7 @@ test("the site itself (or www) is never a chat, whatever its DNS says", async ()
     const shape = { base: `https://${host}/?asst=${ID}`, host, path: "/" };
     await withStubs({ [host]: [GATEWAY] }, {}, async ({ dnsCalls, pageCalls }) => {
       const r = await chat.resolveAvChat(shape, "thecadrion.com");
-      assert.equal(r.ok, false, host);
+      refused(r);
       assert.equal(!r.ok && r.status, 400, host);
       assert.deepEqual(dnsCalls, [], host);
       assert.deepEqual(pageCalls, [], host);
@@ -419,27 +719,201 @@ test("the site itself (or www) is never a chat, whatever its DNS says", async ()
   }
 });
 
-test("a host of ANOTHER domain is never a chat of this site, even behind AV's gateway", async () => {
-  const shape = { base: `https://chat.other-site.com/?asst=${ID}`, host: "chat.other-site.com", path: "/" };
-  await withStubs({ "chat.other-site.com": [GATEWAY] }, {}, async ({ dnsCalls, pageCalls }) => {
-    const r = await chat.resolveAvChat(shape, "thecadrion.com");
-    assert.equal(r.ok, false);
-    assert.equal(!r.ok && r.status, 400);
-    assert.deepEqual(dnsCalls, []);
-    assert.deepEqual(pageCalls, []);
+test("a host of another domain — a look-alike included — is never a chat of this site, even behind AV's gateway", async () => {
+  for (const host of ["chat.other-site.com", "chat.notthecadrion.com", "notthecadrion.com", "thecadrion.com.evil.example"]) {
+    const shape = { base: `https://${host}/?asst=${ID}`, host, path: "/" };
+    await withStubs({ [host]: [GATEWAY] }, { [`https://${host}/worker.js`]: { status: 200, body: worker(SCRIPT) }, [SCRIPT_URL]: SERVED, [shape.base]: { status: 200 } }, async ({ dnsCalls, pageCalls }) => {
+      const r = await chat.resolveAvChat(shape, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 400, host);
+      assert.deepEqual(dnsCalls, [], host);
+      assert.deepEqual(pageCalls, [], host);
+    });
+  }
+});
+
+// ---------- a refusal never turns into READY through a cache ----------
+
+test("a host that STAYS pending is refused every time, and its settings are re-read every time", async () => {
+  for (const body of [worker(""), worker(SCRIPT, true)]) {
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async ({ pageCalls }) => {
+      for (const n of [1, 2]) {
+        const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+        refused(r);
+        assert.match(!r.ok ? r.error : "", /^chat_not_monetized — /, `resolve ${n}`);
+      }
+      assert.deepEqual(pageCalls, [WORKER_URL, WORKER_URL]);
+    });
+  }
+});
+
+test("a host whose ad script stays unpublished is refused every time", async () => {
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [SCRIPT_URL]: { status: 403, body: NO_SCRIPT, type: "application/xml" } }, async ({ pageCalls }) => {
+    for (const n of [1, 2]) {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.match(!r.ok ? r.error : "", /^chat_not_monetized — /, `resolve ${n}`);
+    }
+    assert.deepEqual(pageCalls, [WORKER_URL, SCRIPT_URL, WORKER_URL, SCRIPT_URL]);
+  });
+});
+
+test("a chat address that keeps answering 404 is refused every time", async () => {
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [BASE]: { status: 404 } }, async () => {
+    for (const n of [1, 2]) {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.match(!r.ok ? r.error : "", /^chat_not_live — /, `resolve ${n}`);
+    }
+  });
+});
+
+test("a host that became ready is launchable at once: a refusal is never served from the cache", async () => {
+  chat._resetAvChatCaches();
+  const d = stubCname({ [HOST]: [GATEWAY] });
+  const pending = stubPages({ ...READY, [SCRIPT_URL]: { status: 403, body: NO_SCRIPT, type: "application/xml" } });
+  try {
+    refused(await chat.resolveAvChat(SHAPE, "thecadrion.com"));
+    pending.restore();
+    const ready = stubPages(READY);
+    try {
+      assert.deepEqual(await chat.resolveAvChat(SHAPE, "thecadrion.com"), { ok: true, kind: "chat", base: BASE, site: "thecadrion.com" });
+    } finally {
+      ready.restore();
+    }
+  } finally {
+    d.restore();
+    pending.restore();
+  }
+});
+
+test("a READY host whose ads were switched off: the card's Retry sees it and the next launch is refused", async () => {
+  chat._resetAvChatCaches();
+  const d = stubCname({ [HOST]: [GATEWAY] });
+  const ready = stubPages(READY);
+  try {
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+    ready.restore();
+    const off = stubPages({ ...READY, [WORKER_URL]: { status: 200, body: worker(SCRIPT, true) } });
+    try {
+      const hosts = await chat.avChatHosts(["thecadrion.com"], true);
+      assert.equal(hosts[0]?.live, false);
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 400);
+      assert.match(!r.ok ? r.error : "", /^chat_not_monetized — /);
+    } finally {
+      off.restore();
+    }
+  } finally {
+    d.restore();
+    ready.restore();
+  }
+});
+
+test("the READY verdict is per host: a pending host is refused after another host resolved", async () => {
+  const HOST2 = "c2.thecadrion.com";
+  const BASE2 = `https://${HOST2}/?asst=${ID}`;
+  await withStubs({ [HOST]: [GATEWAY], [HOST2]: [GATEWAY] }, { ...READY, [`https://${HOST2}/worker.js`]: { status: 200, body: worker("") }, [BASE2]: { status: 200 } }, async () => {
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+    const r = await chat.resolveAvChat({ base: BASE2, host: HOST2, path: "/" }, "thecadrion.com");
+    refused(r);
+    assert.match(!r.ok ? r.error : "", /^chat_not_monetized — c2\.thecadrion\.com/);
+  });
+});
+
+// ---------- the caches expire, and stay small ----------
+
+/** The clock the caches read (Date.now), moved by hand. It must NOT start at 0: a cache that stores
+ *  a timestamp may test it for truthiness. */
+const T0 = Date.parse("2026-09-29T10:00:00Z");
+
+test("the READY verdict lasts 5 minutes: inside it the host is not re-read, after it the host is re-read", async () => {
+  chat._resetAvChatCaches();
+  mock.timers.enable({ apis: ["Date"], now: T0 });
+  const d = stubCname({ [HOST]: [GATEWAY] });
+  const ready = stubPages(READY);
+  try {
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+    mock.timers.tick(4 * 60_000);
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+    assert.deepEqual(ready.calls.filter((u) => u === WORKER_URL), [WORKER_URL], "inside the TTL the settings are not read again");
+    ready.restore();
+    const off = stubPages({ ...READY, [WORKER_URL]: { status: 200, body: worker(SCRIPT, true) } });
+    try {
+      mock.timers.tick(60_000 + 1);
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.match(!r.ok ? r.error : "", /^chat_not_monetized — /);
+      assert.deepEqual(off.calls, [WORKER_URL]);
+    } finally {
+      off.restore();
+    }
+  } finally {
+    ready.restore();
+    d.restore();
+    mock.timers.reset();
+  }
+});
+
+test("the chat-host (CNAME) verdict lasts 5 minutes", async () => {
+  chat._resetAvChatCaches();
+  mock.timers.enable({ apis: ["Date"], now: T0 });
+  const d = stubCname({ [HOST]: [GATEWAY] });
+  try {
+    await chat.avChatHost(HOST);
+    mock.timers.tick(4 * 60_000);
+    await chat.avChatHost(HOST);
+    assert.deepEqual(d.calls, [HOST]);
+    mock.timers.tick(60_000 + 1);
+    await chat.avChatHost(HOST);
+    assert.deepEqual(d.calls, [HOST, HOST]);
+  } finally {
+    d.restore();
+    mock.timers.reset();
+  }
+});
+
+test("a chat address proven live is re-checked after 10 minutes", async () => {
+  chat._resetAvChatCaches();
+  mock.timers.enable({ apis: ["Date"], now: T0 });
+  const d = stubCname({ [HOST]: [GATEWAY] });
+  const p = stubPages(READY);
+  try {
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+    mock.timers.tick(9 * 60_000);
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+    assert.deepEqual(p.calls.filter((u) => u === BASE), [BASE], "inside the TTL the chat address is not fetched again");
+    mock.timers.tick(60_000 + 1);
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+    assert.deepEqual(p.calls.filter((u) => u === BASE), [BASE, BASE]);
+  } finally {
+    p.restore();
+    d.restore();
+    mock.timers.reset();
+  }
+});
+
+test("the address cache stays bounded: past 500 chats the oldest is forgotten (any id answers, so ids are unbounded)", async () => {
+  const idOf = (n: number) => n.toString(16).padStart(24, "0");
+  const baseOf = (n: number) => `https://${HOST}/?asst=${idOf(n)}`;
+  const pages: Record<string, Page> = { [WORKER_URL]: { status: 200, body: worker(SCRIPT) }, [SCRIPT_URL]: SERVED };
+  for (let n = 0; n <= 500; n++) pages[baseOf(n)] = { status: 200 };
+  await withStubs({ [HOST]: [GATEWAY] }, pages, async ({ pageCalls }) => {
+    for (let n = 0; n <= 500; n++) assert.equal((await chat.resolveAvChat({ base: baseOf(n), host: HOST, path: "/" }, "thecadrion.com")).ok, true);
+    await chat.resolveAvChat({ base: baseOf(500), host: HOST, path: "/" }, "thecadrion.com");
+    await chat.resolveAvChat({ base: baseOf(0), host: HOST, path: "/" }, "thecadrion.com");
+    assert.equal(pageCalls.filter((u) => u === baseOf(500)).length, 1, "a recent address is still remembered");
+    assert.equal(pageCalls.filter((u) => u === baseOf(0)).length, 2, "the oldest one was forgotten and is checked again");
   });
 });
 
 // ---------- the card's hint: which sites have a chat host, and is it ready ----------
 
-test("the chat-host probe lists chat.<site> only for the sites that have one, ready once ads are enabled", async () => {
-  await withStubs(
-    { [HOST]: [GATEWAY], "chat.second-site.com": ["parking.example"] },
-    { [WORKER_URL]: { status: 200, body: worker("chatthecadrion") } },
-    async () => {
-      assert.deepEqual(await chat.avChatHosts(["thecadrion.com", "second-site.com"]), [{ host: HOST, site: "thecadrion.com", live: true }]);
-    },
-  );
+test("the chat-host probe lists chat.<site> only for the sites that have one, ready once its ad script is served", async () => {
+  await withStubs({ [HOST]: [GATEWAY], "chat.second-site.com": ["parking.example"] }, { [WORKER_URL]: { status: 200, body: worker(SCRIPT) }, [SCRIPT_URL]: SERVED }, async () => {
+    assert.deepEqual(await chat.avChatHosts(["thecadrion.com", "second-site.com"]), [{ host: HOST, site: "thecadrion.com", live: true }]);
+  });
 });
 
 test("a chat host whose activation is unfinished is listed as not live, pointing at Chat Builder", async () => {
@@ -470,29 +944,60 @@ test("a chat host that does not answer is listed as not live, with the reason", 
   });
 });
 
-test("a forced probe (the card's Retry) re-reads DNS and the host instead of the cached verdict", async () => {
-  await withStubs({ [HOST]: [GATEWAY] }, { [WORKER_URL]: { status: 200, body: worker("chatthecadrion") } }, async ({ dnsCalls, pageCalls }) => {
-    await chat.avChatHosts(["thecadrion.com"]);
-    await chat.avChatHosts(["thecadrion.com"]);
-    assert.deepEqual(dnsCalls, [HOST], "an unforced probe answers from the cache");
-    assert.deepEqual(pageCalls, [WORKER_URL]);
-    await chat.avChatHosts(["thecadrion.com"], true);
-    assert.deepEqual(dnsCalls, [HOST, HOST]);
-    assert.deepEqual(pageCalls, [WORKER_URL, WORKER_URL]);
+test("a chat host whose DNS could not be checked is listed as 'could not check' — never silently dropped as 'no chat host'", async () => {
+  await withStubs({ [HOST]: "ETIMEOUT" }, { [DOH(HOST)]: "throw" }, async () => {
+    const hosts = await chat.avChatHosts(["thecadrion.com"]);
+    assert.equal(hosts.length, 1);
+    assert.equal(hosts[0].host, HOST);
+    assert.equal(hosts[0].live, false);
+    assert.match(hosts[0].liveReason ?? "", /^destination_check_failed — the DNS lookup of chat\.thecadrion\.com failed/);
   });
 });
 
-test("a host that became ready is launchable at once: a refusal is never served from the cache", async () => {
+test("a forced probe (the card's Retry) re-reads DNS and the host instead of the cached verdict", async () => {
+  await withStubs({ [HOST]: [GATEWAY] }, { [WORKER_URL]: { status: 200, body: worker(SCRIPT) }, [SCRIPT_URL]: SERVED }, async ({ dnsCalls, pageCalls }) => {
+    await chat.avChatHosts(["thecadrion.com"]);
+    await chat.avChatHosts(["thecadrion.com"]);
+    assert.deepEqual(dnsCalls, [HOST], "an unforced probe answers from the cache");
+    assert.deepEqual(pageCalls, [WORKER_URL, SCRIPT_URL]);
+    await chat.avChatHosts(["thecadrion.com"], true);
+    assert.deepEqual(dnsCalls, [HOST, HOST]);
+    assert.deepEqual(pageCalls, [WORKER_URL, SCRIPT_URL, WORKER_URL, SCRIPT_URL]);
+  });
+});
+
+test("the card's hint remembers a not-ready host for a minute (every card load would pay the probe) — a launch never reads that memory", async () => {
+  chat._resetAvChatCaches();
+  mock.timers.enable({ apis: ["Date"], now: T0 });
+  const d = stubCname({ [HOST]: [GATEWAY] });
+  const p = stubPages({ ...READY, [WORKER_URL]: { status: 200, body: worker("") } });
+  try {
+    assert.equal((await chat.avChatHosts(["thecadrion.com"]))[0].live, false);
+    assert.equal((await chat.avChatHosts(["thecadrion.com"]))[0].live, false);
+    assert.deepEqual(p.calls, [WORKER_URL], "the second card load answers from the hint's memory");
+    refused(await chat.resolveAvChat(SHAPE, "thecadrion.com"));
+    assert.deepEqual(p.calls, [WORKER_URL, WORKER_URL], "the launch re-read the host");
+    mock.timers.tick(60_000 + 1);
+    await chat.avChatHosts(["thecadrion.com"]);
+    assert.deepEqual(p.calls, [WORKER_URL, WORKER_URL, WORKER_URL], "after a minute the hint re-reads it too");
+  } finally {
+    p.restore();
+    d.restore();
+    mock.timers.reset();
+  }
+});
+
+test("a host the hint remembered as not ready is launchable the moment it is ready", async () => {
   chat._resetAvChatCaches();
   const d = stubCname({ [HOST]: [GATEWAY] });
-  const pending = stubPages({ [WORKER_URL]: { status: 200, body: worker("") } });
+  const pending = stubPages({ ...READY, [WORKER_URL]: { status: 200, body: worker("") } });
   try {
-    const before = await chat.resolveAvChat(SHAPE, "thecadrion.com");
-    assert.equal(before.ok, false);
+    assert.equal((await chat.avChatHosts(["thecadrion.com"]))[0].live, false);
     pending.restore();
     const ready = stubPages(READY);
     try {
-      assert.deepEqual(await chat.resolveAvChat(SHAPE, "thecadrion.com"), { ok: true, kind: "chat", base: BASE, site: "thecadrion.com" });
+      assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+      assert.deepEqual(await chat.avChatHosts(["thecadrion.com"]), [{ host: HOST, site: "thecadrion.com", live: true }], "and the hint follows the launch's fresher verdict");
     } finally {
       ready.restore();
     }

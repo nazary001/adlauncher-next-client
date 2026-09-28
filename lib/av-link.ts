@@ -108,16 +108,38 @@ export type AvDestinationKind = "article" | "redirect" | "chat";
 
 /**
  * DISPLAY-time kind of a stored destination — the card's link caption and the picker's tab. The
- * server re-resolves every launch (lib/av-destination) and is the authority; this only reads the
- * host: a redirect domain → "redirect"; any OTHER subdomain of an AV site → "chat" (the only other
- * subdomain the resolver accepts is a Chat Builder host); everything else → "article".
+ * server re-resolves every launch (lib/av-destination) and is the authority; this reads the
+ * address. A chat is known by its SHAPE alone (root + ?asst= is never a page), so it reads right
+ * before the catalog has loaded; a redirect domain is a redirect; a site (or its www) has
+ * articles; any other subdomain of a site holds redirect paths — or, named by a bare chat id, a
+ * chat — and that stays true while the redirect list is unavailable.
  */
 export function avDestinationKind(base: string, known: { sites: string[]; redirectDomains: string[] }): AvDestinationKind {
   const b = avDestinationBase(base);
   if (!b.ok) return "article";
+  if (b.path === "/") return "chat";
   if (known.redirectDomains.some((d) => d.toLowerCase() === b.host)) return "redirect";
-  const site = known.sites.map((s) => s.toLowerCase()).find((s) => b.host.endsWith(`.${s}`));
-  return site && b.host !== `www.${site}` ? "chat" : "article";
+  const sites = known.sites.map((s) => s.toLowerCase());
+  if (sites.some((s) => b.host === s || b.host === `www.${s}`)) return "article";
+  if (!sites.some((s) => b.host.endsWith(`.${s}`))) return "article";
+  return chatIdOf(b.path.slice(1)) ? "chat" : "redirect";
+}
+
+/** What the Destination field looked like when a check was asked for / looks like now. `picks`
+ *  counts the destinations the buyer set by hand — a pick made and undone leaves the value the same
+ *  and still means the buyer moved on. */
+export type AvCheckAsked = { value: string; mode: AvDestinationKind; picks: number };
+
+/**
+ * A check's answer arrives seconds after the click (DNS, the chat host, the page): what may it
+ * still do? Nothing once the field is gone; nothing to the destination once the buyer — or anything
+ * else — changed it meanwhile (theirs stands, the answer is only reported); and the tab follows
+ * the answer only while the buyer is still on the tab the check started from.
+ */
+export function avCheckOutcome(asked: AvCheckAsked, now: AvCheckAsked & { mounted: boolean }): { act: "apply" | "superseded" | "drop"; followTab: boolean } {
+  if (!now.mounted) return { act: "drop", followTab: false };
+  if (now.value !== asked.value || now.picks !== asked.picks) return { act: "superseded", followTab: false };
+  return { act: "apply", followTab: now.mode === asked.mode };
 }
 
 /**
