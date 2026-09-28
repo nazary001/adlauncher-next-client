@@ -4,14 +4,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { SearchSelect } from "./search-select";
 import { TextInput } from "./ui";
 import { AlertIcon, CheckIcon, PlusIcon, RetryIcon, XIcon } from "./icons";
-import { avDestinationBase } from "@/lib/av-link";
+import { type AvDestinationKind, avChatUrl, avDestinationBase, avDestinationKind } from "@/lib/av-link";
 import type { AvDestinations } from "./use-av-destinations";
-import type { AvRedirectOption } from "@/lib/av-destination";
+import type { AvChatHostOption, AvRedirectOption } from "@/lib/av-destination";
 
 // The card's AV Destination picker (WP-D). One card stores a BARE destination URL in
-// Campaign.landing — an article of an AV site, or a Redirect path (redirect.<site>/<path>). The
-// field is segmented Article | Redirect path; the article branch searches the live sitemap (or
-// takes a pasted URL, live-checked), the redirect branch lists AV's paths and can create a new one.
+// Campaign.landing — an article of an AV site, a Redirect path (redirect.<site>/<path>), or a chat
+// of AV's Chat Builder (chat.<site>/?asst=<id>). The field is segmented Article | Redirect path |
+// AI chat; the article branch searches the live sitemap (or takes a pasted URL, live-checked), the
+// redirect branch lists AV's paths and can create a new one, the chat branch takes the chat's pasted
+// address (AV lists no chats) and shows whether the chat host is ready for traffic.
 // Everything the catalog knows comes from useAvDestinations; the server re-resolves the pick on
 // every launch, so this is a convenience layer, not the authority.
 
@@ -100,14 +102,15 @@ export function AvDestinationField({
     [cat],
   );
 
-  // Which redirect domain (if any) the current value belongs to — decides the initial tab.
-  const valueIsRedirect = useMemo(() => {
-    if (!value || !cat) return false;
-    return cat.redirects.some((r) => r.paths.some((p) => p.url === value));
+  // What the current value is (by its host, against the live catalog) — decides the initial tab and
+  // which tab shows it as picked.
+  const valueKind: AvDestinationKind = useMemo(() => {
+    if (!value || !cat) return "article";
+    return avDestinationKind(value, { sites: cat.sites.map((s) => s.domain), redirectDomains: cat.redirects.map((r) => r.domain) });
   }, [value, cat]);
 
-  const [mode, setMode] = useState<"article" | "redirect">("article");
-  // One-time tab sync: a stored REDIRECT value opens on the Redirect tab once the catalog lands
+  const [mode, setMode] = useState<AvDestinationKind>("article");
+  // One-time tab sync: a stored REDIRECT / CHAT value opens on its own tab once the catalog lands
   // (the initializer runs before any fetch, so it can only default to Article). The tab is the
   // buyer's after that.
   const syncedRef = useRef(false);
@@ -115,8 +118,8 @@ export function AvDestinationField({
     if (syncedRef.current || !cat) return;
     syncedRef.current = true;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (valueIsRedirect) setMode("redirect");
-  }, [cat, valueIsRedirect]);
+    if (valueKind !== "article") setMode(valueKind);
+  }, [cat, valueKind]);
 
   // ---- pasted-URL live check (Article tab) ----
   const [paste, setPaste] = useState("");
@@ -142,6 +145,8 @@ export function AvDestinationField({
       onChange(res.base);
       setVerdict({ ok: true, text: `Live ${res.kind} on ${res.site} — set as the destination.` });
       setPaste("");
+      // A chat / redirect URL pasted here lands on its own tab, where it shows as the pick.
+      if (res.kind !== "article") setMode(res.kind);
     } else {
       setVerdict({ ok: false, text: res.error });
     }
@@ -153,12 +158,13 @@ export function AvDestinationField({
 
   return (
     <div className="flex flex-col gap-2">
-      {/* segmented Article | Redirect path */}
-      <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
+      {/* segmented Article | Redirect path | AI chat */}
+      <div className="grid grid-cols-3 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
         {(
           [
             { key: "article" as const, label: "Article" },
             { key: "redirect" as const, label: "Redirect path" },
+            { key: "chat" as const, label: "AI chat" },
           ]
         ).map((opt) => {
           const active = mode === opt.key;
@@ -203,7 +209,7 @@ export function AvDestinationField({
       {mode === "article" ? (
         <>
           <SearchSelect
-            value={valueIsRedirect ? "" : value}
+            value={valueKind === "article" ? value : ""}
             onChange={(v) => onChange(v)}
             options={articleOptions}
             placeholder="Search AV articles"
@@ -260,9 +266,161 @@ export function AvDestinationField({
             ) : null}
           </div>
         </>
-      ) : (
+      ) : mode === "redirect" ? (
         <RedirectPicker cat={cat} loading={loading} value={value} onChange={onChange} articleOptions={articleOptions} destinations={destinations} />
+      ) : (
+        <ChatPicker
+          chats={cat?.chats ?? []}
+          siteDomains={cat ? cat.sites.map((s) => s.domain) : null}
+          loading={loading}
+          failed={Boolean(error) && !cat}
+          current={valueKind === "chat" ? value : ""}
+          onChange={onChange}
+          destinations={destinations}
+        />
       )}
+    </div>
+  );
+}
+
+/** The AI chat tab. AV's API lists no chats (they are built in its dashboard, Chat Builder), so the
+ *  chat's address is PASTED; the tab shows the chat host's state — a host that is not activated, or
+ *  that shows no ads yet ("Pending monetization"), is not launchable and says why. */
+function ChatPicker({
+  chats,
+  siteDomains,
+  loading,
+  failed,
+  current,
+  onChange,
+  destinations,
+}: {
+  chats: AvChatHostOption[];
+  /** Our AV sites' domains; null while the catalog has not loaded (no client host guard then). */
+  siteDomains: string[] | null;
+  loading: boolean;
+  /** The whole catalog failed to load — the top notice + Retry already speaks. */
+  failed: boolean;
+  /** The stored destination when it IS a chat, else "". */
+  current: string;
+  onChange: (v: string) => void;
+  destinations: AvDestinations;
+}) {
+  const [paste, setPaste] = useState("");
+  const [checking, setChecking] = useState(false);
+  const [verdict, setVerdict] = useState<{ ok: boolean; text: string } | null>(null);
+  const url = paste.trim() ? avChatUrl(paste) : null;
+  const canCheck = Boolean(url?.ok) && !checking;
+
+  async function runCheck() {
+    if (!url?.ok) return;
+    // Cheap client guard first — a host of none of our sites never needs a round trip.
+    if (siteDomains && !siteDomains.some((d) => url.host.endsWith(`.${d}`))) {
+      setVerdict({ ok: false, text: `Not a chat of ours — ${url.host} is no subdomain of ${siteDomains.join(", ") || "our sites"}.` });
+      return;
+    }
+    setChecking(true);
+    setVerdict(null);
+    const res = await destinations.check(url.base);
+    setChecking(false);
+    if (res.ok) {
+      onChange(res.base);
+      setVerdict({ ok: true, text: `Chat host ready on ${res.site} — set as the destination.` });
+      setPaste("");
+    } else {
+      setVerdict({ ok: false, text: res.error });
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      {chats.length === 0 ? (
+        failed ? null : (
+          <Notice>
+            {loading ? "Looking for the chat subdomain…" : "No ActiveView chat subdomain for our sites yet — activate one in ActiveView → Chat Builder."}
+          </Notice>
+        )
+      ) : (
+        chats.map((h) => (
+          <div key={h.host} className="rounded-xl border border-line bg-surface2/30 p-2.5">
+            <div className="flex items-center gap-2">
+              <span className={"h-1.5 w-1.5 shrink-0 rounded-full " + (h.live ? "bg-launch2 shadow-[0_0_8px_rgba(52,211,153,0.8)]" : "bg-warn")} />
+              <span className="truncate font-mono text-[11.5px] text-dim">{h.host}</span>
+              <span className="ml-auto text-[9px] font-semibold uppercase tracking-[0.14em] text-faint">{h.live ? "ready" : "not ready"}</span>
+              {!h.live ? (
+                <button
+                  type="button"
+                  onClick={() => destinations.refresh(true)}
+                  className="inline-flex shrink-0 items-center gap-1 rounded-md border border-line2 bg-raise px-2 py-0.5 text-[11px] font-semibold text-dim transition-colors hover:text-ink"
+                >
+                  <RetryIcon className="h-3 w-3" />
+                  Retry
+                </button>
+              ) : null}
+            </div>
+            {!h.live ? (
+              <div className="mt-2">
+                <Notice tone="warn">{h.liveReason ?? "This chat host is not ready for traffic yet."}</Notice>
+              </div>
+            ) : null}
+          </div>
+        ))
+      )}
+
+      {current ? (
+        <div className="flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/10 px-3 py-2">
+          <CheckIcon className="h-3.5 w-3.5 shrink-0 text-[#9db8ff]" />
+          <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-ink">{current}</span>
+          <button
+            type="button"
+            aria-label="Clear the chat destination"
+            onClick={() => {
+              onChange("");
+              setVerdict(null);
+            }}
+            className="rounded p-0.5 text-faint transition-colors hover:text-ink"
+          >
+            <XIcon className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ) : null}
+
+      {/* paste the chat's address — either form AV serves; normalized, then checked on the server */}
+      <div className="flex flex-col gap-1.5">
+        <div className="flex gap-2">
+          <TextInput
+            value={paste}
+            onChange={(e) => {
+              setPaste(e.target.value);
+              setVerdict(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                if (canCheck) void runCheck();
+              }
+            }}
+            maxLength={2000}
+            placeholder={current ? "Paste another chat URL" : "Paste the chat URL from Chat Builder"}
+            className="font-mono text-[11.5px]"
+          />
+          <SmallButton onClick={() => void runCheck()} disabled={!canCheck} busy={checking}>
+            Check
+          </SmallButton>
+        </div>
+        {paste.trim() && url && !url.ok ? (
+          <p className="text-[11px] leading-snug text-warn">{url.error}</p>
+        ) : verdict ? (
+          <p className={"flex items-start gap-1.5 text-[11px] leading-snug " + (verdict.ok ? "text-launch2" : "text-warn")}>
+            {verdict.ok ? <CheckIcon className="mt-px h-3.5 w-3.5 shrink-0" /> : <XIcon className="mt-px h-3.5 w-3.5 shrink-0" />}
+            <span>{verdict.text}</span>
+          </p>
+        ) : (
+          <p className="text-[10.5px] leading-snug text-faint">
+            Copy it from ActiveView → Chat Builder → View your chat. ActiveView answers for any id, so a mistyped one cannot be caught here.
+          </p>
+        )}
+      </div>
     </div>
   );
 }

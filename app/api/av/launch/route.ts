@@ -101,12 +101,13 @@ async function resolveLocales(names: string[], fbGetter: (path: string) => Promi
  * one ad set → one ad per creative, 09-02), with the rail's own pieces: the tree is built on AV's
  * OWN token (slot av.launch, no env seed), the marker is an AV KEY from the registered pool
  * (lib/av-keys — av001…), and the ad link is the campaign's AV DESTINATION (an article of an AV
- * site or a Redirect path, lib/av-destination) with the key in utm_campaign (lib/av-link). The AV
- * page carries no Meta pixel: delivery is Traffic / link clicks only — conversions and min-ROAS are
- * refused server-side (nothing to optimize on), so no pixel is ever bound and the link carries no
- * &pixel=/&fire= tail. Every gate runs BEFORE any claim, and the destination is RE-RESOLVED here
- * (host must be an AV site / redirect domain, article live, redirect path present + domain live) so
- * a stale draft can never point a live ad at a dead page.
+ * site, a Redirect path, or a Chat Builder chat — lib/av-destination) with the key in utm_campaign
+ * (lib/av-link). The AV page carries no Meta pixel: delivery is Traffic / link clicks only —
+ * conversions and min-ROAS are refused server-side (nothing to optimize on), so no pixel is ever
+ * bound and the link carries no &pixel=/&fire= tail. Every gate runs BEFORE any claim, and the
+ * destination is RE-RESOLVED here (host must be an AV site / redirect domain / chat host, article
+ * live, redirect path present + domain live, chat host showing ads) so a stale draft can never
+ * point a live ad at a dead page — or at a chat that earns nothing.
  */
 export async function POST(req: Request) {
   // Proxy-gated, but self-checks the session too (parity with /api/aif/launch).
@@ -288,10 +289,11 @@ export async function POST(req: Request) {
   }
 
   // The destination (Campaign.landing = a bare URL) is re-resolved on the server: the host must be
-  // an AV site of ours (or one of its redirect domains), an article must answer 200, a redirect
-  // path must exist and its domain be live. A stale/renamed draft would otherwise build a live ad
-  // pointing at a dead page (mirror of MO/AIF's landing catalog check). The resolver's own status
-  // (400 = the buyer's fix, 502 = AV unreachable) is surfaced verbatim.
+  // an AV site of ours (or one of its redirect domains / its chat subdomain), an article must
+  // answer 200, a redirect path must exist and its domain be live, a chat's host must show ads. A
+  // stale/renamed draft would otherwise build a live ad pointing at a dead page (mirror of MO/AIF's
+  // landing catalog check). The resolver's own status (400 = the buyer's fix, 502 = AV
+  // unreachable) is surfaced verbatim.
   const resolved = await resolveAvDestination(String(campaign.landing ?? ""));
   if (!resolved.ok) {
     return NextResponse.json({ ok: false, stage: "config", error: resolved.error }, { status: resolved.status });

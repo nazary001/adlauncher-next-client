@@ -5,7 +5,9 @@ import assert from "node:assert/strict";
 import {
   AV_KEY_POOL_MAX,
   avArticleTitle,
+  avChatUrl,
   avDestinationBase,
+  avDestinationKind,
   avKeyCode,
   avKeyIndex,
   avKeyLaunchable,
@@ -106,4 +108,120 @@ test("upload files: ≤200 keys each, one per line, inclusive range", () => {
   assert.equal(files[2].content.trim().split("\n").at(-1), "av450");
   assert.ok(files.every((f) => f.content.length < 50 * 1024));
   assert.deepEqual(avKeysUploadFiles(5, 3), []);
+});
+
+// ---------- chat destinations (ActiveView → Chat Builder) ----------
+// A chat's address carries its id in the QUERY: https://<chat host>/?asst=<24 hex>. Read live 29.09 on
+// the chats of other AV publishers: that form answers on every chat host, the path form /<id>/ only
+// on the hosts whose gateway route was set up for it.
+
+const CHAT_ID = "6a2312cef9f4e11b130fc523";
+const CHAT = `https://chat.thecadrion.com/?asst=${CHAT_ID}`;
+
+test("a chat link joins the tracking params with & — the chat's address already has a query", () => {
+  assert.equal(
+    avLink(CHAT, "av015"),
+    "https://chat.thecadrion.com/?asst=6a2312cef9f4e11b130fc523&utm_source=facebook&utm_medium={{campaign.id}}&utm_campaign=av015&utm_term={{adset.id}}&utm_content={{ad.id}}",
+  );
+});
+
+test("chat link segments: the chat id is the slug, the key is still the marker", () => {
+  assert.deepEqual(avLinkSegments(CHAT, "av015"), [
+    { text: "https://chat.thecadrion.com/", role: "base" },
+    { text: "?asst=6a2312cef9f4e11b130fc523", role: "slug" },
+    { text: "&utm_source=facebook&utm_medium={{campaign.id}}", role: "params" },
+    { text: "&utm_campaign=", role: "gcmKey" },
+    { text: "av015", role: "gcm" },
+    { text: "&utm_term={{adset.id}}&utm_content={{ad.id}}", role: "params" },
+  ]);
+});
+
+test("a clone of a chat ad swaps the key and keeps the chat id", () => {
+  assert.equal(
+    swapUtmCampaign(avLink(CHAT, "av015"), "av016"),
+    "https://chat.thecadrion.com/?asst=6a2312cef9f4e11b130fc523&utm_source=facebook&utm_medium={{campaign.id}}&utm_campaign=av016&utm_term={{adset.id}}&utm_content={{ad.id}}",
+  );
+  assert.equal(avKeyOfLink(avLink(CHAT, "av015")), "av015");
+});
+
+test("destination base keeps a chat's address (root + its id) and nothing else of the query", () => {
+  assert.deepEqual(avDestinationBase("https://Chat.TheCadrion.com/?utm_source=x&asst=6A2312CEF9F4E11B130FC523&fbclid=1#h"), {
+    ok: true,
+    base: CHAT,
+    host: "chat.thecadrion.com",
+    path: "/",
+  });
+  assert.deepEqual(avDestinationBase(avLink(CHAT, "av015")), { ok: true, base: CHAT, host: "chat.thecadrion.com", path: "/" }, "a launched chat link reads back as its base");
+});
+
+test("a root without a well-formed chat id stays refused as the home page", () => {
+  for (const raw of [
+    "https://chat.thecadrion.com/",
+    "https://chat.thecadrion.com/?asst=",
+    "https://chat.thecadrion.com/?asst=6a2312cef9f4e11b130fc52",
+    "https://chat.thecadrion.com/?asst=6a2312cef9f4e11b130fc5233",
+    "https://chat.thecadrion.com/?asst=6a2312cef9f4e11b130fc52g",
+    "https://chat.thecadrion.com/?asst=../../etc/passwd",
+    "https://chat.thecadrion.com/?utm_campaign=av001",
+  ]) {
+    assert.equal(avDestinationBase(raw).ok, false, raw);
+  }
+});
+
+test("an article keeps dropping its whole query, a chat id included", () => {
+  assert.deepEqual(avDestinationBase(`https://thecadrion.com/some-article?asst=${CHAT_ID}&utm_campaign=x`), {
+    ok: true,
+    base: "https://thecadrion.com/some-article",
+    host: "thecadrion.com",
+    path: "/some-article",
+  });
+});
+
+test("a pasted chat URL is normalized to its one canonical address from either form AV serves", () => {
+  const want = { ok: true, base: CHAT, host: "chat.thecadrion.com", id: CHAT_ID };
+  for (const raw of [
+    CHAT,
+    "https://chat.thecadrion.com/6a2312cef9f4e11b130fc523",
+    "https://chat.thecadrion.com/6a2312cef9f4e11b130fc523/",
+    "chat.thecadrion.com/6A2312CEF9F4E11B130FC523/?utm_source=x&utm_campaign=old#h",
+    "https://CHAT.thecadrion.com/?utm_source=chat&asst=6a2312cef9f4e11b130fc523",
+  ]) {
+    assert.deepEqual(avChatUrl(raw), want, raw);
+  }
+});
+
+test("a URL that names no chat id is not a chat URL", () => {
+  for (const raw of [
+    "",
+    "https://chat.thecadrion.com/",
+    "https://chat.thecadrion.com/6a2312cef9f4e11b130fc52",
+    "https://chat.thecadrion.com/6a2312cef9f4e11b130fc5233",
+    "https://chat.thecadrion.com/6a2312cef9f4e11b130fc52g",
+    "https://chat.thecadrion.com/a/6a2312cef9f4e11b130fc523",
+    "https://chat.thecadrion.com/some-article?asst=6a2312cef9f4e11b130fc523",
+    "ftp://chat.thecadrion.com/6a2312cef9f4e11b130fc523",
+    "https://user:pw@chat.thecadrion.com/6a2312cef9f4e11b130fc523",
+  ]) {
+    const r = avChatUrl(raw);
+    assert.equal(r.ok, false, raw);
+    assert.match(!r.ok ? r.error : "", /^(chat_url_invalid|destination_required|destination_invalid) — /, raw);
+  }
+});
+
+test("destination kind for the card caption: article on the site, redirect on a redirect domain, chat on any other subdomain", () => {
+  const known = { sites: ["thecadrion.com"], redirectDomains: ["redirect.thecadrion.com"] };
+  assert.equal(avDestinationKind("https://thecadrion.com/some-article", known), "article");
+  assert.equal(avDestinationKind("https://www.thecadrion.com/some-article", known), "article");
+  assert.equal(avDestinationKind("https://redirect.thecadrion.com/jobs", known), "redirect");
+  assert.equal(avDestinationKind(CHAT, known), "chat");
+  assert.equal(avDestinationKind("https://CHAT.thecadrion.com/?asst=6a2312cef9f4e11b130fc523", known), "chat", "host case does not matter");
+});
+
+test("destination kind falls back to article for anything it cannot place", () => {
+  const known = { sites: ["thecadrion.com"], redirectDomains: ["redirect.thecadrion.com"] };
+  assert.equal(avDestinationKind("", known), "article");
+  assert.equal(avDestinationKind("not a url", known), "article");
+  assert.equal(avDestinationKind(`https://chat.other-site.com/?asst=${CHAT_ID}`, known), "article", "a subdomain of a foreign domain is not our chat");
+  assert.equal(avDestinationKind("https://notthecadrion.com/x", known), "article", "a suffix match is not a subdomain");
+  assert.equal(avDestinationKind(CHAT, { sites: [], redirectDomains: [] }), "article", "no catalog yet");
 });

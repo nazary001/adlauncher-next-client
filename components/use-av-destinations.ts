@@ -6,8 +6,9 @@ import type { AvDestinationCatalog, AvResolved } from "@/lib/av-destination";
 // The card's AV Destination picker talks to three routes (WP-B), all gated by avRailEnabled() +
 // avApiConfigured() server-side:
 //   GET  /api/av/destinations[?fresh=1]  → the whole catalog (sites, articles, redirect domains +
-//        paths/weights/liveness), each part degrading with its own *Error string.
-//   GET  /api/av/destinations/check?url= → resolveAvDestination(url) for a pasted URL.
+//        paths/weights/liveness, chat hosts + readiness), each part degrading with its own *Error.
+//   GET  /api/av/destinations/check?url= → resolveAvDestination(url) for a pasted URL (an article,
+//        or a chat — AV lists no chats, so a chat is always pasted).
 //   POST /api/av/redirect-paths          → create a redirect path, then re-pull the catalog.
 // One instance per launcher board (enabled only for the AV partner); the cards share it. Reads are
 // live-catalog only — no optimistic writes, no browser storage (the server is the truth).
@@ -28,7 +29,8 @@ export type AvDestinations = {
   createPath: (
     input: { domainId: string; path: string; targetUrl: string },
   ) => Promise<{ ok: true; url: string; path: AvCreatedPath } | { ok: false; error: string }>;
-  /** Resolve a pasted URL (host is an AV site / redirect domain, article live / path exists). */
+  /** Resolve a pasted URL (host is an AV site / redirect domain / chat host; article live / path
+   *  exists / chat host shows ads and the chat's address answers). */
   check: (url: string) => Promise<AvResolved>;
 };
 
@@ -64,6 +66,7 @@ export function useAvDestinations(enabled: boolean): AvDestinations {
                 sites: d.sites ?? [],
                 articles: d.articles ?? [],
                 redirects: d.redirects ?? [],
+                chats: d.chats ?? [],
                 ...(d.articlesError ? { articlesError: d.articlesError } : {}),
                 ...(d.redirectsError ? { redirectsError: d.redirectsError } : {}),
               },

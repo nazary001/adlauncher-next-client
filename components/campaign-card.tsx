@@ -37,6 +37,7 @@ import { Field, MoneyInput, Select, TextArea, TextInput, IconButton } from "./ui
 import { SearchSelect } from "./search-select";
 import { AvDestinationField } from "./av-destination-field";
 import type { AvDestinations } from "./use-av-destinations";
+import { type AvDestinationKind, avDestinationKind } from "@/lib/av-link";
 import { MultiSelect } from "./multi-select";
 import { Dropzone } from "./dropzone";
 import {
@@ -505,12 +506,15 @@ function CampaignCardBase({
   }
   const eventLabel = CONVERSION_EVENTS.find((e) => e.value === c.conversionEvent)?.label ?? "";
   const geo = geoSummary(c.countries);
-  // AV destination kind (article vs redirect path) — for the link-preview caption. Derived from
-  // the live catalog: a picked redirect path's URL appears in the redirect list; anything else
-  // (an article pick, a pasted URL) reads as an article.
-  const avKind: "article" | "redirect" =
-    avMode && c.landing && avDestinations?.data?.redirects.some((r) => r.paths.some((p) => p.url === c.landing))
-      ? "redirect"
+  // AV destination kind (article / redirect path / chat) — for the link-preview caption. Read off
+  // the destination's host against the live catalog (lib/av-link avDestinationKind): a redirect
+  // domain is a redirect path, any other subdomain of an AV site is a chat, the rest an article.
+  const avKind: AvDestinationKind =
+    avMode && c.landing
+      ? avDestinationKind(c.landing, {
+          sites: (avDestinations?.data?.sites ?? []).map((s) => s.domain),
+          redirectDomains: (avDestinations?.data?.redirects ?? []).map((r) => r.domain),
+        })
       : "article";
 
   function remove() {
@@ -1213,7 +1217,7 @@ function CampaignCardBase({
                   ) : avMode ? (
                     <Field
                       label="Destination"
-                      hint="an article of an AV site, or a Redirect path — the ad points here; the tracking tail is ours"
+                      hint="an article of an AV site, a Redirect path, or an AI chat — the ad points here; the tracking tail is ours"
                     >
                       <div>
                         <AvDestinationField

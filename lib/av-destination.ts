@@ -1,5 +1,5 @@
-// AV rail — WHERE an ad may point (server-only). Two destination kinds, one stored shape (a bare URL
-// in Campaign.landing, lib/av-link avDestinationBase):
+// AV rail — WHERE an ad may point (server-only). Three destination kinds, one stored shape (a bare
+// URL in Campaign.landing, lib/av-link avDestinationBase):
 //   article  — a page of an AV site (the sites the API key reaches: GET /me). Picked from the site's
 //              live sitemap (AV's CMS publishes every article there; an unknown path answers 404) or
 //              pasted; a launch re-checks it answers 200.
@@ -7,11 +7,15 @@
 //              the target by the path's weights and merges our tracking params into it. Launchable
 //              only while the domain is LIVE (resolves + answers) — 28.09 its CNAME target did not
 //              resolve, the activation wizard was unfinished.
+//   chat     — a chat of AV's Chat Builder on a chat subdomain of the site (chat.<site>/<id>). The
+//              API lists none, so the URL is pasted; the host is recognized by its CNAME and the chat
+//              must answer 200 there (lib/av-chat).
 // Every read is cached per instance (short TTLs) and degrades per part: the card still gets the
 // articles when the redirect list fails, and vice versa, each with its reason.
 
 import { lookup } from "node:dns/promises";
 import { type AvMapping, type AvSite, AvApiError, avMe, avRedirectMappings, avRedirects } from "./av-api";
+import { type AvChatHostOption, _resetAvChatCaches, avChatHosts, resolveAvChat } from "./av-chat";
 import { avArticleTitle, avDestinationBase } from "./av-link";
 
 const UA = "Mozilla/5.0 (compatible; adlauncher-av/1.0)";
@@ -45,12 +49,16 @@ export type AvRedirectOption = {
   liveReason?: string;
   paths: AvRedirectPathOption[];
 };
+export type { AvChatHostOption } from "./av-chat";
 export type AvDestinationCatalog = {
   sites: AvSite[];
   articles: AvArticle[];
   articlesError?: string;
   redirects: AvRedirectOption[];
   redirectsError?: string;
+  /** The sites' chat hosts (chat.<site> behind AV's chat gateway) with their liveness — the chats
+   *  themselves are not listed anywhere, a chat URL is pasted. */
+  chats: AvChatHostOption[];
 };
 
 const fresh = <T>(c: Cached<T> | undefined, ttl: number): c is Cached<T> => Boolean(c) && Date.now() - (c as Cached<T>).at < ttl;
@@ -106,9 +114,11 @@ async function siteArticleUrls(domain: string, force = false): Promise<string[]>
   } else {
     urls = locs(root.text);
   }
+  // An article has a path: the one root lib/av-link lets through is a chat's address (…/?asst=<id>),
+  // which is never a page of the site.
   const clean = [...new Set(urls)]
     .map((u) => avDestinationBase(u))
-    .filter((b): b is Extract<ReturnType<typeof avDestinationBase>, { ok: true }> => b.ok && (b.host === domain || b.host === `www.${domain}`))
+    .filter((b): b is Extract<ReturnType<typeof avDestinationBase>, { ok: true }> => b.ok && b.path !== "/" && (b.host === domain || b.host === `www.${domain}`))
     .map((b) => b.base)
     .slice(0, ARTICLES_MAX);
   sitemapCache.set(domain, { at: Date.now(), value: clean });
@@ -209,7 +219,8 @@ export function invalidateAvRedirects(): void {
 }
 
 /** Everything the card's Destination picker shows. Sites must load (else AvApiError); articles and
- *  redirects degrade independently with their own error text. */
+ *  redirects degrade independently with their own error text; the chat hosts are a DNS + gateway
+ *  probe that never throws (a host it cannot confirm is simply not listed). */
 export async function avDestinationCatalog(opts: { force?: boolean; titles?: boolean } = {}): Promise<AvDestinationCatalog> {
   const sites = await avSites(opts.force);
   const articles: AvArticle[] = [];
@@ -240,6 +251,7 @@ export async function avDestinationCatalog(opts: { force?: boolean; titles?: boo
     ...(errors.length ? { articlesError: `articles unavailable — ${errors.join("; ")}` } : {}),
     redirects,
     ...(redirectsError ? { redirectsError: `redirect paths unavailable — ${redirectsError}` } : {}),
+    chats: await avChatHosts(sites.map((s) => s.domain), opts.force),
   };
 }
 
@@ -268,11 +280,13 @@ async function articleLive(base: string, site: AvSite): Promise<{ ok: true } | {
 export type AvResolved =
   | { ok: true; kind: "article"; base: string; site: string }
   | { ok: true; kind: "redirect"; base: string; site: string; domainId: string; pathId: string; mappings: AvMapping[] }
+  | { ok: true; kind: "chat"; base: string; site: string }
   | { ok: false; error: string; status: number };
 
 /**
  * The server's verdict on a destination (launch + clone): shape → host belongs to an AV site (or one
- * of its redirect domains) → article answers 200 / redirect path exists and its domain is live.
+ * of its redirect domains / its chat subdomain) → article answers 200 / redirect path exists and its
+ * domain is live / chat answers 200 on its chat host.
  * `status` = the HTTP status the route should answer (400 = the buyer's fix, 502 = AV unreachable).
  */
 export async function resolveAvDestination(raw: string): Promise<AvResolved> {
@@ -296,8 +310,7 @@ export async function resolveAvDestination(raw: string): Promise<AvResolved> {
     redirectsFailed = errText(e);
   }
   const rd = redirects.find((r) => r.domain === b.host);
-  if (rd || (redirectsFailed && b.host !== site.domain && b.host !== `www.${site.domain}`)) {
-    if (!rd) return { ok: false, error: `destination_check_failed — redirect paths unavailable (${redirectsFailed})`, status: 502 };
+  if (rd) {
     const live = await avRedirectDomainLive(rd.domain);
     if (!live.live) return { ok: false, error: `redirect_not_live — ${live.reason}`, status: 400 };
     const p = rd.paths.find((x) => x.path === b.path);
@@ -305,7 +318,19 @@ export async function resolveAvDestination(raw: string): Promise<AvResolved> {
     return { ok: true, kind: "redirect", base: b.base, site: site.domain, domainId: rd.domainId, pathId: p.id, mappings: p.mappings };
   }
   if (b.host !== site.domain && b.host !== `www.${site.domain}`) {
-    return { ok: false, error: `destination_not_av — ${b.host} is neither ${site.domain} nor one of its redirect domains`, status: 400 };
+    // A subdomain that is no redirect domain we know: a Chat Builder host (its CNAME says so, whatever
+    // the redirect list did) or nothing of ours. While the redirect list is unavailable a host that
+    // is NOT a chat may still be a redirect domain we could not see — a failed check, not a refusal.
+    const chat = await resolveAvChat(b, site.domain);
+    if (!chat.ok && redirectsFailed && chat.error.startsWith("destination_not_av")) {
+      return { ok: false, error: `destination_check_failed — redirect paths unavailable (${redirectsFailed})`, status: 502 };
+    }
+    return chat;
+  }
+  // On the site itself only a PAGE is a destination — a chat's address (root + ?asst=) belongs to the
+  // chat subdomain, and here it is just the home page.
+  if (b.path === "/") {
+    return { ok: false, error: `destination_invalid — pick an article (or a redirect path), not the home page (a chat lives on the chat subdomain of ${site.domain})`, status: 400 };
   }
   const live = await articleLive(b.base, site);
   if (!live.ok) return { ok: false, error: live.error, status: live.error.startsWith("destination_check_failed") ? 502 : 400 };
@@ -323,4 +348,5 @@ export function _resetAvDestinationCaches(): void {
   redirectsCache.v = undefined;
   liveCache.clear();
   pageOkCache.clear();
+  _resetAvChatCaches();
 }

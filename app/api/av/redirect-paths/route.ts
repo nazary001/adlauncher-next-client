@@ -76,11 +76,12 @@ export async function POST(req: Request) {
   }
 
   // The target must resolve as an ARTICLE of the SAME site as the redirect domain (a redirect path
-  // pointing at another site — or at a redirect path — is not a thing AV can weight for us).
+  // pointing at another site — or at a redirect path, or at a chat — is not a thing AV can weight
+  // for us: its mappings were only ever read as articles).
   const target = await resolveAvDestination(targetUrl);
   if (!target.ok) return bad(`target_invalid — ${target.error}`, target.status);
   if (target.kind !== "article") {
-    return bad("target_invalid — the redirect target must be an article, not a redirect path");
+    return bad(`target_invalid — the redirect target must be an article, not a ${target.kind === "chat" ? "chat" : "redirect path"}`);
   }
   if (target.site !== rd.site) {
     return bad(`target_invalid — the target must be an article of ${rd.site} (the redirect domain's site)`);

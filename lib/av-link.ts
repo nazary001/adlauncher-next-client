@@ -46,11 +46,20 @@ export const AV_UTM_TAIL = "&utm_term={{adset.id}}&utm_content={{ad.id}}";
 
 export type AvBase = { ok: true; base: string; host: string; path: string } | { ok: false; error: string };
 
+/** A chat's id in AV's Chat Builder: 24 hex characters (every id on AV's live chats, read 29.09). */
+const AV_CHAT_ID_RE = /^[a-f0-9]{24}$/;
+const chatIdOf = (raw: unknown): string => {
+  const id = String(raw ?? "").trim().toLowerCase();
+  return AV_CHAT_ID_RE.test(id) ? id : "";
+};
+
 /**
  * Normalize a pasted / picked destination to its bare base: https, lower-case host, no userinfo/port,
  * no query/hash (tracking is ours), no trailing slash, and a real path (the home page is not a
- * destination). SHAPE only — whether the host is an AV site / redirect domain and the page is live
- * is the server's call (lib/av-destination).
+ * destination). The one exception is a CHAT: its address is the root plus its id in the query
+ * (https://<chat host>/?asst=<id>), so a root that names a well-formed chat id keeps exactly that
+ * param. SHAPE only — whether the host is an AV site / redirect domain / chat host and the page is
+ * live is the server's call (lib/av-destination).
  */
 export function avDestinationBase(raw: string): AvBase {
   let s = String(raw ?? "").trim();
@@ -68,9 +77,47 @@ export function avDestinationBase(raw: string): AvBase {
   if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(host)) return { ok: false, error: "destination_invalid — bad host" };
   let path = u.pathname.replace(/\/{2,}/g, "/");
   if (path.length > 1) path = path.replace(/\/+$/, "");
-  if (!path || path === "/") return { ok: false, error: "destination_invalid — pick an article (or a redirect path), not the home page" };
+  if (!path || path === "/") {
+    const id = chatIdOf(u.searchParams.get("asst"));
+    if (id) return { ok: true, base: `https://${host}/?asst=${id}`, host, path: "/" };
+    return { ok: false, error: "destination_invalid — pick an article (or a redirect path), not the home page" };
+  }
   if (!/^\/[A-Za-z0-9._~\-/%]+$/.test(path) || path.length > 300) return { ok: false, error: "destination_invalid — unexpected characters in the path" };
   return { ok: true, base: `https://${host}${path}`, host, path };
+}
+
+export type AvChatUrl = { ok: true; base: string; host: string; id: string } | { ok: false; error: string };
+
+/**
+ * A chat URL → its ONE canonical address, https://<host>/?asst=<id>. AV serves a chat under two
+ * addresses — /?asst=<id> and /<id>/ — and its dashboard hands out the second; read live 29.09 on the
+ * chats of other AV publishers, the query form answers on every chat host while the path form only
+ * answers where the gateway was set up for it, so both are normalized to the query form. SHAPE only:
+ * AV answers 200 for ANY well-formed id (one static shell), so that the chat exists is never proven
+ * by a request — the id is the buyer's to copy from Chat Builder.
+ */
+export function avChatUrl(raw: string): AvChatUrl {
+  const b = avDestinationBase(raw);
+  const id = b.ok ? chatIdOf(b.path === "/" ? new URL(b.base).searchParams.get("asst") : b.path.slice(1)) : "";
+  if (b.ok && id) return { ok: true, base: `https://${b.host}/?asst=${id}`, host: b.host, id };
+  if (!b.ok && !/home page/.test(b.error)) return { ok: false, error: b.error };
+  return { ok: false, error: "chat_url_invalid — a chat's address is https://<chat host>/?asst=<its 24-character id> (copy it from ActiveView → Chat Builder → View your chat)" };
+}
+
+export type AvDestinationKind = "article" | "redirect" | "chat";
+
+/**
+ * DISPLAY-time kind of a stored destination — the card's link caption and the picker's tab. The
+ * server re-resolves every launch (lib/av-destination) and is the authority; this only reads the
+ * host: a redirect domain → "redirect"; any OTHER subdomain of an AV site → "chat" (the only other
+ * subdomain the resolver accepts is a Chat Builder host); everything else → "article".
+ */
+export function avDestinationKind(base: string, known: { sites: string[]; redirectDomains: string[] }): AvDestinationKind {
+  const b = avDestinationBase(base);
+  if (!b.ok) return "article";
+  if (known.redirectDomains.some((d) => d.toLowerCase() === b.host)) return "redirect";
+  const site = known.sites.map((s) => s.toLowerCase()).find((s) => b.host.endsWith(`.${s}`));
+  return site && b.host !== `www.${site}` ? "chat" : "article";
 }
 
 /**
@@ -80,11 +127,14 @@ export function avDestinationBase(raw: string): AvBase {
 export function avLinkSegments(base: string, key: string): LinkSegment[] {
   const b = String(base ?? "").trim();
   if (!b) return [];
-  const cut = b.lastIndexOf("/");
+  // A chat's base already has a query (…/?asst=<id>): the tracking params JOIN it, and the slug is
+  // cut before it (the id has no slash, but the split must not depend on that).
+  const query = b.indexOf("?");
+  const cut = (query < 0 ? b : b.slice(0, query)).lastIndexOf("/");
   return [
     { text: b.slice(0, cut + 1), role: "base" },
     { text: b.slice(cut + 1), role: "slug" },
-    { text: AV_UTM_HEAD, role: "params" },
+    { text: query < 0 ? AV_UTM_HEAD : `&${AV_UTM_HEAD.slice(1)}`, role: "params" },
     { text: "&utm_campaign=", role: "gcmKey" },
     { text: key, role: "gcm" },
     { text: AV_UTM_TAIL, role: "params" },
