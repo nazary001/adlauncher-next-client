@@ -367,13 +367,19 @@ function CampaignCardBase({
         ? (hsData?.tokenAccounts ?? null)
         : null
     : null;
+  // act_-insensitive membership: LION account values (and the token grant set) carry "act_",
+  // /api/tool/ready answers BARE digits — a raw .has() left the TOOL picker empty (UI walk 28.09).
+  const visibleHas = (set: ReadonlySet<string>, id: string): boolean => {
+    const bare = id.replace(/^act_/, "");
+    return set.has(id) || set.has(bare) || set.has(`act_${bare}`);
+  };
   const hsAccountOptions =
     hsVisible !== null
-      ? (hsData?.accounts ?? []).filter((a) => hsVisible.has(a.value))
+      ? (hsData?.accounts ?? []).filter((a) => visibleHas(hsVisible, a.value))
       : (hsData?.accounts ?? []);
   // A stored account the rail switch just hid would submit a bind the picker can't display —
   // clear it (and the dependent pixel), same self-heal idiom as the unlisted-pixel guard above.
-  const hsAccountHidden = Boolean(c.account) && hsVisible !== null && !hsVisible.has(c.account);
+  const hsAccountHidden = Boolean(c.account) && hsVisible !== null && !visibleHas(hsVisible, c.account);
   useEffect(() => {
     if (hsAccountHidden) onPatch(c.id, { account: "", pixel: "" });
   }, [hsAccountHidden, onPatch, c.id]);
@@ -384,8 +390,8 @@ function CampaignCardBase({
   const moToolVisible =
     !hsMode && partner.accountsFromToken && moToolRail ? (toolAccounts ?? null) : null;
   const moAccountOptions =
-    moToolVisible !== null ? (adAccounts ?? []).filter((a) => moToolVisible.has(a.value)) : (adAccounts ?? []);
-  const moAccountHidden = Boolean(c.account) && moToolVisible !== null && !moToolVisible.has(c.account);
+    moToolVisible !== null ? (adAccounts ?? []).filter((a) => visibleHas(moToolVisible, a.value)) : (adAccounts ?? []);
+  const moAccountHidden = Boolean(c.account) && moToolVisible !== null && !visibleHas(moToolVisible, c.account);
   useEffect(() => {
     if (moAccountHidden) onPatch(c.id, { account: "", pixel: "" });
   }, [moAccountHidden, onPatch, c.id]);
