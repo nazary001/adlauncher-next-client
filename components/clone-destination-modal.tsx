@@ -23,6 +23,7 @@ export function CloneDestinationModal({
   title,
   partner,
   aifMode,
+  avMode,
   fanpages,
   adAccounts,
   limits,
@@ -41,6 +42,8 @@ export function CloneDestinationModal({
   title: string;
   partner: PartnerConfig;
   aifMode: boolean;
+  /** AV clone board: no pixel anywhere (the AV page has none — Traffic / link clicks). */
+  avMode: boolean;
   fanpages: FanpageOption[] | null;
   adAccounts: AdAccountOption[] | null;
   limits: AcctLimits;
@@ -108,19 +111,22 @@ export function CloneDestinationModal({
   const pageIsAuto = Boolean(partner.fanpagesFromToken) && !draft.pageId && Boolean(autoPageId);
   const accountIsAuto = Boolean(partner.accountsFromToken) && !draft.accountId && Boolean(autoAccountId);
   const isTarget = Boolean(effAccountId) && effAccountId !== SOURCE_ACCOUNT;
-  const effPixelId =
-    draft.pixelId ||
-    (accountIsAuto && isTarget
-      ? aifMode
-        ? (pickAifPixel(pixelOptionsOf(adAccounts, effAccountId))?.id ?? "")
-        : defaultPixelFor(adAccounts, effAccountId, partner.preferredPixel)
-      : "");
+  // AV never binds a pixel — it stays empty, is never picked and never gates the modal.
+  const effPixelId = avMode
+    ? ""
+    : draft.pixelId ||
+      (accountIsAuto && isTarget
+        ? aifMode
+          ? (pickAifPixel(pixelOptionsOf(adAccounts, effAccountId))?.id ?? "")
+          : defaultPixelFor(adAccounts, effAccountId, partner.preferredPixel)
+        : "");
   const pixelsAll = isTarget ? pixelOptionsOf(adAccounts, effAccountId) : [];
   const pixels = aifMode ? aifOfferablePixels(pixelsAll) : pixelsAll;
   const fanpageOk = !partner.fanpagesFromToken || Boolean(effPageId);
   // On the TOOL rail the account must be a concrete TOOL-visible cabinet (never SOURCE_ACCOUNT).
   const accountOk = !partner.accountsFromToken || (onTool ? toolVisible(effAccountId) : Boolean(effAccountId));
-  const pixelOk = !isTarget || Boolean(effPixelId);
+  // AV never needs a pixel (Traffic / link clicks) — a target account without one is complete.
+  const pixelOk = avMode || !isTarget || Boolean(effPixelId);
   const complete = fanpageOk && accountOk && pixelOk;
   const copiesN = Number(copies);
   const copiesOk = copies === "" || (Number.isFinite(copiesN) && copiesN >= 1 && copiesN <= MAX_CLONE_COPIES);
@@ -128,8 +134,13 @@ export function CloneDestinationModal({
     const o = fanpages?.find((x) => x.value === id);
     return o && o.adCount != null && o.adLimit != null ? `${o.adCount}/${o.adLimit} ads · ${Math.max(o.adLimit - o.adCount, 0)} free` : "";
   };
-  // Apply stores the EFFECTIVE tuple — a row's own destination is always concrete.
-  const result = (): CloneRowDest => ({ pageId: effPageId, accountId: effAccountId, pixelId: isTarget ? effPixelId : "" });
+  // Apply stores the EFFECTIVE tuple — a row's own destination is always concrete. AV never
+  // carries a pixel (the run route forces pixelId="").
+  const result = (): CloneRowDest => ({
+    pageId: effPageId,
+    accountId: effAccountId,
+    pixelId: !avMode && isTarget ? effPixelId : "",
+  });
   const copiesOut = (): number | null => (copies === "" ? null : Math.max(1, Math.min(MAX_CLONE_COPIES, copiesN)));
 
   return (
@@ -207,8 +218,9 @@ export function CloneDestinationModal({
                       accountId: v,
                       // Same auto-pick as the Settings picker: the target's preferred pixel
                       // (AIF: the value pixel) when the account carries it; none in source mode.
+                      // AV never binds a pixel.
                       pixelId:
-                        v && v !== SOURCE_ACCOUNT
+                        !avMode && v && v !== SOURCE_ACCOUNT
                           ? aifMode
                             ? (pickAifPixel(pixelOptionsOf(adAccounts, v))?.id ?? "")
                             : defaultPixelFor(adAccounts, v, partner.preferredPixel)
@@ -234,7 +246,16 @@ export function CloneDestinationModal({
                   warn={onTool ? !toolVisible(effAccountId) : !effAccountId}
                 />
               </Field>
-              {isTarget ? (
+              {avMode ? (
+                // AV page carries no Meta pixel — the clone optimizes for link clicks.
+                <div className="flex items-center justify-between gap-2 rounded-lg border border-line bg-surface2/40 px-3 py-2">
+                  <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Pixel</span>
+                  <span className="flex items-center gap-1.5 font-mono text-[11.5px] text-ink">
+                    No pixel — link clicks
+                    <LockIcon className="h-3 w-3 text-faint" />
+                  </span>
+                </div>
+              ) : isTarget ? (
                 <Field label="Pixel" error={!effPixelId ? "required" : undefined}>
                   <SearchSelect
                     value={effPixelId}

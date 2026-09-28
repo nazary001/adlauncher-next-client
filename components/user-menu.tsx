@@ -3,7 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { CheckIcon, ChevronDownIcon, KeyIcon, LogoutIcon, SessionsIcon, SparklesIcon, UsersIcon } from "./icons";
+import { AvFlag, CheckIcon, ChevronDownIcon, KeyIcon, LogoutIcon, SessionsIcon, SparklesIcon, UsersIcon } from "./icons";
+
+// AV keys is an owner tool that only makes sense where the AV rail is unlocked (local only for now).
+// The build-time flag is inlined into this client bundle exactly like the switcher's gate.
+const AV_ENABLED = process.env.NEXT_PUBLIC_AV_ENABLED === "1";
 
 export type SessionUser = {
   username: string;
@@ -88,6 +92,7 @@ export function UserMenu({ user }: { user: SessionUser }) {
   const onAutoLandings = pathname === "/auto-landings";
   const onTokens = pathname === "/tokens";
   const onSessions = pathname === "/sessions";
+  const onAvKeys = pathname === "/av/keys";
 
   return (
     <div ref={boxRef} className="relative">
@@ -253,6 +258,40 @@ export function UserMenu({ user }: { user: SessionUser }) {
               </span>
             </span>
           </Link>
+
+          {/* AV keys — only where the AV rail is unlocked (NEXT_PUBLIC_AV_ENABLED=1, local for now);
+              the page itself also redirects home when the flag is off. */}
+          {AV_ENABLED ? (
+            <Link
+              href="/av/keys"
+              role="menuitem"
+              onClick={() => setOpen(false)}
+              className={
+                "group flex items-start gap-2.5 rounded-xl px-2.5 py-2 transition-colors " +
+                (onAvKeys ? "bg-accent/10" : "hover:bg-raise")
+              }
+            >
+              <span
+                className={
+                  "mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg border transition-colors " +
+                  (onAvKeys
+                    ? "border-accent/40 bg-accent/15 text-[#9db8ff]"
+                    : "border-line bg-surface2 text-dim group-hover:text-[#9db8ff]")
+                }
+              >
+                <AvFlag className="h-4 w-4" />
+              </span>
+              <span className="min-w-0">
+                <span className="flex items-center gap-1.5 text-[13px] font-medium text-ink">
+                  AV keys
+                  {onAvKeys ? <CheckIcon className="h-3.5 w-3.5 text-[#9db8ff]" /> : null}
+                </span>
+                <span className="block text-[11px] leading-snug text-faint">
+                  ActiveView pool · registry &amp; upload files
+                </span>
+              </span>
+            </Link>
+          ) : null}
 
           <div className="mx-1 my-1 h-px bg-line" />
 

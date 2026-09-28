@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { AIF_VALUE_PIXEL, ROAS_PIXEL, aifOfferablePixels, partnerConfig, pickAifPixel, type PartnerId } from "@/lib/partners";
+import { AIF_VALUE_PIXEL, AV_OBJECTIVE, ROAS_PIXEL, aifOfferablePixels, partnerConfig, pickAifPixel, type PartnerId } from "@/lib/partners";
 import { resolveMoSigner } from "@/lib/mo-soc";
 import { bidAmountMissing, bidKind, moEnsureSocMark, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
@@ -16,8 +16,13 @@ import {
   withParentRetry,
 } from "@/lib/fb-graph";
 import { aifRail } from "@/lib/aif-launch";
+import { avKeysRegistered, avRail, avRailEnabled } from "@/lib/av-launch";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import { backfillBrand, claimBrand, deleteBrand } from "@/lib/aif-claim";
+import { backfillAvKey, claimAvKey, releaseAvKey } from "@/lib/av-keys";
+import { avDestinationBase, avLink } from "@/lib/av-link";
+import { sourceMediaLink } from "@/lib/av-clone";
+import { resolveAvDestination } from "@/lib/av-destination";
 import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 import { reportPagesUsed } from "@/lib/hs-pages";
 import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
@@ -142,36 +147,74 @@ export async function POST(req: Request) {
   if (!partner.fanpagesFromToken) {
     return NextResponse.json({ ok: false, error: "partner_not_launchable" }, { status: 400 });
   }
-  // The partner picks the RAIL: AIF clones ride the AIF token, the aif-maps brand registry and a
-  // brand-only link rewrite; everything else stays byte-identical to the MO flow (token default,
-  // gcm registry, gcm+pixel link rewrite). One route, two claim/backfill/release bundles.
+  // The partner picks the RAIL: AV clones ride the AV token, the AV key registry and a
+  // destination+key link rewrite (no pixel); AIF clones ride the AIF token, the aif-maps brand
+  // registry and a brand-only link rewrite; everything else stays byte-identical to the MO flow
+  // (token default, gcm registry, gcm+pixel link rewrite). One route, three claim/backfill/release
+  // bundles.
+  const av = Boolean(partner.avLaunch);
   const aif = Boolean(partner.aifLaunch);
-  // WHICH bearer builds is the OWNER'S pick on /tokens (clone slots; env defaults while
-  // unassigned) — the AIF rail on its token, the MO rail on the MO clone signer. A missing/
-  // unreadable token is a clean config error, never a silent fallback to another bearer. The
-  // legacy `channel` wire field (the retired per-buyer soc switch) is ignored.
+  // Dormant by flag: the AV clone rail is 404 (not half-open) until NEXT_PUBLIC_AV_ENABLED=1 — the
+  // server twin of the build-time switcher gate, matching /api/av/launch (which 404s in this same
+  // window). Without it a STAGED enable (av.clone token assigned + AV_KEYS_REGISTERED set, but the
+  // public flag still off / not yet redeployed) would let a crafted POST { partnerId: "av" } pass the
+  // token + key gates and build REAL AV clones while the launch route is correctly dormant. partnerId
+  // is taken raw (not sanitizePartnerId'd) here, so this is the gate that keeps the rail fully
+  // dormant, not half-open (review find 09-28). MO/AIF/HS are untouched (av is false).
+  if (av && !avRailEnabled()) {
+    return NextResponse.json({ ok: false, error: "av_rail_disabled" }, { status: 404 });
+  }
+  // AV has no TOOL channel: its cabinets live on AV's own FB token, the TOOL sessions are the HS
+  // team's Ads Manager sessions. A crafted via:"tool" is refused rather than silently rerouted.
+  if (av && via === "tool") {
+    return NextResponse.json({ ok: false, error: "tool_not_available — AV clones run on the AV token only" }, { status: 400 });
+  }
+  // WHICH bearer builds is the OWNER'S pick on /tokens (clone slots; env defaults while unassigned,
+  // no env default for AV) — the AV rail on its token, the AIF rail on its token, the MO rail on the
+  // MO clone signer. A missing/unreadable token is a clean config error, never a silent fallback to
+  // another bearer. The legacy `channel` wire field (the retired per-buyer soc switch) is ignored.
+  const avRes = av ? await avRail("clone") : null;
+  if (av && !avRes?.ok) {
+    return NextResponse.json({ ok: false, error: avRes?.ok === false ? avRes.error : "no_av_token" }, { status: 400 });
+  }
+  // AV keys are launchable only once the owner registered the pool in ActiveView — refuse the whole
+  // batch up front (no FB write, no key claim) rather than fail every clone at the claim.
+  if (av && avKeysRegistered() === 0) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "av_keys_not_registered — no AV keys are registered in ActiveView yet; an owner uploads the pool (AV keys page) and sets AV_KEYS_REGISTERED",
+      },
+      { status: 400 },
+    );
+  }
   const aifRes = aif ? await aifRail("clone") : null;
   if (aif && !aifRes?.ok) {
     return NextResponse.json({ ok: false, error: aifRes?.ok === false ? aifRes.error : "no_aif_token" }, { status: 400 });
   }
-  const moRes = aif ? null : await resolveMoSigner("clone");
-  if (!aif && !moRes?.ok) {
+  const moRes = aif || av ? null : await resolveMoSigner("clone");
+  if (!aif && !av && !moRes?.ok) {
     return NextResponse.json({ ok: false, error: moRes?.ok === false ? moRes.error : "no_token" }, { status: 400 });
   }
+  /** The AV rail (null off the AV rail) — its token signs every Graph call and its catalogs validate
+   *  the picked page/account; AV never needs a pixel catalog (the page has no pixel). */
+  const avr = avRes?.ok ? avRes.rail : null;
   const rail = aifRes?.ok ? aifRes.rail : null;
-  /** The MO signer (null on the AIF rail) — its bearer signs EVERY Graph call (source read, media
-   *  migration, tree build) and its catalogs validate the picked page/account/pixel. */
+  /** The MO signer (null on the AIF/AV rails) — its bearer signs EVERY Graph call (source read,
+   *  media migration, tree build) and its catalogs validate the picked page/account/pixel. */
   const soc = moRes?.ok ? moRes.signer : null;
-  /** Catalog identity of the MO signer (undefined = the AIF rail's own catalog helpers below). */
+  /** Catalog identity of the MO signer (undefined = the AIF/AV rails' own catalog helpers below). */
   const cat = soc?.cat;
-  const railToken = aif ? rail?.token : soc?.token;
-  const pageOk = (p: string) => (aif ? rail!.isAdvertisablePage(p) : isAdvertisablePage(p, cat));
-  const pageNameOf = (p: string) => (aif ? rail!.advertisablePageName(p) : advertisablePageName(p, cat));
-  const acctOk = (a: string) => (aif ? rail!.isTokenAccount(a) : isTokenAccount(a, cat));
+  const railToken = av ? avr?.token : aif ? rail?.token : soc?.token;
+  const pageOk = (p: string) => (av ? avr!.isAdvertisablePage(p) : aif ? rail!.isAdvertisablePage(p) : isAdvertisablePage(p, cat));
+  const pageNameOf = (p: string) => (av ? avr!.advertisablePageName(p) : aif ? rail!.advertisablePageName(p) : advertisablePageName(p, cat));
+  const acctOk = (a: string) => (av ? avr!.isTokenAccount(a) : aif ? rail!.isTokenAccount(a) : isTokenAccount(a, cat));
+  // AV never needs a pixel catalog (the page has no pixel) — this is only ever called on the AIF/MO
+  // paths below (every AV pixel branch is skipped).
   const pixelsOf = (a: string) => (aif ? rail!.accountPixels(a) : accountPixels(a, cat));
-  const acctNameOf = (a: string) => (aif ? rail!.accountName(a) : tokenAccountName(a, cat));
+  const acctNameOf = (a: string) => (av ? avr!.accountName(a) : aif ? rail!.accountName(a) : tokenAccountName(a, cat));
   const post: typeof fbPost = (path, params) =>
-    aif ? rail!.fbPost(path, params as Json) : fbPost(path, params, railToken);
+    av ? avr!.fbPost(path, params as Json) : aif ? rail!.fbPost(path, params as Json) : fbPost(path, params, railToken);
   // Default: a clone is built in its SOURCE's own account (media is account-local) with the
   // source's pixel. The buyer MAY pick a target account+pixel instead (cross-account, media
   // migrated). The fanka is always the buyer's pick. Every picked id is validated here against
@@ -206,7 +249,9 @@ export async function POST(req: Request) {
       if (!/^\d{5,}$/.test(acct)) {
         return NextResponse.json({ ok: false, error: "account_invalid — bad target ad account id" }, { status: 400 });
       }
-      const px = String(e.pixelId ?? "").trim();
+      // AV never binds a pixel (the page has none) — ignore any pixel a stale row carries so it is
+      // neither validated (no AV pixel catalog) nor sent.
+      const px = av ? "" : String(e.pixelId ?? "").trim();
       if (px && !/^\d{10,20}$/.test(px)) {
         return NextResponse.json({ ok: false, error: "pixel_invalid — bad pixel id" }, { status: 400 });
       }
@@ -285,7 +330,7 @@ export async function POST(req: Request) {
         // Server-side mirror of this clone's Task Manager row (no-op when no task id was sent).
         // The partner rides on every write: a row this writer CREATES (client save lost) must
         // still land in the right drawer's scope — null matches no scope at all.
-        const tw = taskWriter(session.username, taskIds[idx] ?? null, { partner: aif ? "us" : "in" });
+        const tw = taskWriter(session.username, taskIds[idx] ?? null, { partner: av ? "av" : aif ? "us" : "in" });
         let lastStage = "source";
         let settled = false; // set before the terminal write — the beat must never chain after it
         const progress = (stage: string) => {
@@ -320,6 +365,23 @@ export async function POST(req: Request) {
           }
           const media = src.media;
           if (!media) throw new FbError("source ad has no reusable video or image", { campaignId: edit.campaignId });
+          // AV clone: the SOURCE ad's link must already be an AV destination. Re-resolve it
+          // server-side (host is an AV site / redirect domain, article live / redirect path present
+          // + domain live) BEFORE any slot/key claim — a source pointing anywhere else is refused
+          // with the reason, nothing burned. The link is rebuilt from this base + a fresh key below
+          // (the source's own utm_campaign is never kept).
+          let avBase = "";
+          if (av) {
+            const shape = avDestinationBase(sourceMediaLink(media));
+            if (!shape.ok) {
+              throw new FbError(`clone_destination_invalid — the source ad's link is not an AV destination (${shape.error})`, { campaignId: edit.campaignId });
+            }
+            const resolved = await resolveAvDestination(shape.base);
+            if (!resolved.ok) {
+              throw new FbError(`clone_destination_invalid — ${resolved.error}`, { campaignId: edit.campaignId });
+            }
+            avBase = resolved.base;
+          }
           // The clone's build location: the source's own account by default, or the buyer's picked
           // TARGET account (cross-account — media gets migrated there below). The source account is
           // re-checked even for cross-account clones: its media is about to be read.
@@ -328,9 +390,20 @@ export async function POST(req: Request) {
             throw new FbError(`source account act_${src.accountId} is not available to the launch token`, { campaignId: edit.campaignId });
           }
           const binds = resolveCloneBinds(edit, src);
+          // AV binds NO pixel, ever — the page has none (resolveCloneBinds would otherwise carry the
+          // source's pixel through for a same-account clone).
+          if (av) binds.pixelId = "";
           // The clone's EFFECTIVE strategy (per-row switch wins, else the source's) — resolved
           // once here so the pixel derivations below and cloneToCampaign can never disagree.
           const targetStrategy = cloneBidStrategy(edit, src);
+          // AV delivery is Traffic / link clicks (no pixel) — a min-ROAS target (the row's switch or
+          // an inherited roas source) has nothing to optimize on, refused before any claim.
+          if (av && bidKind(targetStrategy) === "roas") {
+            throw new FbError(
+              "bid_strategy_invalid — min-ROAS needs a conversion signal; the AV page has no pixel (Traffic / link clicks only)",
+              { campaignId: edit.campaignId },
+            );
+          }
           // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted
           // POST — and for a same-account clone whose SOURCE lives in someone else's account.
           if (!(await accountAllowedFor(session, binds.accountId))) {
@@ -376,6 +449,7 @@ export async function POST(req: Request) {
           // funnel's &pixel= both need it. Click sources (no source pixel) pass pixel-less.
           // MO min-ROAS targets are exempt: their pixel is PINNED to the value pixel below.
           if (
+            !av &&
             binds.cross &&
             /^\d{10,20}$/.test(src.pixelId) &&
             !binds.pixelId &&
@@ -400,6 +474,12 @@ export async function POST(req: Request) {
           // (a bid strategy the builder can't rebuild, or no country targeting) fails here without
           // burning a code or leaving an orphaned PAUSED campaign.
           const campaign = cloneToCampaign(edit, src);
+          if (av) {
+            // AV delivery is pinned Traffic / link clicks regardless of what the source optimized
+            // (a conversion source cloned onto the pixel-less AV page can only run link clicks).
+            campaign.objective = AV_OBJECTIVE;
+            campaign.optimization = "clicks";
+          }
           if (!SUPPORTED_BID_STRATEGIES.has(campaign.bidStrategy)) {
             throw new FbError(`source bid strategy ${campaign.bidStrategy} can't be cloned — recreate it manually (or switch the row's strategy)`, { campaignId: edit.campaignId });
           }
@@ -426,7 +506,7 @@ export async function POST(req: Request) {
           // between the source launch and the clone (09-02 precedent), and this must fail BEFORE
           // any gcm claim/write, not at adset-create. The link rewrite below then fires it too.
           // AIF rows pinned their own value pixel above.
-          if (!aif && bidKind(campaign.bidStrategy) === "roas") {
+          if (!aif && !av && bidKind(campaign.bidStrategy) === "roas") {
             const pixels = await pixelsOf(binds.accountId);
             if (!pixels.some((p) => p.id === ROAS_PIXEL.id)) {
               throw new FbError(
@@ -473,8 +553,8 @@ export async function POST(req: Request) {
           // (the 5/30min window spans every channel); TOOL clones tag "tool-clone"/"aif-tool-clone".
           acctSlot = await claimAcctSlot(binds.accountId, {
             user: session.username,
-            partner: aif ? "us" : "in",
-            channel: via === "tool" ? (aif ? "aif-tool-clone" : "tool-clone") : aif ? "aif-clone" : "clone",
+            partner: av ? "av" : aif ? "us" : "in",
+            channel: av ? "av-clone" : via === "tool" ? (aif ? "aif-tool-clone" : "tool-clone") : aif ? "aif-clone" : "clone",
             name: edit.name,
             accountName: await acctNameOf(binds.accountId).catch(() => ""),
           });
@@ -497,10 +577,22 @@ export async function POST(req: Request) {
             cloneMedia = migrated;
           }
 
-          // Reserve this rail's revenue marker: MO = a gcm code, AIF = a brand (both registries
-          // enforce uniqueness atomically; the marker rides the shared `gcm` field downstream).
+          // Reserve this rail's revenue marker: MO = a gcm code, AIF = a brand, AV = an AV key (all
+          // registries enforce uniqueness atomically; the marker rides the shared `gcm` field
+          // downstream). AV claims a fresh key from the registered pool — the source's own key is
+          // never kept.
           progress("gcm");
-          if (aif) {
+          if (av) {
+            const c = await claimAvKey("", avKeysRegistered(), {
+              user: session.username,
+              via: "clone",
+              source_campaign_id: edit.campaignId,
+              name: edit.name,
+              ad_account: editBinds.accountId,
+              destination: avBase,
+            });
+            claim = { gcm: c.key, documentId: c.documentId };
+          } else if (aif) {
             const c = await claimBrand("", { campaign_name: edit.name, notes: "claimed via adlauncher clone" });
             claim = { gcm: c.brand, documentId: c.documentId };
           } else {
@@ -671,10 +763,16 @@ export async function POST(req: Request) {
                 cloneMedia,
                 gcm,
                 editBinds.pixelId,
-                // AIF RW links: brand marker + the promoted pixel (09-02 — the RW page echoes it
-                // into the postback, the CAPI forwarder routes the Purchase by it; swapPixel
-                // no-ops for pixel-less click clones, leaving legacy links untouched).
-                aif ? (l: string) => swapPixel(swapBrand(l, gcm), editBinds.pixelId) : undefined,
+                // AV links are REBUILT from the resolved destination + the fresh key (the source's
+                // whole tracking tail is discarded — destination/macros come from lib/av-link, never
+                // the stale source link). AIF RW links: brand marker + the promoted pixel (09-02 —
+                // the RW page echoes it into the postback, the CAPI forwarder routes the Purchase by
+                // it; swapPixel no-ops for pixel-less click clones, leaving legacy links untouched).
+                av
+                  ? () => avLink(avBase, gcm)
+                  : aif
+                    ? (l: string) => swapPixel(swapBrand(l, gcm), editBinds.pixelId)
+                    : undefined,
               ),
             );
             created.creative_id = String(creative.id);
@@ -689,10 +787,17 @@ export async function POST(req: Request) {
           }
 
           // Registry ledger: this clone took one slot on its fanka (fire-safe; the box's next
-          // Facebook sweep reconciles either way).
-          await reportPagesUsed(aif ? "us" : "in", [{ pageId: editBinds.pageId, delta: 1 }]);
+          // Facebook sweep reconciles either way). AV has no hs-tools scope — nothing to report.
+          if (!av) await reportPagesUsed(aif ? "us" : "in", [{ pageId: editBinds.pageId, delta: 1 }]);
 
-          if (aif) {
+          if (av) {
+            await backfillAvKey(claim.gcm, {
+              campaign_id: String(created.campaign_id),
+              adset_id: String(created.adset_id),
+              ad_id: String(created.ad_id),
+              ad_count: 1,
+            });
+          } else if (aif) {
             await backfillBrand(claim.documentId, {
               campaign_id: created.campaign_id,
               adset_id: created.adset_id,
@@ -767,8 +872,26 @@ export async function POST(req: Request) {
                 campaign_id: created.campaign_id,
                 ...(created.adset_id ? { adset_id: created.adset_id } : {}),
               };
-              if (aif) await backfillBrand(claim.documentId, failPatch);
+              // AV registry settle is best-effort (never abort the batch over a Strapi hiccup).
+              if (av) {
+                try {
+                  await backfillAvKey(claim.gcm, {
+                    status: "retired",
+                    notes: `clone failed: ${err.message}`,
+                    campaign_id: String(created.campaign_id),
+                    ...(created.adset_id ? { adset_id: String(created.adset_id) } : {}),
+                  });
+                } catch {
+                  /* the AV keys page shows the retired-but-unsettled row to release by hand */
+                }
+              } else if (aif) await backfillBrand(claim.documentId, failPatch);
               else await backfillGcm(claim.documentId, failPatch, claim.gcm);
+            } else if (av) {
+              try {
+                await releaseAvKey(claim.documentId);
+              } catch {
+                /* best-effort — a leftover row shows on the AV keys page */
+              }
             } else if (aif) {
               await deleteBrand(claim.documentId);
             } else {

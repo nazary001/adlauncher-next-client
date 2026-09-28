@@ -54,7 +54,7 @@ import {
   UndoIcon,
 } from "./icons";
 import { Header } from "./header";
-import { useAifTaskManager, useTaskManager } from "./task-manager";
+import { useAifTaskManager, useAvTaskManager, useTaskManager } from "./task-manager";
 import { UploadingNotice } from "./upload-guard";
 import { CloneTargetingModal } from "./clone-targeting-modal";
 import { CloneHighOfferModal } from "./clone-high-offer-modal";
@@ -99,6 +99,19 @@ function rowBidMissing(r: CloneRow): boolean {
 function seedRow(...args: Parameters<typeof makeCloneRow>): CloneRow {
   const row = makeCloneRow(...args);
   return { ...row, budget: moneyCentsLabel(defaultBudgetFor(row.bidStrategy, row.budget)) };
+}
+
+/** AV never launches min-ROAS — the AV page carries no conversion signal (Traffic / link clicks
+ *  only), so the AV bid select never offers ROAS and the server refuses it. A source read on the
+ *  AV rail that happens to bid on min ROAS is snapped to lowest cost AS IT SEEDS, exactly as if
+ *  the buyer had switched the strategy in the row: the goal clears and an untouched $50 ROAS
+ *  default budget drops back to the source's own (budgetOnStrategyChange). Pure — only the AV
+ *  branch calls it, so MO/AIF rows are untouched. */
+function snapAvRoasRow(row: CloneRow): CloneRow {
+  if (bidKind(row.bidStrategy) !== "roas") return row;
+  const bidStrategy = "LOWEST_COST_WITHOUT_CAP";
+  const budget = moneyCentsLabel(budgetOnStrategyChange(row.bidStrategy, bidStrategy, row.budget, row.source.originalBudget));
+  return { ...row, bidStrategy, roasGoal: "", budget };
 }
 
 /** Column heading with the underline rule + an optional right-aligned count chip. */
@@ -183,11 +196,12 @@ function CloneInner({
   // Fixed for the board's lifetime — a partner switch is a full navigation (see changePartner).
   const partnerId: PartnerId = initialPartner;
   // The board talks to the ACTIVE partner's own task manager: AIF clones queue/track in the
-  // separate AIF instance (own drawer, own Strapi scope), MO in the team one — same rule as the
-  // launcher board.
+  // separate AIF instance (own drawer, own Strapi scope), AV in its own, MO in the team one —
+  // same rule as the launcher board.
   const teamTm = useTaskManager();
   const aifTm = useAifTaskManager();
-  const cloneTm = partnerConfig(partnerId).aifLaunch ? aifTm : teamTm;
+  const avTm = useAvTaskManager();
+  const cloneTm = partnerConfig(partnerId).avLaunch ? avTm : partnerConfig(partnerId).aifLaunch ? aifTm : teamTm;
   const { enqueueClone, setOpen } = cloneTm;
   const [settings, setSettings] = useState<CloneSettings>(() => defaultSettings());
   const [rows, setRows] = useState<CloneRow[]>([]);
@@ -221,15 +235,20 @@ function CloneInner({
 
   const partner = partnerConfig(partnerId);
   const aifMode = Boolean(partner.aifLaunch);
-  // The clone signer is the OWNER'S pick on /tokens (mo.clone / aif.clone; env default while
-  // unassigned) — read-only here: the CATALOGS (fanpages/accounts/pixels), the source reads and
-  // the clone build all ride that bearer (the run route resolves the same slot server-side).
+  // AV clone board (partner "av"): AV's own token/catalogs, no pixel anywhere (the AV page has
+  // none — Traffic / link clicks), no SOC marks, keys claimed server-side per clone. Every AV
+  // branch guards on this so MO/AIF stay byte-identical.
+  const avMode = Boolean(partner.avLaunch);
+  // The clone signer is the OWNER'S pick on /tokens (mo.clone / aif.clone / av.clone; env default
+  // while unassigned — AV has no env seed) — read-only here: the CATALOGS (fanpages/accounts;
+  // AV carries no pixels), the source reads and the clone build all ride that bearer (the run
+  // route resolves the same slot server-side).
   const signers = useSigners(true);
-  const railSigner = signers.slots?.[aifMode ? "aif.clone" : "mo.clone"] ?? null;
+  const railSigner = signers.slots?.[avMode ? "av.clone" : aifMode ? "aif.clone" : "mo.clone"] ?? null;
   /** A token exists for this rail — catalogs load, Duplicate may fire. */
   const signerReady = Boolean(railSigner?.primary);
-  /** SOC name marker rides personal-soc signers only (MO) — system users go unmarked. */
-  const moSocMarks = !aifMode && Boolean(railSigner?.primary?.personal);
+  /** SOC name marker rides personal-soc signers only (MO) — system users (AIF/AV) go unmarked. */
+  const moSocMarks = !aifMode && !avMode && Boolean(railSigner?.primary?.personal);
   const signerMissing = !signerReady;
 
   // ---- launch channel (owner ask 28.09): our FB Token (the default Graph rail) vs TOOL (the HS
@@ -258,10 +277,12 @@ function CloneInner({
       /* storage disabled */
     }
   };
-  const toolReady = useToolReady(partnerId, "clone");
+  // AV has no TOOL channel (its own FB token only — the TOOL sessions are the HS team's): never
+  // polled, never fired through, and the channel switch below is not rendered on the AV board.
+  const toolReady = useToolReady(partnerId, "clone", !avMode);
   /** The channel that actually fires: a "tool" pick only holds while the rail is READY (else the
    *  segment is disabled and the fire falls back to FB Token). */
-  const onTool = channel === "tool" && toolReady.ready;
+  const onTool = !avMode && channel === "tool" && toolReady.ready;
   // /api/tool/ready returns BARE digits; our catalog account values are bare digits too, but strip
   // any "act_" defensively so the TOOL filter matches regardless of spelling.
   const bareId = (v: string): string => v.replace(/^act_/, "");
@@ -274,9 +295,12 @@ function CloneInner({
   const fanpages = useFanpages(
     Boolean(partner.fanpagesFromToken) && signerReady,
     partner.pageAdLimit ?? 250,
-    aifMode
-      ? { list: "/api/aif/fanpages?rail=clone", volume: "/api/aif/fanpages/volume" }
-      : { list: "/api/fanpages?rail=clone", volume: "/api/fanpages/volume" },
+    avMode
+      ? // hs-tools has no AV scope → no fill badges (volume null); the list alone is the picker.
+        { list: "/api/av/fanpages?rail=clone", volume: null }
+      : aifMode
+        ? { list: "/api/aif/fanpages?rail=clone", volume: "/api/aif/fanpages/volume" }
+        : { list: "/api/fanpages?rail=clone", volume: "/api/fanpages/volume" },
   );
   // Token ad accounts for the destination pick. The destination is an EXPLICIT choice:
   // "" = nothing chosen yet (Duplicate stays locked), SOURCE_ACCOUNT = consciously keep each
@@ -285,7 +309,9 @@ function CloneInner({
   const adAccounts = useAdAccounts(
     Boolean(partner.accountsFromToken) && signerReady,
     partner.preferredPixel,
-    aifMode ? "/api/aif/adaccounts?rail=clone" : "/api/adaccounts?rail=clone",
+    avMode ? "/api/av/adaccounts?rail=clone" : aifMode ? "/api/aif/adaccounts?rail=clone" : "/api/adaccounts?rail=clone",
+    // AV cabinets carry no pixel — the picker must not flag every one with the "no pixel" danger tag.
+    avMode ? { noPixelTag: true } : undefined,
   );
 
   // ---- destination verdicts, per TUPLE (owner ask 09-08: a row may carry its own) -----------
@@ -324,13 +350,44 @@ function CloneInner({
     Boolean(d.pixelId) &&
     Boolean(adAccounts?.length) &&
     !targetPixelsFor(d.accountId).some((p) => p.id === d.pixelId);
-  const pixelMissingFor = (d: CloneRowDest): boolean => isTargetFor(d) && (!d.pixelId || pixelStaleFor(d));
+  // AV never binds a pixel (the AV page has none — Traffic / link clicks), so a pixel is never
+  // required and never blocks Duplicate; MO/AIF keep the concrete-account pixel requirement.
+  const pixelMissingFor = (d: CloneRowDest): boolean => !avMode && isTargetFor(d) && (!d.pixelId || pixelStaleFor(d));
   const destMissingFor = (d: CloneRowDest): boolean =>
     fanpageMissingFor(d) || accountMissingFor(d) || pixelMissingFor(d);
 
   // Account launch limit (5 campaigns / 30 min) — the pickers' N/5 badges, the default account
   // pick and the batch gate below.
   const limits = useAcctLimits();
+
+  // AV keys registry status. Clones claim a fresh AV key server-side per copy (never here), but
+  // the whole batch is pointless until the owner has uploaded a pool to ActiveView (UTM Campaign
+  // Values) — the preview endpoint answers `poolMax` = the registered count. poolMax 0 = the stub:
+  // /api/clone/run refuses every AV clone with av_keys_not_registered before any FB write, so we
+  // block Duplicate up front with the reason (mirrors the launcher board's poolMax-0 banner).
+  // null = not yet known; only a definite 0 blocks. Non-AV boards never touch the endpoint.
+  const [avPoolMax, setAvPoolMax] = useState<number | null>(null);
+  useEffect(() => {
+    if (!avMode) return;
+    let alive = true;
+    fetch("/api/av/keys")
+      .then((r) => r.json())
+      .then((d) => {
+        if (alive && typeof d?.poolMax === "number") setAvPoolMax(d.poolMax);
+      })
+      .catch(() => {
+        /* registry unreachable — leave it unknown; the server still refuses unregistered keys */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [avMode]);
+  const avKeysUnregistered = avMode && avPoolMax === 0;
+
+  // AV refuses min-ROAS end to end (the AV page has no conversion signal — the run route rejects a
+  // roas target strategy), so the row bid select drops it; a roas source is already snapped to
+  // lowest cost at seed (snapAvRoasRow). MO/AIF keep the full list unchanged.
+  const bidStrategyOptions = avMode ? BID_STRATEGIES.filter((o) => bidKind(o.value) !== "roas") : BID_STRATEGIES;
 
   // ---- default binds (owner rule 09-08): the LEAST-FILLED fanka and the LEAST-LOADED account
   // on our 5/30-min timer are what an EMPTY Settings pick shows and fires; a real pick (incl.
@@ -368,14 +425,16 @@ function CloneInner({
   const settingsAccountIsAuto = Boolean(partner.accountsFromToken) && !settings.accountId && Boolean(autoAccountId);
   const effPageId = settings.pageId || autoPageId;
   const effAccountId = settings.accountId || autoAccountId;
-  // An auto account brings its own default pixel (the same rule the manual pick applies).
-  const effPixelId =
-    settings.pixelId ||
-    (settingsAccountIsAuto && effAccountId !== SOURCE_ACCOUNT
-      ? aifMode
-        ? (pickAifPixel(pixelOptionsOf(adAccounts, effAccountId))?.id ?? "")
-        : defaultPixelFor(adAccounts, effAccountId, partner.preferredPixel)
-      : "");
+  // An auto account brings its own default pixel (the same rule the manual pick applies) — never
+  // for AV, which has no pixel at all.
+  const effPixelId = avMode
+    ? ""
+    : settings.pixelId ||
+      (settingsAccountIsAuto && effAccountId !== SOURCE_ACCOUNT
+        ? aifMode
+          ? (pickAifPixel(pixelOptionsOf(adAccounts, effAccountId))?.id ?? "")
+          : defaultPixelFor(adAccounts, effAccountId, partner.preferredPixel)
+        : "");
   // The batch Settings tuple (the wave defaults, auto picks resolved) — decorates the pickers
   // and is what every row without its own destination rides.
   const defaults: CloneRowDest = { pageId: effPageId, accountId: effAccountId, pixelId: effPixelId };
@@ -468,6 +527,11 @@ function CloneInner({
         failed.map((f) => `#${f.id} — ${f.error}`).join(" · ")
       : null;
 
+  /** Snap a freshly seeded row for the active partner: AV min-ROAS sources drop to lowest cost
+   *  (see snapAvRoasRow); MO/AIF rows pass through untouched. Stable (avMode is fixed for the
+   *  board's life) so it doesn't churn the loadIds callback. */
+  const avSnap = useCallback((r: CloneRow): CloneRow => (avMode ? snapAvRoasRow(r) : r), [avMode]);
+
   /** (Re)load real sources for a set of ids from Facebook. Used by the Retry button — an event
    *  handler, so the synchronous loading/error flips are fine here. */
   const loadIds = useCallback(
@@ -483,7 +547,7 @@ function CloneInner({
       const ddmm = todayDDMM();
       loadCloneSources(ids, partnerId)
         .then(({ sources, failed }) => {
-          setRows(sources.map((s) => seedRow(s, ddmm, `r${nextRowId.current++}`, me)));
+          setRows(sources.map((s) => avSnap(seedRow(s, ddmm, `r${nextRowId.current++}`, me))));
           setLoadWarn(partialWarn(failed));
           setPreviewed(false);
         })
@@ -493,7 +557,7 @@ function CloneInner({
         })
         .finally(() => setLoading(false));
     },
-    [partnerId, me],
+    [partnerId, me, avSnap],
   );
 
   /** Load local mock sources for the "Load sample" button — no Facebook call. */
@@ -503,7 +567,7 @@ function CloneInner({
     const ddmm = todayDDMM();
     loadSampleSources()
       .then((sources) => {
-        setRows(sources.map((s) => seedRow(s, ddmm, `r${nextRowId.current++}`, me)));
+        setRows(sources.map((s) => avSnap(seedRow(s, ddmm, `r${nextRowId.current++}`, me))));
         setLoadWarn(null);
         setPreviewed(false);
       })
@@ -534,7 +598,7 @@ function CloneInner({
     loadCloneSources(initialIds, partnerId)
       .then(({ sources, failed }) => {
         if (!alive) return;
-        setRows(sources.map((s) => seedRow(s, ddmm, `r${nextRowId.current++}`, me)));
+        setRows(sources.map((s) => avSnap(seedRow(s, ddmm, `r${nextRowId.current++}`, me))));
         setLoadWarn(partialWarn(failed));
         setPreviewed(false);
       })
@@ -559,11 +623,13 @@ function CloneInner({
   /** The pixel a fresh account pick brings along (the Settings rule): the target's preferred
    *  pixel — AIF: the value pixel — when the cabinet carries it; none in source mode. */
   const autoPixelFor = (accountId: string): string =>
-    accountId && accountId !== SOURCE_ACCOUNT
-      ? aifMode
-        ? (pickAifPixel(pixelOptionsOf(adAccounts, accountId))?.id ?? "")
-        : defaultPixelFor(adAccounts, accountId, partner.preferredPixel)
-      : "";
+    avMode
+      ? "" // AV binds no pixel — every account pick stays pixel-less
+      : accountId && accountId !== SOURCE_ACCOUNT
+        ? aifMode
+          ? (pickAifPixel(pixelOptionsOf(adAccounts, accountId))?.id ?? "")
+          : defaultPixelFor(adAccounts, accountId, partner.preferredPixel)
+        : "";
   /** Inline per-field destination edit (owner ask 09-08): only the touched field becomes the
    *  row's own — the rest keeps riding the batch defaults (rowDestination fills them). Clearing
    *  every field hands the row back to the defaults (dest → null). */
@@ -596,7 +662,8 @@ function CloneInner({
    *  a time (ACTIVE since 08-11) with live stages / errors / retry — the same queue and pipeline
    *  as launches. Each clone carries ITS row's destination (own or the batch defaults). */
   const duplicate = () => {
-    if (destinationMissing || acctBlocked || fankaOver || bidMissingCount > 0 || signerMissing || limits.staleBuild) return; // the button is disabled too — belt and suspenders
+    if (destinationMissing || acctBlocked || fankaOver || bidMissingCount > 0 || signerMissing || limits.staleBuild || avKeysUnregistered)
+      return; // the button is disabled too — belt and suspenders
     let queued = 0;
     for (const r of rows) {
       const d = destOf(r);
@@ -629,10 +696,14 @@ function CloneInner({
           // Target account+pixel only for a concrete account; SOURCE_ACCOUNT (an explicit pick
           // too) omits them = each clone builds in its source's own account. AIF sends the pick
           // too (09-02) — an empty one auto-derives server-side (click sources stay pixel-less).
+          // AV NEVER sends a pixel (the AV page has none — the run route forces pixelId=""); it
+          // sends only the target account.
           ...(target
-            ? // Belt: a stale pick (no longer among the account's pixels) must never ride the
-              // POST even if some path skips the destinationMissing gate.
-              { accountId: d.accountId, pixelId: stale ? "" : d.pixelId }
+            ? avMode
+              ? { accountId: d.accountId }
+              : // Belt: a stale pick (no longer among the account's pixels) must never ride the
+                // POST even if some path skips the destinationMissing gate.
+                { accountId: d.accountId, pixelId: stale ? "" : d.pixelId }
             : {}),
         };
         enqueueClone({
@@ -682,6 +753,7 @@ function CloneInner({
                 team's TOOL service. TOOL unlocks only when a live session sees this partner's
                 accounts (useToolReady) — today only HS has one, so MO/AIF stay on FB Token until an
                 owner adds a session on Ads Manager sessions. */}
+            {avMode ? null : (
             <div className="flex flex-col gap-1">
               <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Launch channel</span>
               <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
@@ -729,6 +801,7 @@ function CloneInner({
                     : "Builds on our FB token"}
               </p>
             </div>
+            )}
 
             {/* The clone signer — the OWNER'S pick on /tokens: reads the catalogs below AND signs
                 every clone (read-only here, owner ask 09-14). */}
@@ -796,12 +869,8 @@ function CloneInner({
                             // Auto-pick the target's pixel (FARM-1 when it carries it) the same way
                             // a fresh launch card does; no pixel in source mode / when cleared.
                             // AIF auto-picks the value pixel VD-C1-HS-1 (the only offerable one, 09-02 pt2).
-                            pixelId:
-                              v && v !== SOURCE_ACCOUNT
-                                ? aifMode
-                                  ? (pickAifPixel(pixelOptionsOf(adAccounts, v))?.id ?? "")
-                                  : defaultPixelFor(adAccounts, v, partner.preferredPixel)
-                                : "",
+                            // AV never binds a pixel (autoPixelFor returns "").
+                            pixelId: autoPixelFor(v),
                           })
                         }
                         options={accountPickerOptions}
@@ -822,7 +891,11 @@ function CloneInner({
                         </p>
                       ) : null}
                     </div>
-                    {isTargetAccount ? (
+                    {avMode ? (
+                      // AV page carries no Meta pixel — the clone optimizes for link clicks, so
+                      // there is nothing to pick (the run route forces pixelId="").
+                      <LockedRow label="Pixel" value="No pixel — link clicks" />
+                    ) : isTargetAccount ? (
                       <div className="flex flex-col gap-1 px-1.5 py-1">
                         <span
                           className={`text-[10px] font-medium uppercase tracking-[0.14em] ${pixelMissing && defaultsUsed ? "text-warn" : "text-faint"}`}
@@ -857,11 +930,17 @@ function CloneInner({
                 )}
               </div>
               <p className="px-0.5 text-[10.5px] leading-relaxed text-faint">
-                {accountMissing
-                  ? "Pick the destination explicitly: the fanpage and the account. “From each source” keeps every clone in its source campaign’s own account; a concrete account re-builds the whole batch there. Any row can override these with its own Destination."
-                  : isTargetAccount
-                    ? "Rows on the defaults are re-built in the picked account: the source video/image is re-uploaded there (adds a “Migrating media” step) and conversion clones optimize for the picked pixel."
-                    : "Rows on the defaults are created in their source campaign’s own ad account (its video/image lives there), with the source’s pixel. Only the fanpage applies to them."}
+                {avMode
+                  ? accountMissing
+                    ? "Pick the destination explicitly: the fanpage and the account. “From each source” keeps every clone in its source campaign’s own account; a concrete account re-builds the whole batch there. AV runs on Traffic / link clicks — no pixel. Any row can override these with its own Destination."
+                    : isTargetAccount
+                      ? "Rows on the defaults are re-built in the picked account: the source video/image is re-uploaded there (adds a “Migrating media” step). AV optimizes for link clicks — no pixel."
+                      : "Rows on the defaults are created in their source campaign’s own ad account (its video/image lives there). AV optimizes for link clicks — no pixel. Only the fanpage applies to them."
+                  : accountMissing
+                    ? "Pick the destination explicitly: the fanpage and the account. “From each source” keeps every clone in its source campaign’s own account; a concrete account re-builds the whole batch there. Any row can override these with its own Destination."
+                    : isTargetAccount
+                      ? "Rows on the defaults are re-built in the picked account: the source video/image is re-uploaded there (adds a “Migrating media” step) and conversion clones optimize for the picked pixel."
+                      : "Rows on the defaults are created in their source campaign’s own ad account (its video/image lives there), with the source’s pixel. Only the fanpage applies to them."}
               </p>
             </div>
 
@@ -928,11 +1007,31 @@ function CloneInner({
                 Generate Preview
               </button>
 
+              {/* AV keys stub (owner ask 28.09): the pool preview answers poolMax 0 until the
+                  owner uploads AV keys to ActiveView. Clones would be refused server-side, so
+                  Duplicate is blocked with the reason. Shown as soon as it's known, not only after
+                  a preview — the buyer shouldn't build a batch that can't fire. */}
+              {avKeysUnregistered ? (
+                <div className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11.5px] leading-relaxed text-warn">
+                  No AV keys are registered in ActiveView yet — duplicating is locked. An owner
+                  uploads the key pool on the <span className="font-semibold">AV keys</span> page
+                  (UTM Campaign Values) and sets <span className="font-mono">AV_KEYS_REGISTERED</span>.
+                </div>
+              ) : null}
+
               {previewed && rows.length > 0 ? (
                 <button
                   type="button"
                   onClick={duplicate}
-                  disabled={destinationMissing || acctBlocked || fankaOver || bidMissingCount > 0 || signerMissing || limits.staleBuild}
+                  disabled={
+                    destinationMissing ||
+                    acctBlocked ||
+                    fankaOver ||
+                    bidMissingCount > 0 ||
+                    signerMissing ||
+                    limits.staleBuild ||
+                    avKeysUnregistered
+                  }
                   className={
                     "animate-pop-in flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-launch/50 " +
                     "bg-launch/15 text-[14px] font-semibold text-launch2 transition-all duration-150 hover:border-launch/70 " +
@@ -1338,7 +1437,17 @@ function CloneInner({
                             </span>
                           )}
                           {partner.accountsFromToken ? (
-                            target ? (
+                            avMode ? (
+                              // AV page has no Meta pixel — the clone runs on link clicks (the run
+                              // route forces pixelId=""), so there is nothing to pick per row.
+                              <span
+                                className="flex h-8 items-center gap-1.5 rounded-md border border-dashed border-line px-2 font-mono text-[11px] text-faint"
+                                title="AV runs on Traffic / link clicks — the page carries no pixel"
+                              >
+                                <LockIcon className="h-3 w-3 shrink-0" />
+                                No pixel · link clicks
+                              </span>
+                            ) : target ? (
                               <SearchSelect
                                 size="sm"
                                 value={d.pixelId}
@@ -1409,7 +1518,7 @@ function CloneInner({
                                 cellSelect + (r.bidStrategy !== r.source.bidStrategy ? " border-accent/50 text-[#9db8ff]" : "")
                               }
                             >
-                              {BID_STRATEGIES.map((o) => (
+                              {bidStrategyOptions.map((o) => (
                                 <option key={o.value} value={o.value} className="bg-surface text-ink">
                                   {o.label}
                                 </option>
@@ -1618,6 +1727,7 @@ function CloneInner({
           title={fullCloneName(destRow)}
           partner={partner}
           aifMode={aifMode}
+          avMode={avMode}
           fanpages={fanpages}
           adAccounts={adAccounts}
           limits={limits}

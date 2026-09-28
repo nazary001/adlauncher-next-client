@@ -235,6 +235,18 @@ export function useAifTaskManager(): TaskManagerValue {
   return v;
 }
 
+// AV runs the SAME queue/drawer as a fully SEPARATE instance (own context, own Strapi scope
+// partner="av", own localStorage) — the AIF twin pattern again (owner call 28.09: every partner
+// gets its own task manager). use-acct-limit folds this instance's queued demand into the shared
+// per-account launch limit, so it is mounted ABOVE AcctLimitProvider in the (app) layout.
+const AvCtx = createContext<TaskManagerValue | null>(null);
+
+export function useAvTaskManager(): TaskManagerValue {
+  const v = useContext(AvCtx);
+  if (!v) throw new Error("useAvTaskManager must be used within AvTaskManagerProvider");
+  return v;
+}
+
 /** Everything scope-specific about one task-manager instance. `api` also serves POST and the
  *  pagehide beacon — the query param only matters on GET (the server scopes the list by it). */
 type TmScope = {
@@ -264,6 +276,15 @@ const AIF_SCOPE: TmScope = {
   subtitle: "AIF launch queue · team view",
   bannerBottom: "bottom-[4.75rem]",
 };
+const AV_SCOPE: TmScope = {
+  api: "/api/launch-tasks?scope=av",
+  lsBase: "adlauncher.avtasks",
+  label: "AV Tasks",
+  title: "AV Task Manager",
+  subtitle: "AV launch queue · team view",
+  // Stacks above the MO (bottom-5) and AIF (bottom-[4.75rem]) pills so three mid-wave queues never overlap.
+  bannerBottom: "bottom-[8.5rem]",
+};
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -283,6 +304,15 @@ export function TaskManagerProvider({ children, user }: { children: React.ReactN
 export function AifTaskManagerProvider({ children, user }: { children: React.ReactNode; user?: SessionUser }) {
   return (
     <TaskManagerCore user={user} scope={AIF_SCOPE} ctx={AifCtx}>
+      {children}
+    </TaskManagerCore>
+  );
+}
+
+/** The AV twin — mounted alongside in the (app) layout; boards pick the instance by partner. */
+export function AvTaskManagerProvider({ children, user }: { children: React.ReactNode; user?: SessionUser }) {
+  return (
+    <TaskManagerCore user={user} scope={AV_SCOPE} ctx={AvCtx}>
       {children}
     </TaskManagerCore>
   );
@@ -642,9 +672,10 @@ function TaskManagerCore({
         let resStatus = 0;
         try {
           // taskId lets the server mirror progress + the terminal state into the shared row —
-          // the team keeps seeing the truth even if this browser dies mid-run. AIF rides its own
-          // route (own token, brand registry, RW link) with the same stages/NDJSON contract.
-          const launchApi = partnerConfig(input.partnerId).aifLaunch ? "/api/aif/launch" : "/api/launch";
+          // the team keeps seeing the truth even if this browser dies mid-run. AIF and AV each
+          // ride their own route (own token, own registry/link) with the same stages/NDJSON contract.
+          const cfg = partnerConfig(input.partnerId);
+          const launchApi = cfg.avLaunch ? "/api/av/launch" : cfg.aifLaunch ? "/api/aif/launch" : "/api/launch";
           const res = await fetch(launchApi, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1228,6 +1259,10 @@ export function AifTaskManagerButton() {
   return <TasksButtonCore tm={useAifTaskManager()} label={AIF_SCOPE.label} />;
 }
 
+export function AvTaskManagerButton() {
+  return <TasksButtonCore tm={useAvTaskManager()} label={AV_SCOPE.label} />;
+}
+
 function TasksButtonCore({ tm, label }: { tm: TaskManagerValue; label: string }) {
   const { counts, setOpen } = tm;
   const badge = counts.active > 0 ? counts.active : counts.error > 0 ? counts.error : 0;
@@ -1560,7 +1595,7 @@ function TaskRow({
             {task.name || "Untitled campaign"}
           </p>
           <p className="mt-0.5 truncate font-mono text-[10.5px] text-faint">
-            {task.partner === "us" ? "brand" : "gcm"} {task.gcm || "—"} · {task.geo} · ${moneyLabel(task.budget)}
+            {task.partner === "us" ? "brand" : task.partner === "av" ? "key" : "gcm"} {task.gcm || "—"} · {task.geo} · ${moneyLabel(task.budget)}
             {task.bid ? ` · ${task.bid}` : ""} ·{" "}
             <OwnerChip owner={task.owner} mine={mine} />
           </p>

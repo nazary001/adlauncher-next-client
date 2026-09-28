@@ -32,6 +32,7 @@ export function LaunchRail({
   inFlight = 0,
   heldBack = 0,
   poolFree,
+  poolMax = null,
   onJump,
   onPreview,
   onLaunch,
@@ -72,6 +73,9 @@ export function LaunchRail({
   heldBack?: number;
   /** Free gcm codes left in the registry pool (null while loading). 0 → launching hard-blocked. */
   poolFree?: number | null;
+  /** Effective pool ceiling — the AV keys endpoint reports how many are REGISTERED in ActiveView
+   *  (0 = the stub: nothing launchable, but that reads "not registered", not "exhausted"). */
+  poolMax?: number | null;
   /** Jump the page to a campaign card and focus-pulse it. */
   onJump: (id: string) => void;
   onPreview: () => void;
@@ -92,6 +96,9 @@ export function LaunchRail({
   // Registry pool exhausted → the button locks even for cards holding stale code previews: with
   // every code row taken, their claims can only fail server-side (the claim walks 400s then throws).
   const pool = markerPool(partner);
+  // AV stub: nothing registered in ActiveView yet (poolMax 0) — launching is blocked, but the
+  // message must say "not registered", not "exhausted" (there are no codes to free).
+  const poolUnregistered = Boolean(pool) && poolMax === 0;
   const gcmBlocked = Boolean(pool) && poolFree === 0;
   const ddmm = partner.lionLaunch ? todaySaoPauloDDMM() : "";
   const toolReady = tool?.ready ?? false;
@@ -100,10 +107,11 @@ export function LaunchRail({
   // both picked and ready; else the FB Token rail's fixed TOKEN marker; else LION's bare grammar.
   const nameChannel: HsLaunchChannel =
     hsChannel === "tool" && toolReady ? "tool" : hsChannel === "token" && hsTokenReady ? "token" : "lion";
-  const graphRail = !partner.lionLaunch && (partner.usesGcm || Boolean(partner.aifLaunch));
+  const graphRail = !partner.lionLaunch && (partner.usesGcm || Boolean(partner.aifLaunch) || Boolean(partner.avLaunch));
   // MO/AIF TOOL is the EFFECTIVE channel only when picked AND the server says the rail is ready —
   // a stale "tool" pick falls back to our FB token (the same rule the board fires on).
-  const graphToolActive = graphRail && graphChannel === "tool" && toolReady;
+  // AV has no TOOL channel (its own FB token only — the TOOL sessions are the HS team's).
+  const graphToolActive = graphRail && !partner.avLaunch && graphChannel === "tool" && toolReady;
   // SOC name marker rides personal-soc signers only (MO) — system users launch unmarked. TOOL
   // drops SOC (it marks OUR social token as signer, which TOOL is not), so a TOOL wave shows the
   // GCL TOOL marker instead, never SOC.
@@ -157,8 +165,10 @@ export function LaunchRail({
           <div className="-mx-2 flex min-h-0 flex-col overflow-y-auto overscroll-contain">
             {campaigns.map((c, i) => {
               const ready = launchableOf(c);
-              const eventLabel =
-                CONVERSION_EVENTS.find((e) => e.value === c.conversionEvent)?.label ?? "";
+              // AV runs Traffic / link clicks — its card carries a conversion event nobody optimizes on.
+              const eventLabel = partner.avLaunch
+                ? "link clicks"
+                : (CONVERSION_EVENTS.find((e) => e.value === c.conversionEvent)?.label ?? "");
               return (
                 <button
                   key={c.id}
@@ -320,6 +330,8 @@ export function LaunchRail({
               the server says it's ready; a stale "tool" pick falls back to FB Token at fire time. */}
           {graphRail ? (
             <div className="flex flex-col gap-1.5">
+              {/* AV launches on its own FB token only — no FB Token | TOOL switch, just the signer. */}
+              {partner.avLaunch ? null : (
               <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
                 {(
                   [
@@ -360,6 +372,7 @@ export function LaunchRail({
                   );
                 })}
               </div>
+              )}
               {graphToolActive ? (
                 <p className="text-center text-[10px] leading-relaxed text-faint">
                   Launches through TOOL · {tool?.accounts.size ?? 0} account
@@ -430,7 +443,9 @@ export function LaunchRail({
             </p>
           ) : gcmBlocked ? (
             <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">
-              No free {pool?.label ?? "gcm"} codes left — launching is blocked until codes are freed in the registry.
+              {poolUnregistered
+                ? "No AV keys are registered in ActiveView yet — an owner uploads the key pool on the AV keys page before anything can launch."
+                : `No free ${pool?.label ?? "gcm"} codes left — launching is blocked until codes are freed in the registry.`}
             </p>
           ) : justQueued > 0 ? (
             <p className="animate-pop-in text-center text-[11px] font-medium leading-relaxed text-launch2">

@@ -26,12 +26,16 @@ export function useAdAccounts(
   enabled: boolean,
   preferredPixel?: Bound,
   endpoint: string = "/api/adaccounts",
+  /** AV rail: the page carries NO pixel and never launches on one, so a pixel-less account is
+   *  normal there — suppress the "no pixel" danger tag that would otherwise flag every row. */
+  opts?: { noPixelTag?: boolean },
 ): AdAccountOption[] | null {
   const preferredId = preferredPixel?.id;
   const preferredName = preferredPixel?.name;
+  const noPixelTag = Boolean(opts?.noPixelTag);
   // The endpoint is part of the key: switching partners (MO ↔ AIF) must reset to loading and
   // refetch from the right token's catalog, never show the other partner's accounts.
-  const key = `${endpoint}|${preferredId ?? ""}|${preferredName ?? ""}`;
+  const key = `${endpoint}|${preferredId ?? ""}|${preferredName ?? ""}|${noPixelTag ? "np" : ""}`;
   const [state, setState] = useState<{ key: string; list: AdAccountOption[] | null }>({
     key,
     list: null,
@@ -55,9 +59,10 @@ export function useAdAccounts(
             key,
             list: d.accounts.map((a) => {
               const pixels = Array.isArray(a.pixels) ? a.pixels : [];
-              // Only a pixel-less account is flagged (danger) — conversions can't run there.
+              // Only a pixel-less account is flagged (danger) — conversions can't run there. The AV
+              // rail passes noPixelTag: its accounts are expected to carry no pixel (Traffic only).
               const tag: Partial<Pick<AdAccountOption, "tag" | "tagTone">> =
-                pixels.length === 0 ? { tag: "no pixel", tagTone: "danger" } : {};
+                pixels.length === 0 && !noPixelTag ? { tag: "no pixel", tagTone: "danger" } : {};
               return { value: String(a.id), label: String(a.name), meta: String(a.id), subLabel: String(a.id), pixels, ...tag };
             }),
           });
@@ -89,7 +94,7 @@ export function useAdAccounts(
       alive = false;
       if (timer) clearTimeout(timer);
     };
-  }, [enabled, key, preferredId, preferredName, endpoint]);
+  }, [enabled, key, preferredId, preferredName, endpoint, noPixelTag]);
 
   return enabled && state.key === key ? state.list : null;
 }

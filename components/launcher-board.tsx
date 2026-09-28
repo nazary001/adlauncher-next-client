@@ -33,7 +33,8 @@ import { LaunchRail } from "./launch-rail";
 import { useToolReady } from "./use-tool-ready";
 import { CopySettingsModal } from "./copy-settings-modal";
 import { ChevronsIcon, CopyIcon, PlusIcon } from "./icons";
-import { useAifTaskManager, useTaskManager } from "./task-manager";
+import { useAifTaskManager, useAvTaskManager, useTaskManager } from "./task-manager";
+import { useAvDestinations } from "./use-av-destinations";
 import { type HsLaunchChannel, useHsTaskManager } from "./hs-task-manager";
 import type { SessionUser } from "./user-menu";
 
@@ -77,9 +78,13 @@ type GraphChannel = "token" | "tool";
 // The MO / AIF launch signer is no longer a per-buyer pick: the owner assigns it on /tokens
 // (lib/fb-tokens) and every rail resolves that same slot server-side (badge via use-signers).
 
-/** gcm auto-claim (skipping registry-reserved codes) + single account/pixel/fanpage pinning. */
-function normalize(rows: Campaign[], partner: PartnerConfig, reserved: Set<string> | null): Campaign[] {
-  const pool = markerPool(partner);
+/** gcm auto-claim (skipping registry-reserved codes) + single account/pixel/fanpage pinning.
+ *  `poolMax` overrides the pool's static ceiling — AV's launchable range is only the keys
+ *  registered in ActiveView (the preview endpoint reports it), so codes are assigned strictly
+ *  within it; MO/AIF pass nothing and keep their static pool.max. */
+function normalize(rows: Campaign[], partner: PartnerConfig, reserved: Set<string> | null, poolMax?: number | null): Campaign[] {
+  const base = markerPool(partner);
+  const pool = base ? { ...base, max: poolMax ?? base.max } : base;
   const withGcm = pool ? assignPoolCodes(rows, reserved, pool) : rows;
   // The fixed name prefix follows the ACTIVE partner: a card born on MO and launched after the
   // buyer switched to AIF must read "(AIF)" — it kept "(MO)" and every list showed the AIF
@@ -139,7 +144,12 @@ function fillAccountDefaults(
     // list misses it (the launch route's pixel_not_on_account then names the real problem
     // instead of a silent swap ping-ponging with the card's pin effect). AIF converges to the value
     // pixel VD-C1-HS-1 (the only offerable one since 09-02 pt2; empty while unshared).
-    if (bidKind(c.bidStrategy) !== "roas" && (!pixel || !pixels.some((p) => p.id === pixel))) {
+    // AV binds NO pixel — the AV page has none (Traffic / link clicks), and every other AV path keeps
+    // pixel "" (applyPartnerLocks, the card's account-switch handler, the launch/clone routes). Guard
+    // this backfill too: an AV cabinet that happens to expose a Meta pixel would otherwise seed one
+    // onto the card here (the only unguarded AV no-pixel path), violating the invariant in client
+    // state and relying solely on the server's pixel="" override (review find 09-28).
+    if (!partner.avLaunch && bidKind(c.bidStrategy) !== "roas" && (!pixel || !pixels.some((p) => p.id === pixel))) {
       pixel = partner.aifLaunch
         ? (pickAifPixel(pixels)?.id ?? "")
         : defaultPixelFor(adAccounts, account, partner.preferredPixel);
@@ -187,11 +197,14 @@ export function LauncherBoard({ user, initialPartner = "in" }: { user?: SessionU
 function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPartner: PartnerId }) {
   const teamTm = useTaskManager();
   const aifTm = useAifTaskManager();
+  const avTm = useAvTaskManager();
   const [partnerId, setPartnerId] = useState<PartnerId>(initialPartner);
-  // Codes already taken in the current partner's Strapi registry (MO gcm / AIF brand), keyed by
-  // the registry endpoint they came from: switching partners makes the other pool's snapshot
-  // instantly invalid (derived `reserved` reads null → assign nothing until the refetch lands).
-  const [reservedState, setReservedState] = useState<{ api: string; set: Set<string> } | null>(null);
+  // Codes already taken in the current partner's Strapi registry (MO gcm / AIF brand / AV keys),
+  // keyed by the registry endpoint they came from: switching partners makes the other pool's
+  // snapshot instantly invalid (derived `reserved` reads null → assign nothing until the refetch
+  // lands). `poolMax` rides along for AV, whose launchable ceiling = the keys registered in AV
+  // (the preview endpoint reports it); null = the endpoint omits it (MO/AIF → the static max).
+  const [reservedState, setReservedState] = useState<{ api: string; set: Set<string>; poolMax: number | null } | null>(null);
   // Count just sent to the Task Manager, shown as a brief confirmation (campaigns stay on the board).
   const [justQueued, setJustQueued] = useState(0);
   const queuedTimer = useRef<number | null>(null);
@@ -222,29 +235,52 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     return { ...base, landings: [...base.landings, ...autoLandings] };
   }, [partnerId, autoLandings]);
   // The board talks to the ACTIVE partner's own task manager: AIF launches queue/track in the
-  // separate AIF instance (own drawer, own Strapi scope), everything else in the team one.
-  const { enqueue, tasks } = partner.aifLaunch ? aifTm : teamTm;
+  // separate AIF instance (own drawer, own Strapi scope), AV in its own, everything else in the
+  // team one.
+  const { enqueue, tasks } = partner.avLaunch ? avTm : partner.aifLaunch ? aifTm : teamTm;
   const anyExpanded = campaigns.some((c) => !c.collapsed);
-  // The partner's marker pool (MO gcm 01..200 / AIF brand test01..test700; null = no markers).
+  // The partner's marker pool (MO gcm 01..200 / AIF brand test01..test700 / AV key av001..;
+  // null = no markers).
   const pool = markerPool(partner);
   const poolApi = pool?.api ?? "";
   // The current partner's used-set — null while another pool's snapshot (or nothing) is loaded.
   const reserved = reservedState && reservedState.api === poolApi ? reservedState.set : null;
-  // Free codes left in the registry pool (null until the registry loads). `reserved` is the
-  // live used-set — refreshed on focus and grown by completed launches — so this count updates
-  // without extra requests. Drives the exhaustion banner and the Launch hard-block below.
-  const poolFree = pool && reserved ? Math.max(0, pool.max - reserved.size) : null;
+  // Effective pool ceiling. AV's preview endpoint reports how many keys the owner actually
+  // registered in ActiveView (`poolMax`) — the real launchable max; the codec's 999 (pool.max)
+  // is only the key SHAPE. MO/AIF omit poolMax, so their static pool.max stands.
+  // Only AV's endpoint max is honoured — /api/gcm and /api/aif/brand also answer poolMax (their
+  // static 200 / 700), and their arithmetic below must stay exactly what it was.
+  const endpointMax = partner.avLaunch && reservedState && reservedState.api === poolApi ? reservedState.poolMax : null;
+  const poolMax = pool ? (endpointMax ?? pool.max) : null;
+  // Free codes left in the registry pool (null until the registry loads). `reserved` is the live
+  // used-set — refreshed on focus and grown by completed launches — so this count updates without
+  // extra requests. Counted WITHIN the effective range (a key claimed above a later-lowered
+  // registered count must not eat a free slot). Drives the banner + the Launch hard-block below.
+  // MO/AIF (endpointMax null) keep the historical `max − used` arithmetic byte-for-byte.
+  const poolFree = useMemo(() => {
+    if (!pool || !reserved || poolMax == null) return null;
+    if (endpointMax == null) return Math.max(0, pool.max - reserved.size);
+    let inRange = 0;
+    for (let n = 1; n <= poolMax; n++) if (reserved.has(pool.code(n))) inRange++;
+    return Math.max(0, poolMax - inRange);
+  }, [pool, reserved, poolMax, endpointMax]);
+  // AV stub: poolMax 0 = no keys registered in ActiveView yet. Distinct from "exhausted" — there
+  // are no codes to free, an owner must upload the pool (AV keys page). Both block launching.
+  const poolUnregistered = Boolean(pool) && poolMax === 0;
   const poolExhausted = Boolean(pool) && poolFree === 0;
   // The rail's signer (MO / AIF direct-Graph rails) is the OWNER'S pick on /tokens — read-only
   // here (badge in the rail); the launch route resolves the very same slot server-side.
-  const graphRail = !partner.lionLaunch && (partner.usesGcm || Boolean(partner.aifLaunch));
+  const graphRail = !partner.lionLaunch && (partner.usesGcm || Boolean(partner.aifLaunch) || Boolean(partner.avLaunch));
   // TOOL launch-channel readiness for the ACTIVE partner (owner ask 28.09): the server verifies the
   // key + scopes + ≥1 live-session account also in this partner's catalog and assigned to this
   // buyer. Gates the TOOL rail segment and filters the account pickers; polls 5 min + on focus and
-  // resets on a partner switch (the hook keys on partner|rail).
-  const toolReady = useToolReady(partnerId, "launch");
+  // resets on a partner switch (the hook keys on partner|rail). AV rides its OWN FB token only — the
+  // TOOL sessions are the HS team's Ads Manager sessions, not AV's cabinets — so AV never polls it.
+  const toolReady = useToolReady(partnerId, "launch", !partner.avLaunch);
   const signers = useSigners(graphRail);
-  const railSigner = graphRail ? (signers.slots?.[partner.aifLaunch ? "aif.launch" : "mo.launch"] ?? null) : null;
+  const railSigner = graphRail
+    ? (signers.slots?.[partner.avLaunch ? "av.launch" : partner.aifLaunch ? "aif.launch" : "mo.launch"] ?? null)
+    : null;
   /** A token exists for this rail (assigned or env default) — the catalogs load and waves may
    *  fire. An UNHEALTHY token stays effective: its pickers/launch error with FB's own reason. */
   const signerReady = !graphRail || Boolean(railSigner?.primary);
@@ -261,9 +297,12 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   const fanpages = useFanpages(
     Boolean(partner.fanpagesFromToken) && signerReady,
     partner.pageAdLimit ?? 250,
-    partner.aifLaunch
-      ? { list: "/api/aif/fanpages?rail=launch", volume: "/api/aif/fanpages/volume" }
-      : { list: "/api/fanpages?rail=launch", volume: "/api/fanpages/volume" },
+    partner.avLaunch
+      ? // hs-tools has no AV scope → no fill badges (volume: null); the list alone is the picker.
+        { list: "/api/av/fanpages?rail=launch", volume: null }
+      : partner.aifLaunch
+        ? { list: "/api/aif/fanpages?rail=launch", volume: "/api/aif/fanpages/volume" }
+        : { list: "/api/fanpages?rail=launch", volume: "/api/fanpages/volume" },
   );
   // HS launch-token pool health — powers the "all tokens burned" banner (the server gate is the
   // enforcement; this is the courtesy warning before buyers build a wave into a 429).
@@ -274,8 +313,17 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   const adAccounts = useAdAccounts(
     Boolean(partner.accountsFromToken) && signerReady,
     partner.preferredPixel,
-    partner.aifLaunch ? "/api/aif/adaccounts?rail=launch" : "/api/adaccounts?rail=launch",
+    partner.avLaunch
+      ? "/api/av/adaccounts?rail=launch"
+      : partner.aifLaunch
+        ? "/api/aif/adaccounts?rail=launch"
+        : "/api/adaccounts?rail=launch",
+    // AV carries no pixel — a pixel-less account is normal there, so drop the "no pixel" danger tag.
+    partner.avLaunch ? { noPixelTag: true } : undefined,
   );
+  // AV destination catalog (articles + redirect paths) — loaded only on the AV rail; passed to the
+  // cards' Destination field. Undefined for every other partner.
+  const avDestinations = useAvDestinations(Boolean(partner.avLaunch));
   // LION catalog (HS): profiles + ACR, per-profile accounts/pages/locales, per-account pixels.
   const hs = useHs(Boolean(partner.lionLaunch));
   const hsTasks = useHsTaskManager();
@@ -332,7 +380,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // The active graphRail partner's pick + the effective TOOL flags (picked AND server-ready). A
   // stale "tool" pick with the rail not ready falls back (HS → LION, MO/AIF → FB Token) at fire
   // time — the launch/enqueue below reads these, never the raw pick.
-  const graphChannel: GraphChannel = partner.aifLaunch ? aifChannel : moChannel;
+  // AV has no TOOL channel (its own FB token only) — pinned to "token" whatever MO/AIF picked.
+  const graphChannel: GraphChannel = partner.avLaunch ? "token" : partner.aifLaunch ? aifChannel : moChannel;
   const hsToolActive = Boolean(partner.lionLaunch) && hsChannel === "tool" && toolReady.ready;
   const graphToolActive = graphRail && graphChannel === "tool" && toolReady.ready;
   // The TOOL-visible account set to constrain MO/AIF auto-fill to (null unless a TOOL wave is
@@ -399,12 +448,14 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       .then((d) => {
         if (!Array.isArray(d.used)) return;
         const set = new Set<string>(d.used);
-        setReservedState({ api: poolApi, set });
+        // AV reports its registered ceiling as poolMax; MO/AIF omit it (→ null → static max).
+        const max = typeof d.poolMax === "number" ? d.poolMax : null;
+        setReservedState({ api: poolApi, set, poolMax: max });
         // The partner may have switched while this was in flight — assigning the new partner's
         // codes from the OLD pool's snapshot could preview an already-taken code. Only normalize
         // while this snapshot still belongs to the current partner's registry.
         if (markerPool(partnerRef.current)?.api === poolApi) {
-          setCampaigns((cs) => normalize(cs, partnerRef.current, set));
+          setCampaigns((cs) => normalize(cs, partnerRef.current, set, partnerRef.current.avLaunch ? max : null));
         }
       })
       .catch(() => {
@@ -446,7 +497,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
           set.add(g);
         }
       }
-      return set ? { api: prev.api, set } : prev;
+      return set ? { api: prev.api, set, poolMax: prev.poolMax } : prev;
     });
   }, [tasks, poolApi, partnerId]);
 
@@ -615,13 +666,13 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       noteSent(c.account);
       launched.add(c.id);
     }
-    if (nextReserved) setReservedState({ api: launchApi, set: nextReserved });
+    if (nextReserved) setReservedState({ api: launchApi, set: nextReserved, poolMax: endpointMax });
     setPreviewed(false);
 
     // Keep the campaigns on the board so you can tweak them and relaunch — only clear the gcm of the
     // ones just sent (their codes are now taken) so normalize hands them fresh codes for the next wave.
     setCampaigns((cs) =>
-      normalize(cs.map((c) => (launched.has(c.id) ? { ...c, gcm: "" } : c)), partner, nextReserved),
+      normalize(cs.map((c) => (launched.has(c.id) ? { ...c, gcm: "" } : c)), partner, nextReserved, poolMax),
     );
 
     setJustQueued(launched.size);
@@ -638,7 +689,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       setCampaigns((cs) =>
         fillPageDefaults(
           fillAccountDefaults(
-            normalize(fn(cs), partner, reserved),
+            normalize(fn(cs), partner, reserved, poolMax),
             partner,
             adAccountsRef.current,
             limitsRef.current,
@@ -650,29 +701,39 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       );
       setPreviewed(false);
     },
-    [partner, reserved],
+    [partner, reserved, poolMax],
   );
 
   function changePartner(id: PartnerId) {
     setPartnerId(id);
     const cfg = partnerConfig(id);
+    // A card's marker (Campaign.gcm) is a code of the OUTGOING partner's pool — an MO gcm ("05"), an
+    // AIF brand ("test05") or an AV key ("av005"); the shapes never collide, so assignPoolCodes' "row
+    // already has a gcm" guard would KEEP the stale code across a switch instead of reassigning from
+    // the incoming pool. For AV that stale code is a money-safety defect: a carried MO/AIF marker reads
+    // as a valid utm_campaign in the AV link preview + Copy while it is NOT a registered AV key, and it
+    // survives the poolMax-0 stub. Clear the marker whenever the switch crosses the AV rail (either
+    // direction) and pass reserved as null so nothing is handed out from the OUTGOING pool's snapshot —
+    // refreshGcm loads the new pool's used-set + poolMax and assigns then, exactly like a fresh mount
+    // (poolMax 0 → no code, matching the stub). MO/AIF/HS ↔ MO/AIF/HS switches stay byte-identical: the
+    // branch is dead while AV is dormant (review find 09-28).
+    const crossesAv = Boolean(cfg.avLaunch) || Boolean(partner.avLaunch);
     // Re-baseline the redirect to the incoming partner's default (HS → HIGH ADX). Cards born on
     // another partner carry makeCampaign's global META ADX from a board where the field never
     // rendered — without this, switching MO → HS shows every card on a redirect nobody picked.
-    setCampaigns((cs) =>
-      normalize(
-        cfg.defaultRedirect
-          ? cs.map((c) => (c.redirectType === cfg.defaultRedirect ? c : { ...c, redirectType: cfg.defaultRedirect! }))
-          : cs,
-        cfg,
-        reserved,
-      ),
-    );
+    setCampaigns((cs) => {
+      let next = cfg.defaultRedirect
+        ? cs.map((c) => (c.redirectType === cfg.defaultRedirect ? c : { ...c, redirectType: cfg.defaultRedirect! }))
+        : cs;
+      if (crossesAv) next = next.map((c) => (c.gcm ? { ...c, gcm: "" } : c));
+      return normalize(next, cfg, crossesAv ? null : reserved);
+    });
     setPreviewed(false);
     // Every drawer closes on a partner switch: the swapped-in tasks button could otherwise open a
     // second z-[80] panel on top of a still-open one (reachable keyboard-only — review find 08-17).
     teamTm.setOpen(false);
     aifTm.setOpen(false);
+    avTm.setOpen(false);
     hsTasks.setOpen(false);
     // The pick rides in the URL so a refresh reopens on the same partner (no navigation).
     const url = new URL(window.location.href);
@@ -755,8 +816,10 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   };
 
   // Capped at the marker pool size (and 200 overall — a bigger board is unusable anyway) so a
-  // full wave can't leave a card without a code.
-  const MAX_CARDS = Math.min(pool?.max ?? GCM_POOL_MAX, GCM_POOL_MAX);
+  // full wave can't leave a card without a code. AV uses its REGISTERED range when known (a wave
+  // can't exceed the keys uploaded to ActiveView); its unregistered stub keeps the static cap so
+  // the board is still buildable (the launch gate blocks it anyway).
+  const MAX_CARDS = Math.min(poolMax && poolMax > 0 ? poolMax : pool?.max ?? GCM_POOL_MAX, GCM_POOL_MAX);
 
   /** Wave builder: APPEND `n` new cards (owner switched from ×multiply 08-11), cycling through
    *  the existing cards as templates — one template card → n identical copies, several cards →
@@ -791,7 +854,19 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
         {/* Free-pool alert, first thing on the board: designers must see BEFORE building cards
             that launches are (about to be) blocked. Red = pool exhausted (Launch disabled),
             amber = running low. gcm partners only; hidden until the registry loads. */}
-        {pool && poolFree !== null && poolFree <= GCM_LOW_WATER ? (
+        {pool && poolUnregistered ? (
+          // AV stub: nothing registered in ActiveView yet — the owner uploads the key pool first.
+          <div className="mx-auto w-full max-w-[1440px] px-4 pt-4 sm:px-6">
+            <div
+              role="alert"
+              className="flex items-center gap-3 rounded-xl border border-danger/45 bg-danger/10 px-4 py-3 text-[13px] font-semibold text-danger"
+            >
+              <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-danger" />
+              No {pool.label}s are registered in ActiveView yet — launching is blocked until an owner
+              uploads the key pool (AV keys page) and sets AV_KEYS_REGISTERED.
+            </div>
+          </div>
+        ) : pool && poolFree !== null && poolFree <= GCM_LOW_WATER ? (
           <div className="mx-auto w-full max-w-[1440px] px-4 pt-4 sm:px-6">
             <div
               role="alert"
@@ -809,8 +884,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
                 }
               />
               {poolFree === 0
-                ? `No free ${pool!.label} codes left — all ${pool!.max} are in use. Launching is blocked until codes are freed in the registry.`
-                : `Only ${poolFree} free ${pool!.label} code${poolFree === 1 ? "" : "s"} left of ${pool!.max} — a bigger wave won't fit.`}
+                ? `No free ${pool.label} codes left — all ${poolMax ?? pool.max} are in use. Launching is blocked until codes are freed in the registry.`
+                : `Only ${poolFree} free ${pool.label} code${poolFree === 1 ? "" : "s"} left of ${poolMax ?? pool.max} — a bigger wave won't fit.`}
             </div>
           </div>
         ) : null}
@@ -915,6 +990,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
                 fanpages={fanpages}
                 adAccounts={adAccounts}
                 hs={partner.lionLaunch ? hs : undefined}
+                avDestinations={partner.avLaunch ? avDestinations : undefined}
                 highlight={highlightId === c.id}
                 // Covers ride only where WE pin the thumbnail (owner rule): MO/AIF rails always do;
                 // HS only on the FB Token or TOOL channel — the LION weapon picks its own frame.
@@ -969,9 +1045,18 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
             owner={Boolean(user?.owner)}
             previewed={previewed}
             justQueued={justQueued}
-            inFlight={partner.lionLaunch ? hsTasks.counts.inFlight : partner.aifLaunch ? aifTm.counts.inFlight : teamTm.counts.inFlight}
+            inFlight={
+              partner.lionLaunch
+                ? hsTasks.counts.inFlight
+                : partner.avLaunch
+                  ? avTm.counts.inFlight
+                  : partner.aifLaunch
+                    ? aifTm.counts.inFlight
+                    : teamTm.counts.inFlight
+            }
             heldBack={heldBack}
             poolFree={poolFree}
+            poolMax={poolMax}
             onJump={jumpTo}
             onPreview={() => setPreviewed(true)}
             onLaunch={launch}

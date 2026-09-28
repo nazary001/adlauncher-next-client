@@ -156,6 +156,10 @@ test("envDefaultIds: today's per-rail defaults (MO system-class first; HS dup fa
   assert.deepEqual(envDefaultIds(seeds, "aif.launch"), ["env:FB_AIF_LAUNCH_TOKEN"]);
   assert.deepEqual(envDefaultIds(seeds, "hs.launch"), ["env:FB_HS_LAUNCH_TOKEN", "env:FB_HS_LAUNCH_TOKEN_2"]);
   assert.deepEqual(envDefaultIds(seeds, "hs.clone"), ["env:FB_HS_DUP_TOKEN"]);
+  // AV has NO env bearer (owner call 28.09): an unassigned AV slot resolves to nothing — never to
+  // the HS pool the chain would otherwise fall through to.
+  assert.deepEqual(envDefaultIds(seeds, "av.launch"), []);
+  assert.deepEqual(envDefaultIds(seeds, "av.clone"), []);
   const noDup = envSeeds({ ...ENV, FB_HS_DUP_TOKEN: "" }, fp);
   assert.deepEqual(envDefaultIds(noDup, "hs.clone"), ["env:FB_HS_LAUNCH_TOKEN", "env:FB_HS_LAUNCH_TOKEN_2"]);
   // no soc at all → MO has NO default (the legacy launch token never signs MO by default: retired 09-08)

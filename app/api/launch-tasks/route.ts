@@ -69,23 +69,25 @@ export async function GET(req: Request) {
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   if (!storeConfigured()) return NextResponse.json({ ok: false, tasks: [] });
   // Every partner runs its OWN task manager over this one collection (owner call 08-17):
-  // ?scope=aif → only AIF rows (partner="us"); default → the MO drawer, which excludes both
-  // HS ("br", see /api/hs-tasks) and AIF rows. Explicit $and — repeating filters[partner][$ne]
-  // as two bare query keys would collapse into one in parsing.
+  // ?scope=aif → only AIF rows (partner="us"); ?scope=av → only AV rows (partner="av"); default →
+  // the MO drawer, which excludes both HS ("br", see /api/hs-tasks) and AIF rows. Explicit $and —
+  // repeating filters[partner][$ne] as two bare query keys would collapse into one in parsing.
   const scope = new URL(req.url).searchParams.get("scope");
   // The MO scope also claims partner-NULL rows: Strapi's $ne doesn't match NULL, so without the
   // $or a row created without a partner stamp (historic server-writer/beacon creates) would be
   // invisible in EVERY drawer. Null = MO by definition (lib/task-view.ts). The $and excludes every
   // other partner's rows: HS ("br", see /api/hs-tasks), AIF ("us"), Google ("gg", see
-  // /api/google-tasks), Snapchat ("sn", see /api/snap-tasks) and TikTok ("tt", see
-  // /api/tiktok-tasks) each run their OWN task manager over this one collection.
+  // /api/google-tasks), Snapchat ("sn", see /api/snap-tasks), TikTok ("tt", see /api/tiktok-tasks)
+  // and AV ("av", this route ?scope=av) each run their OWN task manager over this one collection.
   const partnerFilter =
     scope === "aif"
       ? `&filters[partner][$eq]=us`
-      : `&filters[$or][0][partner][$null]=true` +
-        `&filters[$or][1][$and][0][partner][$ne]=br&filters[$or][1][$and][1][partner][$ne]=us` +
-        `&filters[$or][1][$and][2][partner][$ne]=gg&filters[$or][1][$and][3][partner][$ne]=sn` +
-        `&filters[$or][1][$and][4][partner][$ne]=tt`;
+      : scope === "av"
+        ? `&filters[partner][$eq]=av`
+        : `&filters[$or][0][partner][$null]=true` +
+          `&filters[$or][1][$and][0][partner][$ne]=br&filters[$or][1][$and][1][partner][$ne]=us` +
+          `&filters[$or][1][$and][2][partner][$ne]=gg&filters[$or][1][$and][3][partner][$ne]=sn` +
+          `&filters[$or][1][$and][4][partner][$ne]=tt&filters[$or][1][$and][5][partner][$ne]=av`;
   // Bounded + short-cached read (task-store): the team's polling collapses to ~one Strapi read per
   // scope per few seconds, and a slow/failing Strapi serves the last good list instead of hanging.
   const cutoff = Date.now() - WINDOW_MS;
@@ -93,7 +95,7 @@ export async function GET(req: Request) {
     `${STRAPI}/api/launch-tasks?filters[owner][$notNull]=true${partnerFilter}&filters[queued_at][$gte]=${cutoff}` +
     `&sort[0]=queued_at:desc&pagination[page]=${page}&pagination[pageSize]=${PAGE_SIZE}`;
   const { ok, tasks, status } = await readTeamTasks(
-    scope === "aif" ? "launch:aif" : "launch:mo",
+    scope === "aif" ? "launch:aif" : scope === "av" ? "launch:av" : "launch:mo",
     pageUrl,
     toClient,
     { pageSize: PAGE_SIZE, maxPages: MAX_PAGES },

@@ -1,7 +1,7 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { SESSION_COOKIE, verifySession } from "@/lib/session";
-import { AifTaskManagerProvider, TaskManagerProvider } from "@/components/task-manager";
+import { AifTaskManagerProvider, AvTaskManagerProvider, TaskManagerProvider } from "@/components/task-manager";
 import { HsTaskManagerProvider } from "@/components/hs-task-manager";
 import { GoogleTaskManagerProvider } from "@/components/google-task-manager";
 import { SnapTaskManagerProvider } from "@/components/snap-task-manager";
@@ -23,7 +23,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     <TaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
       <AifTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
         <HsTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
-          <AcctLimitProvider>
+          {/* AV queue — mounted ABOVE AcctLimitProvider so use-acct-limit can fold its queued
+              demand into the shared per-account launch limit (same reason MO/AIF/HS sit above). */}
+          <AvTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
+            <AcctLimitProvider>
             {/* Google rail queue — innermost so it survives navigating between every board. */}
             <GoogleTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
               {/* Snapchat rail queue — innermost, same reason. */}
@@ -32,7 +35,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                 <TiktokTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>{children}</TiktokTaskManagerProvider>
               </SnapTaskManagerProvider>
             </GoogleTaskManagerProvider>
-          </AcctLimitProvider>
+            </AcctLimitProvider>
+          </AvTaskManagerProvider>
         </HsTaskManagerProvider>
       </AifTaskManagerProvider>
     </TaskManagerProvider>

@@ -15,6 +15,7 @@ import type { PartnerId } from "@/lib/partners";
 import {
   PARTNER_LABEL,
   PARTNER_TITLE,
+  SLOT_IDS,
   SLOT_META,
   TOKEN_PARTNERS,
   describeSlot,
@@ -95,8 +96,8 @@ async function call<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> 
 
 // ---- formatting ---------------------------------------------------------------------------------
 
-const PARTNER_OF_RAIL: Record<PartnerId, TokenPartner> = { in: "mo", us: "aif", br: "hs" };
-const RAIL_OF_PARTNER: Record<TokenPartner, PartnerId> = { mo: "in", aif: "us", hs: "br" };
+const PARTNER_OF_RAIL: Record<PartnerId, TokenPartner> = { in: "mo", us: "aif", br: "hs", av: "av" };
+const RAIL_OF_PARTNER: Record<TokenPartner, PartnerId> = { mo: "in", aif: "us", hs: "br", av: "av" };
 
 function ago(ms: number): string {
   if (!ms) return "never";
@@ -841,7 +842,7 @@ export function TokenVaultBoard({ user, initialPartner = "in" }: { user: Session
               <div className="flex flex-wrap gap-1.5 pt-1">
                 <span className={chip("dim")}>{vault.length} in vault</span>
                 <span className={chip("dim")}>{envTokens.length} from env</span>
-                <span className={chip(assignedSlots ? "accent" : "dim")}>{assignedSlots}/6 slots assigned</span>
+                <span className={chip(assignedSlots ? "accent" : "dim")}>{assignedSlots}/{SLOT_IDS.length} slots assigned</span>
                 {blockedSlots.length ? <span className={chip("danger")}>{blockedSlots.length} blocked</span> : null}
               </div>
             </div>
@@ -927,7 +928,9 @@ export function TokenVaultBoard({ user, initialPartner = "in" }: { user: Session
                         <p className="text-[10.5px] text-faint">
                           {p === "hs"
                             ? "Both slots are failover pools: the first token is primary, the rest take over on an app-level limit or a dead token."
-                            : "One token per rail. Unassigned = the env default (what runs today)."}
+                            : p === "av"
+                              ? "One token per rail. AV has no env default — an unassigned slot blocks the rail until its own token is assigned."
+                              : "One token per rail. Unassigned = the env default (what runs today)."}
                         </p>
                       </div>
                       {!active ? (

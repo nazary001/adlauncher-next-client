@@ -12,7 +12,7 @@ import { Header } from "./header";
 import type { SessionUser } from "./user-menu";
 import { useAdAccounts } from "./use-adaccounts";
 import { CheckIcon, PlusIcon, SearchIcon, UsersIcon, XIcon } from "./icons";
-import { PARTNERS, type PartnerId } from "@/lib/partners";
+import { PARTNERS, partnerConfig, type PartnerId } from "@/lib/partners";
 
 type TeamUser = { username: string; role: string | null; source: string };
 type AssignMap = Record<string, string[]>;
@@ -425,6 +425,9 @@ export function AccountAccessBoard({
   // MO + AIF load eagerly (tab switches feel instant); both endpoints answer from server caches.
   const moAccounts = useAdAccounts(true, undefined, "/api/adaccounts");
   const aifAccounts = useAdAccounts(true, undefined, "/api/aif/adaccounts");
+  // AV's catalog endpoint 404s (`av_rail_disabled`) while the rail is dormant — only load it once
+  // the build flag is on, otherwise the tab would poll a route that can never answer.
+  const avAccounts = useAdAccounts(!partnerConfig("av").inDevelopment, undefined, "/api/av/adaccounts");
 
   // HS: ONE flat list — the MAIN pool only (owner ask 08-21). The globecoders profiles mirror
   // one VD-C1 account pool, so the page loads the first non-FARM profile's bind space and shows
@@ -623,7 +626,7 @@ export function AccountAccessBoard({
   };
 
   // ---- rail rows -------------------------------------------------------------------------------
-  const graphRows = rail === "in" ? moAccounts : rail === "us" ? aifAccounts : null;
+  const graphRows = rail === "in" ? moAccounts : rail === "us" ? aifAccounts : rail === "av" ? avAccounts : null;
   const railLabel = PARTNERS.find((p) => p.id === rail)?.label ?? rail;
 
   const renderRows = (rows: { id: string; name: string }[]) => {

@@ -64,8 +64,9 @@ export default async function ClonePage({
           initialMode={initialMode}
         />
       ) : (
-        // MO and AIF share the Graph clone board — the partner prop picks the rail (token,
-        // marker registry, pixel policy) end to end.
+        // MO, AIF and AV share the Graph clone board — the partner prop picks the rail (token,
+        // marker/key registry, pixel policy — AV binds none) end to end. AV only reaches here when
+        // NEXT_PUBLIC_AV_ENABLED=1 (sanitizePartnerId drops in-development partners to MO otherwise).
         <CloneBoard
           user={{ username: session.username, role: session.role ?? null, owner: isOwnerSession(session) }}
           initialIds={ids}

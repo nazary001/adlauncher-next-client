@@ -35,6 +35,8 @@ import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-ada
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
 import { Field, MoneyInput, Select, TextArea, TextInput, IconButton } from "./ui";
 import { SearchSelect } from "./search-select";
+import { AvDestinationField } from "./av-destination-field";
+import type { AvDestinations } from "./use-av-destinations";
 import { MultiSelect } from "./multi-select";
 import { Dropzone } from "./dropzone";
 import {
@@ -76,8 +78,8 @@ function missingRequirements(
   if (opts.account && !c.account) m.push("account");
   if (opts.pixel && !c.pixel) m.push("pixel");
   if (opts.page && !c.page) m.push(partner.pageLabel.toLowerCase());
-  if (opts.landing && !c.landing) m.push(partner.aifLaunch ? "destination" : "landing");
-  if (opts.gcm && !c.gcm) m.push(partner.aifLaunch ? "brand" : "gcm code");
+  if (opts.landing && !c.landing) m.push(partner.aifLaunch || partner.avLaunch ? "destination" : "landing");
+  if (opts.gcm && !c.gcm) m.push(partner.avLaunch ? "AV key" : partner.aifLaunch ? "brand" : "gcm code");
   if (opts.profile && !c.profile) m.push("profile");
   if (opts.link && !isHttpUrl(c.link)) m.push("link");
   if (opts.adText && !c.title.trim()) m.push("title");
@@ -230,6 +232,7 @@ function CampaignCardBase({
   fanpages,
   adAccounts,
   hs,
+  avDestinations,
   highlight,
   coversEnabled,
   hsTokenRail,
@@ -253,6 +256,9 @@ function CampaignCardBase({
   adAccounts?: AdAccountOption[] | null;
   /** LION catalog (HS partner): profiles + per-profile accounts/pages/locales + pixels. */
   hs?: HsCatalog;
+  /** AV partner: the live ActiveView destination catalog (articles + redirect paths) shared by
+   *  the board — feeds the card's Destination field. Undefined off the AV rail. */
+  avDestinations?: AvDestinations;
   /** Focus-pulse this card after a jump from the Launch bay. */
   highlight?: boolean;
   /** Offer the per-video custom-cover picker. True wherever the launch rides OUR FB token
@@ -308,6 +314,9 @@ function CampaignCardBase({
   // ---- AIF mode: MO-style pickers on the AIF token; destination = free-typed slug; the pixel
   // is derived (conversions → the AIF postback pixel, clicks → none) and never picked. ----
   const aifMode = Boolean(partner.aifLaunch);
+  // ---- AV mode: MO-style token pickers, an AV destination (article / redirect path) in place of
+  // the landing, an AV key in the marker slot, and Traffic / link-clicks delivery (no pixel). ----
+  const avMode = Boolean(partner.avLaunch);
   // ---- HS (LION) mode: the bind cascade + locales come from LION's catalog ----
   const hsMode = Boolean(partner.lionLaunch && hs);
   const hsData = hsMode && hs ? hs.dataFor(c.profile) : undefined;
@@ -329,8 +338,11 @@ function CampaignCardBase({
   // VD-C1-HS-1, AIF → VD-C1-HS-11). Idempotent (patches only on mismatch), so the unstable
   // `patch` identity is safe to leave out of deps.
   const roasPin = aifMode ? AIF_VALUE_PIXEL : ROAS_PIXEL;
+  // AV never pins a value pixel (it refuses min-ROAS and carries no pixel at all) — the drift
+  // effect must never touch an AV card, even if a restored draft momentarily reads as min-ROAS
+  // before applyPartnerLocks snaps it back to lowest cost.
   const roasPixelDrift =
-    !hsMode && partner.accountsFromToken && kind === "roas" && c.pixel !== roasPin.id;
+    !hsMode && !avMode && partner.accountsFromToken && kind === "roas" && c.pixel !== roasPin.id;
   useEffect(() => {
     if (roasPixelDrift) onPatch(c.id, { pixel: roasPin.id });
   }, [roasPixelDrift, onPatch, c.id, roasPin.id]);
@@ -481,7 +493,7 @@ function CampaignCardBase({
   // "…" placeholder until the code lands: preview and Copy now agree — nothing to copy until ready).
   // HS: same contract — no copy until the pixel is picked (the tail ends in pixel=<id>).
   const linkCopyable =
-    Boolean(derivedLink) && (hsMode ? Boolean(c.pixel) : partner.usesGcm || aifMode ? Boolean(c.gcm) : true);
+    Boolean(derivedLink) && (hsMode ? Boolean(c.pixel) : partner.usesGcm || aifMode || avMode ? Boolean(c.gcm) : true);
   function copyLink() {
     if (!linkCopyable) return;
     navigator.clipboard?.writeText(derivedLink);
@@ -490,6 +502,13 @@ function CampaignCardBase({
   }
   const eventLabel = CONVERSION_EVENTS.find((e) => e.value === c.conversionEvent)?.label ?? "";
   const geo = geoSummary(c.countries);
+  // AV destination kind (article vs redirect path) — for the link-preview caption. Derived from
+  // the live catalog: a picked redirect path's URL appears in the redirect list; anything else
+  // (an article pick, a pasted URL) reads as an article.
+  const avKind: "article" | "redirect" =
+    avMode && c.landing && avDestinations?.data?.redirects.some((r) => r.paths.some((p) => p.url === c.landing))
+      ? "redirect"
+      : "article";
 
   function remove() {
     setLeaving(true);
@@ -532,7 +551,7 @@ function CampaignCardBase({
                 {c.profile.replace("globecoders-", "")}
               </span>
             ) : null}
-            {(partner.usesGcm || aifMode) && c.gcm ? (
+            {(partner.usesGcm || aifMode || avMode) && c.gcm ? (
               <span className="rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 font-mono text-[#9db8ff]">
                 {partner.usesGcm ? `gcm ${c.gcm}` : c.gcm}
               </span>
@@ -679,14 +698,17 @@ function CampaignCardBase({
                       onChange={(v) =>
                         patch({
                           account: v,
-                          // A roas card keeps its pinned value pixel across account switches —
-                          // defaultPixelFor would swap it back to the FARM-1 preference. AIF pixels
-                          // are derived from the optimization (normalize re-pins) — never refilled.
-                          pixel: aifMode
-                            ? c.pixel
-                            : kind === "roas"
-                              ? ROAS_PIXEL.id
-                              : defaultPixelFor(adAccounts ?? null, v, partner.preferredPixel),
+                          // AV binds no pixel at all (Traffic / link clicks) — never fill one on an
+                          // account switch. A roas card keeps its pinned value pixel across account
+                          // switches — defaultPixelFor would swap it back to the FARM-1 preference.
+                          // AIF pixels are derived from the optimization (normalize re-pins) — never refilled.
+                          pixel: avMode
+                            ? ""
+                            : aifMode
+                              ? c.pixel
+                              : kind === "roas"
+                                ? ROAS_PIXEL.id
+                                : defaultPixelFor(adAccounts ?? null, v, partner.preferredPixel),
                         })
                       }
                       options={decorateAccountOptions(moAccountOptions, limits)}
@@ -776,18 +798,22 @@ function CampaignCardBase({
                   label="Pixel"
                   className={setupCol}
                   hint={
-                    aifMode
-                      ? kind === "roas"
-                        ? "pinned by min ROAS"
-                        : conversions
-                          ? "postback CAPI pixel"
-                          : "clicks need no pixel"
-                      : !hsMode && partner.accountsFromToken && kind === "roas"
-                        ? "pinned by min ROAS"
-                        : undefined
+                    avMode
+                      ? "the AV page carries no pixel"
+                      : aifMode
+                        ? kind === "roas"
+                          ? "pinned by min ROAS"
+                          : conversions
+                            ? "postback CAPI pixel"
+                            : "clicks need no pixel"
+                        : !hsMode && partner.accountsFromToken && kind === "roas"
+                          ? "pinned by min ROAS"
+                          : undefined
                   }
                   error={
-                    hsMode
+                    avMode
+                      ? undefined
+                      : hsMode
                       ? // Quiet until the fanka is picked — that's where the pixel step starts
                         // (single-pixel accounts then self-fill and never show this nag).
                         c.account && c.page && Array.isArray(hsPixels) && hsPixels.length > 0 && !c.pixel
@@ -811,7 +837,11 @@ function CampaignCardBase({
                             : undefined
                   }
                 >
-                  {aifMode ? (
+                  {avMode ? (
+                    // AV pages carry no Meta pixel — delivery is Traffic / link clicks, so the
+                    // field is locked empty (the account switch never fills it, the route sends "").
+                    <LockedField value="No pixel — link clicks" hint="auto" />
+                  ) : aifMode ? (
                     // Pixel is a CHOICE on this rail (owner ask 09-02): conversions pick from
                     // the cabinet's own token-catalog pixels — the board auto-fills the
                     // account's pixel, and an empty pick still auto-derives server-side.
@@ -886,7 +916,13 @@ function CampaignCardBase({
             <section className="flex flex-col gap-3">
               <SectionLabel icon={<TargetIcon className="h-3.5 w-3.5" />}>Delivery</SectionLabel>
               <div className="grid grid-cols-12 gap-3">
-                {!aifMode ? (
+                {avMode ? (
+                  // AV: the page has no pixel, so the only honest objective is Traffic (link
+                  // clicks) — pinned in the card and re-forced by the route (applyPartnerLocks).
+                  <Field label="Objective" className="col-span-6 md:col-span-4">
+                    <LockedField value="Traffic" hint="AV" />
+                  </Field>
+                ) : !aifMode ? (
                   <Field label="Objective" className={hsMode ? "col-span-6 md:col-span-4" : "col-span-6 md:col-span-3"}>
                     <Select
                       value={c.objective}
@@ -905,8 +941,13 @@ function CampaignCardBase({
                   </Field>
                 ) : null}
                 {/* The optimization toggle is an MO funnel concept — HS tails get fire=click
-                    unconditionally on HIGH ADX (redirect type decides, see hsLinkSegments). */}
-                {!hsMode ? (
+                    unconditionally on HIGH ADX (redirect type decides, see hsLinkSegments). AV is
+                    pinned to link clicks (no pixel to optimize conversions on). */}
+                {avMode ? (
+                  <Field label="Optimization" className="col-span-6 md:col-span-4" hint="no pixel — link clicks">
+                    <LockedField value="Link clicks" hint="AV" />
+                  </Field>
+                ) : !hsMode ? (
                   <Field
                     label="Optimization"
                     className={aifMode ? "col-span-6" : "col-span-6 md:col-span-3"}
@@ -932,7 +973,7 @@ function CampaignCardBase({
                 ) : null}
                 <Field
                   label="Bid strategy"
-                  className={hsMode ? "col-span-6 md:col-span-4" : aifMode ? "col-span-6" : "col-span-6 md:col-span-3"}
+                  className={avMode ? "col-span-6 md:col-span-4" : hsMode ? "col-span-6 md:col-span-4" : aifMode ? "col-span-6" : "col-span-6 md:col-span-3"}
                 >
                   <Select
                     value={c.bidStrategy}
@@ -971,10 +1012,11 @@ function CampaignCardBase({
                         });
                       }
                     }}
-                    options={BID_STRATEGIES}
+                    // AV refuses min-ROAS (no conversion signal without a pixel) — never offer it.
+                    options={avMode ? BID_STRATEGIES.filter((s) => s.value !== "LOWEST_COST_WITH_MIN_ROAS") : BID_STRATEGIES}
                   />
                 </Field>
-                {!aifMode ? (
+                {!aifMode && !avMode ? (
                   <Field
                     label="Conversion event"
                     className={hsMode ? "col-span-6 md:col-span-4" : "col-span-6 md:col-span-3"}
@@ -1158,6 +1200,43 @@ function CampaignCardBase({
                                 copied={copied}
                                 disabled={!linkCopyable}
                                 title="Waiting for a brand…"
+                                onClick={copyLink}
+                              />
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    </Field>
+                  ) : avMode ? (
+                    <Field
+                      label="Destination"
+                      hint="an article of an AV site, or a Redirect path — the ad points here; the tracking tail is ours"
+                    >
+                      <div>
+                        <AvDestinationField
+                          value={c.landing}
+                          onChange={(v) => patch({ landing: v })}
+                          destinations={avDestinations}
+                        />
+                        {/* AV link preview — the EXACT link the launch sends (avLinkSegments); the
+                            key slot fills once the registry hands an AV key. No pixel, no fire. */}
+                        {c.landing ? (
+                          <div className="mt-2 overflow-hidden rounded-lg border border-line bg-surface2/50">
+                            <div className="max-h-24 select-all overflow-y-auto break-all px-3 py-2 font-mono text-[11px] leading-relaxed">
+                              {landingUrlSegments(partner, c.landing, c.gcm || "…", false).map((seg, i) => (
+                                <span key={i} className={LINK_ROLE_CLASS[seg.role]}>
+                                  {seg.text}
+                                </span>
+                              ))}
+                            </div>
+                            <div className="flex items-center justify-between gap-2 border-t border-line bg-surface/50 px-2 py-1.5">
+                              <span className="select-none font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
+                                AV link · {avKind}
+                              </span>
+                              <CopyLinkButton
+                                copied={copied}
+                                disabled={!linkCopyable}
+                                title="Waiting for an AV key…"
                                 onClick={copyLink}
                               />
                             </div>

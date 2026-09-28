@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { FbError, fbGet } from "@/lib/fb-graph";
 import { aifRail } from "@/lib/aif-launch";
+import { avRail } from "@/lib/av-launch";
 import { partnerConfig, sanitizePartnerId } from "@/lib/partners";
 import { resolveMoSigner } from "@/lib/mo-soc";
 import { moneyLabel } from "@/lib/types";
@@ -128,16 +129,22 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
   const url = new URL(req.url);
-  // The partner picks the Graph bearer: AIF sources live in the AIF cabinets (the AIF token),
-  // MO sources are read with the MO signer. Both come from the OWNER'S assignment on /tokens for
-  // the rail named by `?rail=` (the clone board reads with the CLONE signer — the same bearer
-  // that will build the copies, so "no access" on read means "no access" on build; default
-  // clone). A missing/unreadable token is a clean config error, never a guessed bearer.
+  // The partner picks the Graph bearer: AV sources live in the AV cabinets (the AV token), AIF
+  // sources in the AIF cabinets (the AIF token), MO sources are read with the MO signer. All come
+  // from the OWNER'S assignment on /tokens for the rail named by `?rail=` (the clone board reads
+  // with the CLONE signer — the same bearer that will build the copies, so "no access" on read
+  // means "no access" on build; default clone). A missing/unreadable token is a clean config
+  // error, never a guessed bearer.
   const partner = partnerConfig(sanitizePartnerId(url.searchParams.get("partner")));
+  const av = Boolean(partner.avLaunch);
   const aif = Boolean(partner.aifLaunch);
   const railName = url.searchParams.get("rail") === "launch" ? "launch" : "clone";
   let token: string;
-  if (aif) {
+  if (av) {
+    const r = await avRail(railName);
+    if (!r.ok) return NextResponse.json({ ok: false, error: r.error }, { status: 400 });
+    token = r.rail.token;
+  } else if (aif) {
     const r = await aifRail(railName);
     if (!r.ok) return NextResponse.json({ ok: false, error: r.error }, { status: 400 });
     token = r.rail.token;

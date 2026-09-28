@@ -49,7 +49,8 @@ const FIELDS: Field[] = [
     when: (p) => !p.lockedAccount || !!p.fanpagesFromToken,
     preview: (c) => c.page || "—",
   },
-  { key: "pixel", label: "Pixel", group: "Setup", when: (p) => !p.lockedPixel, preview: (c) => c.pixel || "—" },
+  // AV binds no pixel (Traffic / link clicks) — the field is locked empty, so it's never copyable.
+  { key: "pixel", label: "Pixel", group: "Setup", when: (p) => !p.lockedPixel && !p.avLaunch, preview: (c) => c.pixel || "—" },
 
   { key: "objective", label: "Objective", group: "Delivery", preview: (c) => optLabel(OBJECTIVES, c.objective) },
   // The optimization toggle is MO-funnel-only; HS tails carry fire=click unconditionally on
@@ -75,7 +76,9 @@ const FIELDS: Field[] = [
   // AIF reuses the landing slot for its destination slug — same copy semantics, different label.
   { key: "landing", label: "Landing", group: "Creative", when: (p) => p.usesGcm, preview: (c) => c.landing || "—" },
   { key: "landing", label: "Destination article", group: "Creative", when: (p) => Boolean(p.aifLaunch), preview: (c) => c.landing || "—" },
-  { key: "link", label: "Destination link", group: "Creative", when: (p) => !p.usesGcm && !p.aifLaunch, preview: (c) => c.link || "—" },
+  // AV stores the whole destination URL (article / redirect path) in the same slot.
+  { key: "landing", label: "Destination", group: "Creative", when: (p) => Boolean(p.avLaunch), preview: (c) => c.landing || "—" },
+  { key: "link", label: "Destination link", group: "Creative", when: (p) => !p.usesGcm && !p.aifLaunch && !p.avLaunch, preview: (c) => c.link || "—" },
   { key: "title", label: "Title", group: "Creative", preview: (c) => c.title || "—" },
   { key: "copy", label: "Primary text", group: "Creative", preview: (c) => c.copy || "—" },
   { key: "cta", label: "CTA", group: "Creative", preview: (c) => optLabel(CTAS, c.cta) },

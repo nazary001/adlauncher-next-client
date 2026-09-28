@@ -7,6 +7,15 @@ import { makeCampaign, moEnsureSocMark, pinNamePrefix, withPartnerMark } from ".
 
 const MO = "[23/09] (MO) - ";
 const AIF = "[23/09] (AIF) - ";
+const AV = "[28/09] (AV) - ";
+
+test("AV: the create route's partner mark wins over a stale MO/AIF prefix", () => {
+  assert.equal(withPartnerMark(`${MO}Tima`, "AV"), "[23/09] (AV) - Tima");
+  assert.equal(withPartnerMark(`${AIF}Tima`, "AV"), "[23/09] (AV) - Tima");
+  assert.equal(withPartnerMark(`${AV}Tima`, "AV"), `${AV}Tima`);
+  const next = pinNamePrefix([makeCampaign("a", MO, "Tima")], AV);
+  assert.equal(next[0].namePrefix + next[0].name, "[28/09] (AV) - Tima");
+});
 
 test("pinNamePrefix: cards born on MO follow the switch to AIF", () => {
   const rows = [makeCampaign("a", MO, "Tima"), makeCampaign("b", MO, "Dima")];

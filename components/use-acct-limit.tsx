@@ -10,7 +10,7 @@ import {
   useState,
 } from "react";
 import type { RichOption } from "@/lib/catalog";
-import { useAifTaskManager, useTaskManager } from "./task-manager";
+import { useAifTaskManager, useAvTaskManager, useTaskManager } from "./task-manager";
 import { useHsTaskManager } from "./hs-task-manager";
 
 // Client mirror of the per-account launch limit (5 campaigns / 30 min, window anchored at the
@@ -164,6 +164,7 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
   // of starting, and the transition effect below re-polls the registry right then.
   const team = useTaskManager();
   const aif = useAifTaskManager();
+  const av = useAvTaskManager();
   const hsTm = useHsTaskManager();
   const pending = useMemo(() => {
     const m = new Map<string, number>();
@@ -176,9 +177,10 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
     };
     fold(team.tasks);
     fold(aif.tasks);
+    fold(av.tasks);
     fold(hsTm.tasks);
     return m;
-  }, [team.tasks, aif.tasks, hsTm.tasks]);
+  }, [team.tasks, aif.tasks, av.tasks, hsTm.tasks]);
 
   // A local task starting or finishing means the server registry changed within seconds —
   // re-poll (throttled) instead of letting counts sit up to 30 s stale mid-wave.
@@ -195,8 +197,8 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
       }
       return `${q}:${run}:${done}`;
     };
-    return `${sig(team.tasks)}|${sig(aif.tasks)}|${sig(hsTm.tasks)}`;
-  }, [team.tasks, aif.tasks, hsTm.tasks]);
+    return `${sig(team.tasks)}|${sig(aif.tasks)}|${sig(av.tasks)}|${sig(hsTm.tasks)}`;
+  }, [team.tasks, aif.tasks, av.tasks, hsTm.tasks]);
   const skipFirstSig = useRef(true);
   useEffect(() => {
     if (skipFirstSig.current) {

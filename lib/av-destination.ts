@@ -88,6 +88,18 @@ async function siteArticleUrls(domain: string): Promise<string[]> {
   if (/<sitemapindex/i.test(root.text)) {
     const files = locs(root.text).slice(0, SITEMAP_FILES_MAX);
     for (const f of files) {
+      // Server fetches are restricted to THIS AV site (the host allowlist from /me). A sitemap index
+      // is served by AV's CMS, so a <loc> could name any host (an internal address, a metadata
+      // endpoint) — skip a sub-sitemap whose host is not the site, mirroring the allowlist already
+      // applied to the article URLs below, so a foreign entry can't turn into a blind server-side
+      // request (review find 09-28 — the fetch of `f` itself was previously unguarded).
+      let fhost = "";
+      try {
+        fhost = new URL(f).hostname.toLowerCase();
+      } catch {
+        continue; // an unparseable <loc> is never fetched
+      }
+      if (fhost !== domain && fhost !== `www.${domain}`) continue;
       const part = await fetchText(f);
       if (part.status === 200) urls.push(...locs(part.text));
     }
@@ -113,7 +125,12 @@ const decodeEntities = (s: string): string =>
     .replace(/&#(\d+);/g, (_m, d: string) => String.fromCharCode(Number(d)));
 
 /** Fill real <title>s for the articles not cached yet — bounded (8 s total, 8 in flight); the rest
- *  keep the slug-derived title until a later read. */
+ *  keep the slug-derived title until a later read. This is a DISPLAY-time title scrape only: it must
+ *  NOT seed pageOkCache. That cache is the launch/clone liveness signal (articleLive short-circuits on
+ *  it), and articleLive only writes it AFTER proving the page answers 200 AND does not redirect off
+ *  the AV site. A bulk 200 here (redirect:"follow", no finalHost check) would let a since-404'd or
+ *  off-site-redirecting article resolve "live" for up to 10 min after a board load — defeating the
+ *  per-launch re-check the rail advertises (review find 09-28). */
 async function fillTitles(urls: string[]): Promise<void> {
   const todo = urls.filter((u) => !fresh(titleCache.get(u), TITLE_TTL_MS));
   if (todo.length === 0) return;
@@ -126,7 +143,8 @@ async function fillTitles(urls: string[]): Promise<void> {
         const r = await fetchText(u, Math.max(1_000, Math.min(5_000, deadline - Date.now())));
         const m = /<title[^>]*>([^<]{1,300})<\/title>/i.exec(r.text);
         if (r.status === 200 && m) titleCache.set(u, { at: Date.now(), value: decodeEntities(m[1]).replace(/\s+/g, " ").trim() });
-        if (r.status === 200) pageOkCache.set(u, Date.now());
+        // Deliberately does NOT touch pageOkCache — only articleLive (finalHost-validated) may seed
+        // the launch-liveness cache (see this function's header note).
       } catch {
         /* keep the derived title */
       }
