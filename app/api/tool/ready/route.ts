@@ -40,6 +40,16 @@ export async function GET(req: Request) {
   const partner = sanitizePartnerId(params.get("partner"));
   const rail = railParam(params.get("rail"));
 
+  // AV has NO TOOL channel: its cabinets live on AV's own FB token, the TOOL sessions are the HS
+  // team's Ads Manager sessions. Without this the partner would fall into the HS branch below
+  // (catalogIds null = "every live TOOL account") and report ready with the HS team's accounts.
+  if (partner === "av") {
+    return NextResponse.json(
+      { ok: true, ready: false, reason: "not_available", message: "AV launches only on the AV token — TOOL is the HS team's Ads Manager sessions", accounts: [], live: 0 },
+      noStore,
+    );
+  }
+
   const ready = await toolLaunchReady();
   if (!ready.ok) {
     // Key / scope / reachability / no-live-session — all before any partner catalog work.
