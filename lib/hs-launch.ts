@@ -4,6 +4,7 @@
 import { type Campaign, bidKind, normalizeRoasGoal, parseMoney } from "./types";
 import type { LinkSegment } from "./partners";
 import { CONVERSION_EVENTS } from "./catalog";
+import { TOOL_MARK } from "./tool-launch";
 
 /** LION validates the `(REDIR_LABEL)` name segment against redirect_type with this exact map. */
 export const HS_REDIRECT_LABELS: Record<string, string> = {
@@ -162,11 +163,14 @@ export function hsNamePrefix(
   c: Pick<Campaign, "redirectType" | "countries">,
   acr: string,
   ddmm: string,
-  channel: "lion" | "token" = "lion",
+  channel: "lion" | "token" | "tool" = "lion",
 ): string {
   const label = HS_REDIRECT_LABELS[c.redirectType] ?? "…";
   const codes = c.countries.length ? hsCountryCodes(c.countries).join(", ") : "…";
-  return `[${ddmm}] (${acr || "ACR"}) API - (${label}) - [${codes}] - ${channel === "token" ? HS_TOKEN_MARK : ""}`;
+  // The TOKEN slot carries the channel marker: FB Token → TOKEN -, TOOL → GCL TOOL - (the single
+  // TOOL_MARK from lib/tool-launch — one source of truth so the two rails can never drift), LION → none.
+  const mark = channel === "token" ? HS_TOKEN_MARK : channel === "tool" ? TOOL_MARK : "";
+  return `[${ddmm}] (${acr || "ACR"}) API - (${label}) - [${codes}] - ${mark}`;
 }
 
 /** Full campaign name = LION prefix (channel-marked for the FB Token rail) + the user's
@@ -175,7 +179,7 @@ export function hsFullName(
   c: Pick<Campaign, "redirectType" | "countries" | "name">,
   acr: string,
   ddmm: string,
-  channel: "lion" | "token" = "lion",
+  channel: "lion" | "token" | "tool" = "lion",
 ): string {
   return `${hsNamePrefix(c, acr, ddmm, channel)}${c.name.trim()}`;
 }

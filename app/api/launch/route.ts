@@ -35,6 +35,20 @@ import { isAutoLandingSlug } from "@/lib/auto-landings";
 import { reportPagesUsed } from "@/lib/hs-pages";
 import { taskWriter } from "@/lib/task-store";
 import { del } from "@vercel/blob";
+// TOOL launch channel (owner ask 28.09): a `via:"tool"` body flag runs this launch through the HS
+// team's Ads Manager sessions service (tool.gctracking.xyz) instead of the direct Graph tree — same
+// auth, signer/catalog validation, gcm + acct-slot claims and NDJSON contract, but the whole
+// campaign→adset→ad build is one TOOL job. The TOOL key never leaves the server (lib/tool-sessions).
+import {
+  buildToolCampaign,
+  runToolMedia,
+  runToolPublish,
+  toolEnsureMark,
+  type ToolCreated,
+  type ToolCreativeInput,
+  type ToolNdjsonStage,
+} from "@/lib/tool-launch";
+import { toolAccountVisible, toolDeps, toolInputFromCampaign, toolLaunchReady } from "@/lib/tool-run";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -53,6 +67,13 @@ const FB_BUDGET_RETRIES = 8;
 // failure is often the throttle itself, so the pause attempt gets a hard confirmation window
 // instead of riding fbPost's full retry ladder; past it the row honestly says "not confirmed".
 const PAUSE_CONFIRM_MS = 20_000;
+
+// TOOL launch deadline (owner ask 28.09): the TOOL create job is followed by polling GET /jobs
+// (~2.5 s cadence, lib/tool-launch runToolPublish) — media registration + the publish job share
+// this wall-clock budget from request start. 265 s < maxDuration 300 s keeps the deadline INSIDE
+// the function so a pending job settles the row (slot + gcm KEPT, note "pending tool job #N")
+// instead of a Vercel timeout skipping the disposition entirely.
+const TOOL_DEADLINE_MS = 265_000;
 
 // Ad-set creation self-heal and the media upload/processing helpers moved to lib/fb-graph
 // (createAdsetSelfHealing) and lib/fb-media — shared with the HS token-launch rail, byte-identical
@@ -101,12 +122,18 @@ export async function POST(req: Request) {
   if (!session) {
     return NextResponse.json({ ok: false, stage: "auth", error: "unauthorized" }, { status: 401 });
   }
+  // Wall-clock origin for the TOOL job deadline (see TOOL_DEADLINE_MS) — captured before any await
+  // so the whole request shares one budget.
+  const startedAt = Date.now();
 
   let campaign: Campaign;
   let partnerId: PartnerId;
   /** Creatives of this launch (1..maxCreatives): own-Blob URLs; cover = video thumbnail image. */
   let medias: { url: string; kind: "video" | "image"; coverUrl: string }[] = [];
   let taskId: string | null = null;
+  /** owner ask 28.09: `via:"tool"` routes this launch through TOOL; absent/anything else is the
+   *  unchanged direct-Graph path. */
+  let viaTool = false;
   try {
     const j = (await req.json()) as {
       campaign?: Campaign;
@@ -123,9 +150,13 @@ export async function POST(req: Request) {
       /** Legacy client field (pre-image builds still in open tabs) — video by definition. */
       videoUrl?: string;
       taskId?: string;
+      /** owner ask 28.09: "tool" = launch through TOOL; absent/anything else = direct Graph. The
+       *  legacy `channel` field above stays ignored (it was the retired soc switch). */
+      via?: string;
     };
     campaign = (j.campaign ?? {}) as Campaign;
     partnerId = String(j.partnerId ?? "in") as PartnerId;
+    viaTool = j.via === "tool";
     if (Array.isArray(j.medias) && j.medias.length > 0) {
       medias = j.medias.slice(0, 10).map((m) => {
         const kind = m?.kind === "image" ? ("image" as const) : ("video" as const);
@@ -400,13 +431,45 @@ export async function POST(req: Request) {
     );
   }
 
+  // TOOL channel gate (owner ask 28.09) — pre-stream, session-gated exactly like the Graph path
+  // (never ownerGate). Everything above (auth, signer, account/page/pixel/landing/media/bid/geo
+  // validation, image prefetch) has already run identically, so a TOOL launch is validated the
+  // same; here we add ONLY the TOOL-visible-account gate and read the account's TOOL-side currency
+  // (the buildToolCampaign USD guard's backstop — TOOL's validate step re-checks it too). A
+  // not-ready verdict is the SAME pre-stream JSON rejection shape the route already returns.
+  let toolAcctCurrency = "USD";
+  if (viaTool) {
+    const ready = await toolLaunchReady();
+    if (!ready.ok) {
+      return NextResponse.json({ ok: false, stage: "config", error: ready.message }, { status: 400 });
+    }
+    // Fire-time visibility (force-refreshes the 60 s roster once on a miss) — a stale "tool" pick
+    // whose account no live session sees is refused here, not mid-stream.
+    if (!(await toolAccountVisible(binds.accountId))) {
+      return NextResponse.json(
+        {
+          ok: false,
+          stage: "config",
+          error: `tool_account_unavailable — no live TOOL session sees ad account ${binds.accountId}; an owner refreshes/adds one on Ads Manager sessions`,
+        },
+        { status: 400 },
+      );
+    }
+    // Re-read the (now possibly refreshed) roster for this account's currency; default USD so a
+    // roster/refresh race never blocks a valid launch (TOOL still validates currency itself).
+    const roster = await toolLaunchReady();
+    if (roster.ok) toolAcctCurrency = roster.accounts.find((a) => a.account_id === binds.accountId)?.currency || "USD";
+  }
+
   // Soc-born runs carry the fixed SOC marker in the name (server-side truth — an old/tampered
   // client may send an unmarked one), mirroring the HS token rail's ` TOKEN - ` convention.
   // Alternate SYSTEM users (entry.system) are system-class signers, not соцы — no marker.
   // The partner mark in the prefix is the ROUTE's, not the client's (a card born on AIF and
   // launched here after a switch keeps "(AIF)" otherwise — twin of the AIF route's belt).
+  // TOOL-born runs carry `GCL TOOL - ` (toolEnsureMark) in the SOC slot and never the SOC marker
+  // (SOC marks our social token as signer, which TOOL is not — spec §1).
   const baseName = withPartnerMark(`${campaign.namePrefix}${campaign.name}`.trim(), partner.label);
-  const name = !signer.sys ? moEnsureSocMark(baseName) : baseName;
+  const name = viaTool ? toolEnsureMark(baseName) : !signer.sys ? moEnsureSocMark(baseName) : baseName;
   // &fire=click follows the optimization — and min-ROAS ALWAYS optimizes purchase value, so the
   // funnel must fire Purchase on click regardless of what optimization the client sent (the UI
   // pins it, but the server is the truth: a stale/edited draft could still say "clicks", which
@@ -454,24 +517,206 @@ export async function POST(req: Request) {
         acctSlot = await claimAcctSlot(binds.accountId, {
           user: session.username,
           partner: "in",
-          channel: "launch",
+          // The 5/30-min account meter spans every channel; a TOOL launch claims here too, under
+          // its own channel label so the drawer can tell the rails apart (owner ask 28.09).
+          channel: viaTool ? "tool" : "launch",
           name,
           accountName: await tokenAccountName(binds.accountId, cat).catch(() => ""),
         });
 
         // 1) reserve the gcm BEFORE building the link (guarantees no duplicate marker). The
         // registry note records WHICH signer birthed the run — the name only says "SOC" (соцы)
-        // or nothing (system-class signers).
+        // or nothing (system-class signers); a TOOL run notes `via:tool` (no FB signer).
         claim = await claimGcm(campaign.gcm, {
           campaign_name: name,
           landing: campaign.landing || null,
-          notes: `claimed via adlauncher launch (${signer.sys ? "sys" : "soc"}:${signer.name})`,
+          notes: viaTool ? "claimed via adlauncher launch (via:tool)" : `claimed via adlauncher launch (${signer.sys ? "sys" : "soc"}:${signer.name})`,
         });
         const gcm = claim.gcm;
         // The link carries the campaign's chosen pixel (binds.pixelId, already validated) so the
         // funnel fires that pixel — matching the adset's promoted pixel.
         const link = fullLandingUrl(partner, campaign.landing, gcm, conversions, binds.pixelId);
         if (!link) throw new FbError("no landing selected — cannot build destination link", {});
+
+        // ============================================================================================
+        // TOOL launch block (owner ask 28.09). Replaces the direct-Graph upload+tree (steps 2-4
+        // below) with ONE TOOL job: register each creative's media from its public Blob URL, build a
+        // CampaignRequest (USD budget, ROAS coefficient — NEVER money()/×10000), submit and poll.
+        // Every terminal state (done / pending / failed) settles the row and RETURNS, so the Graph
+        // code below stays byte-for-byte and never runs on this rail. TOOL creates PAUSED and
+        // activates last on full success, so there is NO Graph pause to attempt on failure.
+        // ============================================================================================
+        if (viaTool) {
+          const deadlineAt = startedAt + TOOL_DEADLINE_MS;
+          // Idempotency-Key = our task id (spec §3) so a retried wave never double-creates; generate
+          // a stable per-run key when the client sent none (auto-launch modal, browser died pre-save).
+          const idempotencyKey = taskId || `mo-tool-${gcm}-${startedAt.toString(36)}`;
+          // Forward TOOL's own stage keys to the same NDJSON progress the task managers render;
+          // the terminal done/error are sent explicitly below, not through the tick.
+          const onStage = (s: ToolNdjsonStage) => {
+            if (s !== "done" && s !== "error") progress(s);
+          };
+          // Terminal failure disposition — mirrors the shared catch (release the slot only when
+          // nothing was created; retire the gcm with a job-named note when a campaign exists, else
+          // free the code), but with NO Graph pause and TOOL wording. `pending` is handled inline.
+          const toolFail = async (msg: string, opts: { created?: ToolCreated; jobId?: number } = {}) => {
+            if (opts.created?.campaignId) {
+              created.campaign_id = opts.created.campaignId;
+              if (opts.created.adsetIds[0]) created.adset_id = opts.created.adsetIds[0];
+            }
+            if (acctSlot && !created.campaign_id) await releaseAcctSlot(acctSlot.documentId);
+            if (claim?.documentId) {
+              if (created.campaign_id)
+                await backfillGcm(
+                  claim.documentId,
+                  { status: "retired", notes: `launch failed: ${msg}`, campaign_id: created.campaign_id, ...(created.adset_id ? { adset_id: created.adset_id } : {}) },
+                  claim.gcm,
+                );
+              else await deleteGcm(claim.documentId, claim.gcm);
+            }
+            settled = true;
+            tw.write({
+              status: "error",
+              stage: lastStage,
+              finished_at: Date.now(),
+              error: msg,
+              ...(created.campaign_id ? { campaign_id: created.campaign_id } : {}),
+              ...(created.adset_id ? { adset_id: created.adset_id } : {}),
+            });
+            send({ ok: false, stage: "error", via: "tool", ...(opts.jobId ? { tool_job_id: opts.jobId } : {}), error: msg, created });
+          };
+
+          // 2t) register every creative through TOOL (media/{images|videos}/from-url with our public
+          // Blob URL; a custom video cover rides as the thumbnail MediaRef). runToolMedia drives the
+          // video → processing stages and returns a MediaRef per creative.
+          progress("video");
+          const mediaRun = await runToolMedia(
+            toolDeps,
+            binds.accountId,
+            medias.map((m, i) => ({
+              url: m.url,
+              kind: m.kind,
+              name: medias.length > 1 ? `${name} · ${i + 1}` : name,
+              coverUrl: m.coverUrl || undefined,
+            })),
+            { deadlineAt, onStage },
+          );
+          if (!mediaRun.ok) {
+            // Nothing exists on FB yet (media never got a job) → free the slot + the gcm code.
+            await toolFail(`TOOL media registration failed: ${mediaRun.error}`);
+            return;
+          }
+
+          // Build the creatives with the TOOL MediaRefs + the gcm tracking link + the card's copy
+          // (same field mapping as fb-launch: copy→primary_text, headline||title→headline, and the
+          // distinct title→description).
+          const creatives: ToolCreativeInput[] = medias.map((m, i) => {
+            const ref = mediaRun.refs[i];
+            const c: ToolCreativeInput = {
+              name: medias.length > 1 ? `${name} · ${i + 1}` : name,
+              media: ref.media,
+              primaryText: campaign.copy || "",
+              headline: campaign.headline || campaign.title || "",
+              url: link,
+              cta: campaign.cta || "",
+            };
+            if (ref.thumbnail) c.thumbnail = ref.thumbnail;
+            if (campaign.title && campaign.headline && campaign.title !== campaign.headline) c.description = campaign.title;
+            return c;
+          });
+
+          const localeIds = await resolveLocales(campaign.locales, chToken);
+          const built = buildToolCampaign(
+            toolInputFromCampaign(campaign, {
+              name,
+              pageId: binds.pageId,
+              pixelId: binds.pixelId,
+              localeIds,
+              creatives,
+              status: "ACTIVE", // MO launches go live; TOOL creates PAUSED then activates on success
+              accountCurrency: toolAcctCurrency,
+            }),
+          );
+          if (!built.ok) {
+            // A named refusal (bad currency / cta / event / budget / roas) — nothing was created.
+            await toolFail(`TOOL rejected the campaign: ${built.error}`);
+            return;
+          }
+
+          // 3t) submit the create job and follow it to a terminal state (poll ~2.5 s, spec §2.1).
+          progress("campaign");
+          const pub = await runToolPublish(toolDeps, binds.accountId, built.body, { idempotencyKey, deadlineAt, onStage });
+
+          if (pub.ok) {
+            created.campaign_id = pub.campaignId;
+            created.adset_id = pub.adsetId;
+            created.ad_id = pub.adIds[0];
+            if (pub.adIds.length > 1) created.ad_ids = [...pub.adIds];
+            // 4t) same registry side-effects as the Graph success path: page-slot accounting + the
+            // FB ids against the gcm (best-effort — a live TOOL campaign must not be reported failed
+            // over a Strapi/hs-tools hiccup, so these never throw into the catch here).
+            await reportPagesUsed("in", [{ pageId: binds.pageId, delta: pub.adIds.length }]).catch(() => {});
+            await backfillGcm(
+              claim.documentId,
+              { campaign_id: pub.campaignId, adset_id: pub.adsetId, ad_id: pub.adIds[0], notes: `launched via TOOL job #${pub.jobId}` },
+              claim.gcm,
+            ).catch(() => {});
+            settled = true;
+            tw.write({
+              status: "done",
+              stage: "ad",
+              finished_at: Date.now(),
+              campaign_id: pub.campaignId,
+              adset_id: pub.adsetId,
+              ad_id: pub.adIds[0],
+              link,
+              gcm,
+              error: null,
+            });
+            send({
+              ok: true,
+              stage: "done",
+              via: "tool",
+              tool_job_id: pub.jobId,
+              gcm,
+              link,
+              page_id: binds.pageId,
+              campaign_id: pub.campaignId,
+              adset_id: pub.adsetId,
+              ad_id: pub.adIds[0],
+              ...(pub.adIds.length > 1 ? { ad_ids: pub.adIds } : {}),
+            });
+            return;
+          }
+
+          if (pub.pending) {
+            // The deadline hit while TOOL was still working — the job finishes server-side. KEEP the
+            // slot + the gcm/link (do NOT free or retire): the campaign may yet be born. Note the job
+            // so the run is traceable on Ads Manager sessions → Jobs.
+            if (pub.created?.campaignId) created.campaign_id = pub.created.campaignId;
+            const pendingMsg = `pending tool job #${pub.jobId ?? "?"} — check Ads Manager sessions → Jobs`;
+            await backfillGcm(
+              claim.documentId,
+              { notes: pendingMsg, ...(pub.created?.campaignId ? { campaign_id: pub.created.campaignId } : {}) },
+              claim.gcm,
+            ).catch(() => {});
+            settled = true;
+            tw.write({
+              status: "error",
+              stage: lastStage,
+              finished_at: Date.now(),
+              error: pendingMsg,
+              ...(pub.created?.campaignId ? { campaign_id: pub.created.campaignId } : {}),
+            });
+            send({ ok: false, stage: "error", pending: true, via: "tool", tool_job_id: pub.jobId, error: pub.error });
+            return;
+          }
+
+          // Definite failure (4xx refusal, or the job ended error/partial). TOOL creates PAUSED and
+          // only activates on full success, so anything created is already PAUSED — no pause to do.
+          await toolFail(pub.error, { created: pub.created, jobId: pub.jobId });
+          return;
+        }
 
         // 2) register EVERY creative. Videos: FB pulls each from its Blob URL — all uploads are
         // fired first (advideos answers immediately, Meta processes in the background, in
@@ -593,7 +838,10 @@ export async function POST(req: Request) {
         // the stream on its own pause attempt — and carry the confirmed state into the message.
         const disposition = launchFailureDisposition(created);
         let pausedOk = false;
-        if (disposition.pauseNeeded) {
+        // TOOL never leaves an ACTIVE partial (it creates PAUSED, activates last) and its own
+        // terminals already returned above — so a TOOL request reaching here (a pre-branch throw:
+        // acct-limit / gcm claim / link) has nothing on Graph to pause. Skip the Graph pause on it.
+        if (!viaTool && disposition.pauseNeeded) {
           pausedOk = await Promise.race([
             fbPost(String(created.campaign_id), { status: "PAUSED" }, chToken).then(
               () => true,

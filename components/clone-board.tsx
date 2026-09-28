@@ -33,6 +33,7 @@ import {
   todayPrefixDDMM,
 } from "@/lib/types";
 import { BID_STRATEGIES, OS_OPTIONS, countryName, geoSummary } from "@/lib/catalog";
+import { TOOL_MARK, toolEnsureMark } from "@/lib/tool-launch";
 import { AIF_VALUE_PIXEL, type PartnerId, aifOfferablePixels, partnerConfig, pickAifPixel } from "@/lib/partners";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { AutoTextarea, BidKindTag, Field, Select } from "./ui";
@@ -64,6 +65,7 @@ import { SignerBadge } from "./signer-badge";
 import { useFanpages } from "./use-fanpages";
 import { defaultPixelFor, pixelOptionsOf, useAdAccounts } from "./use-adaccounts";
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
+import { useToolReady } from "./use-tool-ready";
 import type { SessionUser } from "./user-menu";
 
 /** Today as DD.MM for clone-name date stamping — the team's (Kyiv) calendar day (lib/types
@@ -229,6 +231,43 @@ function CloneInner({
   /** SOC name marker rides personal-soc signers only (MO) — system users go unmarked. */
   const moSocMarks = !aifMode && Boolean(railSigner?.primary?.personal);
   const signerMissing = !signerReady;
+
+  // ---- launch channel (owner ask 28.09): our FB Token (the default Graph rail) vs TOOL (the HS
+  // team's Ads Manager sessions service). Persisted per partner. TOOL is offered only when the
+  // server says a live TOOL session sees this partner's accounts (useToolReady) — today only HS has
+  // such a session, so MO/AIF stay on FB Token until an owner adds one on Ads Manager sessions. A
+  // stale "tool" pick with the rail not ready falls back to FB Token (same rule as the HS board).
+  const CHANNEL_LS = `adlauncher.clone.${partnerId}.channel`;
+  const [channel, setChannel] = useState<"token" | "tool">("token");
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(CHANNEL_LS);
+      // Safe setState-in-effect: runs once on mount (localStorage is unreadable during SSR).
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      if (v === "tool" || v === "token") setChannel(v);
+    } catch {
+      /* storage disabled — session-local pick only */
+    }
+  }, [CHANNEL_LS]);
+  const changeChannel = (ch: "token" | "tool") => {
+    setChannel(ch);
+    setPreviewed(false);
+    try {
+      localStorage.setItem(CHANNEL_LS, ch);
+    } catch {
+      /* storage disabled */
+    }
+  };
+  const toolReady = useToolReady(partnerId, "clone");
+  /** The channel that actually fires: a "tool" pick only holds while the rail is READY (else the
+   *  segment is disabled and the fire falls back to FB Token). */
+  const onTool = channel === "tool" && toolReady.ready;
+  // /api/tool/ready returns BARE digits; our catalog account values are bare digits too, but strip
+  // any "act_" defensively so the TOOL filter matches regardless of spelling.
+  const bareId = (v: string): string => v.replace(/^act_/, "");
+  /** A concrete account a live TOOL session sees for this partner (never SOURCE_ACCOUNT). */
+  const toolAccountVisible = (accountId: string): boolean =>
+    Boolean(accountId) && accountId !== SOURCE_ACCOUNT && toolReady.accounts.has(bareId(accountId));
   // Token fanpages for the batch fanka picker (with live N/limit fill tags from the hs-tools
   // registry; AIF's scope fills in the day the box syncs AIF pages — same as the launcher board).
   // MO waits for the signer pick — there is no system catalog to fall back to any more.
@@ -267,8 +306,13 @@ function CloneInner({
     isTargetFor(d) &&
     adAccounts !== null &&
     !adAccounts.some((a) => a.value === d.accountId);
+  /** On the TOOL rail the effective build account must be a concrete TOOL-visible cabinet — a
+   *  non-TOOL account or the "From each source" sentinel can't build through TOOL (owner ask 28.09),
+   *  so it reads as missing and blocks Duplicate with the message below. */
+  const accountToolMissingFor = (d: CloneRowDest): boolean =>
+    onTool && Boolean(d.accountId) && !toolAccountVisible(d.accountId);
   const accountMissingFor = (d: CloneRowDest): boolean =>
-    Boolean(partner.accountsFromToken) && (!d.accountId || accountStaleFor(d));
+    Boolean(partner.accountsFromToken) && (!d.accountId || accountStaleFor(d) || accountToolMissingFor(d));
   // AIF offers the cabinet's pixels minus the retired ones (owner call 09-02 pt3 — «GC for
   // AIF» / «GC for MO» never offered); MO keeps the account's full list.
   const targetPixelsFor = (accountId: string) => {
@@ -299,7 +343,9 @@ function CloneInner({
       )
     : "";
   const preferredAcct = partner.defaultAccount?.id ?? "";
-  const acctCandidates = (adAccounts ?? [])
+  // On the TOOL rail only TOOL-visible cabinets are candidates for the auto default (so an empty
+  // Settings pick resolves to an account the TOOL session can actually build in).
+  const acctCandidates = (onTool ? (adAccounts ?? []).filter((a) => toolReady.accounts.has(bareId(a.value))) : (adAccounts ?? []))
     .slice()
     .sort((a, b) => (a.value === preferredAcct ? -1 : b.value === preferredAcct ? 1 : 0));
   const autoAccountId = partner.accountsFromToken
@@ -311,6 +357,13 @@ function CloneInner({
         limits.limit,
       )
     : "";
+  /** The account picker's options for the current rail (Settings + per-row pickers share it): on
+   *  TOOL only the TOOL-visible cabinets (no "From each source" — a TOOL clone must land in a
+   *  concrete TOOL cabinet, and the client has no source-account id to prove SOURCE is visible);
+   *  off it, the full token catalog with the "From each source" sentinel (owner ask 28.09). */
+  const accountPickerOptions = onTool
+    ? decorateAccountOptions((adAccounts ?? []).filter((a) => toolReady.accounts.has(bareId(a.value))), limits)
+    : [{ value: SOURCE_ACCOUNT, label: "From each source" }, ...decorateAccountOptions(adAccounts ?? [], limits)];
   const settingsPageIsAuto = Boolean(partner.fanpagesFromToken) && !settings.pageId && Boolean(autoPageId);
   const settingsAccountIsAuto = Boolean(partner.accountsFromToken) && !settings.accountId && Boolean(autoAccountId);
   const effPageId = settings.pageId || autoPageId;
@@ -341,6 +394,15 @@ function CloneInner({
   const copiesOf = (r: CloneRow): number => rowCopiesOf(r, settings);
   const rowsMissing = rows.filter((r) => destMissingFor(destOf(r)));
   const destinationMissing = rows.length > 0 && rowsMissing.length > 0;
+  /** TOOL rail only: rows whose effective build account isn't a TOOL-visible cabinet (a concrete
+   *  non-TOOL account, or a lingering "From each source" pick) — surfaced with its own message
+   *  below (the generic destinationMissing box already blocks them via accountMissingFor). */
+  const toolAcctBlockedRows = onTool
+    ? rows.filter((r) => {
+        const d = destOf(r);
+        return Boolean(d.accountId) && !toolAccountVisible(d.accountId);
+      })
+    : [];
 
   // Account launch limit (5 campaigns / 30 min): EVERY concrete TARGET account must fit its
   // share (rows × copies bound to it). From-each-source rows aren't metered here — the sources'
@@ -542,9 +604,12 @@ function CloneInner({
       const stale = pixelStaleFor(d);
       const total = copiesOf(r);
       for (let k = 1; k <= total; k++) {
-        // Soc-class signers stamp the SOC marker into the name (server re-ensures it — this
-        // keeps the queue rows/previews honest); system-class signers (Spencermo) go unmarked.
-        const full = moSocMarks ? moEnsureSocMark(fullCloneName(r)) : fullCloneName(r);
+        // Name marker: on TOOL the "GCL TOOL - " marker goes right after the clone prefix (owner
+        // ask 28.09; toolEnsureMark, never a SOC mark — TOOL isn't our social signer). Off TOOL,
+        // soc-class signers stamp the SOC marker (server re-ensures either way — this keeps the
+        // queue rows/previews honest); system-class signers (Spencermo) go unmarked.
+        const base = fullCloneName(r);
+        const full = onTool ? toolEnsureMark(base) : moSocMarks ? moEnsureSocMark(base) : base;
         const name = total > 1 ? `${full} (${k})` : full;
         const edit: CloneEdit = {
           campaignId: r.source.campaignId,
@@ -579,6 +644,10 @@ function CloneInner({
           // Card tag: the row's picked strategy + its Bid value (cap/ROAS rows can't fire without
           // one — rowBidMissing gates the button; lowest-cost reads "auto").
           bid: bidTag(r.bidStrategy, edit.roasGoal) || undefined,
+          // TOOL rail (owner ask 28.09): the queue runner POSTs to the TOOL clone path. `via` is
+          // owned by the task-manager unit (CloneEnqueueArgs.via?: "tool"); a conditional SPREAD
+          // keeps this type-clean whether or not that field has landed yet in the shared tree.
+          ...(onTool ? { via: "tool" as const } : {}),
         });
         queued++;
       }
@@ -608,6 +677,58 @@ function CloneInner({
             <p className="-mt-2 text-[10.5px] leading-snug text-faint">
               Batch defaults — every row rides these unless it sets its own Destination in the table.
             </p>
+
+            {/* launch channel (owner ask 28.09): our FB Token (the default Graph rail) vs the HS
+                team's TOOL service. TOOL unlocks only when a live session sees this partner's
+                accounts (useToolReady) — today only HS has one, so MO/AIF stay on FB Token until an
+                owner adds a session on Ads Manager sessions. */}
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Launch channel</span>
+              <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
+                {[
+                  { key: "token" as const, label: "FB Token", ready: true, hint: "Builds on our FB token (the default rail)" },
+                  {
+                    key: "tool" as const,
+                    label: "TOOL",
+                    ready: toolReady.ready,
+                    hint: !toolReady.loaded
+                      ? "Checking TOOL…"
+                      : toolReady.ready
+                        ? `Launches through TOOL · ${toolReady.accounts.size} account${toolReady.accounts.size === 1 ? "" : "s"}`
+                        : toolReady.message || "TOOL is not ready for this partner",
+                  },
+                ].map((opt) => {
+                  const active = channel === opt.key;
+                  return (
+                    <button
+                      key={opt.key}
+                      type="button"
+                      disabled={!opt.ready}
+                      aria-pressed={active}
+                      title={opt.hint}
+                      onClick={() => changeChannel(opt.key)}
+                      className={
+                        "h-8 rounded-[10px] text-[12px] font-semibold transition-all duration-150 " +
+                        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
+                        (active
+                          ? "bg-accent/20 text-[#9db8ff] shadow-[inset_0_0_0_1px_rgba(122,150,255,0.35)]"
+                          : "text-dim hover:text-ink") +
+                        (opt.ready ? "" : " cursor-not-allowed opacity-40")
+                      }
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-center text-[10px] leading-relaxed text-faint">
+                {onTool
+                  ? `Launches through TOOL · ${toolReady.accounts.size} account${toolReady.accounts.size === 1 ? "" : "s"} · marks names “${TOOL_MARK.trim()}”`
+                  : channel === "tool" && !toolReady.ready
+                    ? toolReady.message || "TOOL not ready — firing on FB Token"
+                    : "Builds on our FB token"}
+              </p>
+            </div>
 
             {/* The clone signer — the OWNER'S pick on /tokens: reads the catalogs below AND signs
                 every clone (read-only here, owner ask 09-14). */}
@@ -683,12 +804,15 @@ function CloneInner({
                                 : "",
                           })
                         }
-                        options={[
-                          { value: SOURCE_ACCOUNT, label: "From each source" },
-                          ...decorateAccountOptions(adAccounts ?? [], limits),
-                        ]}
+                        options={accountPickerOptions}
                         placeholder="Select account"
-                        emptyHint={adAccounts ? "No accounts on the token" : "Loading accounts…"}
+                        emptyHint={
+                          adAccounts
+                            ? onTool
+                              ? "No TOOL-visible accounts for this partner"
+                              : "No accounts on the token"
+                            : "Loading accounts…"
+                        }
                         warn={accountMissing && defaultsUsed}
                       />
                       {settingsAccountIsAuto ? (
@@ -868,6 +992,17 @@ function CloneInner({
                   ))
                 : null}
 
+              {previewed && rows.length > 0 && toolAcctBlockedRows.length > 0 ? (
+                <div className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11.5px] leading-relaxed text-warn">
+                  TOOL launches only into cabinets a live session sees —{" "}
+                  <span className="font-semibold">{toolAcctBlockedRows.length}</span> row
+                  {toolAcctBlockedRows.length === 1 ? " targets" : "s target"} an account that isn&apos;t
+                  TOOL-visible ({toolReady.accounts.size} available). Pick a TOOL account
+                  {toolReady.accounts.size === 0 ? " (none yet — an owner adds a TOOL session)" : ""} — “From
+                  each source” isn&apos;t available on TOOL.
+                </div>
+              ) : null}
+
               {previewed && rows.length > 0 && signerMissing ? (
                 <div className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11.5px] leading-relaxed text-warn">
                   Duplicate is locked — no clone token is assigned for this partner (an owner
@@ -1039,10 +1174,12 @@ function CloneInner({
                       <div className="cr-name min-w-0">
                         <span
                           className="mb-1 flex items-center gap-1 truncate font-mono text-[10.5px] text-faint"
-                          title={`${r.namePrefix.trim()} — fixed, not editable`}
+                          title={`${(onTool ? `${r.namePrefix}${TOOL_MARK}` : r.namePrefix).trim()} — fixed, not editable`}
                         >
                           <LockIcon className="h-2.5 w-2.5 shrink-0" />
-                          {r.namePrefix.trim()}
+                          {/* TOOL rail (owner ask 28.09): the "GCL TOOL - " marker rides after the
+                              clone prefix (server re-ensures it via toolEnsureMark). */}
+                          {(onTool ? `${r.namePrefix}${TOOL_MARK}` : r.namePrefix).trim()}
                         </span>
                         <AutoTextarea
                           value={r.name}
@@ -1181,12 +1318,15 @@ function CloneInner({
                               size="sm"
                               value={d.accountId}
                               onChange={(v) => patchRowDest(r, { accountId: v, pixelId: autoPixelFor(v) })}
-                              options={[
-                                { value: SOURCE_ACCOUNT, label: "From each source" },
-                                ...decorateAccountOptions(adAccounts ?? [], limits),
-                              ]}
+                              options={accountPickerOptions}
                               placeholder="Account"
-                              emptyHint={adAccounts ? "No accounts on the token" : "Loading accounts…"}
+                              emptyHint={
+                                adAccounts
+                                  ? onTool
+                                    ? "No TOOL-visible accounts for this partner"
+                                    : "No accounts on the token"
+                                  : "Loading accounts…"
+                              }
                               warn={acctMissing}
                               accent={Boolean(r.dest?.accountId)}
                               ariaLabel={`Account for row ${i + 1}`}
@@ -1422,8 +1562,12 @@ function CloneInner({
                       key={p.key}
                       className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-surface2/40 px-3 py-2"
                     >
-                      <span className="min-w-0 flex-[1_1_220px] truncate text-[12px] text-ink" title={p.name}>
-                        {p.name}
+                      <span
+                        className="min-w-0 flex-[1_1_220px] truncate text-[12px] text-ink"
+                        title={onTool ? toolEnsureMark(p.name) : p.name}
+                      >
+                        {/* On TOOL the marker rides after the clone prefix (toolEnsureMark, idempotent). */}
+                        {onTool ? toolEnsureMark(p.name) : p.name}
                       </span>
                       <GeoChips codes={p.countries} />
                       <span className="shrink-0 font-mono text-[11px] text-faint">
@@ -1477,6 +1621,8 @@ function CloneInner({
           fanpages={fanpages}
           adAccounts={adAccounts}
           limits={limits}
+          onTool={onTool}
+          toolAccounts={onTool ? toolReady.accounts : null}
           initial={destOf(destRow)}
           initialCopies={destRow.copies}
           defaultCopies={settings.copies}

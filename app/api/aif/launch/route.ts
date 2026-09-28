@@ -22,6 +22,20 @@ import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignme
 import { reportPagesUsed } from "@/lib/hs-pages";
 import { taskWriter } from "@/lib/task-store";
 import { del } from "@vercel/blob";
+// TOOL launch channel (owner ask 28.09): a `via:"tool"` body flag runs this AIF launch through the
+// HS team's Ads Manager sessions service (tool.gctracking.xyz) instead of the direct-Graph tree —
+// same auth, rail/catalog validation, brand + acct-slot claims and NDJSON contract, but the whole
+// campaign→adset→ad build is one TOOL job. The TOOL key never leaves the server (lib/tool-sessions).
+import {
+  buildToolCampaign,
+  runToolMedia,
+  runToolPublish,
+  toolEnsureMark,
+  type ToolCreated,
+  type ToolCreativeInput,
+  type ToolNdjsonStage,
+} from "@/lib/tool-launch";
+import { toolAccountVisible, toolDeps, toolInputFromCampaign, toolLaunchReady } from "@/lib/tool-run";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -33,6 +47,12 @@ type Json = Record<string, unknown>;
 // error path (brand release/retire, task row settle) always runs.
 const FB_BUDGET_MS = 240_000;
 const FB_BUDGET_RETRIES = 8;
+
+// TOOL launch deadline (owner ask 28.09) — twin of the MO route: media registration + the publish
+// job share this wall-clock budget from request start; 265 s < maxDuration 300 s keeps the deadline
+// INSIDE the function so a pending job settles the row (slot + brand KEPT, note "pending tool job
+// #N") rather than a Vercel timeout skipping the disposition.
+const TOOL_DEADLINE_MS = 265_000;
 
 // A destination slug the RW page can serve: bare article slug, no slashes/spaces/query junk.
 const SLUG_RE = /^[\w-]{1,200}$/;
@@ -94,12 +114,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, stage: "config", error: railRes.error }, { status: 400 });
   }
   const rail = railRes.rail;
+  // Wall-clock origin for the TOOL job deadline (see TOOL_DEADLINE_MS), before any await.
+  const startedAt = Date.now();
 
   let campaign: Campaign;
   /** Creatives of this launch (1..maxCreatives, MO-parity 09-02): own-Blob URLs; cover = video
    *  thumbnail image. */
   let medias: { url: string; kind: "video" | "image"; coverUrl: string }[] = [];
   let taskId: string | null = null;
+  /** owner ask 28.09: `via:"tool"` routes this launch through TOOL; absent/anything else is the
+   *  unchanged direct-Graph path. */
+  let viaTool = false;
   try {
     const j = (await req.json()) as {
       campaign?: Campaign;
@@ -112,8 +137,11 @@ export async function POST(req: Request) {
       mediaKind?: string;
       coverUrl?: string;
       taskId?: string;
+      /** owner ask 28.09: "tool" = launch through TOOL; absent/anything else = direct Graph. */
+      via?: string;
     };
     campaign = (j.campaign ?? {}) as Campaign;
+    viaTool = j.via === "tool";
     if (Array.isArray(j.medias) && j.medias.length > 0) {
       medias = j.medias.slice(0, 10).map((m) => {
         const kind = m?.kind === "image" ? ("image" as const) : ("video" as const);
@@ -351,13 +379,40 @@ export async function POST(req: Request) {
     );
   }
 
+  // TOOL channel gate (owner ask 28.09) — pre-stream, session-gated exactly like the Graph path.
+  // Everything above (auth, rail, account/page/pixel/slug/media/bid/geo validation, image prefetch)
+  // ran identically; here we add ONLY the TOOL-visible-account gate and read the account's TOOL-side
+  // currency (the buildToolCampaign USD guard's backstop). A not-ready verdict is the SAME pre-stream
+  // JSON rejection shape the route already returns.
+  let toolAcctCurrency = "USD";
+  if (viaTool) {
+    const ready = await toolLaunchReady();
+    if (!ready.ok) {
+      return NextResponse.json({ ok: false, stage: "config", error: ready.message }, { status: 400 });
+    }
+    if (!(await toolAccountVisible(pickedAccount))) {
+      return NextResponse.json(
+        {
+          ok: false,
+          stage: "config",
+          error: `tool_account_unavailable — no live TOOL session sees ad account ${pickedAccount}; an owner refreshes/adds one on Ads Manager sessions`,
+        },
+        { status: 400 },
+      );
+    }
+    const roster = await toolLaunchReady();
+    if (roster.ok) toolAcctCurrency = roster.accounts.find((a) => a.account_id === pickedAccount)?.currency || "USD";
+  }
+
   // Server-pinned invariants (the UI pins them too, but a stale/edited draft is the client's
   // word, not the truth): objective SALES, event Purchase — the only event the CAPI forwarder
   // ever sends into the AIF pixel.
   const serverCampaign: Campaign = { ...campaign, objective: "OUTCOME_SALES", conversionEvent: "PURCHASE" };
   // The partner mark in the prefix is the ROUTE's, not the client's: a card that kept its MO
-  // prefix across a partner switch still launches here as "(AIF)" (live bug 23.09).
-  const name = withPartnerMark(`${serverCampaign.namePrefix}${serverCampaign.name}`.trim(), partner.label);
+  // prefix across a partner switch still launches here as "(AIF)" (live bug 23.09). A TOOL-born run
+  // carries `GCL TOOL - ` after the partner prefix (toolEnsureMark) and no SOC marker (spec §1).
+  const baseName = withPartnerMark(`${serverCampaign.namePrefix}${serverCampaign.name}`.trim(), partner.label);
+  const name = viaTool ? toolEnsureMark(baseName) : baseName;
 
   const encoder = new TextEncoder();
   const stream = withFbBudget({ deadlineAt: Date.now() + FB_BUDGET_MS, retries: FB_BUDGET_RETRIES }, () =>
@@ -390,7 +445,9 @@ export async function POST(req: Request) {
         acctSlot = await claimAcctSlot(binds.accountId, {
           user: session.username,
           partner: "us",
-          channel: "aif",
+          // The 5/30-min account meter spans every channel; a TOOL launch claims here too, under
+          // its own channel label (owner ask 28.09).
+          channel: viaTool ? "aif-tool" : "aif",
           name,
           accountName: await rail.accountName(binds.accountId).catch(() => ""),
         });
@@ -400,14 +457,185 @@ export async function POST(req: Request) {
           campaign_name: name,
           destination: slug,
           // The flow + partner clientId ride the registry note: this brand's revenue shows up in
-          // THAT client's reporting, and the note says which one to look in.
-          notes: `claimed via adlauncher launch (${AIF_FLOWS[flow].label} · clientId ${AIF_FLOWS[flow].clientId})`,
+          // THAT client's reporting, and the note says which one to look in. A TOOL run adds
+          // `via:tool` so the birth channel is traceable (owner ask 28.09).
+          notes: `claimed via adlauncher launch (${AIF_FLOWS[flow].label} · clientId ${AIF_FLOWS[flow].clientId})${viaTool ? " [via:tool]" : ""}`,
         });
         const brand = claim.brand;
         // The pixel rides the RW link (echoed into the postback) so the CAPI forwarder lands
         // the Purchase on the SAME pixel the ad set optimizes for; clicks carry none.
         const link = fullLandingUrl(partner, slug, brand, conversions, binds.pixelId);
         if (!link) throw new FbError("no destination — cannot build the RW link", {});
+
+        // ============================================================================================
+        // TOOL launch block (owner ask 28.09) — twin of the MO route's. Replaces the direct-Graph
+        // upload+tree with ONE TOOL job (media from Blob URL → CampaignRequest → submit → poll).
+        // Every terminal state settles the row and RETURNS, so the Graph code below stays untouched.
+        // TOOL creates PAUSED and activates last, so there is nothing to pause on failure (AIF never
+        // paused on failure anyway). Money is USD, ROAS a coefficient — never money()/×10000.
+        // ============================================================================================
+        if (viaTool) {
+          const deadlineAt = startedAt + TOOL_DEADLINE_MS;
+          const idempotencyKey = taskId || `aif-tool-${brand}-${startedAt.toString(36)}`;
+          const onStage = (s: ToolNdjsonStage) => {
+            if (s !== "done" && s !== "error") progress(s);
+          };
+          // Terminal failure disposition — mirrors AIF's synchronous catch (release the slot only
+          // when nothing was created; retire the brand with a job-named note when a campaign exists,
+          // else free the brand), no Graph pause. `pending` is handled inline below.
+          const toolFail = async (msg: string, opts: { created?: ToolCreated; jobId?: number } = {}) => {
+            if (opts.created?.campaignId) {
+              created.campaign_id = opts.created.campaignId;
+              if (opts.created.adsetIds[0]) created.adset_id = opts.created.adsetIds[0];
+            }
+            if (acctSlot && !created.campaign_id) await releaseAcctSlot(acctSlot.documentId);
+            if (claim?.documentId) {
+              if (created.campaign_id)
+                await backfillBrand(claim.documentId, {
+                  status: "retired",
+                  notes: `launch failed: ${msg}`,
+                  campaign_id: created.campaign_id,
+                  ...(created.adset_id ? { adset_id: created.adset_id } : {}),
+                });
+              else await deleteBrand(claim.documentId);
+            }
+            settled = true;
+            tw.write({
+              status: "error",
+              stage: lastStage,
+              finished_at: Date.now(),
+              error: msg,
+              ...(created.campaign_id ? { campaign_id: created.campaign_id } : {}),
+              ...(created.adset_id ? { adset_id: created.adset_id } : {}),
+            });
+            send({ ok: false, stage: "error", via: "tool", ...(opts.jobId ? { tool_job_id: opts.jobId } : {}), error: msg, created });
+          };
+
+          // 2t) register every creative through TOOL from its public Blob URL (+ custom video cover).
+          progress("video");
+          const mediaRun = await runToolMedia(
+            toolDeps,
+            binds.accountId,
+            medias.map((m, i) => ({
+              url: m.url,
+              kind: m.kind,
+              name: medias.length > 1 ? `${name} · ${i + 1}` : name,
+              coverUrl: m.coverUrl || undefined,
+            })),
+            { deadlineAt, onStage },
+          );
+          if (!mediaRun.ok) {
+            await toolFail(`TOOL media registration failed: ${mediaRun.error}`);
+            return;
+          }
+
+          // Build the creatives with the TOOL MediaRefs + the RW/Quiz link + the card's copy (same
+          // field mapping as fb-launch: copy→primary_text, headline||title→headline, title→description).
+          const creatives: ToolCreativeInput[] = medias.map((m, i) => {
+            const ref = mediaRun.refs[i];
+            const c: ToolCreativeInput = {
+              name: medias.length > 1 ? `${name} · ${i + 1}` : name,
+              media: ref.media,
+              primaryText: serverCampaign.copy || "",
+              headline: serverCampaign.headline || serverCampaign.title || "",
+              url: link,
+              cta: serverCampaign.cta || "",
+            };
+            if (ref.thumbnail) c.thumbnail = ref.thumbnail;
+            if (serverCampaign.title && serverCampaign.headline && serverCampaign.title !== serverCampaign.headline)
+              c.description = serverCampaign.title;
+            return c;
+          });
+
+          const localeIds = await resolveLocales(serverCampaign.locales, rail);
+          const built = buildToolCampaign(
+            toolInputFromCampaign(serverCampaign, {
+              name,
+              pageId: binds.pageId,
+              pixelId: binds.pixelId,
+              localeIds,
+              creatives,
+              status: "ACTIVE", // AIF launches go live; TOOL creates PAUSED then activates on success
+              accountCurrency: toolAcctCurrency,
+            }),
+          );
+          if (!built.ok) {
+            await toolFail(`TOOL rejected the campaign: ${built.error}`);
+            return;
+          }
+
+          // 3t) submit the create job and follow it to a terminal state (poll ~2.5 s).
+          progress("campaign");
+          const pub = await runToolPublish(toolDeps, binds.accountId, built.body, { idempotencyKey, deadlineAt, onStage });
+
+          if (pub.ok) {
+            created.campaign_id = pub.campaignId;
+            created.adset_id = pub.adsetId;
+            created.ad_id = pub.adIds[0];
+            if (pub.adIds.length > 1) created.ad_ids = [...pub.adIds];
+            // 4t) same registry side-effects as the Graph success path: page-slot accounting + the
+            // FB ids against the brand (best-effort — never throw a live TOOL launch into failure).
+            await reportPagesUsed("us", [{ pageId: binds.pageId, delta: pub.adIds.length }]).catch(() => {});
+            await backfillBrand(claim.documentId, {
+              campaign_id: pub.campaignId,
+              adset_id: pub.adsetId,
+              ad_id: pub.adIds[0],
+              notes: `launched via TOOL job #${pub.jobId}`,
+            }).catch(() => {});
+            settled = true;
+            tw.write({
+              status: "done",
+              stage: "ad",
+              finished_at: Date.now(),
+              campaign_id: pub.campaignId,
+              adset_id: pub.adsetId,
+              ad_id: pub.adIds[0],
+              link,
+              gcm: brand, // the shared task row's marker column carries the brand on this rail
+              error: null,
+            });
+            send({
+              ok: true,
+              stage: "done",
+              via: "tool",
+              tool_job_id: pub.jobId,
+              gcm: brand,
+              link,
+              flow,
+              page_id: binds.pageId,
+              campaign_id: pub.campaignId,
+              adset_id: pub.adsetId,
+              ad_id: pub.adIds[0],
+              ...(pub.adIds.length > 1 ? { ad_ids: pub.adIds } : {}),
+            });
+            return;
+          }
+
+          if (pub.pending) {
+            // Deadline hit while TOOL was still working — KEEP the slot + brand (the campaign may
+            // yet be born); note the job so it is traceable on Ads Manager sessions → Jobs.
+            if (pub.created?.campaignId) created.campaign_id = pub.created.campaignId;
+            const pendingMsg = `pending tool job #${pub.jobId ?? "?"} — check Ads Manager sessions → Jobs`;
+            await backfillBrand(claim.documentId, {
+              notes: pendingMsg,
+              ...(pub.created?.campaignId ? { campaign_id: pub.created.campaignId } : {}),
+            }).catch(() => {});
+            settled = true;
+            tw.write({
+              status: "error",
+              stage: lastStage,
+              finished_at: Date.now(),
+              error: pendingMsg,
+              ...(pub.created?.campaignId ? { campaign_id: pub.created.campaignId } : {}),
+            });
+            send({ ok: false, stage: "error", pending: true, via: "tool", tool_job_id: pub.jobId, error: pub.error });
+            return;
+          }
+
+          // Definite failure (refusal or the job ended error/partial) — anything created is PAUSED.
+          await toolFail(pub.error, { created: pub.created, jobId: pub.jobId });
+          return;
+        }
 
         // 2) register EVERY creative on the AIF account (MO-parity, 09-02). Videos: all uploads
         // are fired first (advideos answers immediately, Meta processes in the background, in

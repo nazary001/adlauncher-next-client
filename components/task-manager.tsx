@@ -119,6 +119,11 @@ type LaunchInput = {
   /** MO launch signer: absent = the system-user token, "soc:<name>" = that personal token
    *  (the board's channel switch) — forwarded to /api/launch verbatim. */
   channel?: string;
+  /** TOOL launch channel (owner ask 28.09): "tool" routes the MO/AIF launch through the HS TOOL
+   *  sessions service instead of building on the Graph. Forwarded to /api/launch|/api/aif/launch
+   *  as `via` — a NEW, distinct field: the retired `channel` above is the soc-signer switch and
+   *  is ignored server-side, so the two must never be conflated. */
+  via?: "tool";
   /** All creatives of this launch (1..partner.maxCreatives). The single-media fields below stay
    *  filled with the FIRST one — legacy shape for anything still reading them. */
   medias?: QueuedMedia[];
@@ -137,6 +142,10 @@ type CloneInput = {
   /** MO clone signer: "soc:<name>" — forwarded to /api/clone/run verbatim (the system token is
    *  retired there; MO clones without a signer are rejected server-side). AIF sends none. */
   channel?: string;
+  /** TOOL clone channel (owner ask 28.09): "tool" routes the MO/AIF clone through the HS TOOL
+   *  sessions service. Forwarded to /api/clone/run as `via` — a NEW field distinct from the
+   *  soc-signer `channel` above (see LaunchInput.via). */
+  via?: "tool";
 };
 
 type TaskInput = LaunchInput | CloneInput;
@@ -152,6 +161,9 @@ export type EnqueueArgs = {
   campaign: Campaign;
   /** MO launch signer (see LaunchInput.channel) — set only for soc-channel waves. */
   channel?: string;
+  /** TOOL launch channel (see LaunchInput.via) — set only when the board's TOOL rail is the
+   *  effective channel for this MO/AIF wave. */
+  via?: "tool";
   /** All creatives (1..partner.maxCreatives); when absent the single-media fields drive alone. */
   medias?: QueuedMedia[];
   mediaUrl: string;
@@ -170,6 +182,9 @@ export type CloneEnqueueArgs = {
   edit: CloneEdit;
   /** MO clone signer (see CloneInput.channel) — required for MO batches, absent for AIF. */
   channel?: string;
+  /** TOOL clone channel (see CloneInput.via) — set only when the clone board's TOOL rail is the
+   *  effective channel. */
+  via?: "tool";
   name: string;
   geo: string;
   budget: string;
@@ -637,6 +652,10 @@ function TaskManagerCore({
               partnerId: input.partnerId,
               campaign: input.campaign,
               ...(input.channel ? { channel: input.channel } : {}),
+              // TOOL launch channel (owner ask 28.09): a distinct `via` field, never the retired
+              // soc `channel` above — /api/launch|/api/aif/launch branch on this to route the wave
+              // through the HS TOOL sessions service instead of the Graph.
+              ...(input.via ? { via: input.via } : {}),
               // Multi-creative shape + the legacy single-media fields (first creative) so a
               // mid-deploy server on either side of the wire keeps working.
               medias,
@@ -719,6 +738,19 @@ function TaskManagerCore({
             error: null,
           });
           inputs.current.delete(id); // done → never re-run; free the captured Campaign/video url
+        } else if (f && f.pending === true) {
+          // TOOL is still finishing this launch past our server window (owner ask 28.09): AMBIGUOUS
+          // like a lost connection — a campaign may already exist, so release local authority
+          // (local:false) and let the server-written row's eventual truth win on the next poll. NO
+          // Retry affordance (re-firing an in-flight launch can double-create once TOOL's
+          // idempotency window lapses) and NO remote write (it could demote the server's own row).
+          // Distinct from a hard `ok:false` error, which IS a clean per-launch verdict below.
+          const finishedAt = Date.now();
+          const msg =
+            (f.error as string) ||
+            "TOOL is still finishing this launch — this row updates from the server; check Ads Manager before re-firing";
+          patch(id, { status: "error", stage: lastStage, finishedAt, local: false, error: msg });
+          inputs.current.delete(id);
         } else if (f) {
           const finishedAt = Date.now();
           const msg = (f.error as string) || (f.stage as string) || `HTTP ${resStatus}`;
@@ -792,6 +824,8 @@ function TaskManagerCore({
               edits: [input.edit],
               taskIds: [id],
               ...(input.channel ? { channel: input.channel } : {}),
+              // TOOL clone channel (owner ask 28.09): distinct `via` field (see runLaunchTask).
+              ...(input.via ? { via: input.via } : {}),
             }),
             signal: streamAbort.signal,
           });
@@ -864,6 +898,17 @@ function TaskManagerCore({
             error: null,
           });
           inputs.current.delete(id); // done → never re-run
+        } else if (f && f.pending === true) {
+          // TOOL clone still finishing past the server window (owner ask 28.09): AMBIGUOUS — the
+          // clone may already exist, so release local authority (local:false → no Retry, excluded
+          // from the retryable count) and let the server row settle it; a re-fire could double-create
+          // once TOOL's idempotency window lapses. Distinct from the hard `ok:false` error below.
+          const finishedAt = Date.now();
+          const msg =
+            (f.error as string) ||
+            "TOOL is still finishing this clone — this row updates from the server; check Ads Manager before re-firing";
+          patch(id, { status: "error", stage: lastStage, finishedAt, local: false, error: msg });
+          inputs.current.delete(id);
         } else {
           const finishedAt = Date.now();
           const msg = f
@@ -936,6 +981,7 @@ function TaskManagerCore({
         partnerId: args.partnerId,
         campaign: args.campaign,
         ...(args.channel ? { channel: args.channel } : {}),
+        ...(args.via ? { via: args.via } : {}),
         ...(args.medias && args.medias.length > 0 ? { medias: args.medias } : {}),
         mediaUrl: args.mediaUrl,
         mediaName: args.mediaName,
@@ -994,6 +1040,7 @@ function TaskManagerCore({
         partnerId: args.partnerId,
         edit: args.edit,
         ...(args.channel ? { channel: args.channel } : {}),
+        ...(args.via ? { via: args.via } : {}),
       });
       const bid = args.bid || undefined;
       meta.current.set(id, {

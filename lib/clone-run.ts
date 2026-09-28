@@ -9,6 +9,9 @@ import { type Campaign, bidKind, makeCampaign } from "./types";
 import type { CloneEdit } from "./clone";
 import { FbError, fbGet, fbPost } from "./fb-graph";
 import { adPayload, adsetPayload, campaignPayload, type LaunchBinds } from "./fb-launch";
+// TOOL channel (owner ask 28.09) — type-only: the wire shapes the extractors below emit, consumed by
+// lib/tool-launch's buildToolCampaign / runToolMedia. No runtime coupling to that leaf.
+import type { ToolMediaItem, ToolMediaRefOut } from "./tool-launch";
 
 type Json = Record<string, unknown>;
 
@@ -433,6 +436,122 @@ export async function resolveLocales(names: string[], token?: string): Promise<n
     }
   }
   return [...new Set(ids)];
+}
+
+// ================================================================================================
+// TOOL channel extractors (owner ask 28.09): run the MO/AIF clone through the HS Ads Manager
+// sessions service (tool.gctracking.xyz) instead of direct Graph. A TOOL clone STILL recreates from
+// scratch (TOOL's /duplicates cannot rewrite the per-clone gcm/brand + pixel link — the very reason
+// this rail exists), so it reuses everything above (source read, cloneToCampaign, the link rewrite)
+// and only swaps the build call. These three pure/near-pure helpers translate the source's media +
+// creative onto TOOL's wire the way videoCreativeData / imageCreativeData do it for Graph
+// object_story_spec; the CampaignRequest assembly + USD/ROAS units live in lib/tool-launch.
+// ================================================================================================
+
+/**
+ * SAME-ACCOUNT TOOL MediaRef straight from the source's own account-local asset. Valid because a
+ * same-account TOOL clone builds in the SOURCE's account (which the resolving TOOL session sees), so
+ * its video_id / image_hash reference the very library the create job runs against. Video →
+ * {video_id} + an {image_hash} thumbnail when the source carried one (TOOL auto-thumbnails
+ * otherwise); static image → {image_hash}. Null when there is no account-local id/hash to reference
+ * (a picture-URL-only image): the caller then registers the source's PUBLIC url via TOOL
+ * media/from-url instead (toolSourceMediaItem). PURE.
+ */
+export function toolMediaRefFromSource(media: SourceMedia): ToolMediaRefOut | null {
+  const d = media.data;
+  if (media.kind === "video") {
+    const videoId = typeof d.video_id === "string" ? d.video_id : "";
+    if (!videoId) return null;
+    const ref: ToolMediaRefOut = { media: { type: "video", video_id: videoId } };
+    const hash = typeof d.image_hash === "string" ? d.image_hash : "";
+    if (hash) ref.thumbnail = { type: "image", image_hash: hash };
+    return ref;
+  }
+  const hash = typeof d.image_hash === "string" ? d.image_hash : "";
+  return hash ? { media: { type: "image", image_hash: hash } } : null;
+}
+
+/**
+ * The rebuilt creative's TOOL CreativeSpec text fields (primary_text / headline / description / cta)
+ * plus the REWRITTEN destination url — pulled from the source's video_data / link_data, the exact
+ * same fields videoCreativeData / imageCreativeData forward to Graph, flattened onto TOOL's shape.
+ * A video ad's destination rides ONLY in its CTA (call_to_action.value.link — the same place
+ * videoCreativeData reads it); a static image ad carries it at link_data.link (top-level). `rewrite`
+ * swaps the fresh gcm/brand + account pixel into the source link exactly like Graph's rewriteLink
+ * (swapPixel no-ops for pixel-less click clones). PURE.
+ */
+export function toolCreativeFromSource(
+  media: SourceMedia,
+  rewrite: LinkRewriter,
+): { primaryText: string; headline: string; description?: string; cta: string; url: string } {
+  const d = media.data;
+  const cta = (d.call_to_action ?? {}) as Json;
+  const ctaType = typeof cta.type === "string" ? cta.type : "";
+  const message = typeof d.message === "string" ? d.message : "";
+  if (media.kind === "video") {
+    const val = (cta.value ?? {}) as Json;
+    const rawLink = typeof val.link === "string" ? val.link : "";
+    const desc = typeof d.link_description === "string" ? d.link_description : "";
+    return {
+      primaryText: message,
+      headline: typeof d.title === "string" ? d.title : "",
+      description: desc || undefined,
+      cta: ctaType,
+      url: rawLink ? rewrite(rawLink) : "",
+    };
+  }
+  // link_data's headline is `name` and its body is `description` (different keys than video_data).
+  const rawLink = typeof d.link === "string" ? d.link : "";
+  const desc = typeof d.description === "string" ? d.description : "";
+  return {
+    primaryText: message,
+    headline: typeof d.name === "string" ? d.name : "",
+    description: desc || undefined,
+    cta: ctaType,
+    url: rawLink ? rewrite(rawLink) : "",
+  };
+}
+
+/**
+ * Resolve the source media's PUBLIC url so TOOL can re-register it into the build account through
+ * media/from-url — for a CROSS-account clone (the source's account-local video_id/image_hash is
+ * invalid in the target account) or a picture-URL-only same-account image. Video: the original's CDN
+ * `source` url (GET /<video_id>?fields=source — the SAME read migrateMediaToAccount does before
+ * re-uploading on Graph). Image: the existing account-agnostic picture url, else the hash's public
+ * url (GET act_<src>/adimages?fields=url,permalink_url&hashes=[…], mirroring how migrateMediaToAccount
+ * reads the source's images). Throws FbError when no public url is available. Reads Graph with the
+ * clone signer's token; full body (no thin wrapper — Turbopack const-fold gotcha).
+ */
+export async function toolSourceMediaItem(
+  media: SourceMedia,
+  sourceAccountId: string,
+  name: string,
+  token?: string,
+): Promise<ToolMediaItem> {
+  if (media.kind === "video") {
+    const videoId = String(media.data.video_id ?? "");
+    const info = await fbGet(`${videoId}?fields=source`, token);
+    const sourceUrl = typeof info.source === "string" ? info.source : "";
+    if (!sourceUrl) throw new FbError("source video file unavailable — cannot register it on TOOL", { videoId });
+    return { url: sourceUrl, kind: "video", name };
+  }
+  const pic = typeof media.data.picture === "string" ? media.data.picture : "";
+  if (pic) return { url: pic, kind: "image", name };
+  const hash = typeof media.data.image_hash === "string" ? media.data.image_hash : "";
+  if (!hash) throw new FbError("source image has no reusable url or hash — cannot register it on TOOL", {});
+  const body = await fbGet(
+    `act_${sourceAccountId}/adimages?fields=url,permalink_url&hashes=${encodeURIComponent(JSON.stringify([hash]))}`,
+    token,
+  );
+  const first = (((body?.data as Json[] | undefined) ?? [])[0] ?? {}) as Json;
+  const url =
+    typeof first.url === "string" && first.url
+      ? first.url
+      : typeof first.permalink_url === "string"
+        ? first.permalink_url
+        : "";
+  if (!url) throw new FbError("source image url unavailable — cannot register it on TOOL", { hash });
+  return { url, kind: "image", name };
 }
 
 // Re-export the launch builders the run route composes, so it imports them from one place.

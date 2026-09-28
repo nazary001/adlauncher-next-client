@@ -38,8 +38,16 @@ import {
   resolveCloneBinds,
   resolveLocales,
   swapBrand,
+  swapGcm,
   swapPixel,
+  toolCreativeFromSource,
+  toolMediaRefFromSource,
+  toolSourceMediaItem,
 } from "@/lib/clone-run";
+// TOOL channel (owner ask 28.09): the same clone RECREATE, but built through the HS Ads Manager
+// sessions service instead of direct Graph — USD money + ROAS coefficient, everything PAUSED.
+import { buildToolCampaign, runToolMedia, runToolPublish, toolEnsureMark, type ToolMediaRefOut } from "@/lib/tool-launch";
+import { toolAccountVisible, toolDeps, toolInputFromCampaign } from "@/lib/tool-run";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -100,9 +108,15 @@ export async function POST(req: Request) {
   let partnerId: PartnerId;
   let edits: CloneEdit[];
   let taskIds: (string | null)[] = [];
+  // Which rail builds the clone: "graph" = today's direct-Graph recreate (unchanged default);
+  // "tool" = recreate through the HS Ads Manager sessions service (owner ask 28.09). A batch-level
+  // field (the board picks one channel per wave, like the HS clone board's dup-channel toggle). NOT
+  // the legacy `channel` wire field (the retired per-buyer soc switch — still ignored).
+  let via: "graph" | "tool" = "graph";
   try {
-    const j = (await req.json()) as { partnerId?: string; edits?: CloneEdit[]; taskIds?: unknown[]; /** legacy, ignored — the signer is the owner's pick on /tokens */ channel?: string };
+    const j = (await req.json()) as { partnerId?: string; edits?: CloneEdit[]; taskIds?: unknown[]; /** launch channel: "tool" builds through TOOL; anything else = Graph */ via?: string; /** legacy, ignored — the signer is the owner's pick on /tokens */ channel?: string };
     partnerId = String(j.partnerId ?? "in") as PartnerId;
+    via = j.via === "tool" ? "tool" : "graph";
     edits = Array.isArray(j.edits) ? j.edits : [];
     // Task Manager rows aligned with `edits` by index. When present, per-clone progress + the
     // terminal state are ALSO written to Strapi server-side (see /api/launch) so every account's
@@ -235,7 +249,10 @@ export async function POST(req: Request) {
   const migratedCache = new Map<string, SourceMedia>();
 
   // withFbBudget wraps the CONSTRUCTION: start() begins inside it, so the whole batch inherits it.
-  const stream = withFbBudget({ deadlineAt: Date.now() + FB_BUDGET_MS, retries: FB_BUDGET_RETRIES }, () =>
+  // The same deadline bounds every TOOL media/publish poll (TOOL calls ride toolFetch, not the FB
+  // ALS budget) so a TOOL clone settles + streams a terminal/pending event before Vercel freezes us.
+  const streamDeadlineAt = Date.now() + FB_BUDGET_MS;
+  const stream = withFbBudget({ deadlineAt: streamDeadlineAt, retries: FB_BUDGET_RETRIES }, () =>
     new ReadableStream<Uint8Array>({
     async start(controller) {
       // No-throw: a client that closed the tab mid-batch makes enqueue throw — the batch must
@@ -252,10 +269,19 @@ export async function POST(req: Request) {
       let failed = 0;
 
       for (let idx = 0; idx < edits.length; idx++) {
-        // Soc-class signers stamp the SOC marker into the clone's name (server-side truth, same
-        // as /api/launch — an old/tampered client may send an unmarked name); system-class socs
-        // (Spencermo) create unmarked.
-        const edit = soc && !soc.sys ? { ...edits[idx], name: moEnsureSocMark(edits[idx].name) } : edits[idx];
+        // The clone's name carries the CHANNEL marker server-side (an old/tampered client may send
+        // an unmarked or wrong one). TOOL clones get ` GCL TOOL - ` after the clone prefix
+        // (toolEnsureMark — never a SOC mark: TOOL is not our social token, spec §1). Graph clones on
+        // a soc-class signer keep the ` SOC - ` marker (same as /api/launch); system-class socs
+        // (Spencermo) and TOOL both create without SOC.
+        const src0 = edits[idx];
+        const markedName =
+          via === "tool"
+            ? toolEnsureMark(src0.name)
+            : soc && !soc.sys
+              ? moEnsureSocMark(src0.name)
+              : src0.name;
+        const edit = markedName === src0.name ? src0 : { ...src0, name: markedName };
         // Server-side mirror of this clone's Task Manager row (no-op when no task id was sent).
         // The partner rides on every write: a row this writer CREATES (client save lost) must
         // still land in the right drawer's scope — null matches no scope at all.
@@ -412,14 +438,25 @@ export async function POST(req: Request) {
           if (money(campaign.budget) < 100) {
             throw new FbError("clone daily budget must be at least $1", { campaignId: edit.campaignId });
           }
+          // TOOL build target must be visible to a LIVE TOOL session (owner ask 28.09) — checked at
+          // fire time (force-refreshes once on a miss) BEFORE any slot/marker claim, so a not-ready
+          // rail burns nothing. Live 28.09 only HS accounts exist on TOOL, so MO/AIF cabinets stay
+          // not-visible until a session that sees them is added on Ads Manager sessions.
+          if (via === "tool" && !(await toolAccountVisible(binds.accountId))) {
+            throw new FbError(
+              `account act_${binds.accountId} is not visible to any live TOOL session — an owner adds/refreshes one on Ads Manager sessions`,
+              { campaignId: edit.campaignId },
+            );
+          }
 
           // Account launch slot (5 campaigns / 30 min per ad account, all channels — owner rule
           // 2026-08-18), claimed BEFORE the costly media migration so a full account fails fast;
-          // released in the catch on any pre-campaign failure.
+          // released in the catch on any pre-campaign failure. The channel marker is telemetry only
+          // (the 5/30min window spans every channel); TOOL clones tag "tool-clone"/"aif-tool-clone".
           acctSlot = await claimAcctSlot(binds.accountId, {
             user: session.username,
             partner: aif ? "us" : "in",
-            channel: aif ? "aif-clone" : "clone",
+            channel: via === "tool" ? (aif ? "aif-tool-clone" : "tool-clone") : aif ? "aif-clone" : "clone",
             name: edit.name,
             accountName: await acctNameOf(binds.accountId).catch(() => ""),
           });
@@ -427,8 +464,11 @@ export async function POST(req: Request) {
           // Cross-account: re-home the media in the target account BEFORE claiming a gcm — a failed
           // migration (video unfetchable, processing error) must not burn a code or orphan anything.
           // Cached per (source campaign → target account): N copies of one source migrate ONCE.
+          // Graph cross-account re-home (advideos file_url / adimages copy_from). SKIPPED on TOOL:
+          // the TOOL build registers the source's media itself (same-account ref or media/from-url),
+          // so no Graph re-upload with our token into a TOOL session's account.
           let cloneMedia = media;
-          if (binds.cross) {
+          if (via !== "tool" && binds.cross) {
             progress("media");
             const mKey = `${edit.campaignId}→${binds.accountId}`;
             let migrated = migratedCache.get(mKey);
@@ -456,44 +496,163 @@ export async function POST(req: Request) {
 
           const localeIds = await resolveLocales(edit.locales, railToken);
 
-          progress("campaign");
-          const camp = await post(`act_${editBinds.accountId}/campaigns`, campaignPayload(campaign, edit.name));
-          created.campaign_id = String(camp.id);
+          if (via === "tool") {
+            // ---- TOOL create-from-scratch (owner ask 28.09). Same recreate, built through the HS
+            //      Ads Manager sessions service: USD money + ROAS coefficient (never cents / ×10000),
+            //      everything PAUSED. The Idempotency-Key is the clone's task id (a retried wave
+            //      never double-creates); media rides a suffixed key so it can't collide with the
+            //      create's client_request_id. ----
+            const idemKey = taskIds[idx] ?? undefined;
+            const mediaIdemKey = idemKey ? `${idemKey}:media` : undefined;
+            // The rebuilt destination link: fresh gcm/brand + the build account's pixel, byte-for-byte
+            // the same rewrite the Graph creative uses (swapGcm+swapPixel for MO, swapBrand+swapPixel
+            // for AIF; swapPixel no-ops for pixel-less click clones).
+            const toolRewrite = aif
+              ? (l: string) => swapPixel(swapBrand(l, gcm), editBinds.pixelId)
+              : (l: string) => swapPixel(swapGcm(l, gcm), editBinds.pixelId);
+            const toolCreative = toolCreativeFromSource(media, toolRewrite);
 
-          progress("adset");
-          const adset = await withParentRetry(String(camp.id), () =>
-            createAdset(
-              `act_${editBinds.accountId}/adsets`,
-              adsetPayload(campaign, edit.name, String(camp.id), editBinds, localeIds),
-              post,
-            ),
-          );
-          created.adset_id = String(adset.id);
+            // Media: same-account reuses the source's own account-local asset directly (valid — the
+            // build account IS the source's and the resolving TOOL session sees it); cross-account
+            // (or a picture-URL-only image with no hash) registers the source's PUBLIC url into the
+            // build account through TOOL and polls it ready. The `media` stage only fires when we
+            // actually register (mirrors the Graph rail, which shows "media" only cross-account).
+            let toolMedia: ToolMediaRefOut | null = binds.cross ? null : toolMediaRefFromSource(media);
+            if (!toolMedia) {
+              progress("media");
+              const item = await toolSourceMediaItem(media, src.accountId, edit.name, railToken);
+              const reg = await runToolMedia(toolDeps, binds.accountId, [item], {
+                deadlineAt: streamDeadlineAt,
+                idempotencyKey: mediaIdemKey,
+                onStage: () => progress("media"),
+              });
+              if (!reg.ok) throw new FbError(reg.error, { campaignId: edit.campaignId });
+              toolMedia = reg.refs[0];
+            }
 
-          progress("creative");
-          const creative = await post(
-            `act_${editBinds.accountId}/adcreatives`,
-            cloneCreativePayload(
-              edit.name,
-              editBinds.pageId,
-              cloneMedia,
-              gcm,
-              editBinds.pixelId,
-              // AIF RW links: brand marker + the promoted pixel (09-02 — the RW page echoes it
-              // into the postback, the CAPI forwarder routes the Purchase by it; swapPixel
-              // no-ops for pixel-less click clones, leaving legacy links untouched).
-              aif ? (l: string) => swapPixel(swapBrand(l, gcm), editBinds.pixelId) : undefined,
-            ),
-          );
-          created.creative_id = String(creative.id);
+            // Assemble the normalized TOOL input from the SAME cloneToCampaign object the Graph build
+            // uses (so geo / bid / budget / category / placement / age stay identical), with the
+            // rebuilt creative + registered media. Clones are PAUSED. accountCurrency is USD — every
+            // TOOL account is USD (TOOL_LIVE_NOTES; the account is TOOL-visible, checked above).
+            const built = buildToolCampaign(
+              toolInputFromCampaign(campaign, {
+                name: edit.name,
+                pageId: editBinds.pageId,
+                pixelId: editBinds.pixelId,
+                localeIds,
+                status: "PAUSED",
+                accountCurrency: "USD",
+                creatives: [
+                  {
+                    name: edit.name,
+                    media: toolMedia.media,
+                    ...(toolMedia.thumbnail ? { thumbnail: toolMedia.thumbnail } : {}),
+                    primaryText: toolCreative.primaryText,
+                    headline: toolCreative.headline,
+                    ...(toolCreative.description ? { description: toolCreative.description } : {}),
+                    url: toolCreative.url,
+                    cta: toolCreative.cta,
+                  },
+                ],
+              }),
+            );
+            // A builder refusal (bad currency/objective/cta/event, WW without support, etc.) is a
+            // clean per-clone error — nothing was created, so the catch frees the marker + slot.
+            if (!built.ok) throw new FbError(built.error, { campaignId: edit.campaignId });
 
-          progress("ad");
-          const ad = await withParentRetry(String(adset.id), () =>
-            post(`act_${editBinds.accountId}/ads`, adPayload(edit.name, String(adset.id), String(creative.id))),
-          );
-          // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
-          if (!ad.id) throw new FbError("ad create returned no id", ad);
-          created.ad_id = String(ad.id);
+            // Submit + follow the create job to a terminal state. Stages feed the same clone-stage
+            // keys the Task Manager renders (campaign/adset/creative/ad); a media step collapses to
+            // "media" and the terminal done/error is handled from the result, not the stage.
+            progress("campaign");
+            const run = await runToolPublish(toolDeps, binds.accountId, built.body, {
+              idempotencyKey: idemKey,
+              deadlineAt: streamDeadlineAt,
+              onStage: (stage) => {
+                if (stage === "done" || stage === "error") return;
+                progress(stage === "video" || stage === "processing" ? "media" : stage);
+              },
+            });
+
+            if (!run.ok) {
+              if (run.pending) {
+                // Deadline hit while TOOL is still working: KEEP the marker + slot and note the job
+                // so it can be reconciled from the TOOL console (spec §2.5). Nothing is freed; the
+                // row stays "running" (honest — the job is genuinely in flight).
+                if (run.jobId) created.tool_job_id = run.jobId;
+                if (run.created?.campaignId) created.campaign_id = run.created.campaignId;
+                const note = `pending tool job #${run.jobId ?? "?"}`;
+                if (claim.documentId) {
+                  const patch = { notes: note, ...(created.campaign_id ? { campaign_id: created.campaign_id } : {}) };
+                  if (aif) await backfillBrand(claim.documentId, patch);
+                  else await backfillGcm(claim.documentId, patch, claim.gcm);
+                }
+                settled = true;
+                tw.write({
+                  status: "running",
+                  stage: "ad",
+                  ...(created.campaign_id ? { campaign_id: created.campaign_id } : {}),
+                  ...(run.jobId ? { link: String(run.jobId) } : {}),
+                });
+                send({ idx, ok: false, stage: "ad", pending: true, via: "tool", tool_job_id: run.jobId ?? null, error: run.error, ...created });
+                // `continue` runs the loop's finally (clearInterval + tw.flush) before advancing.
+                continue;
+              }
+              // A clean refusal. Record whatever TOOL created so the shared catch RETIRES the marker
+              // (traceable by the job id in the note) + keeps the slot when something exists, or
+              // FREES both when nothing did — identical policy to the Graph rail (spec §2.5).
+              if (run.created?.campaignId) created.campaign_id = run.created.campaignId;
+              if (run.created?.adsetIds[0]) created.adset_id = run.created.adsetIds[0];
+              if (run.jobId) created.tool_job_id = run.jobId;
+              throw new FbError(run.jobId ? `${run.error} (tool job #${run.jobId})` : run.error, { campaignId: edit.campaignId });
+            }
+
+            // Done — record the created ids; fall through to the shared success finalization below.
+            created.campaign_id = run.campaignId;
+            if (run.adsetId) created.adset_id = run.adsetId;
+            if (run.adIds[0]) created.ad_id = run.adIds[0];
+            if (run.adIds.length > 1) created.ad_ids = [...run.adIds];
+            created.tool_job_id = run.jobId;
+          } else {
+            // ---- Graph recreate (unchanged) ----
+            progress("campaign");
+            const camp = await post(`act_${editBinds.accountId}/campaigns`, campaignPayload(campaign, edit.name));
+            created.campaign_id = String(camp.id);
+
+            progress("adset");
+            const adset = await withParentRetry(String(camp.id), () =>
+              createAdset(
+                `act_${editBinds.accountId}/adsets`,
+                adsetPayload(campaign, edit.name, String(camp.id), editBinds, localeIds),
+                post,
+              ),
+            );
+            created.adset_id = String(adset.id);
+
+            progress("creative");
+            const creative = await post(
+              `act_${editBinds.accountId}/adcreatives`,
+              cloneCreativePayload(
+                edit.name,
+                editBinds.pageId,
+                cloneMedia,
+                gcm,
+                editBinds.pixelId,
+                // AIF RW links: brand marker + the promoted pixel (09-02 — the RW page echoes it
+                // into the postback, the CAPI forwarder routes the Purchase by it; swapPixel
+                // no-ops for pixel-less click clones, leaving legacy links untouched).
+                aif ? (l: string) => swapPixel(swapBrand(l, gcm), editBinds.pixelId) : undefined,
+              ),
+            );
+            created.creative_id = String(creative.id);
+
+            progress("ad");
+            const ad = await withParentRetry(String(adset.id), () =>
+              post(`act_${editBinds.accountId}/ads`, adPayload(edit.name, String(adset.id), String(creative.id))),
+            );
+            // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
+            if (!ad.id) throw new FbError("ad create returned no id", ad);
+            created.ad_id = String(ad.id);
+          }
 
           // Registry ledger: this clone took one slot on its fanka (fire-safe; the box's next
           // Facebook sweep reconciles either way).
@@ -528,8 +687,12 @@ export async function POST(req: Request) {
             ad_id: created.ad_id,
             gcm,
             error: null,
+            // TOOL clones persist the job id in `link` (the HS convention: link = remote id) so the
+            // drawer can trace the run to the TOOL console; the Graph clone leaves link empty.
+            ...(via === "tool" && created.tool_job_id != null ? { link: String(created.tool_job_id) } : {}),
           });
-          send({ idx, ok: true, stage: "done", gcm, ...created });
+          // `...created` already carries tool_job_id on the TOOL path; add the channel tag on top.
+          send({ idx, ok: true, stage: "done", gcm, ...created, ...(via === "tool" ? { via: "tool" } : {}) });
         } catch (e) {
           failed++;
           const err = e as FbError;
@@ -564,7 +727,18 @@ export async function POST(req: Request) {
             ...(created.campaign_id ? { campaign_id: created.campaign_id } : {}),
             ...(created.adset_id ? { adset_id: created.adset_id } : {}),
           });
-          send({ idx, ok: false, stage: "error", error: err.message ?? String(e), detail: err.detail ?? null, created });
+          send({
+            idx,
+            ok: false,
+            stage: "error",
+            error: err.message ?? String(e),
+            detail: err.detail ?? null,
+            created,
+            // TOOL failures carry the channel + (when TOOL got far enough to have one) the job id, so
+            // the drawer/console can trace a retired-with-ids clone. The Graph path adds neither.
+            ...(via === "tool" ? { via: "tool" } : {}),
+            ...(via === "tool" && created.tool_job_id != null ? { tool_job_id: created.tool_job_id } : {}),
+          });
         } finally {
           // The clone's last transition must land before the loop moves on / the function
           // freezes — in a `finally` so no escape path (however unlikely) can leak the 30s beat

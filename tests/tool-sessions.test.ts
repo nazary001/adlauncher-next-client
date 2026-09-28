@@ -196,3 +196,64 @@ test("toolFailure: an unknown 4xx with an empty body gets a sentence, never an e
   const g = api.toolFailure(404, null);
   assert.equal(g.message, "not found");
 });
+
+test("createCampaign / createDuplicates: path (act_ stripped), POST JSON body, Idempotency-Key when given", async () => {
+  const stub = stubFetch([
+    [/\/accounts\/1702978257719186\/campaigns$/, () => json({ id: 6, status: "queued", stage: "NEW", kind: "campaign.create" }, 202)],
+    [/\/accounts\/1702978257719186\/duplicates$/, () => json({ batch_id: "b1", status: "queued", jobs: [{ id: 11, status: "queued" }] }, 201)],
+  ]);
+  try {
+    const body = { campaign: { name: "n", objective: "OUTCOME_SALES" }, adsets: [] };
+    const c = await api.createCampaign("act_1702978257719186", body as never, { idempotencyKey: "task-42" });
+    assert.ok(c.ok && c.status === 202 && (c.data as { id: number }).id === 6);
+    const cc = stub.calls[0];
+    assert.equal(cc.url, "https://tool.test/api/v1/accounts/1702978257719186/campaigns", "act_ is stripped from the path");
+    assert.equal(cc.method, "POST");
+    assert.equal(cc.headers["content-type"], "application/json");
+    assert.equal(cc.headers["idempotency-key"], "task-42");
+    assert.deepEqual(JSON.parse(cc.body ?? ""), body);
+
+    const d = await api.createDuplicates("1702978257719186", { source_campaign_id: "120210000000101", targets: [{ copies: 1 }] } as never);
+    assert.ok(d.ok && d.status === 201 && (d.data as { batch_id: string }).batch_id === "b1");
+    assert.equal(stub.calls[1].headers["idempotency-key"], undefined, "no key given → no header");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("mediaFromUrl: images vs videos path + /from-url, url-only body, filename passthrough; getMedia GET", async () => {
+  const stub = stubFetch([
+    [/\/accounts\/1\/media\/images\/from-url$/, () => json({ media_id: "med_1", type: "image", status: "ready", account_id: "1", facebook: { image_hash: "h" } }, 201)],
+    [/\/accounts\/1\/media\/videos\/from-url$/, () => json({ media_id: "med_2", type: "video", status: "processing", account_id: "1" }, 201)],
+    [/\/media\/med_1$/, () => json({ media_id: "med_1", type: "image", status: "ready", account_id: "1", facebook: { image_hash: "h" } })],
+  ]);
+  try {
+    const img = await api.mediaFromUrl("1", "image", { url: "https://blob/x.jpg" }, { idempotencyKey: "task-42" });
+    assert.ok(img.ok && (img.data as { media_id: string }).media_id === "med_1");
+    const ic = stub.calls[0];
+    assert.equal(ic.url, "https://tool.test/api/v1/accounts/1/media/images/from-url");
+    assert.equal(ic.headers["idempotency-key"], "task-42");
+    assert.deepEqual(JSON.parse(ic.body ?? ""), { url: "https://blob/x.jpg" }, "url-only body when no filename");
+
+    const vid = await api.mediaFromUrl("1", "video", { url: "https://blob/v.mp4", filename: "clip.mp4" });
+    assert.ok(vid.ok && (vid.data as { media_id: string }).media_id === "med_2");
+    assert.equal(stub.calls[1].url, "https://tool.test/api/v1/accounts/1/media/videos/from-url");
+    assert.deepEqual(JSON.parse(stub.calls[1].body ?? ""), { url: "https://blob/v.mp4", filename: "clip.mp4" });
+
+    const g = await api.getMedia("med_1");
+    assert.ok(g.ok && (g.data as { status: string }).status === "ready");
+    assert.equal(stub.calls[2].method, "GET");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("createCampaign maps a 422 ErrorOut → ToolFailure with field + problems", async () => {
+  const stub = stubFetch([[/\/campaigns$/, () => json({ error: "validation_failed", message: "budget too low", field: "campaign.daily_budget", problems: [{ error: "too_low", field: "campaign.daily_budget" }] }, 422)]]);
+  try {
+    const r = await api.createCampaign("1", { campaign: { name: "n", objective: "OUTCOME_SALES" }, adsets: [] } as never);
+    assert.ok(!r.ok && r.status === 422 && r.error === "validation_failed" && r.field === "campaign.daily_budget" && Array.isArray(r.problems));
+  } finally {
+    stub.restore();
+  }
+});

@@ -2,11 +2,13 @@
 
 import type { Campaign } from "@/lib/types";
 import { fullName, isLaunchable, moEnsureSocMark, moneyLabel, parseMoney } from "@/lib/types";
+import { toolEnsureMark } from "@/lib/tool-launch";
 import { UploadingNotice } from "./upload-guard";
 import { CONVERSION_EVENTS, geoSummary } from "@/lib/catalog";
 import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { type PartnerConfig, launchReadyOpts, markerPool } from "@/lib/partners";
 import type { HsLaunchChannel } from "./hs-task-manager";
+import type { ToolReadyState } from "./use-tool-ready";
 import type { SlotSigner } from "./use-signers";
 import { SignerBadge } from "./signer-badge";
 import { CheckIcon, EyeIcon, RocketIcon } from "./icons";
@@ -19,6 +21,9 @@ export function LaunchRail({
   hsChannel = "lion",
   hsTokenReady = false,
   onHsChannel,
+  tool,
+  graphChannel = "token",
+  onGraphChannel,
   signer = null,
   signerLoaded = false,
   owner = false,
@@ -41,6 +46,15 @@ export function LaunchRail({
   /** FB Token rail provisioned server-side — until then the Token option renders disabled. */
   hsTokenReady?: boolean;
   onHsChannel?: (ch: HsLaunchChannel) => void;
+  /** TOOL readiness for THIS partner × launch rail (useToolReady from the board). Gates the TOOL
+   *  segment on the HS control and the graphRail (MO/AIF) FB Token|TOOL control; its `message` is
+   *  the disabled-segment tooltip and `accounts.size` the "· N accounts" count (owner ask 28.09).
+   *  Undefined = the caller isn't wiring TOOL (TOOL segment renders as not-ready). */
+  tool?: ToolReadyState;
+  /** MO/AIF launch-rail pick: our FB token (direct Graph) vs the TOOL sessions service. Only read
+   *  on the graphRail branch; HS uses hsChannel instead. */
+  graphChannel?: "token" | "tool";
+  onGraphChannel?: (ch: "token" | "tool") => void;
   /** The rail's effective signer (MO / AIF: the owner's pick on /tokens) — read-only badge +
    *  launch gate; null while unknown. */
   signer?: SlotSigner | null;
@@ -80,22 +94,36 @@ export function LaunchRail({
   const pool = markerPool(partner);
   const gcmBlocked = Boolean(pool) && poolFree === 0;
   const ddmm = partner.lionLaunch ? todaySaoPauloDDMM() : "";
-  // The bay previews the name the launch will really create — the FB Token rail's fixed TOKEN
-  // marker included (same effective-channel rule as the launch itself: picked AND provisioned).
-  const nameChannel = hsChannel === "token" && hsTokenReady ? ("token" as const) : ("lion" as const);
+  const toolReady = tool?.ready ?? false;
+  // The bay previews the name the launch will really create — the effective channel's marker
+  // included (same picked-AND-ready rule as the launch itself). TOOL (GCL TOOL - ) wins when it is
+  // both picked and ready; else the FB Token rail's fixed TOKEN marker; else LION's bare grammar.
+  const nameChannel: HsLaunchChannel =
+    hsChannel === "tool" && toolReady ? "tool" : hsChannel === "token" && hsTokenReady ? "token" : "lion";
   const graphRail = !partner.lionLaunch && (partner.usesGcm || Boolean(partner.aifLaunch));
-  // SOC name marker rides personal-soc signers only (MO) — system users launch unmarked.
-  const moSocMarks = partner.usesGcm && Boolean(signer?.primary?.personal);
+  // MO/AIF TOOL is the EFFECTIVE channel only when picked AND the server says the rail is ready —
+  // a stale "tool" pick falls back to our FB token (the same rule the board fires on).
+  const graphToolActive = graphRail && graphChannel === "tool" && toolReady;
+  // SOC name marker rides personal-soc signers only (MO) — system users launch unmarked. TOOL
+  // drops SOC (it marks OUR social token as signer, which TOOL is not), so a TOOL wave shows the
+  // GCL TOOL marker instead, never SOC.
+  const moSocMarks = partner.usesGcm && Boolean(signer?.primary?.personal) && !graphToolActive;
   // No token for this partner's launch rail (nothing assigned, no env default) → nothing may fire.
+  // KEPT even on the TOOL channel (owner ask 28.09): the MO/AIF account/pixel/page pickers read the
+  // SIGNER'S token catalog (TOOL exposes no page/pixel list endpoint), so a signer-less rail has no
+  // launchable card whatever the channel — this gate is really "no catalog", not "TOOL needs our
+  // signer to sign". A TOOL wave with a signer present is never blocked by it.
   const moSignerMissing = graphRail && !signer?.primary;
   const nameOf = (c: Campaign) =>
     partner.lionLaunch
       ? c.name.trim()
         ? hsFullName(c, hsAcr ?? "", ddmm, nameChannel)
         : ""
-      : moSocMarks
-        ? moEnsureSocMark(fullName(c))
-        : fullName(c);
+      : graphToolActive
+        ? toolEnsureMark(fullName(c))
+        : moSocMarks
+          ? moEnsureSocMark(fullName(c))
+          : fullName(c);
 
   return (
     <aside className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-20">
@@ -218,11 +246,32 @@ export function LaunchRail({
               +30 min delivery gap). One pick for the whole wave. */}
           {partner.lionLaunch ? (
             <div className="flex flex-col gap-1">
-              <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
+              {/* Three rails now (owner ask 28.09): LION's create weapon, our FB token direct on
+                  the Graph, or the HS TOOL sessions service. TOOL is offered only while the server
+                  says it's ready (a live session sees this partner's accounts) — otherwise the
+                  segment is disabled with the server's reason as its tooltip; a stale "tool" pick
+                  with the rail not ready falls back to LION at fire time (board's effective rule). */}
+              <div className="grid grid-cols-3 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
                 {(
                   [
-                    { key: "lion" as const, label: "LION API", ready: true },
-                    { key: "token" as const, label: "FB Token", ready: hsTokenReady },
+                    { key: "lion" as const, label: "LION API", ready: true, title: undefined as string | undefined },
+                    {
+                      key: "token" as const,
+                      label: "FB Token",
+                      ready: hsTokenReady,
+                      title: hsTokenReady ? undefined : "FB token not configured on the server (FB_HS_LAUNCH_TOKEN)",
+                    },
+                    {
+                      key: "tool" as const,
+                      label: "TOOL",
+                      ready: toolReady,
+                      title: toolReady
+                        ? undefined
+                        : tool?.message ||
+                          (tool && !tool.loaded
+                            ? "Checking TOOL readiness…"
+                            : "TOOL is not ready — no live session sees this partner's accounts"),
+                    },
                   ]
                 ).map((opt) => {
                   const active = hsChannel === opt.key;
@@ -232,7 +281,7 @@ export function LaunchRail({
                       type="button"
                       disabled={!opt.ready}
                       aria-pressed={active}
-                      title={opt.ready ? undefined : "FB token not configured on the server (FB_HS_LAUNCH_TOKEN)"}
+                      title={opt.title}
                       onClick={() => onHsChannel?.(opt.key)}
                       className={
                         "h-8 rounded-[10px] text-[12px] font-semibold transition-all duration-150 " +
@@ -249,20 +298,73 @@ export function LaunchRail({
                 })}
               </div>
               <p className="text-center text-[10px] leading-relaxed text-faint">
-                {hsChannel === "token"
-                  ? "Our FB token builds the tree · delivery starts +30 min"
-                  : "LION profiles build the tree on the weapon side"}
+                {hsChannel === "tool"
+                  ? `Launches through TOOL · ${tool?.accounts.size ?? 0} account${(tool?.accounts.size ?? 0) === 1 ? "" : "s"} · delivery +30 min`
+                  : hsChannel === "token"
+                    ? "Our FB token builds the tree · delivery starts +30 min"
+                    : "LION profiles build the tree on the weapon side"}
               </p>
             </div>
           ) : null}
-          {/* The rail's signer — the OWNER'S pick on /tokens (read-only here; owner ask 09-14).
-              One bearer for the whole wave; the launch route resolves the very same slot. */}
+          {/* MO/AIF launch rail (owner ask 28.09): our FB token (direct Graph — the signer badge
+              shows the OWNER'S /tokens pick, read-only here) or the HS TOOL sessions service (TOOL
+              resolves the session from the account; no signer of ours). TOOL is offered only while
+              the server says it's ready; a stale "tool" pick falls back to FB Token at fire time. */}
           {graphRail ? (
-            <div className="flex flex-col gap-1">
-              <span className="select-none text-[10px] font-medium uppercase tracking-[0.14em] text-faint">
-                Signer
-              </span>
-              <SignerBadge signer={signer} loaded={signerLoaded} rail="launch" owner={owner} />
+            <div className="flex flex-col gap-1.5">
+              <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
+                {(
+                  [
+                    { key: "token" as const, label: "FB Token", ready: true, title: undefined as string | undefined },
+                    {
+                      key: "tool" as const,
+                      label: "TOOL",
+                      ready: toolReady,
+                      title: toolReady
+                        ? undefined
+                        : tool?.message ||
+                          (tool && !tool.loaded
+                            ? "Checking TOOL readiness…"
+                            : "TOOL is not ready — no live session sees this partner's accounts"),
+                    },
+                  ]
+                ).map((opt) => {
+                  const active = graphChannel === opt.key;
+                  return (
+                    <button
+                      key={opt.key}
+                      type="button"
+                      disabled={!opt.ready}
+                      aria-pressed={active}
+                      title={opt.title}
+                      onClick={() => onGraphChannel?.(opt.key)}
+                      className={
+                        "h-8 rounded-[10px] text-[12px] font-semibold transition-all duration-150 " +
+                        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
+                        (active
+                          ? "bg-accent/20 text-[#9db8ff] shadow-[inset_0_0_0_1px_rgba(122,150,255,0.35)]"
+                          : "text-dim hover:text-ink") +
+                        (opt.ready ? "" : " cursor-not-allowed opacity-40")
+                      }
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+              {graphToolActive ? (
+                <p className="text-center text-[10px] leading-relaxed text-faint">
+                  Launches through TOOL · {tool?.accounts.size ?? 0} account
+                  {(tool?.accounts.size ?? 0) === 1 ? "" : "s"}
+                </p>
+              ) : (
+                <div className="flex flex-col gap-1">
+                  <span className="select-none text-[10px] font-medium uppercase tracking-[0.14em] text-faint">
+                    Signer
+                  </span>
+                  <SignerBadge signer={signer} loaded={signerLoaded} rail="launch" owner={owner} />
+                </div>
+              )}
             </div>
           ) : null}
           <button
@@ -330,10 +432,14 @@ export function LaunchRail({
             <p className="text-center text-[10.5px] leading-relaxed text-faint">
               {readyCount > 0
                 ? partner.lionLaunch
-                  ? hsChannel === "token"
-                    ? "Queued to HS Task Manager · FB token builds the ads · starts in 30 min"
-                    : "Queued to HS Task Manager · LION builds the ads"
-                  : "Queued to Task Manager · goes live on create"
+                  ? nameChannel === "tool"
+                    ? "Queued to HS Task Manager · TOOL builds the ads · starts in 30 min"
+                    : nameChannel === "token"
+                      ? "Queued to HS Task Manager · FB token builds the ads · starts in 30 min"
+                      : "Queued to HS Task Manager · LION builds the ads"
+                  : graphToolActive
+                    ? "Queued to Task Manager · TOOL builds the ads"
+                    : "Queued to Task Manager · goes live on create"
                 : `${partner.launchNote} · needs a creative`}
             </p>
           )}

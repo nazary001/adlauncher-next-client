@@ -13,6 +13,7 @@
 // purpose (type-only from the model) so `node --test` can load this file with a stubbed fetch.
 
 import type { CreateBody, ToolJob, ToolMe, UpdateBody } from "./tool-sessions-model";
+import type { CampaignRequest, DuplicateRequest } from "./tool-launch";
 
 const DEFAULT_BASE = "https://tool.gctracking.xyz";
 const TIMEOUT_MS = 30_000;
@@ -168,3 +169,57 @@ export const cancelJob = (id: number) => toolFetch<{ ok?: boolean } | null>("POS
 // ---- team accounts ---------------------------------------------------------------------------------
 
 export const teamAccounts = () => toolFetch<{ accounts?: unknown[]; scope?: unknown[] }>("GET", "/accounts");
+
+// ---- campaign / duplicate / media writes (the buyer-facing launch channel, owner ask 28.09) -------
+// All through toolFetch (bounded, never-throws, JSON). Writes get a generous 60s timeout (the create
+// job is queued fast, but a cold server + proxy handshake can be slow). The Idempotency-Key header
+// carries OUR task id (shot task id for HS waves) so a retried wave never double-creates — TOOL
+// records it as the job's client_request_id. account_id is act_-stripped (TOOL's canonical form; it
+// accepts act_ too, but the digits are what our registries key on). Media uses …/from-url (JSON) so
+// it rides toolFetch — multipart cannot (toolFetch always sets Content-Type: application/json).
+
+type ToolWriteOpts = { idempotencyKey?: string };
+const idemHeaders = (o?: ToolWriteOpts): Record<string, string> | undefined =>
+  o?.idempotencyKey ? { "Idempotency-Key": o.idempotencyKey } : undefined;
+const acctPath = (accountId: string): string => encodeURIComponent(String(accountId).replace(/^act_/, ""));
+
+/** POST /accounts/{id}/campaigns — 200 DryRunResult (dry_run) | 201/202 JobOut (validate/publish) |
+ *  422 ErrorOut. The caller branches on status/body; here we just carry the answer. */
+export const createCampaign = (accountId: string, body: CampaignRequest, opts: ToolWriteOpts = {}) =>
+  toolFetch<Record<string, unknown>>("POST", `/accounts/${acctPath(accountId)}/campaigns`, {
+    body,
+    timeoutMs: 60_000,
+    headers: idemHeaders(opts),
+  });
+
+/** POST /accounts/{id}/duplicates — 201 DuplicateBatchOut {batch_id, status, jobs:[JobOut]} (one
+ *  child job per target×copy). */
+export const createDuplicates = (accountId: string, body: DuplicateRequest, opts: ToolWriteOpts = {}) =>
+  toolFetch<Record<string, unknown>>("POST", `/accounts/${acctPath(accountId)}/duplicates`, {
+    body,
+    timeoutMs: 60_000,
+    headers: idemHeaders(opts),
+  });
+
+/** POST /accounts/{id}/media/{images|videos}/from-url — register a media from a PUBLIC http(s) URL
+ *  → 201 MediaOut {media_id, status, facebook{image_hash|video_id}}; poll GET /media/{id} for
+ *  `ready`. account_id rides the path (server default); engine defaults to `session`. */
+export const mediaFromUrl = (
+  accountId: string,
+  kind: "image" | "video",
+  body: { url: string; filename?: string },
+  opts: ToolWriteOpts = {},
+) =>
+  toolFetch<Record<string, unknown>>(
+    "POST",
+    `/accounts/${acctPath(accountId)}/media/${kind === "video" ? "videos" : "images"}/from-url`,
+    {
+      body: body.filename ? { url: body.url, filename: body.filename } : { url: body.url },
+      timeoutMs: 60_000,
+      headers: idemHeaders(opts),
+    },
+  );
+
+/** GET /media/{media_id} → MediaOut (poll until status `ready`). */
+export const getMedia = (mediaId: string) =>
+  toolFetch<Record<string, unknown>>("GET", `/media/${encodeURIComponent(mediaId)}`, { timeoutMs: 60_000 });

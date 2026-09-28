@@ -25,6 +25,7 @@ import {
   pixelsFor,
 } from "@/lib/catalog";
 import { hsFinalLink, hsLinkSegments, hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
+import { TOOL_MARK, toolEnsureMark } from "@/lib/tool-launch";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { AIF_VALUE_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifOfferablePixels, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
 import { aifFlowOf } from "@/lib/aif-link";
@@ -232,6 +233,9 @@ function CampaignCardBase({
   highlight,
   coversEnabled,
   hsTokenRail,
+  toolRail,
+  moToolRail,
+  toolAccounts,
   moSocRail,
   onPatch,
   onToggleCollapse,
@@ -259,6 +263,17 @@ function CampaignCardBase({
    *  (LION binds cover segments the token was never granted; a launch there burns on the first
    *  Graph POST — aleph, 2026-08-19). */
   hsTokenRail?: boolean;
+  /** HS: the TOOL rail is the EFFECTIVE channel (owner ask 28.09) — the account picker offers only
+   *  accounts a live TOOL session sees (profile accounts ∩ `toolAccounts`), and the name preview
+   *  carries the GCL TOOL marker in the TOKEN slot (hsNamePrefix "tool"). Mirrors hsTokenRail. */
+  toolRail?: boolean;
+  /** MO/AIF: the TOOL rail is the EFFECTIVE channel — the token-catalog account picker is filtered
+   *  to TOOL-visible accounts (∩ `toolAccounts`) and the name preview carries the GCL TOOL marker
+   *  after the partner prefix (dropping any SOC marker). */
+  moToolRail?: boolean;
+  /** Bare-digit account ids a live TOOL session can launch into (from useToolReady), used to
+   *  filter the account picker when toolRail/moToolRail is set. Undefined = TOOL not the channel. */
+  toolAccounts?: Set<string>;
   /** MO: a soc signer is picked — the name preview carries the fixed SOC marker the server
    *  will really put into the created campaign's name. */
   moSocRail?: boolean;
@@ -339,20 +354,41 @@ function CampaignCardBase({
   useEffect(() => {
     if (hsPixelUnlisted) onPatch(c.id, { pixel: "" });
   }, [hsPixelUnlisted, onPatch, c.id]);
-  // FB Token rail: offer only accounts OUR token can act on — LION binds cover segments the
-  // token was never granted (aleph, 08-19), and a launch there dies on the first Graph POST.
-  // null sweep → no filtering (fail open; the token route's guard still refuses cleanly).
-  const hsTokenVisible = hsMode && hsTokenRail ? (hsData?.tokenAccounts ?? null) : null;
+  // Account-visibility filter for the HS picker, by effective rail (owner ask 28.09):
+  //  • FB Token → only accounts OUR token can act on (LION binds cover segments the token was
+  //    never granted — aleph 08-19 — and a launch there dies on the first Graph POST);
+  //  • TOOL → only accounts a live TOOL session sees (profile accounts ∩ toolAccounts);
+  //  • LION → null (no filtering; fail open, the route's guard still refuses cleanly).
+  // toolRail wins over hsTokenRail (the board only sets one at a time, but be explicit).
+  const hsVisible = hsMode
+    ? toolRail
+      ? (toolAccounts ?? null)
+      : hsTokenRail
+        ? (hsData?.tokenAccounts ?? null)
+        : null
+    : null;
   const hsAccountOptions =
-    hsTokenVisible !== null
-      ? (hsData?.accounts ?? []).filter((a) => hsTokenVisible.has(a.value))
+    hsVisible !== null
+      ? (hsData?.accounts ?? []).filter((a) => hsVisible.has(a.value))
       : (hsData?.accounts ?? []);
   // A stored account the rail switch just hid would submit a bind the picker can't display —
   // clear it (and the dependent pixel), same self-heal idiom as the unlisted-pixel guard above.
-  const hsAccountHidden = Boolean(c.account) && hsTokenVisible !== null && !hsTokenVisible.has(c.account);
+  const hsAccountHidden = Boolean(c.account) && hsVisible !== null && !hsVisible.has(c.account);
   useEffect(() => {
     if (hsAccountHidden) onPatch(c.id, { account: "", pixel: "" });
   }, [hsAccountHidden, onPatch, c.id]);
+  // MO/AIF TOOL rail (owner ask 28.09): offer only accounts a live TOOL session sees (the token
+  // catalog ∩ toolAccounts). null = not the TOOL channel → no filtering. The board's
+  // fillAccountDefaults keeps the auto-pick inside this set too, so this self-heal only fires on a
+  // channel switch that hides a previously-picked account (mirrors the HS picker's self-heal).
+  const moToolVisible =
+    !hsMode && partner.accountsFromToken && moToolRail ? (toolAccounts ?? null) : null;
+  const moAccountOptions =
+    moToolVisible !== null ? (adAccounts ?? []).filter((a) => moToolVisible.has(a.value)) : (adAccounts ?? []);
+  const moAccountHidden = Boolean(c.account) && moToolVisible !== null && !moToolVisible.has(c.account);
+  useEffect(() => {
+    if (moAccountHidden) onPatch(c.id, { account: "", pixel: "" });
+  }, [moAccountHidden, onPatch, c.id]);
   // Default binds (owner rule 09-08): once the profile's catalog lands, an EMPTY account fills
   // with the LEAST-LOADED one on the 5/30-min timer and an empty page with the LEAST-FILLED
   // fanka. Re-pickable like any pick; a duplicate keeps its source's (they arrive non-empty).
@@ -385,16 +421,21 @@ function CampaignCardBase({
   // The LION-validated name prefix is DERIVED (date + ACR + redirect label + geo, and the FB
   // Token rail's fixed TOKEN marker) — it re-renders live as the buyer flips redirect type, geo
   // or the launch rail; the server rebuilds the exact same string.
+  // TOOL wins over the FB-token/SOC markers when it is the effective channel (owner ask 28.09):
+  // HS carries GCL TOOL in the TOKEN slot (hsNamePrefix "tool"); MO/AIF carry it right after the
+  // partner prefix (toolEnsureMark), dropping any SOC marker. The server re-ensures it either way.
   const displayPrefix = hsMode
-    ? hsNamePrefix(c, hs?.acr ?? "", todaySaoPauloDDMM(), hsTokenRail ? "token" : "lion")
-    : c.namePrefix + (moSocRail ? MO_SOC_MARK : "");
+    ? hsNamePrefix(c, hs?.acr ?? "", todaySaoPauloDDMM(), toolRail ? "tool" : hsTokenRail ? "token" : "lion")
+    : c.namePrefix + (moToolRail ? TOOL_MARK : moSocRail ? MO_SOC_MARK : "");
   const displayName = hsMode
     ? c.name.trim()
       ? displayPrefix + c.name
       : ""
-    : moSocRail
-      ? moEnsureSocMark(fullName(c))
-      : fullName(c);
+    : moToolRail
+      ? toolEnsureMark(fullName(c))
+      : moSocRail
+        ? moEnsureSocMark(fullName(c))
+        : fullName(c);
 
   // Indians pin one account → its pixel and fanpage render locked, not searchable.
   const locked = Boolean(partner.lockedAccount);
@@ -616,10 +657,12 @@ function CampaignCardBase({
                           ? "Pick a profile first"
                           : !hsData
                             ? "Loading accounts…"
-                            : hsTokenVisible !== null &&
+                            : hsVisible !== null &&
                                 (hsData.accounts?.length ?? 0) > 0 &&
                                 hsAccountOptions.length === 0
-                              ? "No accounts here are visible to our FB token — use the LION API rail (or another profile)"
+                              ? toolRail
+                                ? "No accounts here are visible to a live TOOL session — use the LION API rail (or an owner refreshes the session on Ads Manager sessions)"
+                                : "No accounts here are visible to our FB token — use the LION API rail (or another profile)"
                               : "No accounts on this profile"
                       }
                       metaWhenClosed
@@ -640,9 +683,15 @@ function CampaignCardBase({
                               : defaultPixelFor(adAccounts ?? null, v, partner.preferredPixel),
                         })
                       }
-                      options={decorateAccountOptions(adAccounts ?? [], limits)}
+                      options={decorateAccountOptions(moAccountOptions, limits)}
                       placeholder="Search account"
-                      emptyHint={adAccounts ? "No accounts on the token" : "Loading accounts…"}
+                      emptyHint={
+                        !adAccounts
+                          ? "Loading accounts…"
+                          : moToolVisible !== null && adAccounts.length > 0 && moAccountOptions.length === 0
+                            ? "No accounts here are visible to a live TOOL session — switch to FB Token (or an owner refreshes the session on Ads Manager sessions)"
+                            : "No accounts on the token"
+                      }
                     />
                   ) : partner.lockedAccount ? (
                     <LockedField value={partner.lockedAccount.name} hint="only" />

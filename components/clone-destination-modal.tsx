@@ -31,6 +31,8 @@ export function CloneDestinationModal({
   defaultCopies,
   hasOverride,
   rowCount,
+  onTool = false,
+  toolAccounts = null,
   onClose,
   onApply,
   onApplyAll,
@@ -49,6 +51,12 @@ export function CloneDestinationModal({
   defaultCopies: number;
   hasOverride: boolean;
   rowCount: number;
+  /** TOOL launch channel (owner ask 28.09): the account picker then offers ONLY the accounts a
+   *  live TOOL session sees for this partner — no "From each source" (the source campaign's own
+   *  account is almost never a TOOL cabinet, and the client has no source-account id to prove it). */
+  onTool?: boolean;
+  /** Bare-digit account ids a live TOOL session sees (from /api/tool/ready); null off the TOOL rail. */
+  toolAccounts?: ReadonlySet<string> | null;
   onClose: () => void;
   onApply: (dest: CloneRowDest, copies: number | null) => void;
   onApplyAll: (dest: CloneRowDest, copies: number | null) => void;
@@ -56,6 +64,14 @@ export function CloneDestinationModal({
 }) {
   const [draft, setDraft] = useState<CloneRowDest>(() => ({ ...initial }));
   const [copies, setCopies] = useState(initialCopies != null ? String(initialCopies) : "");
+  // TOOL /api/tool/ready returns bare digits while our catalog values may carry an "act_" prefix —
+  // compare stripped so the TOOL filter matches regardless of the id spelling.
+  const bareId = (v: string): string => v.replace(/^act_/, "");
+  const toolVisible = (id: string): boolean =>
+    Boolean(id) && id !== SOURCE_ACCOUNT && (toolAccounts?.has(bareId(id)) ?? false);
+  // On the TOOL rail only TOOL-visible cabinets are offerable (and biddable); off it, the full
+  // token catalog is offered with the "From each source" sentinel.
+  const railAccounts = onTool ? (adAccounts ?? []).filter((a) => toolVisible(a.value)) : (adAccounts ?? []);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -78,7 +94,7 @@ export function CloneDestinationModal({
   const autoAccountId = partner.accountsFromToken
     ? leastLoadedAccount(
         accountLoads(
-          (adAccounts ?? [])
+          railAccounts
             .slice()
             .sort((a, b) => (a.value === preferredAcct ? -1 : b.value === preferredAcct ? 1 : 0))
             .map((a) => ({ id: a.value, disabled: a.disabled })),
@@ -102,7 +118,8 @@ export function CloneDestinationModal({
   const pixelsAll = isTarget ? pixelOptionsOf(adAccounts, effAccountId) : [];
   const pixels = aifMode ? aifOfferablePixels(pixelsAll) : pixelsAll;
   const fanpageOk = !partner.fanpagesFromToken || Boolean(effPageId);
-  const accountOk = !partner.accountsFromToken || Boolean(effAccountId);
+  // On the TOOL rail the account must be a concrete TOOL-visible cabinet (never SOURCE_ACCOUNT).
+  const accountOk = !partner.accountsFromToken || (onTool ? toolVisible(effAccountId) : Boolean(effAccountId));
   const pixelOk = !isTarget || Boolean(effPixelId);
   const complete = fanpageOk && accountOk && pixelOk;
   const copiesN = Number(copies);
@@ -198,13 +215,23 @@ export function CloneDestinationModal({
                           : "",
                     }))
                   }
-                  options={[
-                    { value: SOURCE_ACCOUNT, label: "From each source" },
-                    ...decorateAccountOptions(adAccounts ?? [], limits),
-                  ]}
+                  options={
+                    onTool
+                      ? decorateAccountOptions(railAccounts, limits)
+                      : [
+                          { value: SOURCE_ACCOUNT, label: "From each source" },
+                          ...decorateAccountOptions(adAccounts ?? [], limits),
+                        ]
+                  }
                   placeholder="Select account"
-                  emptyHint={adAccounts ? "No accounts on the token" : "Loading accounts…"}
-                  warn={!effAccountId}
+                  emptyHint={
+                    adAccounts
+                      ? onTool
+                        ? "No TOOL-visible accounts for this partner"
+                        : "No accounts on the token"
+                      : "Loading accounts…"
+                  }
+                  warn={onTool ? !toolVisible(effAccountId) : !effAccountId}
                 />
               </Field>
               {isTarget ? (

@@ -17,6 +17,7 @@ import {
   pickAifPixel,
 } from "@/lib/partners";
 import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
+import { toolEnsureMark } from "@/lib/tool-launch";
 import { makeGate } from "@/lib/launch-guards";
 import { Header } from "./header";
 import { CampaignCard } from "./campaign-card";
@@ -29,6 +30,7 @@ import { type AdAccountOption, defaultPixelFor, useAdAccounts } from "./use-adac
 import { type AcctLimits, acctIdKey, useAcctLimits } from "./use-acct-limit";
 import { useHs } from "./use-hs";
 import { LaunchRail } from "./launch-rail";
+import { useToolReady } from "./use-tool-ready";
 import { CopySettingsModal } from "./copy-settings-modal";
 import { ChevronsIcon, CopyIcon, PlusIcon } from "./icons";
 import { useAifTaskManager, useTaskManager } from "./task-manager";
@@ -61,9 +63,16 @@ const todayDDMM = (): string => todayPrefixDDMM();
  *  amber banner, so designers know BEFORE building a wave that it may not fit. 0 = hard block. */
 const GCM_LOW_WATER = 15;
 
-/** The HS launch-rail pick (LION API vs FB Token) survives refreshes — buyers run whole waves on
- *  one rail, re-picking it every session would invite accidental LION shots mid-token-wave. */
+/** The HS launch-rail pick (LION API | FB Token | TOOL) survives refreshes — buyers run whole
+ *  waves on one rail, re-picking it every session would invite accidental LION shots mid-wave. */
 const HS_CHANNEL_LS = "adlauncher.hs.channel";
+/** MO/AIF launch-rail pick (FB Token | TOOL) — one key per partner (owner ask 28.09). MO uses the
+ *  fresh `...channel2` key, NOT the retired `adlauncher.mo.channel` (the old soc-signer switch). */
+const MO_CHANNEL_LS = "adlauncher.mo.channel2";
+const AIF_CHANNEL_LS = "adlauncher.aif.channel";
+
+/** MO/AIF direct-Graph partners choose between our FB token and the HS TOOL sessions service. */
+type GraphChannel = "token" | "tool";
 
 // The MO / AIF launch signer is no longer a per-buyer pick: the owner assigns it on /tokens
 // (lib/fb-tokens) and every rail resolves that same slot server-side (badge via use-signers).
@@ -97,10 +106,18 @@ function fillAccountDefaults(
   partner: PartnerConfig,
   adAccounts: AdAccountOption[] | null,
   limits?: Pick<AcctLimits, "countFor" | "limit" | "resetAtFor">,
+  visible?: Set<string> | null,
 ): Campaign[] {
   if (!partner.accountsFromToken || !adAccounts || adAccounts.length === 0) return rows;
+  // TOOL wave armed (owner ask 28.09): the auto-pick candidate pool is restricted to TOOL-visible
+  // accounts AND a card bound to a non-visible account counts as invalid (needs re-fill). This
+  // keeps the board's default in the same set the card's picker offers, so its self-heal (which
+  // clears a hidden account) and this re-fill converge instead of ping-ponging. Nothing visible
+  // yet → leave the rows for the card-level heal (don't blank a good account off an empty sweep).
+  const pool = visible ? adAccounts.filter((a) => visible.has(a.value)) : adAccounts;
+  if (pool.length === 0) return rows;
   const preferred = partner.defaultAccount?.id ?? "";
-  const ordered = adAccounts.slice().sort((a, b) => (a.value === preferred ? -1 : b.value === preferred ? 1 : 0));
+  const ordered = pool.slice().sort((a, b) => (a.value === preferred ? -1 : b.value === preferred ? 1 : 0));
   const pick = limits
     ? leastLoadedAccount(
         accountLoads(
@@ -113,7 +130,7 @@ function fillAccountDefaults(
   let changed = false;
   const next = rows.map((c) => {
     let account = c.account;
-    if (!account || !adAccounts.some((a) => a.value === account)) {
+    if (!account || !adAccounts.some((a) => a.value === account) || (visible && !visible.has(account))) {
       account = pick || ordered[0].value;
     }
     let pixel = c.pixel;
@@ -221,6 +238,11 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // The rail's signer (MO / AIF direct-Graph rails) is the OWNER'S pick on /tokens — read-only
   // here (badge in the rail); the launch route resolves the very same slot server-side.
   const graphRail = !partner.lionLaunch && (partner.usesGcm || Boolean(partner.aifLaunch));
+  // TOOL launch-channel readiness for the ACTIVE partner (owner ask 28.09): the server verifies the
+  // key + scopes + ≥1 live-session account also in this partner's catalog and assigned to this
+  // buyer. Gates the TOOL rail segment and filters the account pickers; polls 5 min + on focus and
+  // resets on a partner switch (the hook keys on partner|rail).
+  const toolReady = useToolReady(partnerId, "launch");
   const signers = useSigners(graphRail);
   const railSigner = graphRail ? (signers.slots?.[partner.aifLaunch ? "aif.launch" : "mo.launch"] ?? null) : null;
   /** A token exists for this rail (assigned or env default) — the catalogs load and waves may
@@ -261,13 +283,21 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // from localStorage after mount (SSR-safe); the token option is offered only once the server
   // says the rail is provisioned (hs.tokenLaunch).
   const [hsChannel, setHsChannel] = useState<HsLaunchChannel>("lion");
+  // MO/AIF launch rail (owner ask 28.09): our FB token (direct Graph, default) or the HS TOOL
+  // sessions service. Per-partner localStorage keys, restored after mount (SSR-safe).
+  const [moChannel, setMoChannel] = useState<GraphChannel>("token");
+  const [aifChannel, setAifChannel] = useState<GraphChannel>("token");
   useEffect(() => {
     try {
-      const v = localStorage.getItem(HS_CHANNEL_LS);
       // Safe setState-in-effect: runs once on mount (localStorage is unreadable during SSR),
-      // and only flips the default when a pick was actually saved.
+      // and only flips a default when a pick was actually saved.
+      const v = localStorage.getItem(HS_CHANNEL_LS);
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (v === "token" || v === "lion") setHsChannel(v);
+      if (v === "token" || v === "lion" || v === "tool") setHsChannel(v);
+      const mo = localStorage.getItem(MO_CHANNEL_LS);
+      if (mo === "token" || mo === "tool") setMoChannel(mo);
+      const aif = localStorage.getItem(AIF_CHANNEL_LS);
+      if (aif === "token" || aif === "tool") setAifChannel(aif);
     } catch {
       /* storage disabled — session-local pick only */
     }
@@ -280,6 +310,38 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       /* storage disabled */
     }
   }, []);
+  // One toggle handler for the active graphRail partner (MO or AIF); each persists to its own key.
+  // Plain function (the rail isn't memoized): reads the current `partner` freshly, no stale closure.
+  const changeGraphChannel = (ch: GraphChannel) => {
+    if (partner.aifLaunch) {
+      setAifChannel(ch);
+      try {
+        localStorage.setItem(AIF_CHANNEL_LS, ch);
+      } catch {
+        /* storage disabled */
+      }
+    } else {
+      setMoChannel(ch);
+      try {
+        localStorage.setItem(MO_CHANNEL_LS, ch);
+      } catch {
+        /* storage disabled */
+      }
+    }
+  };
+  // The active graphRail partner's pick + the effective TOOL flags (picked AND server-ready). A
+  // stale "tool" pick with the rail not ready falls back (HS → LION, MO/AIF → FB Token) at fire
+  // time — the launch/enqueue below reads these, never the raw pick.
+  const graphChannel: GraphChannel = partner.aifLaunch ? aifChannel : moChannel;
+  const hsToolActive = Boolean(partner.lionLaunch) && hsChannel === "tool" && toolReady.ready;
+  const graphToolActive = graphRail && graphChannel === "tool" && toolReady.ready;
+  // The TOOL-visible account set to constrain MO/AIF auto-fill to (null unless a TOOL wave is
+  // armed) — mirrors the card picker's filter so the board default lands in the same set.
+  const toolVisible = graphToolActive ? toolReady.accounts : null;
+  const toolVisibleRef = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    toolVisibleRef.current = toolVisible;
+  }, [toolVisible]);
 
   // Latest partner for callbacks that must not re-subscribe on partner switch.
   const partnerRef = useRef(partner);
@@ -298,8 +360,17 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // reference when nothing changes, so this never cascades.
   useEffect(() => {
     if (!adAccounts || adAccounts.length === 0) return;
-    setCampaigns((cs) => fillAccountDefaults(cs, partnerRef.current, adAccounts, limitsRef.current));
+    setCampaigns((cs) => fillAccountDefaults(cs, partnerRef.current, adAccounts, limitsRef.current, toolVisibleRef.current));
   }, [adAccounts]);
+
+  // When the TOOL-visible set changes (channel switched to/from TOOL, or its readiness landed),
+  // re-fill account defaults so cards converge onto a TOOL-visible account (or off a now-hidden
+  // one) — the card's self-heal clears a hidden pick, this refills a visible one; they converge.
+  useEffect(() => {
+    const accts = adAccountsRef.current;
+    if (!accts || accts.length === 0) return;
+    setCampaigns((cs) => fillAccountDefaults(cs, partnerRef.current, accts, limitsRef.current, toolVisible));
+  }, [toolVisible]);
 
   // Fanpage defaults (owner rule 09-08): the least-filled fanka fills every empty card — on the
   // list's arrival, again when its fill counts land (the auto memory lets those cards re-settle
@@ -451,7 +522,14 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     // tweak-and-relaunch, same as MO. The token pick is honored only while the server says the
     // rail is provisioned — otherwise the wave falls back to LION rather than dying en masse.
     if (partner.lionLaunch) {
-      const channel: HsLaunchChannel = hsChannel === "token" && hs.tokenLaunch ? "token" : "lion";
+      // Effective HS rail (owner ask 28.09): TOOL when picked AND ready, else FB Token when picked
+      // AND provisioned, else LION — a stale pick falls back rather than dying en masse.
+      const channel: HsLaunchChannel =
+        hsChannel === "tool" && toolReady.ready
+          ? "tool"
+          : hsChannel === "token" && hs.tokenLaunch
+            ? "token"
+            : "lion";
       const ddmm = todaySaoPauloDDMM();
       let sent = 0;
       for (const c of launchable) {
@@ -522,7 +600,14 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
         mediaName: media.name,
         mediaKind: media.kind === "image" ? "image" : "video",
         ...(media.kind === "video" && media.cover ? { cover: media.cover } : {}),
-        name: moSocMarks ? moEnsureSocMark(fullName(c)) : fullName(c),
+        // TOOL wave (owner ask 28.09): the marked preview name (server re-ensures it) and the
+        // distinct `via:"tool"` field — NEVER the retired soc `channel`. TOOL drops the SOC mark.
+        name: graphToolActive
+          ? toolEnsureMark(fullName(c))
+          : moSocMarks
+            ? moEnsureSocMark(fullName(c))
+            : fullName(c),
+        ...(graphToolActive ? { via: "tool" as const } : {}),
         gcm: c.gcm,
         geo: geoSummary(c.countries),
         budget: c.budget,
@@ -552,7 +637,13 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     (fn: (cs: Campaign[]) => Campaign[]) => {
       setCampaigns((cs) =>
         fillPageDefaults(
-          fillAccountDefaults(normalize(fn(cs), partner, reserved), partner, adAccountsRef.current, limitsRef.current),
+          fillAccountDefaults(
+            normalize(fn(cs), partner, reserved),
+            partner,
+            adAccountsRef.current,
+            limitsRef.current,
+            toolVisibleRef.current,
+          ),
           partner,
           fanpagesRef.current,
         ),
@@ -825,14 +916,20 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
                 adAccounts={adAccounts}
                 hs={partner.lionLaunch ? hs : undefined}
                 highlight={highlightId === c.id}
-                // Covers ride only on OUR FB token (owner rule): MO/AIF rails always do; HS only
-                // while the FB Token channel is picked — the LION weapon picks its own frame.
-                coversEnabled={partner.lionLaunch ? hsChannel === "token" && hs.tokenLaunch : true}
+                // Covers ride only where WE pin the thumbnail (owner rule): MO/AIF rails always do;
+                // HS only on the FB Token or TOOL channel — the LION weapon picks its own frame.
+                coversEnabled={partner.lionLaunch ? (hsChannel === "token" && hs.tokenLaunch) || hsToolActive : true}
                 // FB Token rail picked → the card's account picker filters to token-visible ones.
                 hsTokenRail={partner.lionLaunch ? hsChannel === "token" && hs.tokenLaunch : false}
+                // TOOL is the effective channel (owner ask 28.09) → the account picker filters to
+                // TOOL-visible accounts and the name preview carries the GCL TOOL marker.
+                toolRail={hsToolActive}
+                moToolRail={graphToolActive}
+                toolAccounts={toolReady.ready ? toolReady.accounts : undefined}
                 // Соц-class channel picked (MO) → the card's name preview carries the SOC marker
-                // (alternate SYSTEM entries launch unmarked — preview stays unmarked too).
-                moSocRail={moSocMarks}
+                // (alternate SYSTEM entries launch unmarked — preview stays unmarked too). TOOL
+                // drops SOC, so never show it on a TOOL wave.
+                moSocRail={moSocMarks && !graphToolActive}
                 onPatch={patch}
                 onToggleCollapse={toggleCollapse}
                 onDuplicate={duplicate}
@@ -864,6 +961,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
             hsChannel={hsChannel}
             hsTokenReady={hs.tokenLaunch}
             onHsChannel={changeHsChannel}
+            tool={toolReady}
+            graphChannel={graphChannel}
+            onGraphChannel={changeGraphChannel}
             signer={railSigner}
             signerLoaded={signers.loaded}
             owner={Boolean(user?.owner)}

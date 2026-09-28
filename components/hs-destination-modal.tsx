@@ -28,6 +28,8 @@ export function HsDestinationModal({
   limits,
   needsPage,
   tokenRail,
+  toolRail = false,
+  toolAccounts = null,
   maxCopies,
   initial,
   initialCopies,
@@ -46,6 +48,10 @@ export function HsDestinationModal({
   needsPage: boolean;
   /** FB Token rails: offer only accounts the duplicate signer can act on. */
   tokenRail: boolean;
+  /** TOOL rail (owner ask 28.09): offer only the accounts a live TOOL session sees. */
+  toolRail?: boolean;
+  /** Bare-digit account ids a live TOOL session sees (from /api/tool/ready); null off the TOOL rail. */
+  toolAccounts?: ReadonlySet<string> | null;
   maxCopies: number;
   /** Seed — the row's own tuple when it has one, else the wave defaults. */
   initial: HsRowDest;
@@ -74,10 +80,16 @@ export function HsDestinationModal({
 
   const data = draft.profile ? hs.dataFor(draft.profile) : undefined;
   // Same account filter as the Settings column: on the FB Token rails only the signer's own
-  // grant is offered (null sweep → no filtering, fail open).
+  // grant is offered (null sweep → no filtering, fail open); on the TOOL rail only the accounts a
+  // live TOOL session sees (owner ask 28.09). /api/tool/ready returns bare digits while LION
+  // account values may carry "act_" — compare stripped.
+  const bareId = (v: string): string => v.replace(/^act_/, "");
   const tokenVisible = tokenRail ? (data?.dupTokenAccounts ?? data?.tokenAccounts ?? null) : null;
-  const accountOptions =
-    tokenVisible !== null ? (data?.accounts ?? []).filter((a) => tokenVisible.has(a.value)) : (data?.accounts ?? []);
+  const accountOptions = toolRail
+    ? (data?.accounts ?? []).filter((a) => (toolAccounts ? toolAccounts.has(bareId(a.value)) : true))
+    : tokenVisible !== null
+      ? (data?.accounts ?? []).filter((a) => tokenVisible.has(a.value))
+      : (data?.accounts ?? []);
   // Default binds (owner rule 09-08), same as the Settings column: an empty account/page pick
   // shows and applies the least-loaded account / least-filled fanka; a real pick wins.
   const autoAccount = leastLoadedAccount(
@@ -190,9 +202,11 @@ export function HsDestinationModal({
                   ? "Pick a profile first"
                   : !data
                     ? "Loading…"
-                    : tokenVisible !== null && (data.accounts?.length ?? 0) > 0 && accountOptions.length === 0
-                      ? "No accounts here are visible to our FB token — use the LION API rail (or another profile)"
-                      : "No enabled accounts"
+                    : toolRail && (data.accounts?.length ?? 0) > 0 && accountOptions.length === 0
+                      ? "No accounts here are visible to a live TOOL session — pick another profile or fire on LION API"
+                      : tokenVisible !== null && (data.accounts?.length ?? 0) > 0 && accountOptions.length === 0
+                        ? "No accounts here are visible to our FB token — use the LION API rail (or another profile)"
+                        : "No enabled accounts"
               }
               metaWhenClosed
             />

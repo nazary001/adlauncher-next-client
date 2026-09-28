@@ -34,8 +34,9 @@ import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, XIcon
 
 export type HsTaskStatus = "queued" | "running" | "submitted" | "done" | "error" | "unknown";
 
-/** Which rail a launch rides: LION's create weapon, or our own FB token straight on the Graph. */
-export type HsLaunchChannel = "lion" | "token";
+/** Which rail a launch rides: LION's create weapon, our own FB token straight on the Graph, or
+ *  the HS TOOL sessions service (tool.gctracking.xyz — owner ask 28.09). */
+export type HsLaunchChannel = "lion" | "token" | "tool";
 
 export type HsTask = {
   id: string;
@@ -49,9 +50,11 @@ export type HsTask = {
   /** Server-side updatedAt (ms) of the Strapi row — the liveness signal behind `stale`. */
   updatedMs?: number;
   /** "launch" (create weapon, default for restored rows), "duplicate" (clone weapon — enters at
-   *  "submitted" and auto-activates after COMPLETED, clones are born PAUSED) or "token" (FB
-   *  Token channel — the tree is built in-request by /api/hs/token-launch, no LION lifecycle). */
-  kind?: "launch" | "duplicate" | "token";
+   *  "submitted" and auto-activates after COMPLETED, clones are born PAUSED), "token" (FB Token
+   *  channel — the tree is built in-request by /api/hs/token-launch, no LION lifecycle) or "tool"
+   *  (HS TOOL sessions service — same in-request NDJSON contract as token via /api/hs/tool-launch,
+   *  owner ask 28.09). */
+  kind?: "launch" | "duplicate" | "token" | "tool";
   status: HsTaskStatus;
   /** Furthest stage key reached (drives the segmented bar). */
   stage: string;
@@ -99,8 +102,36 @@ const TOKEN_STAGE_LABELS: Record<string, string> = {
   ads: "Creating ads",
 };
 
+// TOOL launches (owner ask 28.09) ride the SAME segmented bar. The /api/hs/tool-launch route
+// reuses token-launch's stage keys where they overlap (submit/campaign/adset/ads) and adds the
+// shared NDJSON keys of spec §2.4 (gcm/video/processing/creative/ad); label every one it can emit.
+const TOOL_STAGE_LABELS: Record<string, string> = {
+  upload: "Uploading creatives",
+  gcm: "Preparing launch",
+  video: "Registering media",
+  processing: "Processing video",
+  submit: "Sending to TOOL",
+  campaign: "Creating campaign",
+  adset: "Creating ad set",
+  creative: "Building creative",
+  ad: "Creating ads",
+  ads: "Creating ads",
+};
+
+// The spec §2.4 NDJSON keys TOOL may emit that are NOT slots on the HS segmented bar
+// (STAGES = upload/submit/queue/campaign/adset/ads) → the slot each lights. Only affects TOOL/token
+// stage keys; LION statuses (queue/campaign/adset/ads) pass through unchanged.
+const HS_STAGE_ALIAS: Record<string, string> = {
+  gcm: "submit",
+  video: "submit",
+  processing: "submit",
+  creative: "ads",
+  ad: "ads",
+};
+
 const stageIndex = (stage: string): number => {
-  const i = STAGES.findIndex((s) => s.key === stage);
+  const key = HS_STAGE_ALIAS[stage] ?? stage;
+  const i = STAGES.findIndex((s) => s.key === key);
   return i < 0 ? 0 : i;
 };
 
@@ -236,7 +267,8 @@ function fromRemote(r: HsRemoteRow): HsTask {
     profile: "",
     geo: r.geo || "",
     budget: r.budget || "",
-    kind: r.kind === "duplicate" ? "duplicate" : r.kind === "token" ? "token" : "launch",
+    kind:
+      r.kind === "duplicate" ? "duplicate" : r.kind === "token" ? "token" : r.kind === "tool" ? "tool" : "launch",
     status,
     stage: r.stage || (status === "submitted" ? "queue" : "upload"),
     lionTaskId: r.lionTaskId || undefined,
@@ -271,14 +303,14 @@ function mergeShared(cur: HsTask[], fetched: HsTask[], tombstones: ReadonlySet<s
     // would double-create.
     const lostAnswer =
       !!prev?.local && (prev.status === "error" || prev.status === "unknown") && !prev.lionTaskId && !!f.lionTaskId;
-    // Token twin of lostAnswer: the stream got cut client-side but the server kept building and
-    // wrote its own verdict — that truth wins. An ambiguous local "unknown" adopts EITHER
+    // Token/TOOL twin of lostAnswer: the stream got cut client-side but the server kept building
+    // and wrote its own verdict — that truth wins. An ambiguous local "unknown" adopts EITHER
     // terminal (done upgrades it, the server's error names the real failure + created ids); a
     // local clean error adopts only "done" (adopting a server error would retire a legitimate
-    // pre-campaign Retry for no gain).
+    // pre-campaign Retry for no gain). TOOL rides the same in-request stream, so it settles alike.
     const tokenSettled =
       !!prev?.local &&
-      prev.kind === "token" &&
+      (prev.kind === "token" || prev.kind === "tool") &&
       ((prev.status === "unknown" && (f.status === "done" || f.status === "error")) ||
         (prev.status === "error" && f.status === "done"));
     byId.set(
@@ -508,7 +540,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
                 // fetch below merges over this snapshot) is the truth; this text only survives for
                 // runs that died before reaching the server.
                 error:
-                  t.kind === "token"
+                  t.kind === "token" || t.kind === "tool"
                     ? "Interrupted — page closed mid-launch; check this row / Ads Manager before re-firing"
                     : "Interrupted — page closed before the submit reached LION",
                 finishedAt: t.finishedAt ?? Date.now(),
@@ -583,7 +615,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       if (document.hidden) return;
       for (const t of tasksRef.current) {
         const mine = t.local || (!!me && t.owner === me);
-        const serverManaged = !t.local && (t.kind === "duplicate" || t.kind === "token");
+        const serverManaged = !t.local && (t.kind === "duplicate" || t.kind === "token" || t.kind === "tool");
         if (mine && !serverManaged && (t.status === "queued" || t.status === "running" || t.status === "submitted")) {
           saveRemote(t.id, dynOf(t));
         }
@@ -623,7 +655,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
             preparedFiles.set(i, await readCreative(f.url, f.name || `creative-${i}`, f.kind === "image" ? "image" : "video", `creative "${f.name || i + 1}"`));
           }
           const cov = media[i].cover;
-          if (input.channel === "token" && cov && media[i].kind === "video") {
+          if ((input.channel === "token" || input.channel === "tool") && cov && media[i].kind === "video") {
             preparedCovers.set(i, await readCreative(cov.url, cov.name || `cover-${i}.jpg`, "image", `cover "${cov.name || i + 1}"`));
           }
         }
@@ -645,9 +677,9 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
           );
         }
 
-        // Custom covers (video creatives, FB Token rail only — LION's create contract takes
-        // bare URLs and picks its own frame): each cover rides to Blob like a creative and the
-        // server pins it as the ad's thumbnail.
+        // Custom covers (video creatives, FB Token / TOOL rails only — LION's create contract
+        // takes bare URLs and picks its own frame): each cover rides to Blob like a creative and
+        // the server pins it as the ad's thumbnail (TOOL registers it via media/from-url).
         const coverUrls = new Map<number, string>();
         for (const [i, file] of preparedCovers) {
           coverUrls.set(
@@ -660,10 +692,13 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
           );
         }
 
-        // 2a) FB Token rail: /api/hs/token-launch builds the whole tree in-request and streams
-        // NDJSON stage events — consume them like the MO manager does, then settle on the final
-        // ok/error event. No LION lifecycle: done here means the campaign EXISTS on Facebook.
-        if (input.channel === "token") {
+        // 2a) FB Token / TOOL rails: /api/hs/token-launch (or /api/hs/tool-launch, owner ask
+        // 28.09) builds the whole tree in-request and streams NDJSON stage events — consume them
+        // like the MO manager does, then settle on the final ok/error event. No LION lifecycle:
+        // done here means the campaign EXISTS on Facebook. The TOOL route accepts the exact same
+        // body the token branch sends (same creatives shape) — only the endpoint differs.
+        if (input.channel === "token" || input.channel === "tool") {
+          const launchApi = input.channel === "tool" ? "/api/hs/tool-launch" : "/api/hs/token-launch";
           patch(id, { stage: "submit" });
           const creatives = media.map((f, i) => ({
             url: urls[i],
@@ -682,7 +717,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
           // `ok:false` final, which IS a real per-launch verdict.
           let transportError: string | null = null;
           try {
-            const res = await fetch("/api/hs/token-launch", {
+            const res = await fetch(launchApi, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ campaign: input.campaign, creatives, taskId: id }),
@@ -758,6 +793,16 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
               error: null,
             });
             inputs.current.delete(id); // the tree exists — never re-run
+          } else if (f && f.pending === true) {
+            // TOOL is still finishing this launch past our window (owner ask 28.09): AMBIGUOUS like
+            // a lost connection — the campaign may exist, so settle terminal-unknown with NO
+            // one-click retry. The server wrote the pending row; mergeShared (tokenSettled) adopts
+            // its eventual done/error over this. No remote write (it could demote the server's row).
+            const msg =
+              (f.error as string) ||
+              "TOOL is still finishing this launch — check this row / Ads Manager before re-firing";
+            patch(id, { status: "unknown", stage: lastStage, finishedAt: Date.now(), error: msg });
+            inputs.current.delete(id);
           } else if (f) {
             // Clean per-launch rejection from the server — a real verdict, retryable only while
             // nothing landed on Facebook.
@@ -904,7 +949,7 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         const error = neverSubmitted
           ? t.kind === "duplicate"
             ? "Never reached LION — the wave's server window closed before this shot; re-fire it in the duplicator"
-            : t.kind === "token"
+            : t.kind === "token" || t.kind === "tool"
               ? "Interrupted — the launching session went offline mid-build; check Ads Manager before re-firing"
               : "Interrupted — the submitting session closed before this launch reached LION; fire the card again"
           : "Still not finished on LION after 3 h — check the LION dashboard";
@@ -1132,8 +1177,10 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       const id =
         (globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)) + Date.now().toString(36);
       const now = Date.now();
-      const channel: HsLaunchChannel = args.channel === "token" ? "token" : "lion";
-      const kind = channel === "token" ? ("token" as const) : ("launch" as const);
+      const channel: HsLaunchChannel =
+        args.channel === "token" ? "token" : args.channel === "tool" ? "tool" : "lion";
+      const kind =
+        channel === "token" ? ("token" as const) : channel === "tool" ? ("tool" as const) : ("launch" as const);
       // What this launch bids on — shown on the card and persisted (rides in `meta`, which is
       // spread into every save) so it survives reload and reaches the team's restored rows too.
       const bid = bidTag(args.campaign.bidStrategy, args.campaign.bidCap) || undefined;
@@ -1468,7 +1515,7 @@ function HsTaskManagerPanel() {
             </span>
             <div className="leading-none">
               <h2 className="text-[14px] font-semibold text-ink">HS Task Manager</h2>
-              <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-faint">LION · FB token launch queue</p>
+              <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-faint">LION · FB token · TOOL launch queue</p>
             </div>
           </div>
           <button
@@ -1536,8 +1583,8 @@ function HsTaskManagerPanel() {
               <p className="text-[13px] font-medium text-dim">Nothing here yet</p>
               <p className="max-w-[250px] text-[11.5px] leading-relaxed text-faint">
                 HS launches land here. LION rail: a green row means LION accepted it — the build
-                finishes on LION&apos;s side. FB token rail: a green row means the campaign is
-                already live on Facebook (delivery starts 30 min after create).
+                finishes on LION&apos;s side. FB token &amp; TOOL rails: a green row means the
+                campaign is already live on Facebook (delivery starts 30 min after create).
               </p>
             </div>
           ) : (
@@ -1636,11 +1683,13 @@ function HsTaskRow({
   // done only when the tree is REAL on Facebook, so they always name it.
   const adsSuffix = t.adCount ? ` · ${t.adCount} ad${t.adCount === 1 ? "" : "s"}` : "";
   const statusLabel = done
-    ? t.kind === "token"
-      ? `Created via FB token${adsSuffix} · delivery +30 min from create`
-      : t.campaignId || t.adCount
-        ? `Created on LION${adsSuffix}`
-        : "Sent to LION"
+    ? t.kind === "tool"
+      ? `Created via TOOL${adsSuffix} · delivery +30 min from create`
+      : t.kind === "token"
+        ? `Created via FB token${adsSuffix} · delivery +30 min from create`
+        : t.campaignId || t.adCount
+          ? `Created on LION${adsSuffix}`
+          : "Sent to LION"
     : error
       ? t.error || "Failed"
       : unknown
@@ -1648,7 +1697,11 @@ function HsTaskRow({
         : t.status === "queued"
           ? "Queued"
           : t.status === "running"
-            ? (t.kind === "token" ? TOKEN_STAGE_LABELS[t.stage] : STAGES[idx]?.label) ?? "Working…"
+            ? (t.kind === "tool"
+                ? TOOL_STAGE_LABELS[t.stage]
+                : t.kind === "token"
+                  ? TOKEN_STAGE_LABELS[t.stage]
+                  : STAGES[idx]?.label) ?? "Working…"
             : (t.lionStatus && LION_STAGE[t.lionStatus]?.label) || `On LION: ${t.lionStatus ?? "…"}`;
 
   return (

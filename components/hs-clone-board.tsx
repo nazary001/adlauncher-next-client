@@ -12,6 +12,7 @@ import { CLONE_DEFAULT_BUDGET, bidKind, bidTag, budgetOnStrategyChange, limitMon
 import { lionWireSuffix } from "@/lib/hs-clone-name";
 import { BID_STRATEGIES, geoSummary } from "@/lib/catalog";
 import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from "@/lib/hs-launch";
+import { TOOL_MARK } from "@/lib/tool-launch";
 import { juroEnsureMark, juroLionStrategyAccepted } from "@/lib/juro";
 import { makeGate } from "@/lib/launch-guards";
 import { relabelNameGeo } from "@/lib/targeting-override";
@@ -33,6 +34,7 @@ import {
 import { HsTargetingModal } from "./hs-targeting-modal";
 import { HsDestinationModal, type HsRowDest } from "./hs-destination-modal";
 import { hsTokensAllDown, useHsTokenStatus } from "./hs-token-status";
+import { useToolReady } from "./use-tool-ready";
 import type { SessionUser } from "./user-menu";
 
 const MAX_COPIES = 20;
@@ -202,6 +204,10 @@ export function HsCloneBoard({
 }) {
   const hs = useHs(true);
   const { setOpen, counts: hsCounts } = useHsTaskManager();
+  // TOOL launch channel readiness for HS (owner ask 28.09): key + scopes + ≥1 live account this
+  // buyer may reach. Gates the TOOL segment; a stale "tool" pick with the rail not ready falls back
+  // to LION at fire time. Only the Cloner mode fires on TOOL (JURO via TOOL is the next step).
+  const toolReady = useToolReady(partner, "clone");
 
   const [profile, setProfile] = useState("");
   const [account, setAccount] = useState("");
@@ -222,7 +228,8 @@ export function HsCloneBoard({
   // /api/hs/jurar | /api/hs/token-jurar. All picks survive refreshes; the token options unlock
   // only once the server says the rail is provisioned.
   const [mode, setMode] = useState<"clone" | "juro">(initialMode ?? "clone");
-  const [dupChannel, setDupChannel] = useState<"lion" | "token">("lion");
+  // Cloner channel gained "tool" (owner ask 28.09) — same localStorage key `adlauncher.hs.dupchannel`.
+  const [dupChannel, setDupChannel] = useState<"lion" | "token" | "tool">("lion");
   const [juroChannel, setJuroChannel] = useState<"lion" | "token">("lion");
   useEffect(() => {
     try {
@@ -235,7 +242,7 @@ export function HsCloneBoard({
       if (!initialMode && (m === "juro" || m === "clone")) setMode(m);
       // pre-split storage carried the mode inside the channel key ("juro") — map it forward
       else if (!initialMode && v === "juro") setMode("juro");
-      if (v === "token" || v === "lion") setDupChannel(v);
+      if (v === "token" || v === "lion" || v === "tool") setDupChannel(v);
       if (j === "token" || j === "lion") setJuroChannel(j);
     } catch {
       /* storage disabled — session-local pick only */
@@ -251,7 +258,7 @@ export function HsCloneBoard({
       /* storage disabled */
     }
   };
-  const changeDupChannel = (ch: "lion" | "token") => {
+  const changeDupChannel = (ch: "lion" | "token" | "tool") => {
     setDupChannel(ch);
     setPreviewed(false);
     setFireNote(null);
@@ -290,16 +297,36 @@ export function HsCloneBoard({
 
   const data = profile ? hs.dataFor(profile) : undefined;
 
-  const effDupChannel: "lion" | "token" | "juro" | "juro-token" =
+  const effDupChannel: "lion" | "token" | "tool" | "juro" | "juro-token" =
     mode === "juro"
       ? juroChannel === "token" && hs.tokenLaunch
         ? "juro-token"
         : "juro"
-      : dupChannel === "token" && hs.tokenLaunch
-        ? "token"
-        : "lion";
+      : // Cloner: a "tool" pick only holds while the TOOL rail is ready (else it falls back to the
+        // FB-token check, then LION — same stale-pick rule the token rail has).
+        dupChannel === "tool" && toolReady.ready
+        ? "tool"
+        : dupChannel === "token" && hs.tokenLaunch
+          ? "token"
+          : "lion";
   /** Both FB-Token channels ride the same token pool — one flag for every pool-dependent gate. */
   const tokenRail = effDupChannel === "token" || effDupChannel === "juro-token";
+  /** The TOOL rail (Cloner only): the destination catalog is filtered to TOOL-visible accounts and
+   *  the wave fires /api/hs/tool-duplicate (owner ask 28.09). */
+  const toolRail = effDupChannel === "tool";
+  // /api/tool/ready returns BARE digits while LION account values may carry an "act_" prefix —
+  // compare stripped so the TOOL filter matches regardless of the id spelling.
+  const bareId = (v: string): string => v.replace(/^act_/, "");
+  /** The account-id filter for the CURRENT rail on a given profile, or null = no filter (LION):
+   *  TOOL → the global TOOL-visible set (profile-independent); FB Token → the profile's own
+   *  dup-token grant. Shared by the Settings + per-row pickers and the fire-time hidden checks. */
+  const railAccountFilter = (prof: string): ((value: string) => boolean) | null => {
+    if (toolRail) return (value) => toolReady.accounts.has(bareId(value));
+    if (!tokenRail) return null;
+    const d = hs.dataFor(prof);
+    const set = d?.dupTokenAccounts ?? d?.tokenAccounts ?? null;
+    return set ? (value) => set.has(value) : null;
+  };
   /** The row's strategy pick WINS on every rail since 09-09: the FB Token rails rebuild the ad
    *  set (owner ask 09-01), LION JURO's /jurar/ takes bid_strategy natively (owner ask 09-08) and
    *  LION duplicate v2 does too (partner docs 09-09 — ROAS ↔ cap ↔ cost cap ↔ lowest). */
@@ -323,9 +350,10 @@ export function HsCloneBoard({
   // accs vs the pool's 379 as of 09-03) — LION binds cover segments a token was never granted
   // (aleph, 08-19), and a build there dies on the first Graph POST. null sweep → no filtering
   // (fail open; the server guard still answers with the actionable error).
-  const tokenVisible = tokenRail ? (data?.dupTokenAccounts ?? data?.tokenAccounts ?? null) : null;
-  const accountOptions =
-    tokenVisible !== null ? (data?.accounts ?? []).filter((a) => tokenVisible.has(a.value)) : (data?.accounts ?? []);
+  const settingsFilter = railAccountFilter(profile);
+  const accountOptions = settingsFilter
+    ? (data?.accounts ?? []).filter((a) => settingsFilter(a.value))
+    : (data?.accounts ?? []);
 
   // ---- default binds (owner rule 09-08): the LEAST-LOADED account on our 5/30-min timer and
   // the LEAST-FILLED fanka are what the Settings picks DEFAULT to. Purely derived: an empty pick
@@ -513,19 +541,15 @@ export function HsCloneBoard({
   };
   // FB Token rails: offer only accounts the DUP signer can act on (its grant is its own — 299
   // accs vs the pool's 379 as of 09-03) — LION binds cover segments a token was never granted
-  // (aleph, 08-19), and a build there dies on the first Graph POST. null sweep → no filtering
-  // (fail open; the server guard still answers with the actionable error).
-  const visibleFor = (prof: string): ReadonlySet<string> | null => {
-    if (!tokenRail) return null;
-    const d = hs.dataFor(prof);
-    return d?.dupTokenAccounts ?? d?.tokenAccounts ?? null;
-  };
-  /** The accounts a row on `prof` may bind (its profile's catalog, token-filtered on the FB
-   *  Token rails) — the row pickers' list and the auto pick's candidates. */
+  // (aleph, 08-19), and a build there dies on the first Graph POST. TOOL rail: only the accounts a
+  // live TOOL session sees (owner ask 28.09). null sweep → no filtering (fail open; the server
+  // guard still answers with the actionable error). railAccountFilter unifies both.
+  /** The accounts a row on `prof` may bind (its profile's catalog, rail-filtered) — the row
+   *  pickers' list and the auto pick's candidates. */
   const accountOptionsFor = (prof: string) => {
     const d = hs.dataFor(prof);
-    const vis = visibleFor(prof);
-    return vis !== null ? (d?.accounts ?? []).filter((a) => vis.has(a.value)) : (d?.accounts ?? []);
+    const f = railAccountFilter(prof);
+    return f ? (d?.accounts ?? []).filter((a) => f(a.value)) : (d?.accounts ?? []);
   };
   /** Default binds for ANY profile (owner rule 09-08): least-loaded account, least-filled page. */
   const autoAccountFor = (prof: string): string =>
@@ -766,6 +790,10 @@ export function HsCloneBoard({
   // wave cap is tighter (mirrors the server's MAX_TOKEN_SHOTS).
   const MAX_SHOTS_PER_FIRE = 45;
   const MAX_TOKEN_SHOTS_PER_FIRE = 10;
+  // TOOL fires one POST /accounts/{target}/duplicates per shot then polls its job (owner ask 28.09)
+  // — lighter than a Graph tree build, so a wider cap than the token rail; keep in sync with the
+  // server pump's own cap in /api/hs/tool-duplicate.
+  const MAX_TOOL_SHOTS_PER_FIRE = 20;
   // The token rails HERE sign with the duplicate/JURO signer (dedicated FB_HS_DUP_TOKEN since
   // 09-03, else the launch pool) — ITS health gates the channel (the server gate refuses waves
   // anyway — this keeps the click honest instead of round-tripping into a 429).
@@ -788,7 +816,7 @@ export function HsCloneBoard({
 
   // A picked account that the rail switch just hid would submit a bind the picker can't display —
   // clear it (and its dependent pixel), same self-heal idiom as the card's unlisted-pixel guard.
-  const accountHidden = Boolean(account) && tokenVisible !== null && !tokenVisible.has(account);
+  const accountHidden = Boolean(account) && settingsFilter !== null && !settingsFilter(account);
   useEffect(() => {
     if (!accountHidden) return;
     // Safe setState-in-effect: converges in one pass (account clears → accountHidden false).
@@ -802,10 +830,13 @@ export function HsCloneBoard({
   const rowAccountHidden = (r: Row): boolean => {
     if (!r.dest?.account) return false;
     const bnd = rowBinds(r);
-    const v = visibleFor(bnd.profile);
-    return v !== null && !v.has(bnd.account);
+    const f = railAccountFilter(bnd.profile);
+    return f !== null && !f(bnd.account);
   };
   const hiddenRows = validRows.filter(rowAccountHidden).length;
+  // TOOL cannot change geo/locale on a duplicate (owner ask 28.09) — a row carrying either override
+  // is blocked before any fire; the buyer moves it to LION API or FB Token for a geo test.
+  const toolGeoRows = toolRail ? validRows.filter((r) => r.countries.length > 0 || r.locales.length > 0).length : 0;
 
   const fireBlocked =
     !bindsReady ||
@@ -816,6 +847,7 @@ export function HsCloneBoard({
     currencyBidMissing > 0 ||
     strategyUnsupported > 0 ||
     hiddenRows > 0 ||
+    toolGeoRows > 0 ||
     limits.staleBuild;
 
   const switchToJuro = () => {
@@ -836,11 +868,11 @@ export function HsCloneBoard({
       });
       return;
     }
-    const cap = tokenRail ? MAX_TOKEN_SHOTS_PER_FIRE : MAX_SHOTS_PER_FIRE;
+    const cap = toolRail ? MAX_TOOL_SHOTS_PER_FIRE : tokenRail ? MAX_TOKEN_SHOTS_PER_FIRE : MAX_SHOTS_PER_FIRE;
     if (totalClones > cap) {
       setFireNote({
         text:
-          `That's ${totalClones} clones — the ${tokenRail ? "FB Token rail builds" : "server fires"} at most ${cap} per wave. ` +
+          `That's ${totalClones} clones — the ${toolRail ? "TOOL rail fires" : tokenRail ? "FB Token rail builds" : "server fires"} at most ${cap} per wave. ` +
           "Lower the copies or remove some rows and fire in waves.",
       });
       return;
@@ -873,10 +905,11 @@ export function HsCloneBoard({
       const prefix = r.info?.name
         ? relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)
         : "";
-      // The channel marker is re-earned per fire: token waves stamp TOKEN into the fixed part
-      // (the server ensures it too), LION waves stay unmarked — splitLionName already stripped
-      // any marker the SOURCE was born with.
-      const mark = effDupChannel === "token" ? HS_TOKEN_MARK : "";
+      // The channel marker is re-earned per fire: token waves stamp TOKEN into the fixed part, TOOL
+      // waves stamp "GCL TOOL - " there (owner ask 28.09 — same TOKEN slot; the server re-ensures it
+      // via toolEnsureMark), LION waves stay unmarked — splitLionName already stripped any marker
+      // the SOURCE was born with.
+      const mark = effDupChannel === "token" ? HS_TOKEN_MARK : effDupChannel === "tool" ? TOOL_MARK : "";
       // Display-only "what it bids on" tag for the monitor card (the server forwards it verbatim to
       // the task row): the row's OWN typed bid when it has one, else the source's inherited bid;
       // effective strategy = the switched one, else the source's. "" (nothing known yet) → the
@@ -907,7 +940,9 @@ export function HsCloneBoard({
             }
           : effDupChannel === "juro-token"
             ? { name: r.info?.name ? `${juroPrefixPreview(prefix)}${HS_TOKEN_MARK}${r.suffix.trim()}`.trim() : r.suffix.trim() }
-            : effDupChannel === "token"
+            : // TOOL builds the SAME wave body as the token-duplicate path — the full board name
+              // (prefix + TOOL marker + tail), which the server re-ensures via toolEnsureMark.
+              effDupChannel === "token" || effDupChannel === "tool"
               ? r.info?.name
                 ? { name: `${prefix}${mark}${r.suffix.trim()}`.trim() }
                 : {}
@@ -950,13 +985,15 @@ export function HsCloneBoard({
     }
     try {
       const endpoint =
-        effDupChannel === "token"
-          ? "/api/hs/token-duplicate"
-          : effDupChannel === "juro"
-            ? "/api/hs/jurar"
-            : effDupChannel === "juro-token"
-              ? "/api/hs/token-jurar"
-              : "/api/hs/duplicate";
+        effDupChannel === "tool"
+          ? "/api/hs/tool-duplicate"
+          : effDupChannel === "token"
+            ? "/api/hs/token-duplicate"
+            : effDupChannel === "juro"
+              ? "/api/hs/jurar"
+              : effDupChannel === "juro-token"
+                ? "/api/hs/token-jurar"
+                : "/api/hs/duplicate";
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1067,7 +1104,7 @@ export function HsCloneBoard({
                     );
                   })}
                 </div>
-                <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
+                <div className="grid grid-cols-3 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
                   {[
                     { key: "lion" as const, label: "LION API", ready: true, down: false, hint: undefined as string | undefined },
                     {
@@ -1081,6 +1118,23 @@ export function HsCloneBoard({
                           : `Signs as ${signerLabel}`
                         : "FB token not configured on the server (FB_HS_DUP_TOKEN / FB_HS_LAUNCH_TOKEN)",
                     },
+                    {
+                      // TOOL (owner ask 28.09): Cloner-only for now — JURO via TOOL is the next step,
+                      // so the segment renders disabled with that tooltip in JURO mode. In Cloner it
+                      // unlocks only once the server says a live TOOL session sees HS accounts.
+                      key: "tool" as const,
+                      label: "TOOL",
+                      ready: mode === "clone" && toolReady.ready,
+                      down: false,
+                      hint:
+                        mode === "juro"
+                          ? "JURO via TOOL — next step"
+                          : !toolReady.loaded
+                            ? "Checking TOOL…"
+                            : toolReady.ready
+                              ? `Launches through TOOL · ${toolReady.accounts.size} account${toolReady.accounts.size === 1 ? "" : "s"}`
+                              : toolReady.message || "TOOL is not ready for HS",
+                    },
                   ].map((opt) => {
                     const active = (mode === "juro" ? juroChannel : dupChannel) === opt.key;
                     return (
@@ -1091,7 +1145,9 @@ export function HsCloneBoard({
                         aria-pressed={active}
                         title={opt.hint}
                         onClick={() => {
-                          if (mode === "juro") changeJuroChannel(opt.key);
+                          // TOOL is Cloner-only (disabled in JURO); the other two apply to the mode.
+                          if (opt.key === "tool") changeDupChannel("tool");
+                          else if (mode === "juro") changeJuroChannel(opt.key);
                           else changeDupChannel(opt.key);
                         }}
                         className={
@@ -1122,13 +1178,17 @@ export function HsCloneBoard({
                     ? dupSigner?.dedicated
                       ? `The ${dupSigner.user || "duplicate/JURO"} token is rate-limited/dead — this rail is blocked until its cooldown lifts; fire on LION API or wait`
                       : "All FB launch tokens are rate-limited — this rail is blocked until a cooldown lifts; fire on LION API or wait"
-                    : effDupChannel === "token"
-                      ? `Signs as ${signerLabel} · rebuilds each tree · starts +30 min · max ${MAX_TOKEN_SHOTS_PER_FIRE}/wave`
-                      : effDupChannel === "juro-token"
-                        ? `Signs as ${signerLabel} · relaunches the posts (social proof kept) · starts +30 min · max ${MAX_TOKEN_SHOTS_PER_FIRE}/wave`
-                        : effDupChannel === "juro"
-                          ? "New campaign from the source's page posts (social proof kept) · geo/languages editable per row · born ACTIVE"
-                          : "LION's clone weapon builds on the weapon side"}
+                    : effDupChannel === "tool"
+                      ? `Launches through TOOL · ${toolReady.accounts.size} account${toolReady.accounts.size === 1 ? "" : "s"} · marks names “${TOOL_MARK.trim()}” · starts +30 min · max ${MAX_TOOL_SHOTS_PER_FIRE}/wave · geo change disabled`
+                      : dupChannel === "tool" && !toolReady.ready
+                        ? toolReady.message || "TOOL not ready — firing on LION API"
+                        : effDupChannel === "token"
+                          ? `Signs as ${signerLabel} · rebuilds each tree · starts +30 min · max ${MAX_TOKEN_SHOTS_PER_FIRE}/wave`
+                          : effDupChannel === "juro-token"
+                            ? `Signs as ${signerLabel} · relaunches the posts (social proof kept) · starts +30 min · max ${MAX_TOKEN_SHOTS_PER_FIRE}/wave`
+                            : effDupChannel === "juro"
+                              ? "New campaign from the source's page posts (social proof kept) · geo/languages editable per row · born ACTIVE"
+                              : "LION's clone weapon builds on the weapon side"}
                 </p>
               </div>
 
@@ -1162,8 +1222,10 @@ export function HsCloneBoard({
                       ? "Pick a profile first"
                       : !data
                         ? "Loading…"
-                        : tokenVisible !== null && (data.accounts?.length ?? 0) > 0 && accountOptions.length === 0
-                          ? "No accounts here are visible to our FB token — use the LION API rail (or another profile)"
+                        : settingsFilter !== null && (data.accounts?.length ?? 0) > 0 && accountOptions.length === 0
+                          ? toolRail
+                            ? "No accounts here are visible to a live TOOL session — pick another profile or fire on LION API"
+                            : "No accounts here are visible to our FB token — use the LION API rail (or another profile)"
                           : "No enabled accounts"
                   }
                 />
@@ -1431,17 +1493,27 @@ export function HsCloneBoard({
               ) : null}
               {hiddenRows > 0 ? (
                 <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
-                  {hiddenRows} row{hiddenRows === 1 ? " targets" : "s target"} an account our FB token
-                  can&apos;t act on — pick another account on {hiddenRows === 1 ? "that row" : "those rows"} or
-                  fire on the LION API rail.
+                  {hiddenRows} row{hiddenRows === 1 ? " targets" : "s target"} an account{" "}
+                  {toolRail ? "no live TOOL session sees" : "our FB token can't act on"} — pick another account on{" "}
+                  {hiddenRows === 1 ? "that row" : "those rows"} or fire on the LION API rail.
+                </p>
+              ) : null}
+              {toolGeoRows > 0 ? (
+                <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
+                  TOOL cannot change geo on a duplicate — use LION API or FB Token for geo tests.{" "}
+                  <span className="font-semibold">{toolGeoRows}</span> row
+                  {toolGeoRows === 1 ? " has" : "s have"} a geo/language override — clear{" "}
+                  {toolGeoRows === 1 ? "it" : "them"} or switch rail.
                 </p>
               ) : null}
               <p className="text-center text-[10.5px] leading-relaxed text-faint">
                 {bindsReady
                   ? previewed
-                    ? tokenRail
-                      ? "Builds over our FB token · born ACTIVE, starts +30 min"
-                      : "Submits to LION · clones activate automatically"
+                    ? toolRail
+                      ? "Submits to TOOL · jobs poll then clones activate · starts +30 min"
+                      : tokenRail
+                        ? "Builds over our FB token · born ACTIVE, starts +30 min"
+                        : "Submits to LION · clones activate automatically"
                     : "Preview first, then duplicate"
                   : validRows.length === 0
                     ? "Add source campaigns below"
@@ -1516,8 +1588,10 @@ export function HsCloneBoard({
                       if (effDupChannel === "juro") return `${juroPrefixPreview(p)}…`;
                       if (effDupChannel === "juro-token") return juroPrefixPreview(p) + HS_TOKEN_MARK;
                       // LION duplicate: LION fills "<family> <lang> <random5>" itself (ellipsis), then
-                      // appends the buyer's addition; token duplicates carry the exact board-built name.
-                      return effDupChannel === "token" ? p + HS_TOKEN_MARK : `${p}…`;
+                      // appends the buyer's addition; token/TOOL duplicates carry the exact board-built name.
+                      if (effDupChannel === "token") return p + HS_TOKEN_MARK;
+                      if (effDupChannel === "tool") return p + TOOL_MARK;
+                      return `${p}…`;
                     })()
                   : "";
                 const geoInherited = r.info?.countries.length
@@ -1788,8 +1862,10 @@ export function HsCloneBoard({
                               ? "Pick a profile first"
                               : !rowData
                                 ? "Loading…"
-                                : visibleFor(b.profile) !== null && (rowData.accounts?.length ?? 0) > 0 && rowAccounts.length === 0
-                                  ? "No accounts here are visible to our FB token — use the LION API rail (or another profile)"
+                                : railAccountFilter(b.profile) !== null && (rowData.accounts?.length ?? 0) > 0 && rowAccounts.length === 0
+                                  ? toolRail
+                                    ? "No accounts here are visible to a live TOOL session — pick another profile or fire on LION API"
+                                    : "No accounts here are visible to our FB token — use the LION API rail (or another profile)"
                                   : "No enabled accounts"
                           }
                           disabled={unreadableRow}
@@ -2090,9 +2166,11 @@ export function HsCloneBoard({
                               ? `${juroPrefixPreview(relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries))}… ${r.suffix.trim()}`
                               : effDupChannel === "juro-token"
                                 ? `${juroPrefixPreview(relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries))}${HS_TOKEN_MARK}${r.suffix.trim()}`
-                                : effDupChannel === "token"
-                                  ? `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}${HS_TOKEN_MARK}${r.suffix.trim()}`
-                                  : `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}… ${lionWireSuffix(r.suffix)}`
+                                : effDupChannel === "tool"
+                                  ? `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}${TOOL_MARK}${r.suffix.trim()}`
+                                  : effDupChannel === "token"
+                                    ? `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}${HS_TOKEN_MARK}${r.suffix.trim()}`
+                                    : `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}… ${lionWireSuffix(r.suffix)}`
                             ).slice(0, 110)
                           : `#${r.campaignId}`}
                       </span>{" "}
@@ -2173,6 +2251,8 @@ export function HsCloneBoard({
             limits={limits}
             needsPage={needsPage}
             tokenRail={tokenRail}
+            toolRail={toolRail}
+            toolAccounts={toolRail ? toolReady.accounts : null}
             maxCopies={MAX_COPIES}
             initial={rowBinds(r)}
             initialCopies={r.copies}
