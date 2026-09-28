@@ -71,6 +71,11 @@ const HS_CHANNEL_LS = "adlauncher.hs.channel";
  *  fresh `...channel2` key, NOT the retired `adlauncher.mo.channel` (the old soc-signer switch). */
 const MO_CHANNEL_LS = "adlauncher.mo.channel2";
 const AIF_CHANNEL_LS = "adlauncher.aif.channel";
+// AV has NO launch-rail pick (owner ask 28.09: "нужно на нужную фанку делать — на то что тянет
+// токен, а через сам токен только фанку тянуть"): AV launches ONLY through TOOL — its cabinets come
+// from the live TOOL session, the fanpage from the AV token's own catalog — so there is no FB Token
+// option and nothing to persist. When TOOL is not ready the Launch button is disabled with TOOL's
+// own reason; it NEVER falls back to a token rail.
 
 /** MO/AIF direct-Graph partners choose between our FB token and the HS TOOL sessions service. */
 type GraphChannel = "token" | "tool";
@@ -274,9 +279,11 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // TOOL launch-channel readiness for the ACTIVE partner (owner ask 28.09): the server verifies the
   // key + scopes + ≥1 live-session account also in this partner's catalog and assigned to this
   // buyer. Gates the TOOL rail segment and filters the account pickers; polls 5 min + on focus and
-  // resets on a partner switch (the hook keys on partner|rail). AV rides its OWN FB token only — the
-  // TOOL sessions are the HS team's Ads Manager sessions, not AV's cabinets — so AV never polls it.
-  const toolReady = useToolReady(partnerId, "launch", !partner.avLaunch);
+  // resets on a partner switch (the hook keys on partner|rail). AV now rides TOOL too (owner ask
+  // 28.09 "сделай чтобы лаунчер оттуда кабинеты тянул"): the live av-01 session sees the GC-AV
+  // cabinets, and for AV the ready `rows` ARE the account catalog (AV has no FB token). So every
+  // partner polls it — the endpoint decides who is TOOL-ready.
+  const toolReady = useToolReady(partnerId, "launch");
   const signers = useSigners(graphRail);
   const railSigner = graphRail
     ? (signers.slots?.[partner.avLaunch ? "av.launch" : partner.aifLaunch ? "aif.launch" : "mo.launch"] ?? null)
@@ -309,17 +316,14 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   const hsTokenStatus = useHsTokenStatus(Boolean(partner.lionLaunch));
   const hsTokensDown = partner.lionLaunch ? hsTokensAllDown(hsTokenStatus.tokens, hsTokenStatus.loaded) : false;
   // Token ad accounts (with their pixels) for the account/pixel pickers — read from the picked
-  // signer's catalog (a soc may see a different account set than the system user).
+  // signer's catalog (a soc may see a different account set than the system user). NOT read for AV
+  // (owner ask 28.09): AV launches only through TOOL, so its cabinets come from the live TOOL
+  // session (the ready `rows` → `avToolAccounts` below), and the AV token is used ONLY for the
+  // fanpage list — never for an account catalog. So the AV token is never asked for accounts here.
   const adAccounts = useAdAccounts(
-    Boolean(partner.accountsFromToken) && signerReady,
+    Boolean(partner.accountsFromToken) && signerReady && !partner.avLaunch,
     partner.preferredPixel,
-    partner.avLaunch
-      ? "/api/av/adaccounts?rail=launch"
-      : partner.aifLaunch
-        ? "/api/aif/adaccounts?rail=launch"
-        : "/api/adaccounts?rail=launch",
-    // AV carries no pixel — a pixel-less account is normal there, so drop the "no pixel" danger tag.
-    partner.avLaunch ? { noPixelTag: true } : undefined,
+    partner.aifLaunch ? "/api/aif/adaccounts?rail=launch" : "/api/adaccounts?rail=launch",
   );
   // AV destination catalog (articles + redirect paths) — loaded only on the AV rail; passed to the
   // cards' Destination field. Undefined for every other partner.
@@ -358,7 +362,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       /* storage disabled */
     }
   }, []);
-  // One toggle handler for the active graphRail partner (MO or AIF); each persists to its own key.
+  // One toggle handler for the active graphRail partner (MO / AIF); each persists to its own key.
+  // AV has no channel switch (it is TOOL-only, owner ask 28.09), so this only ever fires for MO/AIF.
   // Plain function (the rail isn't memoized): reads the current `partner` freshly, no stale closure.
   const changeGraphChannel = (ch: GraphChannel) => {
     if (partner.aifLaunch) {
@@ -377,13 +382,34 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       }
     }
   };
-  // The active graphRail partner's pick + the effective TOOL flags (picked AND server-ready). A
-  // stale "tool" pick with the rail not ready falls back (HS → LION, MO/AIF → FB Token) at fire
-  // time — the launch/enqueue below reads these, never the raw pick.
-  // AV has no TOOL channel (its own FB token only) — pinned to "token" whatever MO/AIF picked.
-  const graphChannel: GraphChannel = partner.avLaunch ? "token" : partner.aifLaunch ? aifChannel : moChannel;
+  // The active graphRail partner's effective channel (owner ask 28.09). AV is PINNED to TOOL — it
+  // has no FB Token rail and never falls back to one (its cabinets ride the live TOOL session, its
+  // fanpage the AV token's catalog). MO/AIF read their own pick; a stale "tool" pick with the rail
+  // not ready still falls back to FB Token at fire time (graphToolActive gates that).
+  const graphChannel: GraphChannel = partner.avLaunch ? "tool" : partner.aifLaunch ? aifChannel : moChannel;
   const hsToolActive = Boolean(partner.lionLaunch) && hsChannel === "tool" && toolReady.ready;
   const graphToolActive = graphRail && graphChannel === "tool" && toolReady.ready;
+  // AV-on-TOOL specifically (owner ask 28.09): AV launches ONLY through TOOL, so this is really
+  // "AV and a live TOOL session is ready". The account picker is the TOOL ready rows; the fanpage
+  // still comes from the AV token's catalog. Every AV-TOOL-only branch keys on this.
+  const avOnTool = Boolean(partner.avLaunch) && graphToolActive;
+  // AV account catalog = the TOOL ready rows themselves (owner ask 28.09: the AV token is used ONLY
+  // for the fanpage list, NEVER for accounts). Shaped as AdAccountOption so the card's normal
+  // token-account picker renders them (name label, id + currency sub, no pixels). Built whenever AV
+  // is active — empty (→ no launchable card) while no live session is ready, so a not-ready TOOL is
+  // a clean block, and the AV token is never asked for an account catalog. Off AV → the real
+  // token catalog (MO/AIF).
+  const avToolAccounts = useMemo<AdAccountOption[] | null>(() => {
+    if (!partner.avLaunch) return null;
+    return toolReady.rows.map((r) => ({
+      value: r.id,
+      label: r.name || r.id,
+      meta: r.id,
+      subLabel: r.currency ? `${r.id} · ${r.currency}` : r.id,
+      pixels: [],
+    }));
+  }, [partner.avLaunch, toolReady.rows]);
+  const boardAccounts = partner.avLaunch ? avToolAccounts : adAccounts;
   // The TOOL-visible account set to constrain MO/AIF auto-fill to (null unless a TOOL wave is
   // armed) — mirrors the card picker's filter so the board default lands in the same set.
   const toolVisible = graphToolActive ? toolReady.accounts : null;
@@ -398,19 +424,21 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     partnerRef.current = partner;
   }, [partner]);
 
-  // Latest accounts for the mutate() wrapper (defaults fill on every board change).
+  // Latest accounts for the mutate() wrapper (defaults fill on every board change). `boardAccounts`
+  // is the token catalog for MO/AIF/HS and the TOOL ready rows for AV-on-TOOL — the auto-pick then
+  // lands in a TOOL cabinet just like the picker offers.
   const adAccountsRef = useRef<AdAccountOption[] | null>(null);
   useEffect(() => {
-    adAccountsRef.current = adAccounts;
-  }, [adAccounts]);
+    adAccountsRef.current = boardAccounts;
+  }, [boardAccounts]);
 
   // When the account list ARRIVES, backfill defaults (the least-loaded account + its preferred
   // pixel) into cards created while it was loading. Functional updater returns the same
   // reference when nothing changes, so this never cascades.
   useEffect(() => {
-    if (!adAccounts || adAccounts.length === 0) return;
-    setCampaigns((cs) => fillAccountDefaults(cs, partnerRef.current, adAccounts, limitsRef.current, toolVisibleRef.current));
-  }, [adAccounts]);
+    if (!boardAccounts || boardAccounts.length === 0) return;
+    setCampaigns((cs) => fillAccountDefaults(cs, partnerRef.current, boardAccounts, limitsRef.current, toolVisibleRef.current));
+  }, [boardAccounts]);
 
   // When the TOOL-visible set changes (channel switched to/from TOOL, or its readiness landed),
   // re-fill account defaults so cards converge onto a TOOL-visible account (or off a now-hidden
@@ -531,8 +559,13 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     // (the banner explains; the rail button is disabled too).
     if (limits.staleBuild) return;
     // No token for this rail (nothing assigned on /tokens, no env default): nothing fires (belt
-    // over the rail's disabled button; the server refuses signer-less launches too).
+    // over the rail's disabled button; the server refuses signer-less launches too). AV keeps this
+    // gate too — its token is what pulls the fanpage, so an unassigned AV slot means no page and no
+    // launchable card (owner ask 28.09).
     if (!signerReady) return;
+    // AV launches ONLY through TOOL (owner ask 28.09): with no live session ready there is nothing
+    // to fire, and it must NEVER fall back to a token rail. Belt over the disabled Launch button.
+    if (partner.avLaunch && !avOnTool) return;
     const opts = launchReadyOpts(partner);
     const launchable = campaigns.filter((c) => isLaunchable(c, opts));
     if (launchable.length === 0) return;
@@ -653,12 +686,14 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
         ...(media.kind === "video" && media.cover ? { cover: media.cover } : {}),
         // TOOL wave (owner ask 28.09): the marked preview name (server re-ensures it) and the
         // distinct `via:"tool"` field — NEVER the retired soc `channel`. TOOL drops the SOC mark.
-        name: graphToolActive
+        // AV always rides TOOL (the guard above already blocked a not-ready AV wave), so it is
+        // marked + sent via:"tool" unconditionally — it must NEVER fall back to a token rail.
+        name: graphToolActive || partner.avLaunch
           ? toolEnsureMark(fullName(c))
           : moSocMarks
             ? moEnsureSocMark(fullName(c))
             : fullName(c),
-        ...(graphToolActive ? { via: "tool" as const } : {}),
+        ...(graphToolActive || partner.avLaunch ? { via: "tool" as const } : {}),
         gcm: c.gcm,
         geo: geoSummary(c.countries),
         budget: c.budget,
@@ -987,8 +1022,12 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
                 campaign={c}
                 index={i}
                 partner={partner}
+                // AV: the fanpage picker reads the AV token's own catalog (owner ask 28.09 — the
+                // token pulls only the fanpage), same as the direct-Graph AV rail. MO/AIF read theirs.
                 fanpages={fanpages}
-                adAccounts={adAccounts}
+                // AV launches only through TOOL → the account picker reads the TOOL ready rows
+                // (boardAccounts); every other rail reads the token catalog (owner ask 28.09).
+                adAccounts={boardAccounts}
                 hs={partner.lionLaunch ? hs : undefined}
                 avDestinations={partner.avLaunch ? avDestinations : undefined}
                 highlight={highlightId === c.id}
@@ -998,7 +1037,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
                 // FB Token rail picked → the card's account picker filters to token-visible ones.
                 hsTokenRail={partner.lionLaunch ? hsChannel === "token" && hs.tokenLaunch : false}
                 // TOOL is the effective channel (owner ask 28.09) → the account picker filters to
-                // TOOL-visible accounts and the name preview carries the GCL TOOL marker.
+                // TOOL-visible accounts and the name preview carries the GCL TOOL marker. AV rides
+                // this too (avOnTool ⊂ graphToolActive): its cabinet list is the TOOL ready rows.
                 toolRail={hsToolActive}
                 moToolRail={graphToolActive}
                 toolAccounts={toolReady.ready ? toolReady.accounts : undefined}

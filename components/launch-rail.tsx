@@ -108,10 +108,11 @@ export function LaunchRail({
   const nameChannel: HsLaunchChannel =
     hsChannel === "tool" && toolReady ? "tool" : hsChannel === "token" && hsTokenReady ? "token" : "lion";
   const graphRail = !partner.lionLaunch && (partner.usesGcm || Boolean(partner.aifLaunch) || Boolean(partner.avLaunch));
-  // MO/AIF TOOL is the EFFECTIVE channel only when picked AND the server says the rail is ready —
-  // a stale "tool" pick falls back to our FB token (the same rule the board fires on).
-  // AV has no TOOL channel (its own FB token only — the TOOL sessions are the HS team's).
-  const graphToolActive = graphRail && !partner.avLaunch && graphChannel === "tool" && toolReady;
+  // MO/AIF/AV TOOL is the EFFECTIVE channel. MO/AIF: only when picked AND ready — a stale "tool"
+  // pick falls back to our FB token (the same rule the board fires on). AV launches ONLY through
+  // TOOL (owner ask 28.09) — its graphChannel is pinned "tool", so this is really "AV and a live
+  // session is ready"; when it is NOT ready AV never falls back to a token rail (avToolBlocked).
+  const graphToolActive = graphRail && graphChannel === "tool" && toolReady;
   // SOC name marker rides personal-soc signers only (MO) — system users launch unmarked. TOOL
   // drops SOC (it marks OUR social token as signer, which TOOL is not), so a TOOL wave shows the
   // GCL TOOL marker instead, never SOC.
@@ -120,8 +121,13 @@ export function LaunchRail({
   // KEPT even on the TOOL channel (owner ask 28.09): the MO/AIF account/pixel/page pickers read the
   // SIGNER'S token catalog (TOOL exposes no page/pixel list endpoint), so a signer-less rail has no
   // launchable card whatever the channel — this gate is really "no catalog", not "TOOL needs our
-  // signer to sign". A TOOL wave with a signer present is never blocked by it.
+  // signer to sign". AV keeps it too: its token is exactly what pulls the fanpage (owner ask 28.09),
+  // so an unassigned AV slot means no page and nothing to launch.
   const moSignerMissing = graphRail && !signer?.primary;
+  // AV launches ONLY through TOOL (owner ask 28.09): there is no FB Token fallback, so a not-ready
+  // TOOL is a hard block carrying TOOL's own reason (MO/AIF instead fall back to FB Token and are
+  // never blocked here). Only meaningful once the AV token is present (moSignerMissing wins first).
+  const avToolBlocked = graphRail && Boolean(partner.avLaunch) && !toolReady;
   const nameOf = (c: Campaign) =>
     partner.lionLaunch
       ? c.name.trim()
@@ -328,10 +334,8 @@ export function LaunchRail({
               shows the OWNER'S /tokens pick, read-only here) or the HS TOOL sessions service (TOOL
               resolves the session from the account; no signer of ours). TOOL is offered only while
               the server says it's ready; a stale "tool" pick falls back to FB Token at fire time. */}
-          {graphRail ? (
+          {graphRail && !partner.avLaunch ? (
             <div className="flex flex-col gap-1.5">
-              {/* AV launches on its own FB token only — no FB Token | TOOL switch, just the signer. */}
-              {partner.avLaunch ? null : (
               <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
                 {(
                   [
@@ -372,7 +376,6 @@ export function LaunchRail({
                   );
                 })}
               </div>
-              )}
               {graphToolActive ? (
                 <p className="text-center text-[10px] leading-relaxed text-faint">
                   Launches through TOOL · {tool?.accounts.size ?? 0} account
@@ -385,6 +388,27 @@ export function LaunchRail({
                   </span>
                   <SignerBadge signer={signer} loaded={signerLoaded} rail="launch" owner={owner} />
                 </div>
+              )}
+            </div>
+          ) : null}
+          {/* AV launch rail (owner ask 28.09): AV launches ONLY through TOOL — no FB Token switch.
+              Its cabinets ride the live TOOL session and the fanpage is the one the AV token pulls;
+              there is no fallback. Ready → the "through TOOL · N accounts" line; not ready → TOOL's
+              own reason (the Launch button is disabled on it too). */}
+          {graphRail && partner.avLaunch ? (
+            <div className="flex flex-col gap-1.5">
+              {graphToolActive ? (
+                <p className="text-center text-[10px] leading-relaxed text-faint">
+                  Launches through TOOL · {tool?.accounts.size ?? 0} account
+                  {(tool?.accounts.size ?? 0) === 1 ? "" : "s"} · fanpage from the AV token
+                </p>
+              ) : (
+                <p className="text-center text-[11px] font-medium leading-relaxed text-warn">
+                  {tool?.message ||
+                    (tool && !tool.loaded
+                      ? "Checking TOOL readiness…"
+                      : "TOOL is not ready — no live session sees AV's cabinets")}
+                </p>
               )}
             </div>
           ) : null}
@@ -412,7 +436,7 @@ export function LaunchRail({
             <button
               type="button"
               onClick={onLaunch}
-              disabled={readyCount === 0 || gcmBlocked || moSignerMissing || limits.staleBuild || launching}
+              disabled={readyCount === 0 || gcmBlocked || moSignerMissing || avToolBlocked || limits.staleBuild || launching}
               className={
                 "animate-pop-in group flex h-11 w-full items-center justify-center gap-2 rounded-xl " +
                 "bg-gradient-to-b from-launch2 to-launch text-[13.5px] font-bold text-[#032e20] " +
@@ -440,6 +464,15 @@ export function LaunchRail({
           ) : moSignerMissing ? (
             <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">
               No launch token is assigned for this partner — an owner assigns one under FB tokens (menu).
+            </p>
+          ) : avToolBlocked ? (
+            // AV launches only through TOOL (owner ask 28.09): no fallback rail, so the button stays
+            // disabled and carries TOOL's own reason.
+            <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">
+              {tool?.message ||
+                (tool && !tool.loaded
+                  ? "Checking TOOL readiness…"
+                  : "TOOL is not ready — an owner refreshes a session that sees AV's cabinets on Ads Manager sessions")}
             </p>
           ) : gcmBlocked ? (
             <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">

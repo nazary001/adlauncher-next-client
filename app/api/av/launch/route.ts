@@ -12,9 +12,9 @@ import {
   money,
 } from "@/lib/fb-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { FbError, withFbBudget, withParentRetry } from "@/lib/fb-graph";
+import { FbError, fbGet, withFbBudget, withParentRetry } from "@/lib/fb-graph";
 import { fetchValidatedImage } from "@/lib/fb-media";
-import { type AvRail, avKeysRegistered, avRail, avRailEnabled } from "@/lib/av-launch";
+import { avKeysRegistered, avRail, avRailEnabled } from "@/lib/av-launch";
 import { backfillAvKey, claimAvKey, releaseAvKey } from "@/lib/av-keys";
 import { resolveAvDestination } from "@/lib/av-destination";
 import { avApiConfigured } from "@/lib/av-api";
@@ -22,6 +22,27 @@ import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import { taskWriter } from "@/lib/task-store";
 import { del } from "@vercel/blob";
+// TOOL launch channel (owner ask 28.09): a `via:"tool"` body flag runs the AV launch through the HS
+// team's Ads Manager sessions service (tool.gctracking.xyz) instead of building the tree on the AV
+// token — the GC-AV cabinets live on a live TOOL session, not on the AV token. Same destination
+// re-resolve, AV-key + acct-slot claims, name prefix and NDJSON contract; the whole
+// campaign→adset→ad build is one TOOL job. The one thing the AV token STILL provides on this path is
+// the FANPAGE: "нужно на нужную фанку делать — на то что тянет токен, а через сам токен только фанку
+// тянуть". So the picked page is validated against the AV token's own advertisable-page catalog
+// (below), and the token is used for NOTHING else here (no account catalog, no upload, no signing).
+// Locales resolve on the MO signer's token — NEVER the AV token (adlocale search needs no account
+// access), so the AV token is truly page-only on TOOL.
+import {
+  buildToolCampaign,
+  runToolMedia,
+  runToolPublish,
+  toolEnsureMark,
+  type ToolCreated,
+  type ToolCreativeInput,
+  type ToolNdjsonStage,
+} from "@/lib/tool-launch";
+import { toolDeps, toolInputFromCampaign, toolLaunchReady } from "@/lib/tool-run";
+import { resolveMoSigner } from "@/lib/mo-soc";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -34,16 +55,26 @@ type Json = Record<string, unknown>;
 const FB_BUDGET_MS = 240_000;
 const FB_BUDGET_RETRIES = 8;
 
+// TOOL launch deadline (owner ask 28.09) — twin of the MO/AIF routes: media registration + the
+// publish job share this wall-clock budget from request start; 265 s < maxDuration 300 s keeps the
+// deadline INSIDE the function so a pending job settles the row (slot + key KEPT, note "pending tool
+// job #N") rather than a Vercel timeout skipping the disposition.
+const TOOL_DEADLINE_MS = 265_000;
+
 // ---------- locale resolution (best-effort, non-fatal) — the AV-token twin of /api/aif/launch's ----------
 
+// Locale ids are global Meta facts (token-independent): the fbGetter only SIGNS the adlocale search.
+// The Graph path passes the AV rail's fbGet; the TOOL path passes the MO signer's — on TOOL the AV
+// token is page-only (owner ask 28.09), so locales are resolved with a non-AV signer, and adlocale
+// search needs no account access. One shared cache serves both.
 const localeCache = new Map<string, number | null>();
-async function resolveLocales(names: string[], rail: AvRail): Promise<number[]> {
+async function resolveLocales(names: string[], fbGetter: (path: string) => Promise<Json>): Promise<number[]> {
   const ids: number[] = [];
   for (const raw of names) {
     if (/\(all\)/i.test(raw)) continue; // "all" = no language restriction (broadest)
     if (!localeCache.has(raw)) {
       try {
-        const body = await rail.fbGet(`search?type=adlocale&limit=25&q=${encodeURIComponent(raw.replace(/[()]/g, " ").trim())}`);
+        const body = await fbGetter(`search?type=adlocale&limit=25&q=${encodeURIComponent(raw.replace(/[()]/g, " ").trim())}`);
         const data = (body?.data as Array<{ key?: number; name?: string }> | undefined) ?? [];
         const norm = (s: string) => s.toLowerCase().replace(/[^a-z]/g, "");
         // Only accept an exact normalized-name match — never fall back to data[0], which would
@@ -100,30 +131,18 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  // The AV launch signer is the OWNER'S pick on /tokens (av.launch slot). AV has NO env default
-  // (owner call 28.09: a new, separate token) — an unassigned/unreadable slot is a clean config
-  // error, never another partner's bearer.
-  const railRes = await avRail("launch");
-  if (!railRes.ok) {
-    return NextResponse.json({ ok: false, stage: "config", error: railRes.error }, { status: 400 });
-  }
-  const rail = railRes.rail;
-  // AV also needs its OWN API key (AV_API_KEY) to re-resolve the destination below (resolveAvDestination
-  // → avSites → avMe → avFetch). Gate it here as a clean config 500 — mirroring /api/av/destinations —
-  // so a registered pool + assigned token but a missing/blank key surfaces as configuration, not a
-  // misleading 502 "destination_check_failed" from the resolver (review find 09-28).
-  if (!avApiConfigured()) {
-    return NextResponse.json(
-      { ok: false, stage: "config", error: "av_not_configured — set AV_API_KEY" },
-      { status: 500 },
-    );
-  }
+  // Wall-clock origin for the TOOL job deadline (see TOOL_DEADLINE_MS) — captured before any await
+  // so the whole request shares one budget.
+  const startedAt = Date.now();
 
   let campaign: Campaign;
   /** Creatives of this launch (1..maxCreatives, MO/AIF-parity): own-Blob URLs; cover = video
    *  thumbnail image. */
   let medias: { url: string; kind: "video" | "image"; coverUrl: string }[] = [];
   let taskId: string | null = null;
+  /** owner ask 28.09: `via:"tool"` routes this launch through TOOL; absent/anything else is the
+   *  unchanged direct-Graph path on the AV token. */
+  let viaTool = false;
   try {
     const j = (await req.json()) as {
       campaign?: Campaign;
@@ -136,8 +155,11 @@ export async function POST(req: Request) {
       mediaKind?: string;
       coverUrl?: string;
       taskId?: string;
+      /** owner ask 28.09: "tool" = launch through TOOL; absent/anything else = direct Graph. */
+      via?: string;
     };
     campaign = (j.campaign ?? {}) as Campaign;
+    viaTool = j.via === "tool";
     if (Array.isArray(j.medias) && j.medias.length > 0) {
       medias = j.medias.slice(0, 10).map((m) => {
         const kind = m?.kind === "image" ? ("image" as const) : ("video" as const);
@@ -157,6 +179,36 @@ export async function POST(req: Request) {
     taskId = typeof j.taskId === "string" && /^[\w-]{6,64}$/.test(j.taskId) ? j.taskId : null;
   } catch (e) {
     return NextResponse.json({ ok: false, stage: "parse", error: String(e) }, { status: 400 });
+  }
+
+  // The AV token (slot av.launch) is resolved on BOTH channels (owner ask 28.09). The direct-Graph
+  // path signs the whole build with it; the TOOL path uses it ONLY to list + validate the fanpage —
+  // "через сам токен только фанку тянуть". Either way an unassigned/unreadable slot is a clean config
+  // error: the Graph path surfaces resolveSlot's verdict verbatim; the TOOL path names the remedy so
+  // a buyer knows the token is needed only for the fanpage.
+  const railRes = await avRail("launch");
+  if (!railRes.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        stage: "config",
+        error: viaTool
+          ? "AV fanpages come from the AV token — assign it on /tokens (AV · Launches)"
+          : railRes.error,
+      },
+      { status: 400 },
+    );
+  }
+  const rail = railRes.rail;
+  // AV needs its OWN API key (AV_API_KEY) to re-resolve the destination below (resolveAvDestination
+  // → avSites → avMe → avFetch) on BOTH channels. Gate it here as a clean config 500 — mirroring
+  // /api/av/destinations — so a registered pool but a missing/blank key surfaces as configuration,
+  // not a misleading 502 "destination_check_failed" from the resolver (review find 09-28).
+  if (!avApiConfigured()) {
+    return NextResponse.json(
+      { ok: false, stage: "config", error: "av_not_configured — set AV_API_KEY" },
+      { status: 500 },
+    );
   }
 
   const partner = partnerConfig("av" as PartnerId);
@@ -182,26 +234,48 @@ export async function POST(req: Request) {
         { status: 400 },
       );
     }
-    if (!(await rail.isTokenAccount(pickedAccount))) {
-      return NextResponse.json(
-        { ok: false, stage: "config", error: "account_not_allowed — the AV token cannot use this ad account" },
-        { status: 400 },
-      );
+    if (viaTool) {
+      // TOOL path: the ACCOUNT is a live GC-AV TOOL cabinet, gated against the live session in the
+      // TOOL block below (there is no AV-token account check — the token is page-only here). The
+      // PAGE, though, is validated against the AV token's OWN advertisable-page catalog (owner ask
+      // 28.09: the token pulls only the fanpage), and its name is read from that same list for
+      // whatever downstream needs it — exactly as the direct-Graph path does.
+      if (!/^\d{5,}$/.test(pickedPage)) {
+        return NextResponse.json(
+          { ok: false, stage: "config", error: "fanpage_required — pick a fanpage on the campaign card" },
+          { status: 400 },
+        );
+      }
+      if (!(await rail.isAdvertisablePage(pickedPage))) {
+        return NextResponse.json(
+          { ok: false, stage: "config", error: "fanpage_not_allowed — the AV token cannot advertise with this page" },
+          { status: 400 },
+        );
+      }
+      // DSA beneficiary/payor for EU-reaching ad sets — same rule as MO/AIF (live failure 2026-08-10).
+      binds.pageName = await rail.advertisablePageName(pickedPage);
+    } else {
+      if (!(await rail.isTokenAccount(pickedAccount))) {
+        return NextResponse.json(
+          { ok: false, stage: "config", error: "account_not_allowed — the AV token cannot use this ad account" },
+          { status: 400 },
+        );
+      }
+      if (!/^\d{5,}$/.test(pickedPage)) {
+        return NextResponse.json(
+          { ok: false, stage: "config", error: "fanpage_required — pick a fanpage on the campaign card" },
+          { status: 400 },
+        );
+      }
+      if (!(await rail.isAdvertisablePage(pickedPage))) {
+        return NextResponse.json(
+          { ok: false, stage: "config", error: "fanpage_not_allowed — the AV token cannot advertise with this page" },
+          { status: 400 },
+        );
+      }
+      // DSA beneficiary/payor for EU-reaching ad sets — same rule as MO/AIF (live failure 2026-08-10).
+      binds.pageName = await rail.advertisablePageName(pickedPage);
     }
-    if (!/^\d{5,}$/.test(pickedPage)) {
-      return NextResponse.json(
-        { ok: false, stage: "config", error: "fanpage_required — pick a fanpage on the campaign card" },
-        { status: 400 },
-      );
-    }
-    if (!(await rail.isAdvertisablePage(pickedPage))) {
-      return NextResponse.json(
-        { ok: false, stage: "config", error: "fanpage_not_allowed — the AV token cannot advertise with this page" },
-        { status: 400 },
-      );
-    }
-    // DSA beneficiary/payor for EU-reaching ad sets — same rule as MO/AIF (live failure 2026-08-10).
-    binds.pageName = await rail.advertisablePageName(pickedPage);
   } catch (e) {
     const err = e as FbError;
     if (err instanceof FbError && err.status === 400) {
@@ -317,19 +391,79 @@ export async function POST(req: Request) {
     );
   }
 
+  // TOOL channel gate (owner ask 28.09) — pre-stream, session-gated exactly like the Graph path.
+  // Everything above (destination re-resolve, the AV-token fanpage validation, media/bid/geo/budget
+  // validation, image prefetch) ran identically; here we add the TOOL pieces: the account must be a
+  // live GC-AV cabinet a TOOL session sees (no AV-token account check — the AV token is page-only on
+  // this path), and its TOOL-side currency (the buildToolCampaign USD guard's backstop) + name are
+  // read. If the card carries languages we resolve a Graph token that can hit adlocale search WITHOUT
+  // account access (the MO signer — adlocale is a global endpoint; NEVER the AV token); with none,
+  // refuse by name (a wrong-language ad is worse than a refusal). A not-ready verdict is the SAME
+  // pre-stream JSON rejection shape the route already returns.
+  let toolAcctCurrency = "USD";
+  let toolAcctName = "";
+  let toolLocaleToken = "";
+  if (viaTool) {
+    const ready = await toolLaunchReady();
+    if (!ready.ok) {
+      return NextResponse.json({ ok: false, stage: "config", error: ready.message }, { status: 400 });
+    }
+    const findAv = (r: Awaited<ReturnType<typeof toolLaunchReady>>) =>
+      r.ok ? r.accounts.find((a) => a.account_id === pickedAccount && /^GC-AV-/i.test(String(a.name ?? "").trim())) : undefined;
+    // Fire-time visibility (force-refreshes the 60 s roster once on a miss) — a stale pick whose GC-AV
+    // account no live session sees is refused here, not mid-stream.
+    let row = findAv(ready);
+    if (!row) row = findAv(await toolLaunchReady(true));
+    if (!row) {
+      return NextResponse.json(
+        {
+          ok: false,
+          stage: "config",
+          error: `tool_account_unavailable — no live TOOL session sees a GC-AV cabinet ${pickedAccount}; an owner refreshes/adds one on Ads Manager sessions`,
+        },
+        { status: 400 },
+      );
+    }
+    toolAcctCurrency = row.currency || "USD";
+    toolAcctName = row.name || "";
+    const wantsLocales = Array.isArray(campaign.locales) && campaign.locales.some((n) => !/\(all\)/i.test(String(n)));
+    if (wantsLocales) {
+      const signer = await resolveMoSigner("launch");
+      if (!signer.ok) {
+        return NextResponse.json(
+          { ok: false, stage: "config", error: "languages need a token to resolve on TOOL — clear them or add the AV token" },
+          { status: 400 },
+        );
+      }
+      toolLocaleToken = signer.signer.token;
+    }
+  }
+
   // Server-pinned invariants (the UI pins them too, but a stale/edited draft is the client's word,
   // not the truth): AV objective Traffic, optimization link clicks, no pixel — the only honest
   // delivery for a page with no conversion signal.
   const serverCampaign: Campaign = { ...campaign, objective: AV_OBJECTIVE, optimization: "clicks", pixel: "" };
   // The partner mark in the prefix is the ROUTE's, not the client's: a card that kept its MO/AIF
-  // prefix across a partner switch still launches here as "(AV)" (live bug 23.09).
-  const name = withPartnerMark(`${serverCampaign.namePrefix}${serverCampaign.name}`.trim(), partner.label);
+  // prefix across a partner switch still launches here as "(AV)" (live bug 23.09). A TOOL-born run
+  // carries `GCL TOOL - ` after the partner prefix (toolEnsureMark) — the client name is never trusted.
+  const baseName = withPartnerMark(`${serverCampaign.namePrefix}${serverCampaign.name}`.trim(), partner.label);
+  const name = viaTool ? toolEnsureMark(baseName) : baseName;
 
   const encoder = new TextEncoder();
   const stream = withFbBudget({ deadlineAt: Date.now() + FB_BUDGET_MS, retries: FB_BUDGET_RETRIES }, () =>
     new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (o: Json) => controller.enqueue(encoder.encode(JSON.stringify(o) + "\n"));
+      // review find 28.09: on the TOOL path a client that closed the tab makes controller.enqueue
+      // throw — swallow it so a disconnect never unwinds the TOOL branch mid-poll. TOOL creates AND
+      // activates server-side, so an unwind into the catch would free the key + acct-slot out from
+      // under a campaign being born live. The Graph path MUST keep throwing exactly as before.
+      const send = (o: Json) => {
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(o) + "\n"));
+        } catch (e) {
+          if (!viaTool) throw e;
+        }
+      };
       // Mirror progress into the shared launch-task row — the team keeps seeing the truth even if
       // this browser dies mid-run. partner="av" on every write: the row must land in the AV
       // drawer's scope even when this writer is the one that creates it.
@@ -348,6 +482,10 @@ export async function POST(req: Request) {
       const created: Json = {};
       let key: { key: string; documentId: string } | null = null;
       let acctSlot: { documentId: string } | null = null;
+      // review find 28.09 (belt): set by runToolPublish's onSubmitted the instant TOOL returns a job
+      // id (before any poll). Once set, a throw reaching the catch with no known campaign id settles
+      // as PENDING (keep slot + key), never freed — the job may still be creating the live campaign.
+      let toolSubmittedJob: number | null = null;
       try {
         // 0) claim the ACCOUNT's launch slot — at most 5 campaigns per ad account per 30-min
         // window, across every user and channel (owner rule 2026-08-18). Released below on any
@@ -356,9 +494,11 @@ export async function POST(req: Request) {
         acctSlot = await claimAcctSlot(binds.accountId, {
           user: session.username,
           partner: "av",
-          channel: "av",
+          // The 5/30-min account meter spans every channel; a TOOL launch claims here too, under its
+          // own channel label so the drawer can tell the rails apart (owner ask 28.09).
+          channel: viaTool ? "av-tool" : "av",
           name,
-          accountName: await rail.accountName(binds.accountId).catch(() => ""),
+          accountName: viaTool ? toolAcctName : await rail.accountName(binds.accountId).catch(() => ""),
         });
 
         // 1) reserve the AV key BEFORE building the link (guarantees no duplicate revenue key).
@@ -378,6 +518,206 @@ export async function POST(req: Request) {
         // pixel / fire tail — tracking is entirely in the utm params AV's script reads.
         const link = fullLandingUrl(partner, resolved.base, avKey, false);
         if (!link) throw new FbError("no destination — cannot build the AV link", {});
+
+        // ============================================================================================
+        // TOOL launch block (owner ask 28.09) — twin of the MO/AIF routes'. Replaces the direct-Graph
+        // upload+tree with ONE TOOL job (media from Blob URL → CampaignRequest → submit → poll). Every
+        // terminal state settles the row and RETURNS, so the Graph code below stays byte-for-byte and
+        // never runs on this rail. TOOL creates PAUSED and activates last on full success, so there is
+        // nothing to pause on failure (AV never paused on failure anyway). Money is USD, ROAS a
+        // coefficient — but AV is Traffic/clicks with no pixel, so no ROAS ever reaches here.
+        // ============================================================================================
+        if (viaTool) {
+          const deadlineAt = startedAt + TOOL_DEADLINE_MS;
+          // Idempotency-Key = our task id (spec §3) so a retried wave never double-creates; a stable
+          // per-run key covers a client that sent none (auto-launch, browser died pre-save).
+          const idempotencyKey = taskId || `av-tool-${avKey}-${startedAt.toString(36)}`;
+          const onStage = (s: ToolNdjsonStage) => {
+            if (s !== "done" && s !== "error") progress(s);
+          };
+          // Terminal failure disposition — mirrors AV's synchronous catch (release the slot only when
+          // nothing was created; retire the key with a job-named note when a campaign exists, else free
+          // the key), with NO Graph pause. `pending` is handled inline below.
+          const toolFail = async (msg: string, opts: { created?: ToolCreated; jobId?: number } = {}) => {
+            if (opts.created?.campaignId) {
+              created.campaign_id = opts.created.campaignId;
+              if (opts.created.adsetIds[0]) created.adset_id = opts.created.adsetIds[0];
+            }
+            // toolFail only ever sees DEFINITE outcomes — pre-submit refusals, a 4xx on submit, or a
+            // terminal error / canceled job that reported no ids (runToolPublish turns every ambiguous
+            // end — partial/unknown without ids, done without a campaign, deadline — into `pending`,
+            // handled below). So nothing created here really means nothing: free the slot + the key (a
+            // kept key would leak from the registered pool). Post-submit THROWS are the shared catch's
+            // job (toolSubmittedJob belt).
+            if (acctSlot && !created.campaign_id) await releaseAcctSlot(acctSlot.documentId);
+            if (key) {
+              try {
+                if (created.campaign_id)
+                  await backfillAvKey(key.key, {
+                    status: "retired",
+                    notes: `launch failed: ${msg}`,
+                    campaign_id: created.campaign_id as string,
+                    ...(created.adset_id ? { adset_id: created.adset_id as string } : {}),
+                  });
+                else await releaseAvKey(key.documentId);
+              } catch {
+                /* registry settle is best-effort; the AV keys page shows a leftover row to release */
+              }
+            }
+            settled = true;
+            tw.write({
+              status: "error",
+              stage: lastStage,
+              finished_at: Date.now(),
+              error: msg,
+              ...(created.campaign_id ? { campaign_id: created.campaign_id } : {}),
+              ...(created.adset_id ? { adset_id: created.adset_id } : {}),
+            });
+            send({ ok: false, stage: "error", via: "tool", ...(opts.jobId ? { tool_job_id: opts.jobId } : {}), error: msg, created });
+          };
+
+          // 2t) register every creative through TOOL from its public Blob URL (+ custom video cover).
+          progress("video");
+          const mediaRun = await runToolMedia(
+            toolDeps,
+            binds.accountId,
+            medias.map((m, i) => ({
+              url: m.url,
+              kind: m.kind,
+              name: medias.length > 1 ? `${name} · ${i + 1}` : name,
+              coverUrl: m.coverUrl || undefined,
+            })),
+            { deadlineAt, onStage },
+          );
+          if (!mediaRun.ok) {
+            await toolFail(`TOOL media registration failed: ${mediaRun.error}`);
+            return;
+          }
+
+          // Build the creatives with the TOOL MediaRefs + the AV link + the card's copy (same field
+          // mapping as fb-launch: copy→primary_text, headline||title→headline, title→description).
+          const creatives: ToolCreativeInput[] = medias.map((m, i) => {
+            const ref = mediaRun.refs[i];
+            const c: ToolCreativeInput = {
+              name: medias.length > 1 ? `${name} · ${i + 1}` : name,
+              media: ref.media,
+              primaryText: serverCampaign.copy || "",
+              headline: serverCampaign.headline || serverCampaign.title || "",
+              url: link,
+              cta: serverCampaign.cta || "",
+            };
+            if (ref.thumbnail) c.thumbnail = ref.thumbnail;
+            if (serverCampaign.title && serverCampaign.headline && serverCampaign.title !== serverCampaign.headline)
+              c.description = serverCampaign.title;
+            return c;
+          });
+
+          // Locales resolve on the MO signer's token (captured pre-stream when the card has any) —
+          // adlocale search needs no account access, so it works with no AV token (owner ask 28.09).
+          const localeIds = toolLocaleToken
+            ? await resolveLocales(serverCampaign.locales, (path) => fbGet(path, toolLocaleToken))
+            : [];
+          const built = buildToolCampaign(
+            toolInputFromCampaign(serverCampaign, {
+              name,
+              pageId: binds.pageId,
+              pixelId: "", // AV never binds a pixel (Traffic / link clicks)
+              localeIds,
+              creatives,
+              status: "ACTIVE", // AV launches go live; TOOL creates PAUSED then activates on success
+              accountCurrency: toolAcctCurrency,
+            }),
+          );
+          if (!built.ok) {
+            await toolFail(`TOOL rejected the campaign: ${built.error}`);
+            return;
+          }
+
+          // 3t) submit the create job and follow it to a terminal state (poll ~2.5 s).
+          progress("campaign");
+          const pub = await runToolPublish(toolDeps, binds.accountId, built.body, {
+            idempotencyKey,
+            deadlineAt,
+            onStage,
+            // review find 28.09 (belt): record the job id the instant TOOL accepts the submit, before
+            // any poll — so a throw after this point never frees the key/slot under a live campaign.
+            onSubmitted: (jobId) => {
+              toolSubmittedJob = jobId;
+            },
+          });
+
+          if (pub.ok) {
+            created.campaign_id = pub.campaignId;
+            created.adset_id = pub.adsetId;
+            created.ad_id = pub.adIds[0];
+            if (pub.adIds.length > 1) created.ad_ids = [...pub.adIds];
+            // 4t) record the FB ids against the claimed key (AV has NO hs-tools scope, so there is no
+            // reportPagesUsed here — same as the Graph path). Best-effort: a live TOOL campaign must
+            // never be reported failed over a registry hiccup.
+            await backfillAvKey(avKey, {
+              campaign_id: pub.campaignId,
+              adset_id: pub.adsetId,
+              ad_id: pub.adIds[0],
+              ad_count: pub.adIds.length,
+              notes: `launched via TOOL job #${pub.jobId}`,
+            }).catch(() => {});
+            settled = true;
+            tw.write({
+              status: "done",
+              stage: "ad",
+              finished_at: Date.now(),
+              campaign_id: pub.campaignId,
+              adset_id: pub.adsetId,
+              ad_id: pub.adIds[0],
+              link,
+              gcm: avKey, // the shared task row's marker column carries the AV key on this rail
+              error: null,
+            });
+            send({
+              ok: true,
+              stage: "done",
+              via: "tool",
+              tool_job_id: pub.jobId,
+              gcm: avKey,
+              link,
+              destination_kind: resolved.kind,
+              page_id: binds.pageId,
+              campaign_id: pub.campaignId,
+              adset_id: pub.adsetId,
+              ad_id: pub.adIds[0],
+              ...(pub.adIds.length > 1 ? { ad_ids: pub.adIds } : {}),
+            });
+            return;
+          }
+
+          if (pub.pending) {
+            // Deadline hit while TOOL was still working — KEEP the slot + key (the campaign may yet be
+            // born); note the job so it is traceable on Ads Manager sessions → Jobs.
+            if (pub.created?.campaignId) created.campaign_id = pub.created.campaignId;
+            const pendingMsg = `pending tool job #${pub.jobId ?? "?"} — check Ads Manager sessions → Jobs`;
+            await backfillAvKey(avKey, {
+              notes: pendingMsg,
+              ...(pub.created?.campaignId ? { campaign_id: pub.created.campaignId } : {}),
+            }).catch(() => {});
+            settled = true;
+            tw.write({
+              status: "error",
+              stage: lastStage,
+              finished_at: Date.now(),
+              error: pendingMsg,
+              ...(pub.created?.campaignId ? { campaign_id: pub.created.campaignId } : {}),
+            });
+            send({ ok: false, stage: "error", pending: true, via: "tool", tool_job_id: pub.jobId, error: pub.error });
+            return;
+          }
+
+          // Definite failure (refusal or the job ended error/partial) — anything created is PAUSED.
+          await toolFail(pub.error, { created: pub.created, jobId: pub.jobId });
+          return;
+        }
+
+        // Graph path only (the TOOL block returned above). The AV rail is always resolved (avRail
+        // returned ok for both channels), so the whole direct-Graph build below signs with it.
 
         // 2) register EVERY creative on the AV account (MO/AIF-parity). Videos: all uploads are
         // fired first (advideos answers immediately, Meta processes in the background, in
@@ -409,7 +749,7 @@ export async function POST(req: Request) {
           if (coverBuf) r.coverHash = await rail.uploadImage(binds.accountId, coverBuf);
           else r.thumbUrl = await rail.videoThumb(r.videoId);
         }
-        const localeIds = await resolveLocales(serverCampaign.locales, rail);
+        const localeIds = await resolveLocales(serverCampaign.locales, rail.fbGet);
 
         // 3) campaign → adset → one creative+ad PER media, all ACTIVE (parity with the MO/AIF rails)
         progress("campaign");
@@ -500,6 +840,20 @@ export async function POST(req: Request) {
         });
       } catch (e) {
         const err = e as FbError;
+        // review find 28.09 (TOOL belt): if TOOL accepted the submit (onSubmitted set toolSubmittedJob)
+        // but no campaign id is known, a throw reaching here must NOT free the slot/key — TOOL may be
+        // creating AND activating the campaign server-side. Settle exactly like the TOOL PENDING
+        // terminal above (keep the slot, keep the key with a "pending tool job #N" note, free NOTHING).
+        // The guarded send already stops a client disconnect from unwinding the TOOL branch; this
+        // covers any other post-submit throw.
+        if (viaTool && toolSubmittedJob != null && !created.campaign_id) {
+          const pendingMsg = `pending tool job #${toolSubmittedJob} — check Ads Manager sessions → Jobs`;
+          if (key) await backfillAvKey(key.key, { notes: pendingMsg }).catch(() => {});
+          settled = true;
+          tw.write({ status: "error", stage: lastStage, finished_at: Date.now(), error: pendingMsg });
+          send({ ok: false, stage: "error", pending: true, via: "tool", tool_job_id: toolSubmittedJob, error: err.message ?? String(e) });
+          return;
+        }
         // Free the account's launch slot when NO campaign was created — the window only meters
         // campaigns that actually exist on FB. Once one exists the slot stays consumed.
         if (acctSlot && !created.campaign_id) await releaseAcctSlot(acctSlot.documentId);

@@ -273,9 +273,12 @@ function CampaignCardBase({
    *  accounts a live TOOL session sees (profile accounts ∩ `toolAccounts`), and the name preview
    *  carries the GCL TOOL marker in the TOKEN slot (hsNamePrefix "tool"). Mirrors hsTokenRail. */
   toolRail?: boolean;
-  /** MO/AIF: the TOOL rail is the EFFECTIVE channel — the token-catalog account picker is filtered
-   *  to TOOL-visible accounts (∩ `toolAccounts`) and the name preview carries the GCL TOOL marker
-   *  after the partner prefix (dropping any SOC marker). */
+  /** MO/AIF/AV: the TOOL rail is the EFFECTIVE channel — the account picker is filtered to
+   *  TOOL-visible accounts (∩ `toolAccounts`) and the name preview carries the GCL TOOL marker after
+   *  the partner prefix (dropping any SOC marker). Set for AV-on-TOOL too (owner ask 28.09): AV
+   *  launches ONLY through TOOL, so its cabinet list is the TOOL ready rows (passed as `adAccounts`)
+   *  while the fanpage still comes from the AV token's own catalog (`fanpages`), same picker as the
+   *  direct-Graph AV rail. */
   moToolRail?: boolean;
   /** Bare-digit account ids a live TOOL session can launch into (from useToolReady), used to
    *  filter the account picker when toolRail/moToolRail is set. Undefined = TOOL not the channel. */

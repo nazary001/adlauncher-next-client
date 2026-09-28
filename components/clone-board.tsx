@@ -277,11 +277,13 @@ function CloneInner({
       /* storage disabled */
     }
   };
-  // AV has no TOOL channel (its own FB token only — the TOOL sessions are the HS team's): never
-  // polled, never fired through, and the channel switch below is not rendered on the AV board.
-  const toolReady = useToolReady(partnerId, "clone", !avMode);
+  // AV clones can't run through TOOL — TOOL has no way to READ the source campaign (owner ask
+  // 28.09): the ready endpoint answers partner=av&rail=clone with ready:false / not_available and a
+  // message pointing at the AV token on /tokens. We still POLL it (so the TOOL segment shows that
+  // message as its disabled tooltip) but AV never FIRES through it.
+  const toolReady = useToolReady(partnerId, "clone");
   /** The channel that actually fires: a "tool" pick only holds while the rail is READY (else the
-   *  segment is disabled and the fire falls back to FB Token). */
+   *  segment is disabled and the fire falls back to FB Token). AV never fires through TOOL. */
   const onTool = !avMode && channel === "tool" && toolReady.ready;
   // /api/tool/ready returns BARE digits; our catalog account values are bare digits too, but strip
   // any "act_" defensively so the TOOL filter matches regardless of spelling.
@@ -752,8 +754,9 @@ function CloneInner({
             {/* launch channel (owner ask 28.09): our FB Token (the default Graph rail) vs the HS
                 team's TOOL service. TOOL unlocks only when a live session sees this partner's
                 accounts (useToolReady) — today only HS has one, so MO/AIF stay on FB Token until an
-                owner adds a session on Ads Manager sessions. */}
-            {avMode ? null : (
+                owner adds a session on Ads Manager sessions. AV shows the switch too, but its TOOL
+                segment is always disabled: TOOL cannot READ the source campaign, so AV clones stay
+                on the AV FB token (the disabled tooltip / caption carries that reason). */}
             <div className="flex flex-col gap-1">
               <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Launch channel</span>
               <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
@@ -794,14 +797,15 @@ function CloneInner({
                 })}
               </div>
               <p className="text-center text-[10px] leading-relaxed text-faint">
-                {onTool
-                  ? `Launches through TOOL · ${toolReady.accounts.size} account${toolReady.accounts.size === 1 ? "" : "s"} · marks names “${TOOL_MARK.trim()}”`
-                  : channel === "tool" && !toolReady.ready
-                    ? toolReady.message || "TOOL not ready — firing on FB Token"
-                    : "Builds on our FB token"}
+                {avMode
+                  ? toolReady.message || "AV clones read the source with the AV token — TOOL cannot read sources"
+                  : onTool
+                    ? `Launches through TOOL · ${toolReady.accounts.size} account${toolReady.accounts.size === 1 ? "" : "s"} · marks names “${TOOL_MARK.trim()}”`
+                    : channel === "tool" && !toolReady.ready
+                      ? toolReady.message || "TOOL not ready — firing on FB Token"
+                      : "Builds on our FB token"}
               </p>
             </div>
-            )}
 
             {/* The clone signer — the OWNER'S pick on /tokens: reads the catalogs below AND signs
                 every clone (read-only here, owner ask 09-14). */}
