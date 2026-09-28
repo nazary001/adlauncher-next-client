@@ -192,6 +192,10 @@ function SlotCard({
   );
   const vaultOpts = eligible.filter((t) => t.source === "registry");
   const envOpts = eligible.filter((t) => t.source === "env");
+  // Does picking the empty <option> fall back to a working env default? A partner with no env seed
+  // (AV — owner call 28.09: its own assigned token, no env bearer) has none, so the empty option
+  // means "no token, rail blocked", not "Env default" (review find 09-28).
+  const hasEnvDefault = envOpts.length > 0;
   const assigned = view.assigned;
   const srcChip =
     view.source === "assigned" ? (
@@ -356,7 +360,7 @@ function SlotCard({
             disabled={busy}
             onChange={(e) => onSetSlot(slot, e.target.value ? [e.target.value] : [])}
           >
-            <option value="">Env default</option>
+            <option value="">{hasEnvDefault ? "Env default" : "No signer — rail blocked"}</option>
             {options([])}
           </select>
           {eligible.length === 0 ? (

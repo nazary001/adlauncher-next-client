@@ -17,6 +17,7 @@ import { fetchValidatedImage } from "@/lib/fb-media";
 import { type AvRail, avKeysRegistered, avRail, avRailEnabled } from "@/lib/av-launch";
 import { backfillAvKey, claimAvKey, releaseAvKey } from "@/lib/av-keys";
 import { resolveAvDestination } from "@/lib/av-destination";
+import { avApiConfigured } from "@/lib/av-api";
 import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import { taskWriter } from "@/lib/task-store";
@@ -107,6 +108,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, stage: "config", error: railRes.error }, { status: 400 });
   }
   const rail = railRes.rail;
+  // AV also needs its OWN API key (AV_API_KEY) to re-resolve the destination below (resolveAvDestination
+  // → avSites → avMe → avFetch). Gate it here as a clean config 500 — mirroring /api/av/destinations —
+  // so a registered pool + assigned token but a missing/blank key surfaces as configuration, not a
+  // misleading 502 "destination_check_failed" from the resolver (review find 09-28).
+  if (!avApiConfigured()) {
+    return NextResponse.json(
+      { ok: false, stage: "config", error: "av_not_configured — set AV_API_KEY" },
+      { status: 500 },
+    );
+  }
 
   let campaign: Campaign;
   /** Creatives of this launch (1..maxCreatives, MO/AIF-parity): own-Blob URLs; cover = video

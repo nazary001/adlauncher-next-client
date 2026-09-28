@@ -259,6 +259,10 @@ type TmScope = {
   /** Bottom offset of the still-launching pill — the two instances must never overlap when both
    *  queues are mid-wave (MO wave running while an AIF wave fires, or vice versa). */
   bannerBottom: string;
+  /** A dormant rail's instance never talks to the server (no restore fetch, no poll) — the same
+   *  rule the Snap rail follows: a build without the rail's flag must not generate Strapi traffic
+   *  for a queue nobody can fill (AV while NEXT_PUBLIC_AV_ENABLED is unset). */
+  dormant?: boolean;
 };
 const MO_SCOPE: TmScope = {
   api: "/api/launch-tasks",
@@ -284,6 +288,8 @@ const AV_SCOPE: TmScope = {
   subtitle: "AV launch queue · team view",
   // Stacks above the MO (bottom-5) and AIF (bottom-[4.75rem]) pills so three mid-wave queues never overlap.
   bannerBottom: "bottom-[8.5rem]",
+  // Build-time flag (NEXT_PUBLIC_AV_ENABLED inlined): a dormant AV rail never polls Strapi.
+  dormant: partnerConfig("av").inDevelopment === true,
 };
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -456,6 +462,10 @@ function TaskManagerCore({
     } catch {
       /* ignore */
     }
+    if (scope.dormant) {
+      loadedRef.current = true;
+      return;
+    }
     let alive = true;
     fetch(scope.api)
       .then((r) => r.json())
@@ -480,11 +490,12 @@ function TaskManagerCore({
     return () => {
       alive = false;
     };
-  }, [lsKey, noteSkew, scope.api, scope.lsBase]);
+  }, [lsKey, noteSkew, scope.api, scope.lsBase, scope.dormant]);
 
   // Live shared view: poll continuously (faster with the drawer open), pause while the tab is
   // hidden, refresh immediately on focus/visible — the badge is truthful at any moment.
   useEffect(() => {
+    if (scope.dormant) return;
     const tick = () => {
       if (document.hidden || authDeadRef.current) return;
       const interval = openRef.current ? POLL_OPEN_MS : POLL_CLOSED_MS;
@@ -508,7 +519,7 @@ function TaskManagerCore({
       window.removeEventListener("focus", wake);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [loadRemote]);
+  }, [loadRemote, scope.dormant]);
 
   useEffect(() => {
     openRef.current = open;

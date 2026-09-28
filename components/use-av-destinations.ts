@@ -122,11 +122,16 @@ export function useAvDestinations(enabled: boolean): AvDestinations {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(input),
         });
-        const d = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string; path?: AvCreatedPath };
+        const d = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string; path?: AvCreatedPath; created?: { id: string; url: string } };
         if (r.ok && d.ok && d.path) {
           refresh(true); // the new path only becomes pickable once the catalog is re-pulled
           return { ok: true as const, url: d.path.url, path: d.path };
         }
+        // Failure half: the path WAS created on AV (with its article as the fallback) but the mapping
+        // PUT failed (502 + `created`). The server already dropped its redirect cache, so re-pull the
+        // catalog — otherwise the created path stays invisible/unselectable and a same-slug retry 400s
+        // redirect_path_exists (review find 09-28). It is selectable/launchable via that fallback.
+        if (d.created) refresh(true);
         return { ok: false as const, error: d.error || `redirect_path_failed — HTTP ${r.status}` };
       } catch (e) {
         return { ok: false as const, error: `redirect_path_failed — ${errText(e)}` };

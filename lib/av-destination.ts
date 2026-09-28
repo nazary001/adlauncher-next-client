@@ -79,9 +79,9 @@ async function fetchText(url: string, timeoutMs = 10_000): Promise<{ status: num
 const locs = (xml: string): string[] => [...xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)].map((m) => m[1].replace(/&amp;/g, "&"));
 
 /** Every article URL of a site from its sitemap (index → page sitemaps), cached 10 min. */
-async function siteArticleUrls(domain: string): Promise<string[]> {
+async function siteArticleUrls(domain: string, force = false): Promise<string[]> {
   const c = sitemapCache.get(domain);
-  if (fresh(c, SITEMAP_TTL_MS)) return c.value;
+  if (!force && fresh(c, SITEMAP_TTL_MS)) return c.value;
   const root = await fetchText(`https://${domain}/sitemap.xml`);
   if (root.status !== 200) throw new Error(`sitemap of ${domain} answered ${root.status}`);
   let urls: string[] = [];
@@ -216,7 +216,7 @@ export async function avDestinationCatalog(opts: { force?: boolean; titles?: boo
   const errors: string[] = [];
   for (const s of sites) {
     try {
-      const urls = await siteArticleUrls(s.domain);
+      const urls = await siteArticleUrls(s.domain, opts.force);
       if (opts.titles !== false) await fillTitles(urls);
       for (const url of urls) {
         const path = new URL(url).pathname;

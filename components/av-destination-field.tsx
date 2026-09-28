@@ -207,7 +207,7 @@ export function AvDestinationField({
             onChange={(v) => onChange(v)}
             options={articleOptions}
             placeholder="Search AV articles"
-            emptyHint={loading && articleOptions.length === 0 ? "Loading articles…" : cat?.articlesError ? "Articles unavailable — see below" : "No articles match"}
+            emptyHint={loading && articleOptions.length === 0 ? "Loading articles…" : error && !cat ? "Couldn't load AV destinations — use Retry above" : cat?.articlesError ? "Articles unavailable — see below" : "No articles match"}
             facets
             warn={!value}
           />
@@ -304,6 +304,10 @@ function RedirectPicker({
     );
   }
   if (redirects.length === 0) {
+    // Whole-catalog load failure (no cat at all): the top danger notice + Retry already speaks —
+    // don't also claim there are "no redirect domains", which reads as a genuinely empty catalog
+    // rather than a failed load (review find 09-28).
+    if (destinations.error && !cat) return null;
     return <Notice>{loading ? "Loading redirect domains…" : "No ActiveView redirect domains for our sites yet."}</Notice>;
   }
 

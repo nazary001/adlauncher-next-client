@@ -13,7 +13,7 @@ import Link from "next/link";
 import { Header } from "./header";
 import type { SessionUser } from "./user-menu";
 import { AlertIcon, AvFlag, RetryIcon } from "./icons";
-import { AV_KEY_POOL_MAX, avKeysUploadFiles } from "@/lib/av-link";
+import { AV_KEY_POOL_MAX, avKeyCode, avKeysUploadFiles } from "@/lib/av-link";
 import type { PartnerId } from "@/lib/partners";
 
 // One registry row as GET /api/av/keys?rows=1 serves it (AvKeyRow minus documentId — the owner
@@ -151,7 +151,14 @@ export function AvKeysBoard({ user }: { user: SessionUser }) {
 
   const registered = view?.registered ?? 0;
   const codecMax = view?.codecMax ?? AV_KEY_POOL_MAX;
-  const bound = view?.used.length ?? 0;
+  // Bound/Free count only keys WITHIN the launchable range (av001…av<registered>) — a key claimed
+  // above a later-lowered AV_KEYS_REGISTERED must not eat a free slot (mirrors launcher-board's
+  // in-range poolFree; out-of-range rows still show in the registry table below). Counting every
+  // registry row here made Free undercount and disagree with the launcher (review find 09-28).
+  const usedCodes = useMemo(() => new Set(view?.used ?? []), [view]);
+  let inRangeBound = 0;
+  for (let n = 1; n <= registered; n++) if (usedCodes.has(avKeyCode(n))) inRangeBound++;
+  const bound = inRangeBound;
   const free = Math.max(0, registered - bound);
   const cleanTarget = Math.min(Math.max(1, Math.floor(target || 0)), codecMax);
   const files = useMemo(() => avKeysUploadFiles(1, cleanTarget), [cleanTarget]);
@@ -239,7 +246,7 @@ export function AvKeysBoard({ user }: { user: SessionUser }) {
                 {/* One text node for the flex row — bare text + an inline <span> would each become a flex item (columns). */}
                 <p className="min-w-0">
                   No AV keys are registered in ActiveView yet — the rail is a stub. Upload the pool below, then set{" "}
-                  <span className="font-mono">AV_KEYS_REGISTERED</span> to the highest registered number and redeploy.
+                  <span className="font-mono">AV_KEYS_REGISTERED</span> to the highest registered number and restart the server (on Vercel: redeploy).
                 </p>
               </div>
             ) : view ? (
@@ -274,7 +281,7 @@ export function AvKeysBoard({ user }: { user: SessionUser }) {
                 </li>
                 <li>
                   <span className="mr-1.5 font-mono text-faint">4.</span> Set the server env{" "}
-                  <span className="font-mono">AV_KEYS_REGISTERED</span> to the highest registered number and redeploy.
+                  <span className="font-mono">AV_KEYS_REGISTERED</span> to the highest registered number and restart the server (on Vercel: redeploy).
                 </li>
               </ol>
             </div>
