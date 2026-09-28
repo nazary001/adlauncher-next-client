@@ -7,7 +7,7 @@
 // Shape (one Strapi app-cache row, see lib/fb-tokens):
 //   tokens — sealed bearers with their tags (partners they may sign for, personal-soc flag,
 //            label, who added them, last identity probe);
-//   slots  — per PARTNER×RAIL ("mo.launch" … "hs.clone") an ORDERED list of token ids. MO/AIF
+//   slots  — per PARTNER×RAIL ("mo.launch" … "av.clone") an ORDERED list of token ids. MO/AIF/AV
 //            rails take exactly one token; the HS rails are POOLS (first = primary, the rest =
 //            failover order — same-user bearers issued through different FB apps dodge the
 //            app-level (#4) limit, the 08-20 design, now owner-editable).
@@ -17,18 +17,19 @@
 
 import { randomBytes } from "node:crypto";
 
-export type TokenPartner = "mo" | "aif" | "hs";
+export type TokenPartner = "mo" | "aif" | "hs" | "av";
 export type TokenRail = "launch" | "clone";
-export type SlotId = "mo.launch" | "mo.clone" | "aif.launch" | "aif.clone" | "hs.launch" | "hs.clone";
+export type SlotId = "mo.launch" | "mo.clone" | "aif.launch" | "aif.clone" | "hs.launch" | "hs.clone" | "av.launch" | "av.clone";
 
-export const TOKEN_PARTNERS: readonly TokenPartner[] = ["mo", "aif", "hs"];
-export const SLOT_IDS: readonly SlotId[] = ["mo.launch", "mo.clone", "aif.launch", "aif.clone", "hs.launch", "hs.clone"];
+export const TOKEN_PARTNERS: readonly TokenPartner[] = ["mo", "aif", "hs", "av"];
+export const SLOT_IDS: readonly SlotId[] = ["mo.launch", "mo.clone", "aif.launch", "aif.clone", "hs.launch", "hs.clone", "av.launch", "av.clone"];
 
-export const PARTNER_LABEL: Record<TokenPartner, string> = { mo: "MO", aif: "AIF", hs: "HS" };
+export const PARTNER_LABEL: Record<TokenPartner, string> = { mo: "MO", aif: "AIF", hs: "HS", av: "AV" };
 export const PARTNER_TITLE: Record<TokenPartner, string> = {
   mo: "MO · Magicoffers (direct Graph)",
   aif: "AIF · Airfind Rewarded Web (direct Graph)",
   hs: "HS · FB Token rails (LION stays on its own token)",
+  av: "AV · ActiveView (direct Graph)",
 };
 
 export type SlotMeta = { partner: TokenPartner; rail: TokenRail; title: string; hint: string; pool: boolean };
@@ -39,6 +40,8 @@ export const SLOT_META: Record<SlotId, SlotMeta> = {
   "aif.clone": { partner: "aif", rail: "clone", title: "Clones", hint: "AIF clone board", pool: false },
   "hs.launch": { partner: "hs", rail: "launch", title: "Launches (FB Token rail)", hint: "Failover pool · first = primary, the rest take over on an app-level limit", pool: true },
   "hs.clone": { partner: "hs", rail: "clone", title: "Duplicates & JURO (FB Token rails)", hint: "Failover pool · also signs the geo-override patch of LION clones", pool: true },
+  "av.launch": { partner: "av", rail: "launch", title: "Launches", hint: "AV launcher board", pool: false },
+  "av.clone": { partner: "av", rail: "clone", title: "Clones", hint: "AV clone board", pool: false },
 };
 
 export const slotOf = (partner: TokenPartner, rail: TokenRail): SlotId => `${partner}.${rail}` as SlotId;
@@ -314,6 +317,9 @@ export function envDefaultIds(seeds: SeedEntry[], slot: SlotId): string[] {
     return pick ? [pick.id] : [];
   }
   if (partner === "aif") return seeds.filter((s) => s.id === "env:FB_AIF_LAUNCH_TOKEN").map((s) => s.id);
+  // AV has NO env bearer (owner call 28.09: its own new token, assigned on /tokens) — an unassigned
+  // AV slot resolves to nothing, never falls through to the HS pool below.
+  if (partner === "av") return [];
   const pool = seeds.filter((s) => s.id.startsWith("env:FB_HS_LAUNCH_TOKEN")).map((s) => s.id);
   if (slotRail(slot) === "clone") {
     const dup = seeds.find((s) => s.id === "env:FB_HS_DUP_TOKEN");

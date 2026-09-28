@@ -23,8 +23,17 @@ import type { PartnerId } from "./partners";
 const BASE = (process.env.HS_PAGES_API_URL || "https://hs.gctracking.xyz").replace(/\/+$/, "");
 const KEY = process.env.HS_PAGES_API_KEY ?? "";
 
-/** hs-tools partner prefix per adlauncher partner (br = HS default tables). */
-const SCOPE: Record<PartnerId, string> = { br: "", in: "/mo", us: "/aif" };
+/** hs-tools partner prefix per adlauncher partner (br = HS default tables). null = the partner has
+ *  NO hs-tools scope (AV — its fanpages are not synced to the box): reads throw "no scope" (callers
+ *  already treat a failed registry as unknown) and usage reports are skipped. */
+const SCOPE: Record<PartnerId, string | null> = { br: "", in: "/mo", us: "/aif", av: null };
+
+/** The box prefix of a partner; throws for a partner without an hs-tools scope. */
+function scopeOf(partner: PartnerId): string {
+  const s = SCOPE[partner];
+  if (s == null) throw new Error(`hs-pages: partner "${partner}" has no hs-tools scope`);
+  return s;
+}
 
 export const hsPagesConfigured = (): boolean => KEY.length > 0;
 
@@ -80,7 +89,7 @@ const inflight = new Map<string, Promise<Snapshot>>();
 type Json = Record<string, unknown>;
 
 async function registryGet(partner: PartnerId, path: string): Promise<Json> {
-  const res = await fetch(`${BASE}${SCOPE[partner]}${path}`, {
+  const res = await fetch(`${BASE}${scopeOf(partner)}${path}`, {
     headers: { "X-Api-Key": KEY },
     cache: "no-store",
     signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
@@ -234,13 +243,13 @@ export type UsedReport = { pageId: string; delta: number };
  * are dropped; an unregistered page logs "page not found" and the rest of the batch still lands.
  */
 export async function reportPagesUsed(partner: PartnerId, items: UsedReport[]): Promise<void> {
-  if (!hsPagesConfigured()) return;
+  if (!hsPagesConfigured() || SCOPE[partner] == null) return;
   const clean = items
     .filter((i) => /^\d{5,}$/.test(i.pageId) && Number.isFinite(i.delta) && Math.round(i.delta) !== 0)
     .map((i) => ({ page_id: i.pageId, delta: Math.round(i.delta) }));
   if (clean.length === 0) return;
   try {
-    const res = await fetch(`${BASE}${SCOPE[partner]}/fb/api/v1/pages/used`, {
+    const res = await fetch(`${BASE}${scopeOf(partner)}/fb/api/v1/pages/used`, {
       method: "POST",
       headers: { "X-Api-Key": KEY, "Content-Type": "application/json" },
       body: JSON.stringify({ items: clean }),

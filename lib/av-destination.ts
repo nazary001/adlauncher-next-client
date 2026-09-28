@@ -1,0 +1,308 @@
+// AV rail — WHERE an ad may point (server-only). Two destination kinds, one stored shape (a bare URL
+// in Campaign.landing, lib/av-link avDestinationBase):
+//   article  — a page of an AV site (the sites the API key reaches: GET /me). Picked from the site's
+//              live sitemap (AV's CMS publishes every article there; an unknown path answers 404) or
+//              pasted; a launch re-checks it answers 200.
+//   redirect — a path of an AV Redirect domain (redirect.<site>/<path>, GET /v1/redirects): AV picks
+//              the target by the path's weights and merges our tracking params into it. Launchable
+//              only while the domain is LIVE (resolves + answers) — 28.09 its CNAME target did not
+//              resolve, the activation wizard was unfinished.
+// Every read is cached per instance (short TTLs) and degrades per part: the card still gets the
+// articles when the redirect list fails, and vice versa, each with its reason.
+
+import { lookup } from "node:dns/promises";
+import { type AvMapping, type AvSite, AvApiError, avMe, avRedirectMappings, avRedirects } from "./av-api";
+import { avArticleTitle, avDestinationBase } from "./av-link";
+
+const UA = "Mozilla/5.0 (compatible; adlauncher-av/1.0)";
+const SITES_TTL_MS = 10 * 60_000;
+const SITEMAP_TTL_MS = 10 * 60_000;
+const TITLE_TTL_MS = 6 * 60 * 60_000;
+const REDIRECTS_TTL_MS = 60_000;
+const LIVE_TTL_MS = 5 * 60_000;
+const PAGE_OK_TTL_MS = 10 * 60_000;
+const SITEMAP_FILES_MAX = 10;
+const ARTICLES_MAX = 2000;
+const TITLE_BUDGET_MS = 8_000;
+const TITLE_CONCURRENCY = 8;
+
+type Cached<T> = { at: number; value: T };
+const sitesCache: { v?: Cached<AvSite[]> } = {};
+const sitemapCache = new Map<string, Cached<string[]>>();
+const titleCache = new Map<string, Cached<string>>();
+const redirectsCache: { v?: Cached<AvRedirectOption[]> } = {};
+const liveCache = new Map<string, Cached<{ live: boolean; reason?: string }>>();
+const pageOkCache = new Map<string, number>();
+
+export type AvArticle = { url: string; site: string; path: string; title: string; variant: string };
+export type AvRedirectPathOption = { id: string; path: string; url: string; mappings: AvMapping[]; mappingsError?: string };
+export type AvRedirectOption = {
+  domainId: string;
+  domain: string;
+  /** The AV site this redirect domain belongs to (redirect.thecadrion.com → thecadrion.com). */
+  site: string;
+  live: boolean;
+  liveReason?: string;
+  paths: AvRedirectPathOption[];
+};
+export type AvDestinationCatalog = {
+  sites: AvSite[];
+  articles: AvArticle[];
+  articlesError?: string;
+  redirects: AvRedirectOption[];
+  redirectsError?: string;
+};
+
+const fresh = <T>(c: Cached<T> | undefined, ttl: number): c is Cached<T> => Boolean(c) && Date.now() - (c as Cached<T>).at < ttl;
+const errText = (e: unknown): string => (e instanceof AvApiError ? e.message : (e as Error)?.message ?? String(e));
+
+/** The AV sites the API key reaches (GET /me, cached 10 min). Throws AvApiError when AV refuses. */
+export async function avSites(force = false): Promise<AvSite[]> {
+  if (!force && fresh(sitesCache.v, SITES_TTL_MS)) return sitesCache.v.value;
+  const me = await avMe();
+  sitesCache.v = { at: Date.now(), value: me.sites };
+  return me.sites;
+}
+
+/** The site a host belongs to: the site itself, www.<site>, or a subdomain of it (redirect.<site>). */
+export function siteOfHost(host: string, sites: AvSite[]): AvSite | null {
+  const h = host.toLowerCase();
+  return sites.find((s) => h === s.domain || h.endsWith(`.${s.domain}`)) ?? null;
+}
+
+async function fetchText(url: string, timeoutMs = 10_000): Promise<{ status: number; text: string; finalUrl: string }> {
+  const res = await fetch(url, { headers: { "User-Agent": UA, Accept: "text/html,application/xml;q=0.9,*/*;q=0.8" }, redirect: "follow", cache: "no-store", signal: AbortSignal.timeout(timeoutMs) });
+  const text = await res.text().catch(() => "");
+  return { status: res.status, text, finalUrl: res.url || url };
+}
+
+const locs = (xml: string): string[] => [...xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)].map((m) => m[1].replace(/&amp;/g, "&"));
+
+/** Every article URL of a site from its sitemap (index → page sitemaps), cached 10 min. */
+async function siteArticleUrls(domain: string): Promise<string[]> {
+  const c = sitemapCache.get(domain);
+  if (fresh(c, SITEMAP_TTL_MS)) return c.value;
+  const root = await fetchText(`https://${domain}/sitemap.xml`);
+  if (root.status !== 200) throw new Error(`sitemap of ${domain} answered ${root.status}`);
+  let urls: string[] = [];
+  if (/<sitemapindex/i.test(root.text)) {
+    const files = locs(root.text).slice(0, SITEMAP_FILES_MAX);
+    for (const f of files) {
+      const part = await fetchText(f);
+      if (part.status === 200) urls.push(...locs(part.text));
+    }
+  } else {
+    urls = locs(root.text);
+  }
+  const clean = [...new Set(urls)]
+    .map((u) => avDestinationBase(u))
+    .filter((b): b is Extract<ReturnType<typeof avDestinationBase>, { ok: true }> => b.ok && (b.host === domain || b.host === `www.${domain}`))
+    .map((b) => b.base)
+    .slice(0, ARTICLES_MAX);
+  sitemapCache.set(domain, { at: Date.now(), value: clean });
+  return clean;
+}
+
+const decodeEntities = (s: string): string =>
+  s
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;|&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#(\d+);/g, (_m, d: string) => String.fromCharCode(Number(d)));
+
+/** Fill real <title>s for the articles not cached yet — bounded (8 s total, 8 in flight); the rest
+ *  keep the slug-derived title until a later read. */
+async function fillTitles(urls: string[]): Promise<void> {
+  const todo = urls.filter((u) => !fresh(titleCache.get(u), TITLE_TTL_MS));
+  if (todo.length === 0) return;
+  const deadline = Date.now() + TITLE_BUDGET_MS;
+  let i = 0;
+  const worker = async () => {
+    while (i < todo.length && Date.now() < deadline) {
+      const u = todo[i++];
+      try {
+        const r = await fetchText(u, Math.max(1_000, Math.min(5_000, deadline - Date.now())));
+        const m = /<title[^>]*>([^<]{1,300})<\/title>/i.exec(r.text);
+        if (r.status === 200 && m) titleCache.set(u, { at: Date.now(), value: decodeEntities(m[1]).replace(/\s+/g, " ").trim() });
+        if (r.status === 200) pageOkCache.set(u, Date.now());
+      } catch {
+        /* keep the derived title */
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: TITLE_CONCURRENCY }, worker));
+}
+
+/** Is the redirect domain live? DNS must resolve and HTTPS must answer at all (any status). 5 min. */
+export async function avRedirectDomainLive(domain: string, force = false): Promise<{ live: boolean; reason?: string }> {
+  // Offline-smoke seam (_e2e/_adl_av_smoke.mts): domains listed here count as live WITHOUT a DNS/HTTPS
+  // probe. Ignored on production builds — prod liveness is always probed for real.
+  if (process.env.NODE_ENV !== "production") {
+    const forced = (process.env.AV_TEST_LIVE_REDIRECT_DOMAINS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+    if (forced.includes(domain.toLowerCase())) return { live: true };
+  }
+  const c = liveCache.get(domain);
+  if (!force && fresh(c, LIVE_TTL_MS)) return c.value;
+  let v: { live: boolean; reason?: string };
+  try {
+    await lookup(domain);
+    try {
+      await fetch(`https://${domain}/`, { method: "HEAD", redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(6_000), headers: { "User-Agent": UA } });
+      v = { live: true };
+    } catch (e) {
+      v = { live: false, reason: `${domain} resolves but does not answer over HTTPS yet (${(e as Error).message ?? e}) — finish the Redirect activation in ActiveView` };
+    }
+  } catch {
+    v = { live: false, reason: `${domain} does not resolve yet — finish the Redirect activation (DNS validation) in ActiveView → Redirect` };
+  }
+  liveCache.set(domain, { at: Date.now(), value: v });
+  return v;
+}
+
+/** Redirect domains with their paths + weights and liveness (cached 60 s). Throws on an API failure. */
+export async function avRedirectCatalog(sites: AvSite[], force = false): Promise<AvRedirectOption[]> {
+  if (!force && fresh(redirectsCache.v, REDIRECTS_TTL_MS)) return redirectsCache.v.value;
+  const domains = await avRedirects();
+  const out: AvRedirectOption[] = [];
+  for (const d of domains) {
+    const site = siteOfHost(d.name, sites);
+    if (!site) continue; // a redirect domain of a site this key cannot see is not ours to launch on
+    const live = await avRedirectDomainLive(d.name, force);
+    const paths: AvRedirectPathOption[] = [];
+    for (const p of d.paths) {
+      const url = `https://${d.name}${p.path}`;
+      try {
+        paths.push({ id: p.id, path: p.path, url, mappings: await avRedirectMappings(p.id) });
+      } catch (e) {
+        paths.push({ id: p.id, path: p.path, url, mappings: [], mappingsError: errText(e) });
+      }
+    }
+    out.push({ domainId: d.id, domain: d.name, site: site.domain, live: live.live, ...(live.reason ? { liveReason: live.reason } : {}), paths });
+  }
+  redirectsCache.v = { at: Date.now(), value: out };
+  return out;
+}
+
+/** Drop the redirect list cache (after a path was created). */
+export function invalidateAvRedirects(): void {
+  redirectsCache.v = undefined;
+}
+
+/** Everything the card's Destination picker shows. Sites must load (else AvApiError); articles and
+ *  redirects degrade independently with their own error text. */
+export async function avDestinationCatalog(opts: { force?: boolean; titles?: boolean } = {}): Promise<AvDestinationCatalog> {
+  const sites = await avSites(opts.force);
+  const articles: AvArticle[] = [];
+  const errors: string[] = [];
+  for (const s of sites) {
+    try {
+      const urls = await siteArticleUrls(s.domain);
+      if (opts.titles !== false) await fillTitles(urls);
+      for (const url of urls) {
+        const path = new URL(url).pathname;
+        const derived = avArticleTitle(path);
+        articles.push({ url, site: s.domain, path, title: titleCache.get(url)?.value || derived.title, variant: derived.variant });
+      }
+    } catch (e) {
+      errors.push(`${s.domain}: ${errText(e)}`);
+    }
+  }
+  let redirects: AvRedirectOption[] = [];
+  let redirectsError: string | undefined;
+  try {
+    redirects = await avRedirectCatalog(sites, opts.force);
+  } catch (e) {
+    redirectsError = errText(e);
+  }
+  return {
+    sites,
+    articles,
+    ...(errors.length ? { articlesError: `articles unavailable — ${errors.join("; ")}` } : {}),
+    redirects,
+    ...(redirectsError ? { redirectsError: `redirect paths unavailable — ${redirectsError}` } : {}),
+  };
+}
+
+/** Does the article answer 200 on its own site (following redirects that stay on the site)? */
+async function articleLive(base: string, site: AvSite): Promise<{ ok: true } | { ok: false; error: string }> {
+  const seen = pageOkCache.get(base);
+  if (seen && Date.now() - seen < PAGE_OK_TTL_MS) return { ok: true };
+  try {
+    const r = await fetchText(base, 10_000);
+    const finalHost = (() => {
+      try {
+        return new URL(r.finalUrl).hostname.toLowerCase();
+      } catch {
+        return "";
+      }
+    })();
+    if (r.status !== 200) return { ok: false, error: `destination_not_live — ${base} answered ${r.status} (renamed or unpublished in AV's CMS?)` };
+    if (finalHost && !siteOfHost(finalHost, [site])) return { ok: false, error: `destination_invalid — ${base} redirects off the AV site (${finalHost})` };
+    pageOkCache.set(base, Date.now());
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: `destination_check_failed — ${base} did not answer (${(e as Error).message ?? e})` };
+  }
+}
+
+export type AvResolved =
+  | { ok: true; kind: "article"; base: string; site: string }
+  | { ok: true; kind: "redirect"; base: string; site: string; domainId: string; pathId: string; mappings: AvMapping[] }
+  | { ok: false; error: string; status: number };
+
+/**
+ * The server's verdict on a destination (launch + clone): shape → host belongs to an AV site (or one
+ * of its redirect domains) → article answers 200 / redirect path exists and its domain is live.
+ * `status` = the HTTP status the route should answer (400 = the buyer's fix, 502 = AV unreachable).
+ */
+export async function resolveAvDestination(raw: string): Promise<AvResolved> {
+  const b = avDestinationBase(raw);
+  if (!b.ok) return { ok: false, error: b.error, status: 400 };
+  let sites: AvSite[];
+  try {
+    sites = await avSites();
+  } catch (e) {
+    return { ok: false, error: `destination_check_failed — ${errText(e)}`, status: 502 };
+  }
+  const site = siteOfHost(b.host, sites);
+  if (!site) {
+    return { ok: false, error: `destination_not_av — ${b.host} is not an ActiveView site of ours (${sites.map((s) => s.domain).join(", ") || "none"})`, status: 400 };
+  }
+  let redirects: AvRedirectOption[] = [];
+  let redirectsFailed = "";
+  try {
+    redirects = await avRedirectCatalog(sites);
+  } catch (e) {
+    redirectsFailed = errText(e);
+  }
+  const rd = redirects.find((r) => r.domain === b.host);
+  if (rd || (redirectsFailed && b.host !== site.domain && b.host !== `www.${site.domain}`)) {
+    if (!rd) return { ok: false, error: `destination_check_failed — redirect paths unavailable (${redirectsFailed})`, status: 502 };
+    const live = await avRedirectDomainLive(rd.domain);
+    if (!live.live) return { ok: false, error: `redirect_not_live — ${live.reason}`, status: 400 };
+    const p = rd.paths.find((x) => x.path === b.path);
+    if (!p) return { ok: false, error: `redirect_path_unknown — ${b.path} is not a path of ${rd.domain} (create it on the card first)`, status: 400 };
+    return { ok: true, kind: "redirect", base: b.base, site: site.domain, domainId: rd.domainId, pathId: p.id, mappings: p.mappings };
+  }
+  if (b.host !== site.domain && b.host !== `www.${site.domain}`) {
+    return { ok: false, error: `destination_not_av — ${b.host} is neither ${site.domain} nor one of its redirect domains`, status: 400 };
+  }
+  const live = await articleLive(b.base, site);
+  if (!live.ok) return { ok: false, error: live.error, status: live.error.startsWith("destination_check_failed") ? 502 : 400 };
+  return { ok: true, kind: "article", base: b.base, site: site.domain };
+}
+
+/** A redirect path slug the buyer may create: lower-case letters/digits/dashes, 2–60 chars. */
+export const AV_PATH_RE = /^[a-z0-9](?:[a-z0-9-]{0,58}[a-z0-9])?$/;
+
+/** Test seam: drop every per-instance cache. */
+export function _resetAvDestinationCaches(): void {
+  sitesCache.v = undefined;
+  sitemapCache.clear();
+  titleCache.clear();
+  redirectsCache.v = undefined;
+  liveCache.clear();
+  pageOkCache.clear();
+}

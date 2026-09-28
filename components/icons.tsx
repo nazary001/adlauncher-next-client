@@ -407,6 +407,30 @@ export function UsaFlag(props: P) {
   );
 }
 
+/** ActiveView (AV) — not a country: a circular brand badge in the flags' geometry (deep navy disc,
+ *  teal "A" peak over a "V" trough — the partner's monogram, simplified). */
+export function AvFlag(props: P) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...props}>
+      <defs>
+        <clipPath id="flag-av">
+          <circle cx="12" cy="12" r="11" />
+        </clipPath>
+        <linearGradient id="flag-av-bg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#123A6B" />
+          <stop offset="1" stopColor="#081C38" />
+        </linearGradient>
+      </defs>
+      <g clipPath="url(#flag-av)">
+        <rect width="24" height="24" fill="url(#flag-av-bg)" />
+        <path d="M5.2 15.6 9.3 6.8h1.9l4.1 8.8h-2.2l-.8-1.9H8.2l-.8 1.9z M8.9 12h2.7L10.25 8.9z" fill="#35D6C6" fillRule="evenodd" />
+        <path d="M13.4 10.2h2l1.7 4.3 1.7-4.3h2l-2.9 6.8h-1.6z" fill="#F5F7FA" />
+      </g>
+      <circle cx="12" cy="12" r="10.6" fill="none" stroke="rgba(255,255,255,0.16)" strokeWidth="0.8" />
+    </svg>
+  );
+}
+
 /* ---------- platform marks ---------- */
 
 export function FacebookMark(props: P) {

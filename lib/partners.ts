@@ -1,12 +1,13 @@
 import type { ComponentType, SVGProps } from "react";
-import { BrazilFlag, IndiaFlag, UsaFlag } from "@/components/icons";
+import { AvFlag, BrazilFlag, IndiaFlag, UsaFlag } from "@/components/icons";
 import type { Campaign } from "./types";
 import { bidKind } from "./types";
 import { type AifFlow, AIF_RW_BASE, aifFlowOf, aifLinkSegments } from "./aif-link";
+import { AV_KEY_POOL_MAX, avKeyCode, avLinkSegments } from "./av-link";
 
 export type Bound = { id: string; name: string };
 
-export type PartnerId = "br" | "in" | "us";
+export type PartnerId = "br" | "in" | "us" | "av";
 
 export type Landing = {
   slug: string;
@@ -70,6 +71,12 @@ export type PartnerConfig = {
    *  (aifOfferablePixels — retired pixels excluded; empty pick auto-defaults via pickAifPixel)
    *  + Purchase. Min-ROAS pins the rail's value pixel AIF_VALUE_PIXEL (VD-C1-HS-11). */
   aifLaunch?: boolean;
+  /** ActiveView (AV, lib/av-*): a direct Graph launch on AV's OWN token (slots av.launch/av.clone,
+   *  no env default) onto an AV destination — an article of an AV site or an AV Redirect path, kept
+   *  as a bare URL in Campaign.landing — with an AV key (av001…, the AIF-brand twin, only the range
+   *  registered in AV's "UTM Campaign Values" is launchable) in utm_campaign. The page carries NO
+   *  pixel: delivery is pinned to Traffic / link clicks (applyPartnerLocks + the route). */
+  avLaunch?: boolean;
   /** Not built out yet → the switcher renders this partner disabled ("in development"). */
   inDevelopment?: boolean;
   /** Meta's per-Page ad-limit tier for the bound fanpage. The Graph API returns the live
@@ -358,7 +365,37 @@ export const PARTNERS: PartnerConfig[] = [
     // until the FB_AIF_LAUNCH_TOKEN env and a battle smoke land).
     inDevelopment: process.env.NEXT_PUBLIC_AIF_ENABLED !== "1",
   },
+  {
+    id: "av",
+    label: "AV",
+    Flag: AvFlag,
+    usesGcm: false,
+    avLaunch: true,
+    usesProfile: false,
+    nameTier: "av",
+    // The destination is a full URL (article / redirect path) picked or pasted on the card — the
+    // catalog comes live from AV (/api/av/destinations), never from a static list.
+    landingBase: "",
+    landings: [],
+    pageLabel: "Fanpage",
+    pagePlaceholder: "Search fanpage",
+    fanpages: [],
+    fanpagesFromToken: true,
+    accountsFromToken: true,
+    launchNote: "Submits via the AV token",
+    pageAdLimit: 250,
+    // AIF parity: one campaign → one ad set → one ad per creative, ≤5 creatives (Blob broker).
+    maxCreatives: 5,
+    // AV ships DORMANT, same pattern as HS/AIF: the switcher unlocks only where
+    // NEXT_PUBLIC_AV_ENABLED=1 is baked into the build (.env.local — local only for now); every
+    // /api/av/* route answers 404 av_rail_disabled without it (lib/av-launch avRailEnabled).
+    inDevelopment: process.env.NEXT_PUBLIC_AV_ENABLED !== "1",
+  },
 ];
+
+/** AV cards run on Traffic: the AV page carries no Meta pixel, so link clicks (LINK_CLICKS, no
+ *  promoted_object) is the only honest optimization. Pinned by applyPartnerLocks and the route. */
+export const AV_OBJECTIVE = "OUTCOME_TRAFFIC";
 
 export function partnerConfig(id: PartnerId): PartnerConfig {
   return PARTNERS.find((p) => p.id === id) ?? PARTNERS[0];
@@ -389,24 +426,26 @@ export function launchReadyOpts(p: PartnerConfig): {
 } {
   return {
     // AIF reuses the landing slot for its free-typed destination slug — required all the same.
-    landing: p.usesGcm || Boolean(p.aifLaunch),
+    landing: p.usesGcm || Boolean(p.aifLaunch) || Boolean(p.avLaunch),
     profile: p.usesProfile,
     page: Boolean(p.fanpagesFromToken) || Boolean(p.lionLaunch),
     account: Boolean(p.accountsFromToken) || Boolean(p.lionLaunch),
     // AIF's pixel is a pick with a server-side auto-derive fallback (empty pick → the
     // cabinet's own pixel), and click cards legitimately carry none — requiring it here would
     // dead-lock them, so readiness never gates on it for AIF.
-    pixel: (Boolean(p.accountsFromToken) && !p.aifLaunch) || Boolean(p.lionLaunch),
+    // AV never binds a pixel (Traffic / link clicks — the AV page has none).
+    pixel: (Boolean(p.accountsFromToken) && !p.aifLaunch && !p.avLaunch) || Boolean(p.lionLaunch),
     // Marker-pool partners (MO gcm / AIF brand) need a claimed code before the card counts as
     // ready — a card whose code hasn't loaded (registry unreachable / pre-load window) must not
     // look launchable, and Copy must not offer a link with an empty marker.
-    gcm: p.usesGcm || Boolean(p.aifLaunch),
+    gcm: p.usesGcm || Boolean(p.aifLaunch) || Boolean(p.avLaunch),
     // LION builds ads from the typed destination link + title/copy — all hard-required by create/.
     link: Boolean(p.lionLaunch),
     adText: Boolean(p.lionLaunch),
     // Min-ROAS pins the partner's value pixel VD-C1-HS-11 on both rails (AIF since 09-02, MO
     // since 09-08 — both VO-probed); LION partners validate pixels their own way.
-    roasPixel: p.aifLaunch ? AIF_VALUE_PIXEL.id : p.accountsFromToken ? ROAS_PIXEL.id : "",
+    // AV has no value pixel (and refuses min-ROAS) — no pin.
+    roasPixel: p.avLaunch ? "" : p.aifLaunch ? AIF_VALUE_PIXEL.id : p.accountsFromToken ? ROAS_PIXEL.id : "",
   };
 }
 
@@ -457,6 +496,10 @@ export function landingUrlSegments(
   // from the catalog entry — so the card's preview and the launched link can never disagree
   // with the server's own catalog check (lib/aif-link builds both shapes).
   if (p.aifLaunch) return aifLinkSegments(aifFlowOf(p.landings, slug), slug, gcm, pixel);
+  // AV: `slug` IS the destination URL (article / redirect path) and `gcm` the AV key; no pixel,
+  // no fire — lib/av-link builds <destination>?utm_source=facebook&utm_medium={{campaign.id}}
+  // &utm_campaign=<key>&utm_term={{adset.id}}&utm_content={{ad.id}}.
+  if (p.avLaunch) return avLinkSegments(slug, gcm);
   const medium = p.nameTier ? `&utm_medium=${p.nameTier}` : "";
   const segs: LinkSegment[] = [
     { text: `${p.landingBase}/`, role: "base" },
@@ -492,7 +535,7 @@ export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[
   const acct = p.lockedAccount?.name;
   const px = p.lockedPixel?.id; // pixel is identified by its numeric id, not its text name
   const fan = p.fanpages.length === 1 ? p.fanpages[0] : undefined;
-  if (!acct && !px && !fan && !p.aifLaunch) return rows;
+  if (!acct && !px && !fan && !p.aifLaunch && !p.avLaunch) return rows;
   let changed = false;
   const next = rows.map((r) => {
     const patch: Partial<Campaign> = {};
@@ -511,6 +554,17 @@ export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[
       if (r.objective !== "OUTCOME_SALES") patch.objective = "OUTCOME_SALES";
       if (r.conversionEvent !== "PURCHASE") patch.conversionEvent = "PURCHASE";
     }
+    if (p.avLaunch) {
+      // Traffic / link clicks, no pixel — the AV page has none, so conversions and min-ROAS have
+      // nothing to optimize on (the route refuses both; this converges copied/restored drafts).
+      if (r.objective !== AV_OBJECTIVE) patch.objective = AV_OBJECTIVE;
+      if (r.optimization !== "clicks") patch.optimization = "clicks";
+      if (r.pixel) patch.pixel = "";
+      if (bidKind(r.bidStrategy) === "roas") {
+        patch.bidStrategy = "LOWEST_COST_WITHOUT_CAP";
+        patch.bidCap = "";
+      }
+    }
     if (Object.keys(patch).length === 0) return r;
     changed = true;
     return { ...r, ...patch };
@@ -526,7 +580,8 @@ export const GCM_POOL_MAX = 200;
 export const gcmCode = (n: number): string => String(n).padStart(2, "0");
 
 /** A partner's revenue-marker pool: the codes that segment partner revenue per campaign, claimed
- *  atomically from a Strapi registry. MO = gcm 01..200, AIF = brand test01..test700. The two code
+ *  atomically from a Strapi registry. MO = gcm 01..200, AIF = brand test01..test700, AV = av001…
+ *  (registered range only). The two code
  *  shapes can never collide, but each partner previews/claims strictly from its own registry. */
 export type MarkerPool = {
   /** What the code is called in UI copy ("gcm" / "brand"). */
@@ -538,10 +593,13 @@ export type MarkerPool = {
 };
 export const GCM_POOL: MarkerPool = { label: "gcm", max: GCM_POOL_MAX, code: gcmCode, api: "/api/gcm" };
 export const AIF_POOL: MarkerPool = { label: "brand", max: AIF_POOL_MAX, code: aifBrandCode, api: "/api/aif/brand" };
+/** AV keys av001…av999 — the CODEC range; the launchable part is what the owner registered in AV
+ *  (the preview endpoint answers it as `poolMax`, and the board walks that, not this max). */
+export const AV_POOL: MarkerPool = { label: "AV key", max: AV_KEY_POOL_MAX, code: avKeyCode, api: "/api/av/keys" };
 
 /** The marker pool a partner assigns from (null = partner has no marker concept, e.g. HS). */
 export function markerPool(p: PartnerConfig): MarkerPool | null {
-  return p.usesGcm ? GCM_POOL : p.aifLaunch ? AIF_POOL : null;
+  return p.usesGcm ? GCM_POOL : p.aifLaunch ? AIF_POOL : p.avLaunch ? AV_POOL : null;
 }
 
 /**
