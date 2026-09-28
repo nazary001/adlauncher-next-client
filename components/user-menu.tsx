@@ -57,7 +57,7 @@ export function UserMenu({ user }: { user: SessionUser }) {
         {initial}
       </span>
       <span
-        className="hidden max-w-[110px] truncate text-[12.5px] font-medium text-dim xl:inline"
+        className="hidden max-w-[110px] truncate text-[12.5px] font-medium text-dim md:max-lg:inline min-[1440px]:inline"
         title={user.username}
       >
         {user.username}

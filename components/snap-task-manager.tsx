@@ -372,7 +372,7 @@ export function SnapTaskManagerButton() {
         <TasksIcon className="h-4 w-4" />
         {counts.running > 0 ? <span className="animate-pulse-soft absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-launch2" /> : null}
       </span>
-      <span className="hidden whitespace-nowrap sm:inline">Snap tasks</span>
+      <span className="hidden whitespace-nowrap md:max-lg:inline min-[1360px]:inline">Snap tasks</span>
       {badge > 0 ? (
         <span key={badge} className={"animate-badge-pop grid h-4 min-w-4 place-items-center rounded-full px-1 font-mono text-[10px] font-semibold " + (counts.active > 0 ? "bg-launch text-[#032e20]" : "bg-danger text-white")}>
           {badge}

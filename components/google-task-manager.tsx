@@ -585,7 +585,7 @@ export function GoogleTaskManagerButton() {
           <span className="animate-pulse-soft absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-launch2" />
         ) : null}
       </span>
-      <span className="hidden whitespace-nowrap sm:inline">Google tasks</span>
+      <span className="hidden whitespace-nowrap md:max-lg:inline min-[1360px]:inline">Google tasks</span>
       {badge > 0 ? (
         <span
           key={badge}

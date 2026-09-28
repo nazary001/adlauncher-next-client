@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useRef } from "react";
 import { FacebookMark, GoogleMark, RocketIcon, SnapMark, TikTokMark } from "./icons";
 import { PartnerSwitcher } from "./partner-switcher";
 import { AcctLimitWidget } from "./acct-limit-widget";
@@ -31,7 +32,10 @@ function Logo() {
         <span className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(255,255,255,0.35),transparent_55%)]" />
         <RocketIcon className="relative h-5 w-5 text-white transition-transform duration-300 ease-out group-hover:-translate-y-[2px] group-hover:translate-x-[2px]" />
       </span>
-      <span className="flex flex-col leading-none">
+      {/* The wordmark gives way where the row is tightest: phones, and the single-row lg band
+          (1024–1279px) where every pixel goes to the switcher + tabs. Never wraps (it used to break
+          into "Ad / Launcher" once the row got crowded). */}
+      <span className="hidden flex-col whitespace-nowrap leading-none sm:flex lg:hidden xl:flex">
         <span className="text-[17px] font-semibold tracking-tight text-ink">
           Ad Launcher
         </span>
@@ -44,9 +48,13 @@ function Logo() {
 }
 
 function PlatformTabs({ platform }: { platform: Platform }) {
+  // Inactive tabs are icon-only (a tooltip names them) — every platform label at once never fit
+  // next to the partner switcher (the header overflowed the viewport from 1366px down). The ACTIVE
+  // tab keeps its name from xl up; below that the coloured pill alone says where you are.
   const base =
-    "relative flex h-9 items-center gap-2 rounded-full px-3.5 text-[13px] font-medium " +
-    "transition-all duration-200 sm:px-4";
+    "relative flex h-9 shrink-0 items-center gap-2 rounded-full px-2.5 text-[13px] font-medium " +
+    "transition-all duration-200 sm:px-3";
+  const label = (active: boolean) => (active ? "hidden whitespace-nowrap xl:inline" : "sr-only");
   // Inactive tab: a plain link that lights up on hover (same idiom as the partner switcher).
   const inactive = "border border-transparent text-dim hover:bg-raise hover:text-ink";
   // Facebook keeps its blue active pill; Google gets an analogous pill in the Google blue so it
@@ -64,20 +72,26 @@ function PlatformTabs({ platform }: { platform: Platform }) {
   const onGoogle = platform === "google";
   const onSnap = platform === "snapchat";
   return (
-    <nav aria-label="Ad platform" className="flex items-center gap-1 rounded-full border border-line bg-surface p-1">
+    <nav aria-label="Ad platform" className="flex shrink-0 items-center gap-0.5 rounded-full border border-line bg-surface p-1 sm:gap-1">
       <Link
         href="/"
         aria-current={onFacebook ? "page" : undefined}
-        className={`${base} ${onFacebook ? fbActive : inactive}`}
+        data-tip={onFacebook ? undefined : "Facebook"}
+        className={`${base} ${onFacebook ? fbActive : `${inactive} tip tip-b`}`}
       >
         <FacebookMark className={`h-4 w-4 ${onFacebook ? "text-[#5f9bf0]" : ""}`} />
-        <span className="hidden sm:inline">Facebook</span>
+        <span className={label(onFacebook)}>Facebook</span>
       </Link>
 
       {TIKTOK_ENABLED ? (
-        <Link href="/tiktok" aria-current={onTiktok ? "page" : undefined} className={`${base} ${onTiktok ? tiktokActive : inactive}`}>
+        <Link
+          href="/tiktok"
+          aria-current={onTiktok ? "page" : undefined}
+          data-tip={onTiktok ? undefined : "TikTok"}
+          className={`${base} ${onTiktok ? tiktokActive : `${inactive} tip tip-b`}`}
+        >
           <TikTokMark className="h-4 w-4" />
-          <span className="hidden sm:inline">TikTok</span>
+          <span className={label(onTiktok)}>TikTok</span>
         </Link>
       ) : (
         // Dormant on prod (NEXT_PUBLIC_TIKTOK_ENABLED unset) → the disabled "in development" cue.
@@ -89,7 +103,7 @@ function PlatformTabs({ platform }: { platform: Platform }) {
           className={`${base} tip tip-b cursor-not-allowed text-faint opacity-60 hover:opacity-80`}
         >
           <TikTokMark className="h-4 w-4" />
-          <span className="hidden sm:inline">TikTok</span>
+          <span className="sr-only">TikTok</span>
           <span className="animate-pulse-soft absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-warn" />
         </button>
       )}
@@ -99,10 +113,11 @@ function PlatformTabs({ platform }: { platform: Platform }) {
         <Link
           href="/google"
           aria-current={onGoogle ? "page" : undefined}
-          className={`${base} ${onGoogle ? googleActive : inactive}`}
+          data-tip={onGoogle ? undefined : "Google"}
+          className={`${base} ${onGoogle ? googleActive : `${inactive} tip tip-b`}`}
         >
           <GoogleMark className="h-4 w-4" />
-          <span className="hidden sm:inline">Google</span>
+          <span className={label(onGoogle)}>Google</span>
         </Link>
       ) : (
         // Dormant on prod (NEXT_PUBLIC_GOOGLE_ENABLED unset) → the same disabled "in development" cue.
@@ -114,20 +129,25 @@ function PlatformTabs({ platform }: { platform: Platform }) {
           className={`${base} tip tip-b cursor-not-allowed text-faint opacity-60 hover:opacity-80`}
         >
           <GoogleMark mono className="h-4 w-4" />
-          <span className="hidden sm:inline">Google</span>
+          <span className="sr-only">Google</span>
           <span className="animate-pulse-soft absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-warn" />
         </button>
       )}
 
       {SNAP_ENABLED ? (
-        <Link href="/snap" aria-current={onSnap ? "page" : undefined} className={`${base} ${onSnap ? snapActive : inactive}`}>
+        <Link
+          href="/snap"
+          aria-current={onSnap ? "page" : undefined}
+          data-tip={onSnap ? undefined : "Snapchat"}
+          className={`${base} ${onSnap ? snapActive : `${inactive} tip tip-b`}`}
+        >
           <SnapMark className="h-4 w-4" />
-          <span className="hidden sm:inline">Snapchat</span>
+          <span className={label(onSnap)}>Snapchat</span>
         </Link>
       ) : (
         <button type="button" aria-disabled="true" tabIndex={-1} data-tip="Snapchat — in development" className={`${base} tip tip-b cursor-not-allowed text-faint opacity-60 hover:opacity-80`}>
           <SnapMark mono className="h-4 w-4" />
-          <span className="hidden sm:inline">Snapchat</span>
+          <span className="sr-only">Snapchat</span>
           <span className="animate-pulse-soft absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-warn" />
         </button>
       )}
@@ -161,31 +181,52 @@ export function Header({
   const isConsole = platform === "console";
   // Every non-FB platform hides the FB-only widgets (HS token pool, per-account launch limit).
   const pinned = isGoogle || isSnap || isTiktok || isConsole;
+  // The header's real height rides a CSS variable (--hdr-h): from lg up it is one 64px row, below
+  // lg the partner row wraps under the logo row, so the sticky sub-navs (Google / Snap / TikTok) and
+  // the launch-limit toast sit under whatever height the header actually has (they read
+  // top-[var(--hdr-h,4rem)]). A ResizeObserver keeps it exact through wraps and font loads.
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const set = () => document.documentElement.style.setProperty("--hdr-h", `${Math.round(el.getBoundingClientRect().height)}px`);
+    set();
+    const ro = new ResizeObserver(set);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const middle = isConsole ? (
+    <span className="flex items-center gap-2 whitespace-nowrap rounded-full border border-line bg-surface px-3 py-1.5 text-[11px] font-medium text-dim">
+      {consoleLabel}
+    </span>
+  ) : isSnap ? (
+    <span
+      className="flex items-center gap-2 whitespace-nowrap rounded-full border border-line bg-surface px-3 py-1.5 text-[11px] font-medium text-dim"
+      title="Snapchat runs on our own ad account — there is no partner rail to pick"
+    >
+      <SnapMark className="h-3.5 w-3.5" />
+      Own Snapchat ad account
+    </span>
+  ) : (
+    <PartnerSwitcher
+      value={partner}
+      onChange={onPartnerChange}
+      {...(isGoogle ? { lockedNote: "Google runs through LION (HS) only" } : isTiktok ? { lockedNote: "TikTok runs through LION (HS) only" } : {})}
+    />
+  );
   return (
-    <header className="sticky top-0 z-40 border-b border-line bg-bg/75 backdrop-blur-md">
-      <div className="mx-auto grid h-16 w-full max-w-[1440px] grid-cols-[1fr_auto_1fr] items-center gap-3 px-4 sm:px-6">
-        <div className="justify-self-start">
+    <header ref={ref} className="sticky top-0 z-40 border-b border-line bg-bg/75 backdrop-blur-md">
+      {/* One row from lg up (logo · partner context · queue/platforms/user); below lg the partner
+          context (switcher + the FB widgets) wraps into its own full-width row under the logo row —
+          the old 3-column grid simply ran off the right edge (1366px and down, HS already at 1536). */}
+      <div className="mx-auto flex w-full max-w-[1440px] flex-wrap items-center gap-x-2 gap-y-2 px-3 py-2 sm:gap-x-3 sm:px-6 lg:h-16 lg:flex-nowrap lg:py-0">
+        <div className="order-1 shrink-0">
           <Logo />
         </div>
-        {/* Google runs through LION (HS) only — the switcher is pinned, other partners disabled.
-            Snapchat has no partner axis at all (our own ad account) — a static label instead. */}
-        {isConsole ? (
-          <span className="flex items-center gap-2 rounded-full border border-line bg-surface px-3 py-1.5 text-[11px] font-medium text-dim">
-            {consoleLabel}
-          </span>
-        ) : isSnap ? (
-          <span className="flex items-center gap-2 rounded-full border border-line bg-surface px-3 py-1.5 text-[11px] font-medium text-dim" title="Snapchat runs on our own ad account — there is no partner rail to pick">
-            <SnapMark className="h-3.5 w-3.5" />
-            Own Snapchat ad account
-          </span>
-        ) : (
-          <PartnerSwitcher
-            value={partner}
-            onChange={onPartnerChange}
-            {...(isGoogle ? { lockedNote: "Google runs through LION (HS) only" } : isTiktok ? { lockedNote: "TikTok runs through LION (HS) only" } : {})}
-          />
-        )}
-        <div className="flex items-center gap-2.5 justify-self-end">
+        {/* Partner context: the switcher (Google / TikTok pin it to HS; Snapchat and owner consoles
+            show a static label) + the FB rails' widgets that belong to the picked partner. */}
+        <div className="order-3 flex w-full min-w-0 flex-wrap items-center justify-center gap-2 lg:order-2 lg:w-auto lg:flex-1 lg:flex-nowrap">
+          {middle}
           {/* HS launch-token pool (T1→T2 failover) — health dots + which bearer is in use;
               keeping it on screen also keeps the shared failover state fresh (the status
               endpoint's probe marks burned tokens for the whole fleet). FB rail only. */}
@@ -194,6 +235,8 @@ export function Header({
               Google rail has no such per-account window (LION owns pacing), nor does Snapchat
               (the server pump paces the wave). */}
           {!pinned ? <AcctLimitWidget /> : null}
+        </div>
+        <div className="order-2 ml-auto flex shrink-0 items-center gap-1.5 sm:gap-2 lg:order-3 lg:ml-0">
           {/* The active rail's queue button: Snapchat and Google each have their own compact
               manager; on FB, HS (LION submits) has its own manager, everyone else shares the team
               Tasks queue. Every provider stays mounted in the app layout, so the hidden queue keeps

@@ -20,7 +20,7 @@ export function TiktokNav({ active }: { active: "launch" | "clone" }) {
   const base = "flex h-8 items-center rounded-full px-3.5 text-[12.5px] font-medium transition-all duration-150";
   const off = "border border-transparent text-dim hover:bg-raise hover:text-ink";
   return (
-    <div className="sticky top-16 z-30 border-b border-line bg-bg/75 backdrop-blur-md">
+    <div className="sticky top-[var(--hdr-h,4rem)] z-30 border-b border-line bg-bg/75 backdrop-blur-md">
       <div className="mx-auto flex w-full max-w-[1440px] items-center gap-3 px-4 py-2 sm:px-6">
         <nav aria-label="TikTok board" className="flex items-center gap-1 rounded-full border border-line bg-surface p-1">
           {PILLS.map((p) => {

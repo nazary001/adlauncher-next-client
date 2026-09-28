@@ -139,7 +139,7 @@ export function HsTokenStatusWidget() {
         }
       >
         <FacebookMark className="h-3.5 w-3.5 text-[#5f9bf0]" />
-        <span className="hidden md:inline">Tokens</span>
+        <span className="hidden md:inline lg:hidden xl:inline">Tokens</span>
         <span className="flex items-center gap-1">
           {tokens.map((t) => (
             <span
@@ -156,7 +156,7 @@ export function HsTokenStatusWidget() {
       </button>
 
       {open ? (
-        <div className="animate-pop-in absolute right-0 top-11 z-50 w-[320px] rounded-2xl border border-line bg-surface p-3 shadow-[0_24px_60px_rgba(0,0,0,0.55)]">
+        <div className="animate-pop-in absolute right-0 top-11 z-50 w-[320px] max-sm:fixed max-sm:inset-x-3 max-sm:top-[calc(var(--hdr-h,4rem)+8px)] max-sm:w-auto rounded-2xl border border-line bg-surface p-3 shadow-[0_24px_60px_rgba(0,0,0,0.55)]">
           <p className="px-1 pb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-faint">
             HS launch tokens
           </p>

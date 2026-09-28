@@ -118,7 +118,10 @@ export function AcctLimitWidget() {
       {open ? (
         <div
           className={
+            // Phones: the widget sits mid-row, so a right-anchored 340px panel would run off the left
+            // edge — pin it to the viewport under the header instead.
             "absolute right-0 top-full z-50 mt-2 w-[340px] animate-pop-in rounded-2xl border " +
+            "max-sm:fixed max-sm:inset-x-3 max-sm:top-[calc(var(--hdr-h,4rem)+8px)] max-sm:mt-0 max-sm:w-auto " +
             "border-line bg-surface p-3 shadow-[0_18px_50px_rgba(0,0,0,0.5)]"
           }
         >

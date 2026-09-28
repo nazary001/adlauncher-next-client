@@ -19,7 +19,7 @@ export function GoogleNav({ active }: { active: "launch" | "clone" }) {
   const on = "border border-[#4285F4]/40 bg-[#4285F4]/15 text-[#9cc0ff]";
   const off = "border border-transparent text-dim hover:bg-raise hover:text-ink";
   return (
-    <div className="sticky top-16 z-30 border-b border-line bg-bg/75 backdrop-blur-md">
+    <div className="sticky top-[var(--hdr-h,4rem)] z-30 border-b border-line bg-bg/75 backdrop-blur-md">
       <div className="mx-auto flex w-full max-w-[1440px] items-center gap-3 px-4 py-2 sm:px-6">
         <nav aria-label="Google board" className="flex items-center gap-1 rounded-full border border-line bg-surface p-1">
           {PILLS.map((p) => {

@@ -263,7 +263,7 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
  *  Launching is hard-blocked everywhere while it shows — reload is the only way forward. */
 function StaleBuildBanner() {
   return (
-    <div className="fixed inset-x-0 top-16 z-[90] flex justify-center px-4">
+    <div className="fixed inset-x-0 top-[var(--hdr-h,4rem)] z-[90] flex justify-center px-4">
       <div
         role="alert"
         className={

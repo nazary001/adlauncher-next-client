@@ -1420,7 +1420,7 @@ export function HsTaskManagerButton() {
           <span className="animate-pulse-soft absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-launch2" />
         ) : null}
       </span>
-      <span className="hidden whitespace-nowrap sm:inline">HS Tasks</span>
+      <span className="hidden whitespace-nowrap md:max-lg:inline min-[1360px]:inline">HS Tasks</span>
       {badge > 0 ? (
         <span
           key={badge}
