@@ -89,27 +89,33 @@ export async function GET(req: Request) {
     }
   }
 
-  // TOOL ∩ partner catalog (HS: all TOOL), then the owner's per-buyer assignment filter.
+  // TOOL ∩ partner catalog, then the owner's per-buyer assignment filter. HS has no cheap catalog
+  // (LION lists accounts per profile only), so its axis is the HS cabinet NAME — every HS account is
+  // "GC-HS-…" (302/302 on glo-01). Without it a TOOL session carrying ANOTHER partner's cabinets
+  // (av-01 → GC-AV-LA-*, live 28.09) lit the HS TOOL segment with 11 accounts that no LION profile
+  // holds — an enabled rail with an empty picker. The card still intersects with the profile.
   const canon = (id: string): string => String(id).replace(/^act_/, "");
   const intersected =
-    catalogIds === null ? liveIds : (() => {
-      const cat = new Set(catalogIds.map(canon));
-      return liveIds.filter((id) => cat.has(id));
-    })();
+    catalogIds === null
+      ? ready.accounts.filter((a) => /^GC-HS-/i.test(String(a.name ?? "").trim())).map((a) => a.account_id)
+      : (() => {
+          const cat = new Set(catalogIds.map(canon));
+          return liveIds.filter((id) => cat.has(id));
+        })();
   const filtered = await filterAccountsFor(session, intersected, (id) => id);
 
   if (filtered.length === 0) {
     // Two distinct causes → two distinct, actionable sentences.
     const label = partner === "in" ? "MO" : partner === "us" ? "AIF" : "HS";
-    if (intersected.length === 0 && catalogIds !== null) {
-      // TOOL has live accounts, but none overlap this partner's cabinets (today TOOL carries only
-      // HS accounts — MO/AIF stay not-ready until a session with their token is added).
+    if (intersected.length === 0) {
+      // TOOL has live accounts, but none overlap this partner's cabinets (e.g. 28.09 the only live
+      // session carries ActiveView cabinets) — not-ready until a session seeing this partner's is added.
       return NextResponse.json(
         {
           ok: true,
           ready: false,
           reason: "no_live_session",
-          message: `TOOL sees ${live} live account${live === 1 ? "" : "s"} but none of ${label}'s — an owner adds a TOOL session carrying the ${label} token on Ads Manager sessions`,
+          message: `TOOL sees ${live} live account${live === 1 ? "" : "s"} but none of ${label}'s — an owner adds a TOOL session that sees ${label}'s cabinets on Ads Manager sessions`,
           accounts: [],
           live,
         },

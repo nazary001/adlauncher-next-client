@@ -407,6 +407,14 @@ export type ToolBuildInput = {
 
 export type BuildResult = { ok: true; body: CampaignRequest; inferred: string[] } | { ok: false; error: string };
 
+/** objective|goal|bid_strategy combos TOOL's /capabilities marks CONFIRMED (read 28.09: its `rules`
+ *  + `tested_scenarios`). Anything else rides with allow_inferred (TOOL refuses it otherwise). */
+export const TOOL_CONFIRMED_COMBOS: ReadonlySet<string> = new Set([
+  "OUTCOME_SALES|VALUE|LOWEST_COST_WITH_MIN_ROAS",
+  "OUTCOME_SALES|OFFSITE_CONVERSIONS|LOWEST_COST_WITHOUT_CAP",
+  "OUTCOME_LEADS|LEAD_GENERATION|LOWEST_COST_WITHOUT_CAP",
+]);
+
 /** Placement encodes a set (FULL vs COMPLIANCE) + optional gender suffix — same bits as fb-launch. */
 function placementBits(placement: string) {
   const p = str(placement);
@@ -535,6 +543,13 @@ export function buildToolCampaign(input: ToolBuildInput): BuildResult {
   } else if (input.bid.kind === "cap") {
     bid = { amount: input.bid.usd };
     inferred.push(bidStrategy === "COST_CAP" ? "cost_cap" : "bid_cap");
+  }
+  // The objective × goal × strategy COMBINATION is gated too: TOOL refuses any combo outside its
+  // CONFIRMED rules (/capabilities) without allow_inferred — live dry_run 28.09: OUTCOME_SALES +
+  // LINK_CLICKS + LOWEST_COST_WITHOUT_CAP → "unsupported_combination … статус INFERRED". The cap
+  // markers above already flag their own combos; name the rest so the flag is truthful.
+  if (!inferred.includes("bid_cap") && !inferred.includes("cost_cap") && !TOOL_CONFIRMED_COMBOS.has(`${input.objective}|${goal}|${bidStrategy}`)) {
+    inferred.push(`combo:${goal}`);
   }
 
   const status = input.status;

@@ -115,6 +115,25 @@ test("bid cap is USD (0.5) and INFERRED; cost cap uses cost_cap", () => {
   assert.ok(cost.inferred.includes("cost_cap"));
 });
 
+// Live dry_run 28.09: OUTCOME_SALES + LINK_CLICKS + LOWEST_COST_WITHOUT_CAP came back
+// "unsupported_combination … INFERRED" without allow_inferred — combos outside TOOL's CONFIRMED rules
+// must set the flag; the two confirmed launch combos must NOT (a stray flag on a confirmed combo
+// would needlessly ride the test-cabinet path).
+test("objective × goal × strategy outside TOOL's CONFIRMED rules → INFERRED; confirmed combos stay clean", () => {
+  const clicks = built({ optimization: "clicks", pixelId: "", conversionEvent: "" });
+  assert.equal(clicks.body.adsets[0].optimization_goal, "LINK_CLICKS");
+  assert.ok(clicks.inferred.includes("combo:LINK_CLICKS"));
+  assert.equal(clicks.body.options?.allow_inferred, true);
+  const conv = built();
+  assert.deepEqual(conv.inferred, []);
+  assert.equal(conv.body.options?.allow_inferred, false);
+  const roas = built({ bidStrategy: "LOWEST_COST_WITH_MIN_ROAS", bid: { kind: "roas", coefficient: 0.3 } });
+  assert.deepEqual(roas.inferred, []);
+  // a cap combo carries only its own marker (no duplicate combo marker)
+  const cap = built({ bidStrategy: "LOWEST_COST_WITH_BID_CAP", bid: { kind: "cap", usd: 0.5 } });
+  assert.deepEqual(cap.inferred, ["bid_cap"]);
+});
+
 // ================================================================================================
 // targeting parity with fb-launch
 // ================================================================================================
