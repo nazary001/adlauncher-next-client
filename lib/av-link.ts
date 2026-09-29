@@ -125,21 +125,42 @@ export function avDestinationKind(base: string, known: { sites: string[]; redire
   return chatIdOf(b.path.slice(1)) ? "chat" : "redirect";
 }
 
-/** What the Destination field looked like when a check was asked for / looks like now. `picks`
- *  counts the destinations the buyer set by hand — a pick made and undone leaves the value the same
- *  and still means the buyer moved on. */
+/** What the Destination field looked like when a slow answer was asked for / looks like now.
+ *  `picks` counts the destinations the buyer set by hand — a pick made and undone leaves the value
+ *  the same and still means the buyer moved on. */
 export type AvCheckAsked = { value: string; mode: AvDestinationKind; picks: number };
 
 /**
- * A check's answer arrives seconds after the click (DNS, the chat host, the page): what may it
- * still do? Nothing once the field is gone; nothing to the destination once the buyer — or anything
- * else — changed it meanwhile (theirs stands, the answer is only reported); and the tab follows
- * the answer only while the buyer is still on the tab the check started from.
+ * A slow answer — a check's verdict, a created redirect path — arrives seconds after the click:
+ * may it still set the destination? "drop" once the field is gone (nothing is written, nothing
+ * shown); "superseded" once the buyer moved on — they set or cleared a destination, something else
+ * set one (copy settings), or they went to another tab: theirs stands and the answer is only
+ * REPORTED in the box that asked; "apply" when the field is as it was.
  */
-export function avCheckOutcome(asked: AvCheckAsked, now: AvCheckAsked & { mounted: boolean }): { act: "apply" | "superseded" | "drop"; followTab: boolean } {
-  if (!now.mounted) return { act: "drop", followTab: false };
-  if (now.value !== asked.value || now.picks !== asked.picks) return { act: "superseded", followTab: false };
-  return { act: "apply", followTab: now.mode === asked.mode };
+export function avCheckOutcome(asked: AvCheckAsked, now: AvCheckAsked & { mounted: boolean }): "apply" | "superseded" | "drop" {
+  if (!now.mounted) return "drop";
+  return now.value === asked.value && now.picks === asked.picks && now.mode === asked.mode ? "apply" : "superseded";
+}
+
+/** A tab the buyer opened by hand, and the destination it was opened for. */
+export type AvTabPin = { forValue: string; mode: AvDestinationKind } | null;
+
+/**
+ * The tab the Destination field shows: what the destination IS (`kind`, read off its address) —
+ * until the buyer opens another tab for that same destination. A NEW destination takes the tab
+ * back, whoever set it: a pick, copy settings, a duplicated card.
+ */
+export function avFieldTab(pin: AvTabPin, value: string, kind: AvDestinationKind): AvDestinationKind {
+  return pin && pin.forValue === value ? pin.mode : kind;
+}
+
+/**
+ * The pin after the buyer set a destination by hand from the tab `mode`. A destination shows on its
+ * own tab (no pin); a CLEAR keeps the tab it was made from — an empty field reads as "article", and
+ * falling back there would take a half-filled form (New path, a pasted URL) away from the buyer.
+ */
+export function avPinAfterPick(value: string, mode: AvDestinationKind): AvTabPin {
+  return value ? null : { forValue: "", mode };
 }
 
 /**

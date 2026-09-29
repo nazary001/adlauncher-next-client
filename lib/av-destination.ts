@@ -16,7 +16,7 @@
 import { lookup } from "node:dns/promises";
 import { type AvMapping, type AvSite, AvApiError, avMe, avRedirectMappings, avRedirects } from "./av-api";
 import { type AvChatHostOption, _resetAvChatCaches, avChatHosts, resolveAvChat } from "./av-chat";
-import { avArticleTitle, avDestinationBase } from "./av-link";
+import { avArticleTitle, avChatUrl, avDestinationBase } from "./av-link";
 
 const UA = "Mozilla/5.0 (compatible; adlauncher-av/1.0)";
 const SITES_TTL_MS = 10 * 60_000;
@@ -73,22 +73,22 @@ export async function avSites(force = false): Promise<AvSite[]> {
 }
 
 /**
- * Where a host stands among our sites: `exact` = the listed site it IS (or its www), `parent` = the
- * listed site it is a subdomain of — the ROOT-most one, so the answer never depends on the order of
+ * Where a host stands among our sites: `exact` = the listed site it IS (or its www), `parents` = the
+ * listed sites it is a subdomain of, the ROOT-most first. Nothing here depends on the order of
  * GET /me. A host may have both: ActiveView may list a site's chat subdomain as a site of its own.
  */
-function placeOfHost(host: string, sites: AvSite[]): { exact: AvSite | null; parent: AvSite | null } {
+function placeOfHost(host: string, sites: AvSite[]): { exact: AvSite | null; parents: AvSite[] } {
   const h = host.toLowerCase();
   const exact = sites.find((s) => h === s.domain || h === `www.${s.domain}`) ?? null;
-  const parents = sites.filter((s) => h.endsWith(`.${s.domain}`) && h !== `www.${s.domain}`);
-  const parent = parents.sort((a, b) => a.domain.length - b.domain.length)[0] ?? null;
-  return { exact, parent };
+  const parents = sites.filter((s) => h.endsWith(`.${s.domain}`) && h !== `www.${s.domain}`).sort((a, b) => a.domain.length - b.domain.length);
+  return { exact, parents };
 }
 
-/** The site a host belongs to: the site itself, www.<site>, or a subdomain of it (redirect.<site>). */
+/** The site a host belongs to: the site it is (or its www), else the NEAREST listed site it is a
+ *  subdomain of (redirect.blog.<site> belongs to blog.<site> when that is a site of its own). */
 export function siteOfHost(host: string, sites: AvSite[]): AvSite | null {
-  const { exact, parent } = placeOfHost(host, sites);
-  return parent ?? exact;
+  const { exact, parents } = placeOfHost(host, sites);
+  return exact ?? parents.at(-1) ?? null;
 }
 
 async function fetchText(url: string, timeoutMs = 10_000): Promise<{ status: number; text: string; finalUrl: string }> {
@@ -288,6 +288,11 @@ async function articleLive(base: string, site: AvSite): Promise<{ ok: true } | {
     })();
     if (r.status !== 200) return { ok: false, error: `destination_not_live — ${base} answered ${r.status} (renamed or unpublished in AV's CMS?)` };
     if (finalHost && !siteOfHost(finalHost, [site])) return { ok: false, error: `destination_invalid — ${base} redirects off the AV site (${finalHost})` };
+    // A page that redirects to a CHAT (another host, an address that names a chat id) would put a
+    // chat behind an article's verdict — past the chat's own gate (does its host show ads?).
+    if (finalHost && finalHost !== new URL(base).hostname && avChatUrl(r.finalUrl).ok) {
+      return { ok: false, error: `destination_invalid — ${base} redirects to a chat (${r.finalUrl}): launch the chat itself, from the AI chat tab` };
+    }
     pageOkCache.set(base, Date.now());
     return { ok: true };
   } catch (e) {
@@ -316,8 +321,9 @@ export async function resolveAvDestination(raw: string): Promise<AvResolved> {
   } catch (e) {
     return { ok: false, error: `destination_check_failed — ${errText(e)}`, status: 502 };
   }
-  const { exact, parent } = placeOfHost(b.host, sites);
-  const owner = parent ?? exact;
+  const { exact, parents } = placeOfHost(b.host, sites);
+  const root = parents[0] ?? null;
+  const owner = siteOfHost(b.host, sites);
   if (!owner) {
     return { ok: false, error: `destination_not_av — ${b.host} is not an ActiveView site of ours (${sites.map((s) => s.domain).join(", ") || "none"})`, status: 400 };
   }
@@ -336,12 +342,12 @@ export async function resolveAvDestination(raw: string): Promise<AvResolved> {
     if (!p) return { ok: false, error: `redirect_path_unknown — ${b.path} is not a path of ${rd.domain} (create it on the card first)`, status: 400 };
     return { ok: true, kind: "redirect", base: b.base, site: owner.domain, domainId: rd.domainId, pathId: p.id, mappings: p.mappings };
   }
-  if (parent) {
+  if (root) {
     // A subdomain of one of our sites that is no redirect domain we know: a Chat Builder host — its
     // CNAME says so, whatever the redirect list did and whether or not ActiveView ALSO lists the
     // host as a site of its own (a chat host must never reach an ad through the article branch,
     // past the chat's gate). Its verdict stands unless the host is simply not a chat host.
-    const chat = await resolveAvChat(b, parent.domain);
+    const chat = await resolveAvChat(b, root.domain);
     if (chat.ok || !chat.error.startsWith("destination_not_av")) return chat;
     if (!exact) {
       // While the redirect list is unavailable the host may still be a redirect domain we could not
@@ -349,6 +355,9 @@ export async function resolveAvDestination(raw: string): Promise<AvResolved> {
       if (redirectsFailed) return { ok: false, error: `destination_check_failed — redirect paths unavailable (${redirectsFailed})`, status: 502 };
       return chat;
     }
+    // The host IS a listed site: its pages are articles — but an address that names a chat id is a
+    // chat's, never an article's (a chat host whose CNAME we could not see, e.g. a proxied record).
+    if (avChatUrl(b.base).ok) return chat;
   }
   const site = exact as AvSite;
   // On a site itself only a PAGE is a destination — a chat's address (root + ?asst=) belongs to a

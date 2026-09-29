@@ -507,8 +507,8 @@ function CampaignCardBase({
   const eventLabel = CONVERSION_EVENTS.find((e) => e.value === c.conversionEvent)?.label ?? "";
   const geo = geoSummary(c.countries);
   // AV destination kind (article / redirect path / chat) — for the link-preview caption. Read off
-  // the destination's host against the live catalog (lib/av-link avDestinationKind): a redirect
-  // domain is a redirect path, any other subdomain of an AV site is a chat, the rest an article.
+  // the destination's address (lib/av-link avDestinationKind): a chat by its shape alone, a
+  // redirect path on a redirect domain or any other subdomain of an AV site, the rest an article.
   const avKind: AvDestinationKind =
     avMode && c.landing
       ? avDestinationKind(c.landing, {

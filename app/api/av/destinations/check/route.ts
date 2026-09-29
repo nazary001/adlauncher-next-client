@@ -6,8 +6,10 @@ import { resolveAvDestination } from "@/lib/av-destination";
 
 export const runtime = "nodejs";
 // A resolve = the shape check + one live GET (article), the redirect catalog lookup, or a chat
-// host's DNS + ad settings + address; bounded by lib/av-destination's / lib/av-chat's own timeouts.
-export const maxDuration = 30;
+// host's DNS + ad settings + ad script + address; bounded by lib/av-destination's / lib/av-chat's
+// own timeouts. A chat's steps add up to 29 s when every one is slow but alive (a normal resolve is
+// about a second) — the route must outlast them to answer with the reason, not with a cut.
+export const maxDuration = 60;
 
 /**
  * GET /api/av/destinations/check?url=<pasted url>

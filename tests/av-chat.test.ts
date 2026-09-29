@@ -465,6 +465,99 @@ test("a chat host whose ads are switched off in its config is refused", async ()
   });
 });
 
+test("ads switched off in any way the page's loader reads as true are off", async () => {
+  // The loader takes Boolean(config.disable): a string or a number switches the ads off too.
+  for (const off of ['"true"', "1", '"yes"']) {
+    const body = worker(SCRIPT).replace('"disable": false', `"disable": ${off}`);
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 400, off);
+      assert.match(!r.ok ? r.error : "", /^chat_not_monetized — ads are switched off/, off);
+      assert.deepEqual(pageCalls, [WORKER_URL], off);
+    });
+  }
+});
+
+test("an empty list of agent names is still a list: the page starts and loads its ads (read live on two monetized hosts)", async () => {
+  for (const names of ["[]", "[\n  ]"]) {
+    const body = worker(SCRIPT).replace(/"botNames": \[[^\]]*\]/, `"botNames": ${names}`);
+    assert.ok(body.includes(`"botNames": ${names}`), "the fixture really has an empty list");
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async () => {
+      assert.deepEqual(await chat.resolveAvChat(SHAPE, "thecadrion.com"), { ok: true, kind: "chat", base: BASE, site: "thecadrion.com" }, names);
+    });
+  }
+});
+
+test("the settings are read at the literal's OWN level: a key, a script or a part nested deeper never stands in for the host's", async () => {
+  const nestedScript = worker("").replace('"company": "Thecadrion"', '"company": "Thecadrion",\n    "script": "somebodyelses",\n    "key": "nested"');
+  const nestedKey = worker(SCRIPT, false, "").replace('"company": "Thecadrion"', '"company": "Thecadrion",\n    "key": "aq_nested:0000"');
+  const nestedTerms = worker(SCRIPT)
+    .replace(/"terms": \{[^}]*\}/, '"terms": null')
+    .replace('"chat-background": "#f4f4f5"', '"chat-background": "#f4f4f5",\n    "terms": { "company": "nested" }');
+  const cases: [string, string, RegExp][] = [
+    ["a script nested in terms", nestedScript, /^chat_not_monetized — .*Pending monetization/],
+    ["a key nested in terms", nestedKey, /^chat_not_live — .*no chat key/],
+    ["terms: null next to a nested terms", nestedTerms, /^chat_not_monetized — .*\bterms\b/],
+  ];
+  for (const [what, body, want] of cases) {
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 400, what);
+      assert.match(!r.ok ? r.error : "", want, what);
+      assert.deepEqual(pageCalls, [WORKER_URL], what);
+    });
+  }
+});
+
+test("settings that come after the keys' usual place are read all the same (live hosts serve five key orders)", async () => {
+  const keyLast = `const assistantQuizSettings = {
+  "theme": { "chat-background": "#f4f4f5" },
+  "terms": { "company": "Thecadrion", "termsUrl": "https://thecadrion.com/terms" },
+  "config": { "quantityResponses": 2, "disable": false },
+  "botNames": ["Anna"],
+  "script": "${SCRIPT}",
+  "key": "${KEY}"
+};
+${LOADER}`;
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: keyLast } }, async () => {
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+  });
+});
+
+test("a commented-out sample of the settings above the real ones is not the settings", async () => {
+  const commented = `// const assistantQuizSettings = { key: "${KEY}", script: "${SCRIPT}", botNames: ["x"], terms: {}, theme: {}, config: { disable: false } };
+/* const assistantQuizSettings = { key: "${KEY}", script: "${SCRIPT}", botNames: ["x"], terms: {}, theme: {}, config: {} }; */
+${worker("")}`;
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: commented } }, async ({ pageCalls }) => {
+    const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+    refused(r);
+    assert.match(!r.ok ? r.error : "", /^chat_not_monetized — .*Pending monetization/);
+    assert.deepEqual(pageCalls, [WORKER_URL]);
+  });
+});
+
+test("settings that are not plain data (a value computed in code) cannot be vouched for: a failed check (502)", async () => {
+  for (const value of ["getScript()", "`chatthecadrion`", "SCRIPT_NAME", "!0 ? 'a' : 'b'"]) {
+    const body = worker(SCRIPT).replace(`"script": "${SCRIPT}"`, `"script": ${value}`);
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 502, value);
+      assert.match(!r.ok ? r.error : "", /^destination_check_failed — the ad settings of chat\.thecadrion\.com could not be read/, value);
+      assert.deepEqual(pageCalls, [WORKER_URL], value);
+    });
+  }
+});
+
+test("a text in the settings that looks like their end (\"};\") or like a key does not cut them short", async () => {
+  const tricky = worker(SCRIPT).replace('"footer": "by using this, you accept"', '"footer": "by using this }; you accept, \\"script\\": \\"\\", key: \'\'"');
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: tricky } }, async () => {
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+  });
+});
+
 test("settings the page itself would refuse (a part its loader requires is missing) are refused: it never loads the ad script", async () => {
   const noConfig = worker(SCRIPT).replace(/,\s*"config": \{[^}]*\}/, "");
   const noTerms = worker(SCRIPT).replace(/\s*"terms": \{[^}]*\},/, "");
@@ -808,6 +901,51 @@ test("a READY host whose ads were switched off: the card's Retry sees it and the
   } finally {
     d.restore();
     ready.restore();
+  }
+});
+
+test("a refusal drops the READY memory even when an older, overlapping check wrote it a moment before", async () => {
+  // A launch reads the host while ads are on; a forced card refresh reads it after they were
+  // switched off and answers LAST. The launch's READY must not outlive that refusal.
+  chat._resetAvChatCaches();
+  const d = stubCname({ [HOST]: [GATEWAY] });
+  const real = globalThis.fetch;
+  const gates: { url: string; release: (body: string) => void }[] = [];
+  const asked: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    asked.push(url);
+    const answer = (body: string, type?: string) => {
+      const res = new Response(body, { status: 200, headers: type ? { "content-type": type } : {} });
+      Object.defineProperty(res, "url", { value: url });
+      return res;
+    };
+    if (url === SCRIPT_URL) return answer("/* ad script */", "application/javascript");
+    if (url === BASE) return answer("<html></html>");
+    return new Promise<Response>((resolve) => gates.push({ url, release: (body) => resolve(answer(body)) }));
+  }) as typeof fetch;
+  const settle = () => new Promise((r) => setImmediate(r));
+  try {
+    const launch = chat.resolveAvChat(SHAPE, "thecadrion.com");
+    await settle();
+    const refresh = chat.avChatHosts(["thecadrion.com"], true);
+    await settle();
+    assert.deepEqual(gates.map((g) => g.url), [WORKER_URL, WORKER_URL], "both checks are reading the host");
+    gates[0].release(worker(SCRIPT));
+    assert.equal((await launch).ok, true);
+    gates[1].release(worker(SCRIPT, true));
+    assert.equal((await refresh)[0]?.live, false);
+
+    const next = chat.resolveAvChat(SHAPE, "thecadrion.com");
+    await settle();
+    assert.equal(gates.length, 3, "the next launch reads the host again instead of trusting the older READY");
+    gates[2].release(worker(SCRIPT, true));
+    const r = await next;
+    refused(r);
+    assert.match(!r.ok ? r.error : "", /^chat_not_monetized — ads are switched off/);
+  } finally {
+    globalThis.fetch = real;
+    d.restore();
   }
 });
 

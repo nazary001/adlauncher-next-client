@@ -9,6 +9,7 @@ import {
   avCheckOutcome,
   avDestinationBase,
   avDestinationKind,
+  avFieldTab,
   avKeyCode,
   avKeyIndex,
   avKeyLaunchable,
@@ -16,6 +17,7 @@ import {
   avKeysUploadFiles,
   avLink,
   avLinkSegments,
+  avPinAfterPick,
   avRegisteredCount,
   swapUtmCampaign,
 } from "../lib/av-link.ts";
@@ -255,34 +257,61 @@ test("destination kind falls back to article for anything it cannot place", () =
   assert.equal(avDestinationKind("https://redirect.thecadrion.com/jobs", { sites: [], redirectDomains: [] }), "article", "no catalog yet");
 });
 
-// ---------- a check's answer arrives seconds after the click ----------
+// ---------- a slow answer (a check, a created path) arrives seconds after the click ----------
 
-test("a check's answer is applied when nothing changed meanwhile, and the tab follows it", () => {
-  const asked = { value: "https://thecadrion.com/a", mode: "chat" as const, picks: 3 };
-  assert.deepEqual(avCheckOutcome(asked, { ...asked, mounted: true }), { act: "apply", followTab: true });
+const ASKED = { value: "https://thecadrion.com/a", mode: "chat" as const, picks: 3 };
+
+test("a slow answer is applied when the field is as it was when it was asked for", () => {
+  assert.equal(avCheckOutcome(ASKED, { ...ASKED, mounted: true }), "apply");
 });
 
-test("a check's answer writes nothing once the field is gone", () => {
-  const asked = { value: "", mode: "chat" as const, picks: 0 };
-  assert.deepEqual(avCheckOutcome(asked, { ...asked, mounted: false }), { act: "drop", followTab: false });
+test("a slow answer writes nothing once the field is gone", () => {
+  assert.equal(avCheckOutcome(ASKED, { ...ASKED, mounted: false }), "drop");
+  assert.equal(avCheckOutcome(ASKED, { value: "https://thecadrion.com/other", mode: "article", picks: 9, mounted: false }), "drop");
 });
 
-test("a destination picked while the check was running stands: the late answer is not applied", () => {
-  const asked = { value: "", mode: "chat" as const, picks: 0 };
-  assert.deepEqual(avCheckOutcome(asked, { value: "https://thecadrion.com/picked", mode: "article", picks: 1, mounted: true }), { act: "superseded", followTab: false });
+test("a destination picked while the answer was on its way stands: the answer is not applied", () => {
+  assert.equal(avCheckOutcome({ value: "", mode: "chat", picks: 0 }, { value: "https://thecadrion.com/picked", mode: "chat", picks: 1, mounted: true }), "superseded");
 });
 
-test("a pick that was made and undone meanwhile still counts: the value is the same, the late answer is not applied", () => {
-  const asked = { value: "https://thecadrion.com/a", mode: "article" as const, picks: 1 };
-  assert.deepEqual(avCheckOutcome(asked, { value: "https://thecadrion.com/a", mode: "article", picks: 3, mounted: true }), { act: "superseded", followTab: false });
+test("a pick that was made and undone meanwhile still counts: the value is the same, the answer is not applied", () => {
+  assert.equal(avCheckOutcome(ASKED, { ...ASKED, picks: 5, mounted: true }), "superseded");
 });
 
-test("a destination changed from OUTSIDE the field (copy settings) supersedes the late answer too", () => {
-  const asked = { value: "https://thecadrion.com/a", mode: "chat" as const, picks: 0 };
-  assert.deepEqual(avCheckOutcome(asked, { value: "https://thecadrion.com/copied", mode: "chat", picks: 0, mounted: true }), { act: "superseded", followTab: false });
+test("a destination changed from OUTSIDE the field (copy settings) supersedes the answer too", () => {
+  assert.equal(avCheckOutcome(ASKED, { ...ASKED, value: "https://thecadrion.com/copied", mounted: true }), "superseded");
 });
 
-test("a buyer who moved to another tab keeps that tab: the answer is applied, the tab is not pulled", () => {
-  const asked = { value: "", mode: "article" as const, picks: 0 };
-  assert.deepEqual(avCheckOutcome(asked, { value: "", mode: "redirect", picks: 0, mounted: true }), { act: "apply", followTab: false });
+test("a buyer who moved to another tab moved on: the answer is not applied behind their back", () => {
+  assert.equal(avCheckOutcome(ASKED, { ...ASKED, mode: "redirect", mounted: true }), "superseded");
+});
+
+// ---------- which tab the Destination field shows ----------
+
+const A_CHAT = "https://chat.thecadrion.com/?asst=6a2312cef9f4e11b130fc523";
+
+test("the tab shows what the destination is", () => {
+  assert.equal(avFieldTab(null, "", "article"), "article");
+  assert.equal(avFieldTab(null, A_CHAT, "chat"), "chat");
+  assert.equal(avFieldTab(null, "https://redirect.thecadrion.com/jobs", "redirect"), "redirect");
+});
+
+test("a tab the buyer opened stays open for as long as the destination is the one it was opened for", () => {
+  const opened = { forValue: ART, mode: "chat" as const };
+  assert.equal(avFieldTab(opened, ART, "article"), "chat");
+  assert.equal(avFieldTab(opened, ART, "redirect"), "chat", "a catalog that lands late re-reads the kind — the tab is still the buyer's");
+});
+
+test("a new destination takes the tab back — one pushed from outside the field too", () => {
+  const opened = { forValue: ART, mode: "redirect" as const };
+  assert.equal(avFieldTab(opened, A_CHAT, "chat"), "chat");
+  assert.equal(avFieldTab(opened, "", "article"), "article");
+});
+
+test("a destination set by hand shows on its own tab; one CLEARED by hand keeps the tab it was cleared from", () => {
+  assert.equal(avPinAfterPick(A_CHAT, "article"), null);
+  assert.deepEqual(avPinAfterPick("", "redirect"), { forValue: "", mode: "redirect" });
+  assert.deepEqual(avPinAfterPick("", "chat"), { forValue: "", mode: "chat" });
+  // …which is what keeps a half-filled form on the tab: the cleared field reads "redirect", not "article"
+  assert.equal(avFieldTab(avPinAfterPick("", "redirect"), "", "article"), "redirect");
 });

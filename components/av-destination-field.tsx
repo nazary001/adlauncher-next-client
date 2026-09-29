@@ -4,9 +4,19 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { SearchSelect } from "./search-select";
 import { TextInput } from "./ui";
 import { AlertIcon, CheckIcon, PlusIcon, RetryIcon, XIcon } from "./icons";
-import { type AvCheckAsked, type AvDestinationKind, avChatUrl, avCheckOutcome, avDestinationBase, avDestinationKind } from "@/lib/av-link";
+import {
+  type AvCheckAsked,
+  type AvDestinationKind,
+  type AvTabPin,
+  avChatUrl,
+  avCheckOutcome,
+  avDestinationBase,
+  avDestinationKind,
+  avFieldTab,
+  avPinAfterPick,
+} from "@/lib/av-link";
 import type { AvDestinations } from "./use-av-destinations";
-import type { AvChatHostOption, AvRedirectOption, AvResolved } from "@/lib/av-destination";
+import type { AvChatHostOption, AvDestinationCatalog, AvRedirectOption, AvResolved } from "@/lib/av-destination";
 
 // The card's AV Destination picker (WP-D). One card stores a BARE destination URL in
 // Campaign.landing — an article of an AV site, a Redirect path (redirect.<site>/<path>), or a chat
@@ -16,6 +26,11 @@ import type { AvChatHostOption, AvRedirectOption, AvResolved } from "@/lib/av-de
 // address (AV lists no chats) and shows whether the chat host is ready for traffic.
 // Everything the catalog knows comes from useAvDestinations; the server re-resolves the pick on
 // every launch, so this is a convenience layer, not the authority.
+//
+// The three panels stay MOUNTED (the inactive ones hidden): what the buyer typed, a verdict and a
+// request in flight survive a look at another tab. Two answers arrive seconds after their click — a
+// check's verdict and a created redirect path — and both go through lib/av-link avCheckOutcome
+// before they may set the destination.
 
 /** Client mirror of lib/av-destination AV_PATH_RE (that module is server-only — it imports node:dns
  *  — so its value can't cross into this client bundle). The POST route re-validates with the real
@@ -33,6 +48,14 @@ function mappingLabel(m: { url: string; percentage: number }): string {
   }
   return `${m.percentage}% ${seg}`;
 }
+
+const hostOf = (url: string): string => {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+};
 
 /** A muted / warning / danger inline notice — the field's catalog states share one look. */
 function Notice({ tone = "muted", children }: { tone?: "muted" | "warn" | "danger"; children: React.ReactNode }) {
@@ -93,11 +116,24 @@ function RetryButton({ onClick, busy }: { onClick: () => void; busy?: boolean })
   );
 }
 
-/** What the field looks like NOW — what a check's late answer is compared against (lib/av-link
+/** What the field looks like NOW — what a slow answer is compared against (lib/av-link
  *  avCheckOutcome). Written from effects and event handlers only, never during render. */
 type Live = AvCheckAsked;
 type Resolved = Extract<AvResolved, { ok: true }>;
 type Shape = { ok: true; base: string; host: string } | { ok: false; error: string };
+type ArticleOption = { value: string; label: string; subLabel: string; group: string };
+
+/** Is the component still there when a slow answer lands? */
+function useMounted(): React.RefObject<boolean> {
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  return mounted;
+}
 
 export function AvDestinationField({
   value,
@@ -135,9 +171,9 @@ export function AvDestinationField({
 
   // The tab follows what the destination is — a pick, a catalog that lands late, a value pushed
   // from outside the field (copy settings) — until the buyer opens another tab for that SAME
-  // destination. A new destination takes the tab back.
-  const [opened, setOpened] = useState<{ forValue: string; mode: AvDestinationKind } | null>(null);
-  const mode = opened && opened.forValue === value ? opened.mode : valueKind;
+  // destination (lib/av-link avFieldTab / avPinAfterPick).
+  const [opened, setOpened] = useState<AvTabPin>(null);
+  const mode = avFieldTab(opened, value, valueKind);
 
   const live = useRef<Live>({ value, mode, picks: 0 });
   useEffect(() => {
@@ -145,9 +181,11 @@ export function AvDestinationField({
     live.current.mode = mode;
   }, [value, mode]);
 
-  // Every destination set by hand goes through here: a pick counts even when it is undone later.
+  // Every destination set by hand goes through here: a pick counts even when it is undone later,
+  // and a clear keeps the tab it was made from.
   function pick(v: string) {
     live.current.picks += 1;
+    setOpened(avPinAfterPick(v, mode));
     onChange(v);
   }
 
@@ -156,6 +194,7 @@ export function AvDestinationField({
   }
 
   const siteDomains = cat ? cat.sites.map((s) => s.domain) : null;
+  const panel = (m: AvDestinationKind) => (mode === m ? "flex flex-col gap-2" : "hidden");
 
   return (
     <div className="flex flex-col gap-2">
@@ -209,50 +248,48 @@ export function AvDestinationField({
         </Notice>
       ) : null}
 
-      {mode === "article" ? (
-        <>
-          <SearchSelect
-            value={valueKind === "article" ? value : ""}
-            onChange={(v) => pick(v)}
-            options={articleOptions}
-            placeholder="Search AV articles"
-            emptyHint={loading && articleOptions.length === 0 ? "Loading articles…" : error && !cat ? "Couldn't load AV destinations — use Retry above" : cat?.articlesError ? "Articles unavailable — see below" : "No articles match"}
-            facets
-            warn={!value}
-          />
-          {cat?.articlesError ? (
-            <Notice tone="warn">
-              <div className="flex items-start gap-2">
-                <span className="min-w-0 flex-1">{cat.articlesError}</span>
-                <RetryButton onClick={() => destinations.refresh(true)} busy={loading} />
-              </div>
-            </Notice>
-          ) : null}
+      <div className={panel("article")}>
+        <SearchSelect
+          value={valueKind === "article" ? value : ""}
+          onChange={(v) => pick(v)}
+          options={articleOptions}
+          placeholder="Search AV articles"
+          emptyHint={loading && articleOptions.length === 0 ? "Loading articles…" : error && !cat ? "Couldn't load AV destinations — use Retry above" : cat?.articlesError ? "Articles unavailable — see below" : "No articles match"}
+          facets
+          warn={!value}
+        />
+        {cat?.articlesError ? (
+          <Notice tone="warn">
+            <div className="flex items-start gap-2">
+              <span className="min-w-0 flex-1">{cat.articlesError}</span>
+              <RetryButton onClick={() => destinations.refresh(true)} busy={loading} />
+            </div>
+          </Notice>
+        ) : null}
 
-          {/* paste any AV destination URL — validated for shape + host, then checked on the server */}
-          <PasteCheck
-            label="Destination URL"
-            placeholder="…or paste an AV article URL"
-            value={value}
-            shape={(raw) => avDestinationBase(raw)}
-            foreign={(host) =>
-              siteDomains && !siteDomains.some((d) => host === d || host.endsWith(`.${d}`))
-                ? `Not an ActiveView site — ${host} is none of ${siteDomains.join(", ") || "our sites"}.`
-                : null
-            }
-            check={destinations.check}
-            live={live}
-            onApply={(res) => pick(res.base)}
-            applied={(res) =>
-              res.kind === "chat"
-                ? `Chat host ready (it shows ads) — ${res.base} set as the destination. The chat id itself cannot be verified: open the chat once to confirm.`
-                : `Live ${res.kind} on ${res.site} — set as the destination.`
-            }
-          />
-        </>
-      ) : mode === "redirect" ? (
-        <RedirectPicker cat={cat} loading={loading} value={value} onChange={pick} articleOptions={articleOptions} destinations={destinations} />
-      ) : (
+        {/* paste any AV destination URL — validated for shape + host, then checked on the server */}
+        <PasteCheck
+          label="Destination URL"
+          placeholder="…or paste an AV article URL"
+          value={value}
+          shape={(raw) => avDestinationBase(raw)}
+          foreign={(host) =>
+            siteDomains && !siteDomains.some((d) => host === d || host.endsWith(`.${d}`))
+              ? `Not an ActiveView site — ${host} is none of ${siteDomains.join(", ") || "our sites"}.`
+              : null
+          }
+          check={destinations.check}
+          live={live}
+          onApply={(res) => pick(res.base)}
+          applied={(res) => `Live ${res.kind} on ${res.site} — set as the destination.`}
+        />
+      </div>
+
+      <div className={panel("redirect")}>
+        <RedirectPicker cat={cat} loading={loading} value={value} onChange={pick} live={live} articleOptions={articleOptions} destinations={destinations} />
+      </div>
+
+      <div className={panel("chat")}>
         <ChatPicker
           chats={cat?.chats ?? []}
           siteDomains={siteDomains}
@@ -264,7 +301,7 @@ export function AvDestinationField({
           live={live}
           destinations={destinations}
         />
-      )}
+      </div>
     </div>
   );
 }
@@ -272,8 +309,9 @@ export function AvDestinationField({
 /**
  * The paste box both tabs share: shape → a cheap "is this host ours" guard → the server's verdict.
  * The verdict takes seconds, so its answer is applied only if the field is still as it was when
- * Check was pressed (lib/av-link avCheckOutcome): a destination picked meanwhile stands, and a box
- * that went away (the buyer left the tab or the card) writes nothing.
+ * Check was pressed (lib/av-link avCheckOutcome): a destination picked meanwhile — or a buyer who
+ * went to another tab — stands, and the answer is reported here instead; a box that went away (the
+ * card was removed) writes nothing.
  */
 function PasteCheck({
   label,
@@ -284,6 +322,7 @@ function PasteCheck({
   check,
   live,
   onApply,
+  onRefused,
   applied,
   note,
 }: {
@@ -298,6 +337,8 @@ function PasteCheck({
   check: AvDestinations["check"];
   live: React.RefObject<Live>;
   onApply: (res: Resolved) => void;
+  /** The server refused the address that was checked. */
+  onRefused?: (base: string) => void;
   /** The words for an applied answer. */
   applied: (res: Resolved) => string;
   /** Shown under the box whatever the verdict — what a check cannot prove must not disappear
@@ -307,13 +348,7 @@ function PasteCheck({
   const [paste, setPaste] = useState("");
   const [checking, setChecking] = useState(false);
   const [verdict, setVerdict] = useState<{ ok: boolean; text: string; forValue?: string } | null>(null);
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
+  const mounted = useMounted();
 
   const pasted = paste.trim() ? shape(paste) : null;
   const canCheck = Boolean(pasted?.ok) && !checking;
@@ -332,14 +367,15 @@ function PasteCheck({
     setVerdict(null);
     const res = await check(pasted.base);
     const outcome = avCheckOutcome(asked, { ...live.current, mounted: mounted.current });
-    if (outcome.act === "drop") return;
     setChecking(false);
+    if (outcome === "drop") return;
     if (!res.ok) {
       setVerdict({ ok: false, text: res.error });
+      onRefused?.(pasted.base);
       return;
     }
-    if (outcome.act === "superseded") {
-      setVerdict({ ok: false, text: `${res.base} passed the check, but the destination was changed while it was being checked — not applied. Press Check again to use it.` });
+    if (outcome === "superseded") {
+      setVerdict({ ok: false, text: `${res.base} passed the check, but the destination or the tab was changed while it was being checked — not applied. Press Check again to use it.` });
       return;
     }
     onApply(res);
@@ -387,14 +423,6 @@ function PasteCheck({
   );
 }
 
-const hostOf = (url: string): string => {
-  try {
-    return new URL(url).hostname.toLowerCase();
-  } catch {
-    return "";
-  }
-};
-
 /** The AI chat tab. AV's API lists no chats (they are built in its dashboard, Chat Builder), so the
  *  chat's address is PASTED; the tab shows the chat host's state — a host that is not activated, or
  *  that shows no ads yet ("Pending monetization"), is not launchable and says why. */
@@ -423,23 +451,34 @@ function ChatPicker({
   live: React.RefObject<Live>;
   destinations: AvDestinations;
 }) {
-  // The picked chat's own host, when the catalog lists it: a chat on a host that is not ready is
-  // stored, but its launch will be refused — the row must not read as "all set".
-  const currentHost = current ? chats.find((h) => h.host === hostOf(current)) : undefined;
-  const blocked = Boolean(currentHost && !currentHost.live);
+  // The catalog probes chat.<site> of the ROOT sites only (a site's own subdomain has none).
+  const probed = (siteDomains ?? []).filter((d) => !(siteDomains ?? []).some((o) => d.endsWith(`.${o}`))).map((d) => `chat.${d}`);
+  // What is KNOWN about the picked chat's host: listed ready, listed not ready (or probed and not
+  // found) — its launch will be refused —, or simply not checked here (the launch checks it).
+  const currentHost = hostOf(current);
+  const row = chats.find((h) => h.host === currentHost);
+  const state: "ready" | "blocked" | "unknown" = !current
+    ? "unknown"
+    : row
+      ? row.live
+        ? "ready"
+        : "blocked"
+      : siteDomains && !failed && probed.includes(currentHost)
+        ? "blocked"
+        : "unknown";
 
   return (
-    <div className="flex flex-col gap-2">
+    <>
       {chats.length === 0 ? (
         failed ? null : (
           <Notice>
             <div className="flex items-start gap-2">
               <span className="min-w-0 flex-1">
-                {loading
+                {loading && !siteDomains
                   ? "Looking for the chat subdomain…"
-                  : `No chat host found at ${(siteDomains ?? []).map((d) => `chat.${d}`).join(", ") || "chat.<site>"} — activate one in ActiveView → Chat Builder. A chat on another subdomain can still be pasted below.`}
+                  : `No chat host found at ${probed.join(", ") || "chat.<site>"} — activate one in ActiveView → Chat Builder. A chat on another subdomain can still be pasted below.`}
               </span>
-              {loading ? null : <RetryButton onClick={() => destinations.refresh(true)} />}
+              {siteDomains ? <RetryButton onClick={() => destinations.refresh(true)} busy={loading} /> : null}
             </div>
           </Notice>
         )
@@ -450,7 +489,7 @@ function ChatPicker({
               <span className={"h-1.5 w-1.5 shrink-0 rounded-full " + (h.live ? "bg-launch2 shadow-[0_0_8px_rgba(52,211,153,0.8)]" : "bg-warn")} />
               <span className="truncate font-mono text-[11.5px] text-dim">{h.host}</span>
               <span className="ml-auto text-[9px] font-semibold uppercase tracking-[0.14em] text-faint">{h.live ? "ready" : "not ready"}</span>
-              {!h.live ? <RetryButton onClick={() => destinations.refresh(true)} busy={loading} /> : null}
+              <RetryButton onClick={() => destinations.refresh(true)} busy={loading} />
             </div>
             {!h.live ? (
               <div className="mt-2">
@@ -462,9 +501,18 @@ function ChatPicker({
       )}
 
       {current ? (
-        <div className={"flex flex-col gap-1 rounded-lg border px-3 py-2 " + (blocked ? "border-warn/40 bg-warn/10" : "border-accent/40 bg-accent/10")}>
+        <div
+          className={
+            "flex flex-col gap-1 rounded-lg border px-3 py-2 " +
+            (state === "blocked" ? "border-warn/40 bg-warn/10" : state === "ready" ? "border-accent/40 bg-accent/10" : "border-line bg-surface2/40")
+          }
+        >
           <div className="flex items-start gap-2">
-            {blocked ? <AlertIcon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warn" /> : <CheckIcon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#9db8ff]" />}
+            {state === "blocked" ? (
+              <AlertIcon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warn" />
+            ) : state === "ready" ? (
+              <CheckIcon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#9db8ff]" />
+            ) : null}
             <span className="min-w-0 flex-1 break-all font-mono text-[11.5px] leading-snug text-ink" title={current}>
               {current}
             </span>
@@ -485,7 +533,13 @@ function ChatPicker({
               <XIcon className="h-3.5 w-3.5" />
             </button>
           </div>
-          {blocked ? <p className="text-[11px] leading-snug text-warn">Its host is not ready — a launch to this chat will be refused until it is.</p> : null}
+          {state === "blocked" ? (
+            <p className="text-[11px] leading-snug text-warn">
+              {row ? "Its host is not ready" : `No chat host was found at ${currentHost}`} — a launch to this chat will be refused until it is.
+            </p>
+          ) : state === "unknown" ? (
+            <p className="text-[11px] leading-snug text-dim">Its host is not checked here — the launch checks it.</p>
+          ) : null}
         </div>
       ) : null}
 
@@ -505,10 +559,13 @@ function ChatPicker({
           // The host's row may still say what it said before this check — re-read it.
           if (chats.some((h) => h.host === hostOf(res.base) && !h.live)) destinations.refresh(true);
         }}
+        onRefused={(base) => {
+          if (chats.some((h) => h.host === hostOf(base) && h.live)) destinations.refresh(true);
+        }}
         applied={(res) => `Chat host ready (it shows ads) — ${res.base} set as the destination.`}
         note="Copy the address from ActiveView → Chat Builder → View your chat. ActiveView answers for ANY id, so a mistyped one cannot be caught here — open the chat once to confirm."
       />
-    </div>
+    </>
   );
 }
 
@@ -519,14 +576,16 @@ function RedirectPicker({
   loading,
   value,
   onChange,
+  live,
   articleOptions,
   destinations,
 }: {
-  cat: import("@/lib/av-destination").AvDestinationCatalog | null;
+  cat: AvDestinationCatalog | null;
   loading: boolean;
   value: string;
   onChange: (v: string) => void;
-  articleOptions: { value: string; label: string; subLabel: string; group: string }[];
+  live: React.RefObject<Live>;
+  articleOptions: ArticleOption[];
   destinations: AvDestinations;
 }) {
   const redirects = cat?.redirects ?? [];
@@ -536,14 +595,7 @@ function RedirectPicker({
       <Notice tone="warn">
         <div className="flex items-start gap-2">
           <span className="min-w-0 flex-1">{cat.redirectsError}</span>
-          <button
-            type="button"
-            onClick={() => destinations.refresh(true)}
-            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-line2 bg-raise px-2 py-0.5 text-[11px] font-semibold text-dim transition-colors hover:text-ink"
-          >
-            <RetryIcon className="h-3 w-3" />
-            Retry
-          </button>
+          <RetryButton onClick={() => destinations.refresh(true)} busy={loading} />
         </div>
       </Notice>
     );
@@ -559,14 +611,7 @@ function RedirectPicker({
   return (
     <div className="flex flex-col gap-3">
       {redirects.map((rd) => (
-        <RedirectDomainBlock
-          key={rd.domainId}
-          rd={rd}
-          value={value}
-          onChange={onChange}
-          articleOptions={articleOptions}
-          destinations={destinations}
-        />
+        <RedirectDomainBlock key={rd.domainId} rd={rd} value={value} onChange={onChange} live={live} articleOptions={articleOptions} destinations={destinations} />
       ))}
     </div>
   );
@@ -576,13 +621,15 @@ function RedirectDomainBlock({
   rd,
   value,
   onChange,
+  live,
   articleOptions,
   destinations,
 }: {
   rd: AvRedirectOption;
   value: string;
   onChange: (v: string) => void;
-  articleOptions: { value: string; label: string; subLabel: string; group: string }[];
+  live: React.RefObject<Live>;
+  articleOptions: ArticleOption[];
   destinations: AvDestinations;
 }) {
   const [newOpen, setNewOpen] = useState(false);
@@ -590,6 +637,8 @@ function RedirectDomainBlock({
   const [target, setTarget] = useState("");
   const [creating, setCreating] = useState(false);
   const [createErr, setCreateErr] = useState<string | null>(null);
+  const [createNote, setCreateNote] = useState<string | null>(null);
+  const mounted = useMounted();
 
   const pathOptions = rd.paths.map((p) => ({
     value: p.url,
@@ -600,20 +649,27 @@ function RedirectDomainBlock({
   const slugOk = AV_PATH_HINT_RE.test(slug.trim());
   const canCreate = slugOk && Boolean(target) && !creating;
 
+  // The POST takes seconds: the path is created either way, but it becomes the DESTINATION only if
+  // the field is still as it was when Create was pressed (a destination picked meanwhile stands).
   async function create() {
     if (!canCreate) return;
+    const asked = { ...live.current };
     setCreating(true);
     setCreateErr(null);
+    setCreateNote(null);
     const res = await destinations.createPath({ domainId: rd.domainId, path: slug.trim(), targetUrl: target });
+    const outcome = avCheckOutcome(asked, { ...live.current, mounted: mounted.current });
     setCreating(false);
-    if (res.ok) {
-      onChange(res.url);
-      setNewOpen(false);
-      setSlug("");
-      setTarget("");
-    } else {
+    if (outcome === "drop") return;
+    if (!res.ok) {
       setCreateErr(res.error);
+      return;
     }
+    if (outcome === "apply") onChange(res.url);
+    else setCreateNote(`${res.url} was created, but the destination or the tab was changed meanwhile — not applied. Pick it from the list to use it.`);
+    setNewOpen(false);
+    setSlug("");
+    setTarget("");
   }
 
   return (
@@ -641,10 +697,18 @@ function RedirectDomainBlock({
             placeholder="Search redirect paths"
             emptyHint="No paths on this domain yet — create one below"
           />
+          {createNote ? (
+            <p role="status" className="text-[11px] leading-snug text-warn">
+              {createNote}
+            </p>
+          ) : null}
           {!newOpen ? (
             <button
               type="button"
-              onClick={() => setNewOpen(true)}
+              onClick={() => {
+                setNewOpen(true);
+                setCreateNote(null);
+              }}
               className={
                 "flex items-center justify-center gap-1.5 rounded-lg border border-line bg-surface2/50 py-1.5 " +
                 "text-[11.5px] font-medium text-dim transition-colors hover:border-accent/40 hover:bg-accent/5 " +

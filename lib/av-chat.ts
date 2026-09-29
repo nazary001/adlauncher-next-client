@@ -49,6 +49,7 @@ const SETTINGS_TIMEOUT_MS = 8_000;
 const SCRIPT_TIMEOUT_MS = 5_000;
 const PAGE_TIMEOUT_MS = 8_000;
 const SETTINGS_MAX_BYTES = 256 * 1024;
+const SETTINGS_MAX_DEPTH = 12;
 const DOH_MAX_BYTES = 64 * 1024;
 
 export type AvChatShape = { base: string; host: string; path: string };
@@ -206,32 +207,130 @@ export async function avChatHost(host: string, force = false): Promise<AvChatHos
   return verdict;
 }
 
+/** Past the white space and the comments that start at `i`. */
+function skipBlank(src: string, i: number): number {
+  for (;;) {
+    while (i < src.length && /\s/.test(src[i])) i++;
+    if (src.startsWith("//", i)) {
+      const nl = src.indexOf("\n", i);
+      i = nl < 0 ? src.length : nl + 1;
+    } else if (src.startsWith("/*", i)) {
+      const end = src.indexOf("*/", i + 2);
+      i = end < 0 ? src.length : end + 2;
+    } else return i;
+  }
+}
+
+/** Where a quoted text that opens at `i` closes (the index past its closing quote), and what it says. */
+function readText(src: string, i: number): { value: string; end: number } {
+  const quote = src[i];
+  let value = "";
+  for (let j = i + 1; j < src.length; j++) {
+    const c = src[j];
+    if (c === "\\") {
+      const n = src[++j];
+      value += n === "n" ? "\n" : n === "t" ? "\t" : n === "r" ? "\r" : (n ?? "");
+    } else if (c === quote) return { value, end: j + 1 };
+    else if (c === "\n") break;
+    else value += c;
+  }
+  throw new Error("an unclosed text");
+}
+
+/**
+ * One value of a DATA-only literal that starts at `i`: JSON, or the template's JavaScript flavour of
+ * it (bare keys, single quotes, trailing commas, comments). Anything that is not plain data — a
+ * call, a name, a template, an expression — throws: what a page computes cannot be vouched for by
+ * reading its source.
+ */
+function readData(src: string, at: number, depth = 0): { value: unknown; end: number } {
+  if (depth > SETTINGS_MAX_DEPTH) throw new Error("nested too deep");
+  let i = skipBlank(src, at);
+  const c = src[i];
+  if (c === '"' || c === "'") return readText(src, i);
+  if (c === "{" || c === "[") {
+    const list = c === "[";
+    const close = list ? "]" : "}";
+    const items: unknown[] = [];
+    const entries: Record<string, unknown> = Object.create(null);
+    i = skipBlank(src, i + 1);
+    while (src[i] !== close) {
+      if (i >= src.length) throw new Error("an unclosed literal");
+      let key = "";
+      if (!list) {
+        if (src[i] === '"' || src[i] === "'") {
+          const k = readText(src, i);
+          key = k.value;
+          i = k.end;
+        } else {
+          const k = /^[A-Za-z_$][\w$]*/.exec(src.slice(i, i + 80));
+          if (!k) throw new Error("not a key");
+          key = k[0];
+          i += key.length;
+        }
+        i = skipBlank(src, i);
+        if (src[i] !== ":") throw new Error("a key without a value");
+        i += 1;
+      }
+      const v = readData(src, i, depth + 1);
+      if (list) items.push(v.value);
+      else entries[key] = v.value; // a repeated key: the last one stands, as in the page
+      i = skipBlank(src, v.end);
+      if (src[i] === ",") i = skipBlank(src, i + 1);
+      else if (src[i] !== close) throw new Error("not plain data");
+    }
+    return { value: list ? items : entries, end: i + 1 };
+  }
+  const word = /^(?:true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?![\w$.(])/.exec(src.slice(i, i + 40));
+  if (!word) throw new Error("not plain data");
+  const w = word[0];
+  return { value: w === "true" ? true : w === "false" ? false : w === "null" ? null : Number(w), end: i + w.length };
+}
+
+/** Where the settings literal opens (the index of its "{"): the first `assistantQuizSettings = {`
+ *  that is code — not inside a comment or a text. -1 = the file has none. */
+function settingsStart(js: string): number {
+  const opens = /assistantQuizSettings\s*=\s*\{/y;
+  for (let i = 0; i < js.length; i++) {
+    const c = js[i];
+    if (c === '"' || c === "'" || c === "`") {
+      // a text: skip to its closing quote (a template's ${} is never met before the settings)
+      for (i++; i < js.length && js[i] !== c; i++) if (js[i] === "\\") i++;
+    } else if (c === "/" && (js[i + 1] === "/" || js[i + 1] === "*")) {
+      i = skipBlank(js, i) - 1;
+    } else if (c === "a" && !/[\w$]/.test(js[i - 1] ?? "")) {
+      opens.lastIndex = i;
+      const m = opens.exec(js);
+      if (m) return i + m[0].length - 1;
+    }
+  }
+  return -1;
+}
+
 /**
  * A chat host's settings out of its /worker.js: `const assistantQuizSettings = {…};` followed by
- * the loader. Only the literal is read (the loader names `script` / `disable` too), with either key
- * style — live hosts serve quoted keys, the unpublished template bare ones. A missing `script` is
- * no script and a missing `disable` is false, exactly as the loader reads them; `missing` lists the
- * parts the loader requires and does not find. null = not that file.
+ * the loader. The literal is read as DATA, at its own level (a key, a script or a part nested
+ * deeper never stands in for the host's; the loader below names `script` / `disable` too), and then
+ * read the way the host's own loader reads it: a missing or blank `script` is no script,
+ * Boolean(config.disable) switches the ads off, and `missing` lists the parts the loader requires
+ * and finds falsy — an EMPTY list or object is there. null = not that file, or not plain data.
  */
 function chatSettings(js: string): { key: string; script: string; disable: boolean; missing: string[] } | null {
-  const at = js.search(/\bassistantQuizSettings\s*=\s*\{/);
+  const at = settingsStart(js);
   if (at < 0) return null;
-  const end = js.indexOf("};", at);
-  const literal = end < 0 ? js.slice(at) : js.slice(at, end + 1);
-  const name = (n: string) => `(?:^|[\\s{,])["']?${n}["']?\\s*:\\s*`;
-  const text = (n: string) => (new RegExp(`${name(n)}(["'])(.*?)\\1`).exec(literal)?.[2] ?? "").trim();
-  const present: Record<(typeof REQUIRED_SETTINGS)[number], boolean> = {
-    key: text("key") !== "",
-    terms: new RegExp(`${name("terms")}\\{`).test(literal),
-    theme: new RegExp(`${name("theme")}\\{`).test(literal),
-    config: new RegExp(`${name("config")}\\{`).test(literal),
-    botNames: new RegExp(`${name("botNames")}\\[\\s*["']`).test(literal),
-  };
+  let settings: Record<string, unknown>;
+  try {
+    settings = readData(js, at).value as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const text = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  const config = settings.config && typeof settings.config === "object" ? (settings.config as Record<string, unknown>) : null;
   return {
-    key: text("key"),
-    script: text("script"),
-    disable: new RegExp(`${name("disable")}true\\b`).test(literal),
-    missing: REQUIRED_SETTINGS.filter((part) => !present[part]),
+    key: text(settings.key),
+    script: text(settings.script),
+    disable: Boolean(config?.disable),
+    missing: REQUIRED_SETTINGS.filter((part) => (part === "key" ? !text(settings.key) : !settings[part])),
   };
 }
 
@@ -336,6 +435,9 @@ async function chatHostReady(host: string, force = false): Promise<Ready> {
     readyCache.set(host, Date.now());
     hintCache.delete(host);
   } else {
+    // The refusal is the newest word on the host: a READY an older, overlapping check wrote
+    // meanwhile must not outlive it.
+    readyCache.delete(host);
     hintCache.set(host, { at: Date.now(), value: verdict });
   }
   return verdict;

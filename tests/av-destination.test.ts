@@ -66,6 +66,8 @@ type World = {
   sites?: string[];
   /** What ActiveView's redirect list answers: the list, or a refusal (403 is never retried). */
   redirects?: "ok" | "forbidden";
+  /** The redirect domain the list names (default: redirect.thecadrion.com). */
+  redirectDomain?: string;
   /** CNAMEs per host; a host missing here has none (ENOTFOUND). */
   cnames?: Record<string, string[]>;
   /** Pages per URL: a status, a body, a page whose final URL is elsewhere, or a request that
@@ -82,7 +84,10 @@ async function inWorld<T>(w: World, run: (calls: string[], dnsCalls: string[]) =
     const url = String(input);
     calls.push(url);
     if (url === "https://av.test/me") return json({ response: { publisher_id: "f845", sites: (w.sites ?? ["thecadrion.com"]).map(site) } });
-    if (url === "https://av.test/v1/redirects") return w.redirects === "forbidden" ? json({ message: "route disabled" }, 403) : json(REDIRECTS);
+    if (url === "https://av.test/v1/redirects") {
+      if (w.redirects === "forbidden") return json({ message: "route disabled" }, 403);
+      return json(w.redirectDomain ? { redirectDomains: [{ ...REDIRECTS.redirectDomains[0], name: w.redirectDomain }] } : REDIRECTS);
+    }
     if (url === "https://av.test/v1/redirects/paths/path1/mappings") return json(MAPPINGS);
     if (url === "https://thecadrion.com/sitemap.xml") return new Response(SITEMAP, { status: 200 });
     if (/\/sitemap\.xml$/.test(url)) return new Response("<urlset></urlset>", { status: 200 });
@@ -188,6 +193,53 @@ test("a chat host that ActiveView ALSO lists as a site of its own still goes thr
       assert.deepEqual(await dest.resolveAvDestination(CHAT), IS_CHAT, sites.join(","));
     });
   }
+});
+
+test("a chat's address on a listed chat host never becomes an ARTICLE when its CNAME cannot be seen (a proxied record)", async () => {
+  // The host is a site of its own in GET /me and its CNAME is hidden: the chat check says "not a
+  // chat host". An address that names a chat id is still no article — the dashboard's path form
+  // would otherwise reach an ad past the chat's gate.
+  const sites = ["thecadrion.com", "chat.thecadrion.com"];
+  const path = "https://chat.thecadrion.com/6a2312cef9f4e11b130fc523";
+  for (const raw of [`${path}/`, CHAT]) {
+    await inWorld({ sites, pages: { [path]: 200, [CHAT]: 200 } }, async (calls) => {
+      const r = await dest.resolveAvDestination(raw);
+      assert.equal(r.ok, false, raw);
+      assert.equal(!r.ok && r.status, 400, raw);
+      assert.match(!r.ok ? r.error : "", /^destination_not_av — chat\.thecadrion\.com .*chat gateway/, raw);
+      assert.ok(!calls.includes(path) && !calls.includes(CHAT), "the address is never fetched as an article");
+    });
+  }
+});
+
+test("an article that redirects to a chat is refused: a chat is launched as a chat, through its own gate", async () => {
+  for (const chatUrl of [CHAT, "https://chat.thecadrion.com/6a2312cef9f4e11b130fc523/"]) {
+    await inWorld({ ...CHAT_HOST, pages: { [ARTICLE]: { finalUrl: chatUrl } } }, async () => {
+      const r = await dest.resolveAvDestination(ARTICLE);
+      assert.equal(r.ok, false, chatUrl);
+      assert.equal(!r.ok && r.status, 400, chatUrl);
+      assert.match(!r.ok ? r.error : "", /^destination_invalid — .*redirects to a chat/, chatUrl);
+    });
+  }
+});
+
+test("an article that redirects to another page of its own site — or of a subdomain of it — still resolves", async () => {
+  for (const finalUrl of ["https://thecadrion.com/forklift-certification-mobile-app-us-en-2", "https://www.thecadrion.com/forklift-certification-mobile-app-us-en", "https://m.thecadrion.com/forklift-certification-mobile-app-us-en"]) {
+    await inWorld({ pages: { [ARTICLE]: { finalUrl } } }, async () => {
+      assert.deepEqual(await dest.resolveAvDestination(ARTICLE), { ok: true, kind: "article", base: ARTICLE, site: "thecadrion.com" }, finalUrl);
+    });
+  }
+});
+
+test("a redirect domain belongs to the NEAREST site it is a subdomain of — a subdomain site keeps its own redirect domain", async () => {
+  await inWorld({ sites: ["thecadrion.com", "blog.thecadrion.com"], redirectDomain: "redirect.blog.thecadrion.com" }, async () => {
+    const cat = await dest.avDestinationCatalog({ titles: false });
+    assert.deepEqual(cat.redirects.map((r) => [r.domain, r.site]), [["redirect.blog.thecadrion.com", "blog.thecadrion.com"]]);
+  });
+  await inWorld({ sites: ["blog.thecadrion.com", "thecadrion.com"] }, async () => {
+    const cat = await dest.avDestinationCatalog({ titles: false });
+    assert.deepEqual(cat.redirects.map((r) => [r.domain, r.site]), [["redirect.thecadrion.com", "thecadrion.com"]]);
+  });
 });
 
 test("a subdomain that is a site of its own and no chat host keeps its articles", async () => {
