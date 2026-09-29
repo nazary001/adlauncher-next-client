@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AvDestinationCatalog, AvResolved } from "@/lib/av-destination";
 
 // The card's AV Destination picker talks to three routes (WP-B), all gated by avRailEnabled() +
@@ -12,13 +12,21 @@ import type { AvDestinationCatalog, AvResolved } from "@/lib/av-destination";
 //   POST /api/av/redirect-paths          → create a redirect path, then re-pull the catalog.
 // One instance per launcher board (enabled only for the AV partner); the cards share it. Reads are
 // live-catalog only — no optimistic writes, no browser storage (the server is the truth).
+// What the hook returns is ONE object for as long as nothing changed (and the article options are
+// built once, here): every card of the board takes it as a prop, and a new object per render would
+// re-render every card on every keystroke anywhere on the board.
 
 /** The created redirect path the POST hands back (enough to select it on the card). */
 export type AvCreatedPath = { id: string; path: string; url: string };
+/** An article as the card's search lists it (label = title, sub = path · variant, grouped by site). */
+export type AvArticleOption = { value: string; label: string; subLabel: string; group: string };
 
 export type AvDestinations = {
-  /** The last good catalog (kept across a failed refresh so the picker never blanks). */
+  /** The last good catalog (kept across a failed refresh so the picker never blanks — a PART that
+   *  failed in a read keeps what the last good read listed, next to its *Error). */
   data: AvDestinationCatalog | null;
+  /** The catalog's articles as search options. */
+  articleOptions: AvArticleOption[];
   loading: boolean;
   /** Whole-request failure (av_not_configured / network / non-ok) — shown with a Retry. Per-part
    *  failures ride the catalog itself (articlesError / redirectsError). */
@@ -60,18 +68,26 @@ export function useAvDestinations(enabled: boolean): AvDestinations {
         .then((d) => {
           if (id !== reqId.current) return; // superseded by a newer refresh
           if (d && d.ok) {
-            setState({
-              key,
-              data: {
-                sites: d.sites ?? [],
-                articles: d.articles ?? [],
-                redirects: d.redirects ?? [],
-                chats: d.chats ?? [],
-                ...(d.articlesError ? { articlesError: d.articlesError } : {}),
-                ...(d.redirectsError ? { redirectsError: d.redirectsError } : {}),
-              },
-              loading: false,
-              error: null,
+            setState((s) => {
+              // A part that FAILED in this read (empty, with its error) keeps the last good list:
+              // what the buyer was working with — a half-filled New path form — stays on screen,
+              // and the part's error says the list is not fresh.
+              const last = s.key === key ? s.data : null;
+              const articles = d.articles ?? [];
+              const redirects = d.redirects ?? [];
+              return {
+                key,
+                data: {
+                  sites: d.sites ?? [],
+                  articles: d.articlesError && articles.length === 0 && last ? last.articles : articles,
+                  redirects: d.redirectsError && redirects.length === 0 && last ? last.redirects : redirects,
+                  chats: d.chats ?? [],
+                  ...(d.articlesError ? { articlesError: d.articlesError } : {}),
+                  ...(d.redirectsError ? { redirectsError: d.redirectsError } : {}),
+                },
+                loading: false,
+                error: null,
+              };
             });
           } else {
             // Keep the last good catalog on-screen; surface the reason for a Retry.
@@ -143,5 +159,16 @@ export function useAvDestinations(enabled: boolean): AvDestinations {
     [refresh],
   );
 
-  return { data, loading, error, refresh, check, createPath };
+  const articleOptions = useMemo(
+    () =>
+      (data?.articles ?? []).map((a) => ({
+        value: a.url,
+        label: a.title || a.path,
+        subLabel: a.variant ? `${a.path} · ${a.variant}` : a.path,
+        group: a.site,
+      })),
+    [data],
+  );
+
+  return useMemo(() => ({ data, articleOptions, loading, error, refresh, check, createPath }), [data, articleOptions, loading, error, refresh, check, createPath]);
 }

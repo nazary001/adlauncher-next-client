@@ -171,7 +171,7 @@ function stubCname(answers: Record<string, string[] | string>) {
   };
 }
 
-type Page = { status: number; finalUrl?: string; body?: string; type?: string; location?: string } | "throw" | "tls";
+type Page = { status: number; finalUrl?: string; body?: string; type?: string; location?: string; server?: string } | "throw" | "tls";
 
 /** What fetch throws for a host still behind the gateway's default certificate (read live 29.09:
  *  chat.thecadrion.com served Kong's self-signed CN=localhost before its activation). */
@@ -194,6 +194,7 @@ function stubPages(pages: Record<string, Page>) {
     const headers: Record<string, string> = {};
     if (p.type) headers["content-type"] = p.type;
     if (p.location) headers.location = p.location;
+    if (p.server) headers.server = p.server;
     const res = new Response(p.status === 301 || p.status === 302 ? null : (p.body ?? "<html><title>Assistant Chat</title></html>"), { status: p.status, headers });
     Object.defineProperty(res, "url", { value: p.finalUrl ?? url });
     return res;
@@ -578,14 +579,233 @@ test("settings the page itself would refuse (a part its loader requires is missi
   }
 });
 
-test("an ad script that is NAMED but not served (AV's CDN answers 403 / 404) is refused: the chat loads no ad code", async () => {
-  for (const status of [403, 404]) {
-    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [SCRIPT_URL]: { status, body: NO_SCRIPT, type: "application/xml" } }, async ({ pageCalls }) => {
+// ---------- the rest of the file: is it the loader the settings are read for? ----------
+
+/** The settings literal alone — what a fixture's loader follows. */
+const literalOf = (body: string) => body.slice(0, body.indexOf(LOADER));
+const CALL = "loadRemoteScript({ disable: Boolean(assistantQuizSettings?.config?.disable), fileName: assistantQuizSettings.script });";
+
+test("the loader as live hosts carry it (the call spread over lines, inside an async start-up) is the loader", async () => {
+  const live = `${literalOf(worker(SCRIPT))}
+/**
+ * Validates that assistantQuizSettings has all required properties
+ */
+function validateSettings(settings) {
+  const requiredFields = ["key", "terms", "theme", "config", "botNames"];
+  const missingFields = requiredFields.filter((field) => !settings[field]);
+  if (missingFields.length > 0) {
+    console.error(\`[AV Assistant] Missing required settings: \${missingFields.join(", ")}\`);
+    return false;
+  }
+  return true;
+}
+
+function loadRemoteScript({
+  disable,
+  fileName,
+  baseUrl = "https://scr.actview.net",
+}) {
+  return new Promise((resolve) => resolve());
+}
+
+async function initializeAssistant() {
+  try {
+    if (!validateSettings(assistantQuizSettings)) {
+      throw new Error("Invalid assistantQuizSettings configuration");
+    }
+    loadConstants(assistantQuizSettings);
+    loadTheme(assistantQuizSettings.theme);
+    await loadRemoteScript({
+      disable: Boolean(assistantQuizSettings?.config?.disable),
+      fileName: assistantQuizSettings.script,
+    });
+  } catch (error) {
+    console.error("[AV Assistant] Failed to initialize:", error);
+  }
+}
+
+initializeAssistant();
+`;
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: live } }, async () => {
+    assert.deepEqual(await chat.resolveAvChat(SHAPE, "thecadrion.com"), { ok: true, kind: "chat", base: BASE, site: "thecadrion.com" });
+  });
+});
+
+test("settings whose file does not load the ad script FROM THEM cannot be vouched for: a failed check (502)", async () => {
+  const literal = literalOf(worker(SCRIPT));
+  const cases: [string, string][] = [
+    ["the literal alone, no loader", literal],
+    ["a loader that takes the ad script from another setting", worker(SCRIPT).replace("fileName: assistantQuizSettings.script", "fileName: assistantQuizSettings.adScript")],
+    ["a loader that names the script itself", worker(SCRIPT).replace("fileName: assistantQuizSettings.script", 'fileName: "somebodyelses"')],
+    ["a loader that reads another object's script", worker(SCRIPT).replace("fileName: assistantQuizSettings.script", "fileName: defaults.script")],
+    ["the loader's call only in a comment", `${literal}\n// ${CALL}\n/* ${CALL} */\n`],
+    ["the loader's call only in a text", `${literal}\nconst sample = "${CALL.replace(/"/g, "'")}";\nconst other = \`${CALL}\`;\n`],
+  ];
+  for (const [what, body] of cases) {
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async ({ pageCalls }) => {
       const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
       refused(r);
-      assert.equal(!r.ok && r.status, 400, String(status));
-      assert.match(!r.ok ? r.error : "", /^chat_not_monetized — chat\.thecadrion\.com names the ad script "chatthecadrion" but .*not published/, String(status));
+      assert.equal(!r.ok && r.status, 502, what);
+      assert.match(!r.ok ? r.error : "", /^destination_check_failed — the settings file of chat\.thecadrion\.com is not in a form the launcher knows \(.*ad script/, what);
+      assert.deepEqual(pageCalls, [WORKER_URL], what);
+    });
+  }
+});
+
+test("settings the file CHANGES after the literal cannot be vouched for: a failed check (502)", async () => {
+  for (const later of [
+    'assistantQuizSettings.script = "";',
+    'assistantQuizSettings["script"] = "";',
+    "assistantQuizSettings.config.disable = true;",
+    "assistantQuizSettings . config = { disable: true };",
+    "Object.assign(assistantQuizSettings, { script: '' });",
+    "assistantQuizSettings.script ||= 'other';",
+    "delete assistantQuizSettings.script;",
+  ]) {
+    const body = worker(SCRIPT).replace(LOADER, `\n${later}\n${LOADER}`);
+    assert.ok(body.includes(later), "the fixture really carries the statement");
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 502, later);
+      assert.match(!r.ok ? r.error : "", /^destination_check_failed — the settings file of chat\.thecadrion\.com is not in a form the launcher knows \(.*changes/, later);
+      assert.deepEqual(pageCalls, [WORKER_URL], later);
+    });
+  }
+});
+
+test("a loader that only READS the settings, or writes about them in a comment, is the loader", async () => {
+  const reads = worker(SCRIPT).replace(
+    LOADER,
+    `${LOADER}
+// assistantQuizSettings.script = "set by ActiveView"; (a note, not code)
+const note = "assistantQuizSettings.script = ''";
+if (assistantQuizSettings.script === "" || assistantQuizSettings.config.disable == true) console.log("no ads");
+const names = (assistantQuizSettings) => assistantQuizSettings.botNames;
+window.chatSettings = assistantQuizSettings;
+`,
+  );
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: reads } }, async () => {
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+  });
+});
+
+test("the parts the page requires are the ones ITS loader lists", async () => {
+  const LIST = '["key", "terms", "theme", "config", "botNames"]';
+  assert.ok(worker(SCRIPT).includes(LIST), "the fixture's loader carries the list");
+  // one more part than the launcher knows: the page would stop, so would the ads
+  const stricter = worker(SCRIPT).replace(LIST, '["key", "terms", "theme", "config", "botNames", "welcome"]');
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: stricter } }, async ({ pageCalls }) => {
+    const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+    refused(r);
+    assert.equal(!r.ok && r.status, 400);
+    assert.match(!r.ok ? r.error : "", /^chat_not_monetized — the settings of chat\.thecadrion\.com are incomplete \(no welcome\)/);
+    assert.deepEqual(pageCalls, [WORKER_URL]);
+  });
+  // one part fewer: settings without it start the page all the same
+  const looser = worker(SCRIPT)
+    .replace(/\s*"botNames": \[[^\]]*\],/, "")
+    .replace(LIST, "['key', 'terms', 'theme', 'config']");
+  assert.ok(!literalOf(looser).includes("botNames"), "the fixture really has no botNames");
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: looser } }, async () => {
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+  });
+  // a list that requires nothing — the chat key is the launcher's own requirement, whatever the list
+  const nothing = worker(SCRIPT).replace(/\s*"botNames": \[[^\]]*\],/, "").replace(LIST, "[]");
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: nothing } }, async () => {
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+  });
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: worker(SCRIPT, false, "").replace(LIST, "[]") } }, async () => {
+    const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+    refused(r);
+    assert.match(!r.ok ? r.error : "", /^chat_not_live — .*no chat key/);
+  });
+});
+
+test("an older loader that validates nothing (read live on six hosts) is judged by the parts every loader uses", async () => {
+  const old = (body: string) => body.replace(/function validateSettings[\s\S]*?\n}\n/, "");
+  assert.ok(!old(worker(SCRIPT)).includes("requiredFields"), "the fixture really validates nothing");
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: old(worker(SCRIPT)) } }, async () => {
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+  });
+  const noTheme = old(worker(SCRIPT)).replace(/\s*"theme": \{[^}]*\},/, "");
+  assert.ok(!literalOf(noTheme).includes('"theme"'), "the fixture really has no theme");
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: noTheme } }, async () => {
+    const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+    refused(r);
+    assert.match(!r.ok ? r.error : "", /^chat_not_monetized — .*\btheme\b/);
+  });
+});
+
+test("a loader whose list of required parts cannot be read is a failed check (502)", async () => {
+  const LIST = '["key", "terms", "theme", "config", "botNames"]';
+  for (const list of ["REQUIRED_FIELDS", "[...BASE_FIELDS, 'botNames']", '["key", 5]', '["key", ""]', "Object.keys(schema)"]) {
+    const body = worker(SCRIPT).replace(LIST, list);
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 502, list);
+      assert.match(!r.ok ? r.error : "", /^destination_check_failed — the settings file of chat\.thecadrion\.com is not in a form the launcher knows \(.*requires/, list);
+      assert.deepEqual(pageCalls, [WORKER_URL], list);
+    });
+  }
+  // a validation with no list at all: what it wants is unknown
+  const renamed = worker(SCRIPT).replace(/requiredFields/g, "mustHave");
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: renamed } }, async () => {
+    const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+    refused(r);
+    assert.equal(!r.ok && r.status, 502);
+    assert.match(!r.ok ? r.error : "", /is not in a form the launcher knows \(.*requires/);
+  });
+});
+
+test("what is wrong with the HOST is said before what is unknown about its loader", async () => {
+  // An unpublished or pending host is the buyer's / ActiveView's move whatever the loader looks like.
+  const noLoader = (body: string) => literalOf(body);
+  const cases: [string, RegExp][] = [
+    [noLoader(template()), /^chat_not_live — .*no chat key/],
+    [noLoader(worker("")), /^chat_not_monetized — .*Pending monetization/],
+    [noLoader(worker(SCRIPT, true)), /^chat_not_monetized — ads are switched off/],
+  ];
+  for (const [body, want] of cases) {
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async () => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 400, String(want));
+      assert.match(!r.ok ? r.error : "", want);
+    });
+  }
+});
+
+test("an ad script that is NAMED but not served (AV's CDN answers 403 / 404) is refused: the chat loads no ad code", async () => {
+  // The CDN's own word for a file it does not have (read live 29.09: 403, application/xml, Server: AmazonS3).
+  for (const page of [
+    { status: 403, body: NO_SCRIPT, type: "application/xml" },
+    { status: 404, body: NO_SCRIPT, type: "application/xml" },
+    { status: 403, body: NO_SCRIPT, server: "AmazonS3" },
+  ] as Page[]) {
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [SCRIPT_URL]: page }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 400, JSON.stringify(page));
+      assert.match(!r.ok ? r.error : "", /^chat_not_monetized — chat\.thecadrion\.com names the ad script "chatthecadrion" but .*not published/, JSON.stringify(page));
       assert.deepEqual(pageCalls, [WORKER_URL, SCRIPT_URL], "the chat page is not even fetched");
+    });
+  }
+});
+
+test("a 403 / 404 that is not the CDN's own word for a missing file (a block page, a proxy) is a failed check, not 'not published'", async () => {
+  for (const page of [
+    { status: 403, body: "<html>Request blocked</html>", type: "text/html" },
+    { status: 404, body: "not found", type: "text/plain" },
+    { status: 403, body: "" },
+  ] as Page[]) {
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [SCRIPT_URL]: page }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 502, JSON.stringify(page));
+      assert.match(!r.ok ? r.error : "", /^destination_check_failed — the ad script of chat\.thecadrion\.com could not be checked/, JSON.stringify(page));
+      assert.deepEqual(pageCalls, [WORKER_URL, SCRIPT_URL], JSON.stringify(page));
     });
   }
 });
@@ -612,6 +832,17 @@ test("an ad script name that is not a file name is never turned into a request",
       assert.deepEqual(pageCalls, [WORKER_URL], name);
     });
   }
+});
+
+test("a refusal never carries more of the remote settings than a name's worth", async () => {
+  const long = `bad name ${"x".repeat(50_000)}`;
+  await withStubs({ [HOST]: [GATEWAY] }, { [WORKER_URL]: { status: 200, body: worker(long) }, [BASE]: { status: 200 } }, async () => {
+    const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+    refused(r);
+    assert.equal(!r.ok && r.status, 502);
+    assert.ok(!r.ok && r.error.length < 400, `the error is ${!r.ok ? r.error.length : 0} characters long`);
+    assert.match(!r.ok ? r.error : "", /"bad name x+…"/);
+  });
 });
 
 test("a script name with a dot is a file name (read live: \"chatcuponseamostras.com\")", async () => {
@@ -743,6 +974,19 @@ test("a chat address that answers anything but 200 is refused — a redirect inc
       assert.equal(!r.ok && r.status, 400, JSON.stringify(page));
       assert.match(!r.ok ? r.error : "", new RegExp(`^chat_not_live — https://chat\\.thecadrion\\.com/\\?asst=6a2312cef9f4e11b130fc523 answered ${(page as { status: number }).status}`), JSON.stringify(page));
       assert.deepEqual(pageCalls, [WORKER_URL, SCRIPT_URL, BASE], "nothing past the chat address is requested");
+    });
+  }
+});
+
+test("a chat address that answers with a passing trouble (408 / 429 / 5xx) is a failed check (502), and is asked again next time", async () => {
+  for (const status of [408, 425, 429, 500, 502, 503, 504, 520]) {
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [BASE]: { status, body: "upstream" } }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 502, String(status));
+      assert.match(!r.ok ? r.error : "", new RegExp(`^destination_check_failed — https://chat\\.thecadrion\\.com/\\?asst=6a2312cef9f4e11b130fc523 answered ${status}`), String(status));
+      await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      assert.deepEqual(pageCalls.filter((u) => u === BASE), [BASE, BASE], String(status));
     });
   }
 });
@@ -949,6 +1193,102 @@ test("a refusal drops the READY memory even when an older, overlapping check wro
   }
 });
 
+test("an older check that ENDS after a newer refusal does not bring READY back", async () => {
+  // A launch reads the settings while ads are on and goes on to the script CDN; the card's Retry
+  // reads them after ads were switched off and is refused at once — a refusal needs no CDN round
+  // trip, so it ends first. The launch's CDN answer lands last: it is the OLDER reading.
+  chat._resetAvChatCaches();
+  const d = stubCname({ [HOST]: [GATEWAY] });
+  const real = globalThis.fetch;
+  const gates: { url: string; release: (body: string) => void }[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    const answer = (body: string, type?: string) => {
+      const res = new Response(body, { status: 200, headers: type ? { "content-type": type } : {} });
+      Object.defineProperty(res, "url", { value: url });
+      return res;
+    };
+    if (url === BASE) return answer("<html></html>");
+    return new Promise<Response>((resolve) => gates.push({ url, release: (body) => resolve(answer(body, url === SCRIPT_URL ? "application/javascript" : undefined)) }));
+  }) as typeof fetch;
+  const settle = async () => {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  };
+  try {
+    const launch = chat.resolveAvChat(SHAPE, "thecadrion.com");
+    await settle();
+    gates[0].release(worker(SCRIPT));
+    await settle();
+    assert.deepEqual(gates.map((g) => g.url), [WORKER_URL, SCRIPT_URL], "the launch is waiting for the script CDN");
+
+    const retry = chat.avChatHosts(["thecadrion.com"], true);
+    await settle();
+    assert.equal(gates[2]?.url, WORKER_URL, "the newer check is reading the host");
+    gates[2].release(worker(SCRIPT, true));
+    assert.equal((await retry)[0]?.live, false);
+
+    gates[1].release("/* ad script */");
+    assert.equal((await launch).ok, true, "the launch keeps its own verdict");
+
+    assert.equal((await chat.avChatHosts(["thecadrion.com"]))[0]?.live, false, "the card still shows the newer reading");
+    const next = chat.resolveAvChat(SHAPE, "thecadrion.com");
+    await settle();
+    assert.equal(gates.length, 4, "the next launch reads the host again instead of trusting the older READY");
+    gates[3].release(worker(SCRIPT, true));
+    const r = await next;
+    refused(r);
+    assert.match(!r.ok ? r.error : "", /^chat_not_monetized — ads are switched off/);
+  } finally {
+    globalThis.fetch = real;
+    d.restore();
+  }
+});
+
+test("a refusal takes the READY memory away whatever its age — and is not what the card remembers when a newer check has spoken", async () => {
+  // The launch (started first) and the card's Retry (started second) both read the settings with
+  // ads on; the CDN serves the Retry and, a moment later, no longer serves the launch: the launch's
+  // refusal is the older CHECK and the newer word about the script.
+  chat._resetAvChatCaches();
+  const d = stubCname({ [HOST]: [GATEWAY] });
+  const real = globalThis.fetch;
+  const gates: { url: string; release: (res: Response) => void }[] = [];
+  const asked: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    asked.push(url);
+    if (url === WORKER_URL) return new Response(worker(SCRIPT), { status: 200 });
+    if (url === BASE) return new Response("<html></html>", { status: 200 });
+    return new Promise<Response>((resolve) => gates.push({ url, release: resolve }));
+  }) as typeof fetch;
+  const settle = async () => {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  };
+  const served = () => new Response("/* ad script */", { status: 200, headers: { "content-type": "application/javascript" } });
+  try {
+    const launch = chat.resolveAvChat(SHAPE, "thecadrion.com");
+    await settle();
+    const retry = chat.avChatHosts(["thecadrion.com"], true);
+    await settle();
+    assert.deepEqual(gates.map((g) => g.url), [SCRIPT_URL, SCRIPT_URL], "both checks are waiting for the script CDN");
+    gates[1].release(served());
+    assert.equal((await retry)[0]?.live, true);
+    gates[0].release(new Response(NO_SCRIPT, { status: 403, headers: { "content-type": "application/xml" } }));
+    const refusedLaunch = await launch;
+    refused(refusedLaunch);
+    assert.match(!refusedLaunch.ok ? refusedLaunch.error : "", /^chat_not_monetized — .*not published/);
+
+    const before = asked.filter((u) => u === WORKER_URL).length;
+    const card = chat.avChatHosts(["thecadrion.com"]);
+    await settle();
+    assert.equal(asked.filter((u) => u === WORKER_URL).length, before + 1, "the card reads the host again: neither the READY nor the older check's refusal is served from memory");
+    gates[2].release(served());
+    assert.equal((await card)[0]?.live, true);
+  } finally {
+    globalThis.fetch = real;
+    d.restore();
+  }
+});
+
 test("the READY verdict is per host: a pending host is refused after another host resolved", async () => {
   const HOST2 = "c2.thecadrion.com";
   const BASE2 = `https://${HOST2}/?asst=${ID}`;
@@ -1142,5 +1482,55 @@ test("a host the hint remembered as not ready is launchable the moment it is rea
   } finally {
     d.restore();
     pending.restore();
+  }
+});
+
+test("the card's hint remembers a DNS check that FAILED for a minute (every card load would pay its timeouts) — a launch never reads that memory", async () => {
+  chat._resetAvChatCaches();
+  mock.timers.enable({ apis: ["Date"], now: T0 });
+  const d = stubCname({ [HOST]: "ETIMEOUT" });
+  const p = stubPages({ [DOH(HOST)]: "throw" });
+  try {
+    const first = await chat.avChatHosts(["thecadrion.com"]);
+    assert.match(first[0]?.liveReason ?? "", /^destination_check_failed — the DNS lookup of chat\.thecadrion\.com failed/);
+    assert.deepEqual(await chat.avChatHosts(["thecadrion.com"]), first);
+    assert.deepEqual(d.calls, [HOST], "the second card load answers from the hint's memory");
+
+    const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+    refused(r);
+    assert.equal(!r.ok && r.status, 502);
+    assert.deepEqual(d.calls, [HOST, HOST], "the launch asked DNS itself");
+
+    await chat.avChatHosts(["thecadrion.com"], true);
+    assert.deepEqual(d.calls, [HOST, HOST, HOST], "the card's Retry asks again");
+
+    mock.timers.tick(60_000 + 1);
+    await chat.avChatHosts(["thecadrion.com"]);
+    assert.deepEqual(d.calls, [HOST, HOST, HOST, HOST], "after a minute the hint asks again");
+  } finally {
+    p.restore();
+    d.restore();
+    mock.timers.reset();
+  }
+});
+
+test("a DNS check that failed for the card is forgotten the moment a check of the host succeeds", async () => {
+  chat._resetAvChatCaches();
+  const down = stubCname({ [HOST]: "ETIMEOUT" });
+  const noDoh = stubPages({ [DOH(HOST)]: "throw" });
+  try {
+    assert.equal((await chat.avChatHosts(["thecadrion.com"]))[0]?.live, false);
+  } finally {
+    down.restore();
+    noDoh.restore();
+  }
+  const up = stubCname({ [HOST]: [GATEWAY] });
+  const ready = stubPages(READY);
+  try {
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+    assert.deepEqual(await chat.avChatHosts(["thecadrion.com"]), [{ host: HOST, site: "thecadrion.com", live: true }], "the card follows the launch's fresher word");
+  } finally {
+    up.restore();
+    ready.restore();
   }
 });

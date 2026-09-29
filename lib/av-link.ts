@@ -52,14 +52,18 @@ const chatIdOf = (raw: unknown): string => {
   const id = String(raw ?? "").trim().toLowerCase();
   return AV_CHAT_ID_RE.test(id) ? id : "";
 };
+/** What is wrong with an address that was meant to be a chat's. */
+const AV_CHAT_URL_INVALID =
+  "chat_url_invalid — a chat's address is https://<chat host>/?asst=<its 24-character id> (copy it from ActiveView → Chat Builder → View your chat)";
 
 /**
  * Normalize a pasted / picked destination to its bare base: https, lower-case host, no userinfo/port,
  * no query/hash (tracking is ours), no trailing slash, and a real path (the home page is not a
  * destination). The one exception is a CHAT: its address is the root plus its id in the query
  * (https://<chat host>/?asst=<id>), so a root that names a well-formed chat id keeps exactly that
- * param. SHAPE only — whether the host is an AV site / redirect domain / chat host and the page is
- * live is the server's call (lib/av-destination).
+ * param; a root whose id is damaged (a character lost in the copy) is refused for the ID — "the home
+ * page" would send the buyer looking for the wrong mistake. SHAPE only — whether the host is an AV
+ * site / redirect domain / chat host and the page is live is the server's call (lib/av-destination).
  */
 export function avDestinationBase(raw: string): AvBase {
   let s = String(raw ?? "").trim();
@@ -78,8 +82,10 @@ export function avDestinationBase(raw: string): AvBase {
   let path = u.pathname.replace(/\/{2,}/g, "/");
   if (path.length > 1) path = path.replace(/\/+$/, "");
   if (!path || path === "/") {
-    const id = chatIdOf(u.searchParams.get("asst"));
+    const asst = u.searchParams.get("asst");
+    const id = chatIdOf(asst);
     if (id) return { ok: true, base: `https://${host}/?asst=${id}`, host, path: "/" };
+    if (asst !== null) return { ok: false, error: AV_CHAT_URL_INVALID };
     return { ok: false, error: "destination_invalid — pick an article (or a redirect path), not the home page" };
   }
   if (!/^\/[A-Za-z0-9._~\-/%]+$/.test(path) || path.length > 300) return { ok: false, error: "destination_invalid — unexpected characters in the path" };
@@ -101,7 +107,7 @@ export function avChatUrl(raw: string): AvChatUrl {
   const id = b.ok ? chatIdOf(b.path === "/" ? new URL(b.base).searchParams.get("asst") : b.path.slice(1)) : "";
   if (b.ok && id) return { ok: true, base: `https://${b.host}/?asst=${id}`, host: b.host, id };
   if (!b.ok && !/home page/.test(b.error)) return { ok: false, error: b.error };
-  return { ok: false, error: "chat_url_invalid — a chat's address is https://<chat host>/?asst=<its 24-character id> (copy it from ActiveView → Chat Builder → View your chat)" };
+  return { ok: false, error: AV_CHAT_URL_INVALID };
 }
 
 export type AvDestinationKind = "article" | "redirect" | "chat";
@@ -134,12 +140,15 @@ export type AvCheckAsked = { value: string; mode: AvDestinationKind; picks: numb
  * A slow answer — a check's verdict, a created redirect path — arrives seconds after the click:
  * may it still set the destination? "drop" once the field is gone (nothing is written, nothing
  * shown); "superseded" once the buyer moved on — they set or cleared a destination, something else
- * set one (copy settings), or they went to another tab: theirs stands and the answer is only
- * REPORTED in the box that asked; "apply" when the field is as it was.
+ * set one (copy settings), or they OPENED another tab: theirs stands and the answer is only
+ * REPORTED in the box that asked; "apply" when the field is as it was. A tab that changed by itself
+ * (`pinned` false: the catalog landed and the stored destination's kind was re-read) is no move of
+ * the buyer.
  */
-export function avCheckOutcome(asked: AvCheckAsked, now: AvCheckAsked & { mounted: boolean }): "apply" | "superseded" | "drop" {
+export function avCheckOutcome(asked: AvCheckAsked, now: AvCheckAsked & { mounted: boolean; pinned: boolean }): "apply" | "superseded" | "drop" {
   if (!now.mounted) return "drop";
-  return now.value === asked.value && now.picks === asked.picks && now.mode === asked.mode ? "apply" : "superseded";
+  if (now.value !== asked.value || now.picks !== asked.picks) return "superseded";
+  return now.mode !== asked.mode && now.pinned ? "superseded" : "apply";
 }
 
 /** A tab the buyer opened by hand, and the destination it was opened for. */
@@ -161,6 +170,21 @@ export function avFieldTab(pin: AvTabPin, value: string, kind: AvDestinationKind
  */
 export function avPinAfterPick(value: string, mode: AvDestinationKind): AvTabPin {
   return value ? null : { forValue: "", mode };
+}
+
+/** A redirect path's target as the card names it: its weight and the target's last path segment. A
+ *  CHAT is named as one — its address is the root of its host, which alone would hide what it is. */
+export function avMappingLabel(m: { url: string; percentage: number }): string {
+  const chat = avChatUrl(m.url);
+  if (chat.ok) return `${m.percentage}% chat ${chat.id.slice(0, 6)}…${chat.id.slice(-4)}`;
+  let seg = "";
+  try {
+    const u = new URL(m.url);
+    seg = u.pathname.split("/").filter(Boolean).pop() || u.hostname;
+  } catch {
+    seg = m.url;
+  }
+  return `${m.percentage}% ${seg}`;
 }
 
 /**

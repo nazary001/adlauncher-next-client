@@ -15,7 +15,10 @@
 //     script the settings name, off AV's script CDN. AV assigns and publishes that script by hand
 //     after its review ("Pending monetization" until then) — hosts were seen with no script, with
 //     the template's placeholder, and with a name whose file the CDN does not have. Each of those
-//     shows no ads: every visitor bought for it earns nothing, so the launch is refused.
+//     shows no ads: every visitor bought for it earns nothing, so the launch is refused. The
+//     settings are vouched for only while the REST of the file is the loader they are read for
+//     (it loads the ad script the settings name and leaves them as they are): Chat Builder is a
+//     beta and its loader has changed before — a form the launcher does not know is a failed check.
 // What a request can NOT prove is the chat itself: the gateway serves one static shell, so ANY
 // well-formed id answers 200. The id is the buyer's to copy from Chat Builder.
 //
@@ -29,8 +32,22 @@ const UA = "Mozilla/5.0 (compatible; adlauncher-av/1.0)";
 const DEFAULT_GATEWAYS = ["assistant-quiz-infrastructure-gateway.activeview.app"];
 /** Where every chat host's loader takes its ad script from (`${base}/${script}.js`, nothing encoded). */
 const DEFAULT_SCRIPT_CDN = "https://scr.actview.net";
-/** What the loader's validateSettings wants before the page starts — the ad script included. */
-const REQUIRED_SETTINGS = ["key", "terms", "theme", "config", "botNames"] as const;
+/** What a loader's validateSettings wants before the page starts, where the loader does not list it
+ *  itself (every loader read live 29.09 that lists its parts lists these). */
+const REQUIRED_SETTINGS: readonly string[] = ["key", "terms", "theme", "config", "botNames"];
+/** How every loader read live takes its ads: the file the SETTINGS name, nothing else. */
+const LOADS_FROM_SETTINGS = /\bloadRemoteScript\s*\(\s*\{[^{}]*?\bfileName\s*:\s*assistantQuizSettings\s*(?:\?\.|\.)\s*script\b(?:\s*\??\.\s*trim\s*\(\s*\))?(?=\s*[,}])/;
+/** Code that would make the settings something else than the literal says. */
+const CHANGES_SETTINGS = [
+  /\bassistantQuizSettings\b\s*(?:(?:\?\.|\.)\s*[\w$]+\s*|\[[^\]]*\]\s*)*(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])/,
+  /\bassistantQuizSettings\b\s*(?:(?:\?\.|\.)\s*[\w$]+\s*|\[[^\]]*\]\s*)*(?:\+\+|--)/,
+  /\bdelete\s+assistantQuizSettings\b/,
+  /\bObject\s*\.\s*(?:assign|defineProperty|defineProperties|setPrototypeOf)\s*\(\s*assistantQuizSettings\b/,
+];
+const REQUIRED_LIST = /\brequiredFields\s*=\s*\[/;
+const VALIDATES = /\b(?:validateSettings|requiredFields)\b/;
+/** The longest script name a refusal repeats (a name is remote content). */
+const NAME_ECHO_MAX = 80;
 /** The template's default ad script: a name no host's own script carries (on the CDN it is another
  *  publisher's file). */
 const PLACEHOLDER_SCRIPTS = new Set(["localhost"]);
@@ -64,7 +81,12 @@ type Cached<T> = { at: number; value: T };
 const hostCache = new Map<string, Cached<{ chat: true; gateway: string }>>();
 const readyCache = new Map<string, number>();
 const hintCache = new Map<string, Cached<Ready>>();
+/** The card's memory of a DNS check that could not be made (host → its reason). */
+const dnsHintCache = new Map<string, Cached<string>>();
 const pageOkCache = new Map<string, number>();
+/** The newest probe STARTED per host, while it is in flight. */
+const probing = new Map<string, number>();
+let probes = 0;
 
 const normHost = (h: unknown): string => String(h ?? "").trim().toLowerCase().replace(/\.+$/, "");
 
@@ -200,6 +222,7 @@ export async function avChatHost(host: string, force = false): Promise<AvChatHos
   } catch (e) {
     return { chat: false, failed: true, reason: `the DNS lookup of ${h} failed (${errText(e)})` };
   }
+  dnsHintCache.delete(h); // DNS answered: what the card remembered of a failed check is old news
   const gateway = gateways().find((g) => cnames.includes(g));
   if (!gateway) return { chat: false, failed: false };
   const verdict = { chat: true as const, gateway };
@@ -307,6 +330,65 @@ function settingsStart(js: string): number {
   return -1;
 }
 
+/** `src` with every comment and every quoted text blanked out — same length, same line breaks, so an
+ *  index into what is left (the code) is an index into `src`. */
+function codeOnly(src: string): string {
+  const blank = (from: number, to: number) => src.slice(from, to).replace(/[^\n]/g, " ");
+  let out = "";
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === "/" && (src[i + 1] === "/" || src[i + 1] === "*")) {
+      let end: number;
+      if (src[i + 1] === "/") {
+        const nl = src.indexOf("\n", i);
+        end = nl < 0 ? src.length : nl;
+      } else {
+        const close = src.indexOf("*/", i + 2);
+        end = close < 0 ? src.length : close + 2;
+      }
+      out += blank(i, end);
+      i = end;
+    } else if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      // a quoted text ends with its line at the latest; a template may run over lines
+      while (j < src.length && src[j] !== c && (c === "`" || src[j] !== "\n")) j += src[j] === "\\" ? 2 : 1;
+      const end = Math.min(src.length, j + 1);
+      out += blank(i, end);
+      i = end;
+    } else {
+      out += c;
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/** `known` = the rest of the file is a loader the settings can be vouched for; `required` = the
+ *  parts its page will not start without. */
+type Loader = { known: true; required: readonly string[] } | { known: false; why: string };
+
+/**
+ * What follows the settings literal. The settings say what the page WILL do only under the loader
+ * they were read for: it takes its ads from the file the settings name, it leaves the settings as
+ * the literal set them, and what it requires before it starts can be read (its own list — or none,
+ * the older loaders validate nothing and are judged by the list the newer ones carry).
+ */
+function loaderOf(rest: string): Loader {
+  const code = codeOnly(rest);
+  if (!LOADS_FROM_SETTINGS.test(code)) return { known: false, why: "nothing in it loads the ad script the settings name" };
+  if (CHANGES_SETTINGS.some((re) => re.test(code))) return { known: false, why: "it changes the settings after they are set" };
+  const list = REQUIRED_LIST.exec(code);
+  if (!list) return VALIDATES.test(code) ? { known: false, why: "what its page requires cannot be read" } : { known: true, required: REQUIRED_SETTINGS };
+  try {
+    const parts = readData(rest, list.index + list[0].length - 1).value;
+    if (Array.isArray(parts) && parts.every((p) => typeof p === "string" && p.trim())) return { known: true, required: parts as string[] };
+  } catch {
+    /* not plain data */
+  }
+  return { known: false, why: "what its page requires cannot be read" };
+}
+
 /**
  * A chat host's settings out of its /worker.js: `const assistantQuizSettings = {…};` followed by
  * the loader. The literal is read as DATA, at its own level (a key, a script or a part nested
@@ -315,45 +397,55 @@ function settingsStart(js: string): number {
  * Boolean(config.disable) switches the ads off, and `missing` lists the parts the loader requires
  * and finds falsy — an EMPTY list or object is there. null = not that file, or not plain data.
  */
-function chatSettings(js: string): { key: string; script: string; disable: boolean; missing: string[] } | null {
+function chatSettings(js: string): { key: string; script: string; disable: boolean; loader: Loader; missing: string[] } | null {
   const at = settingsStart(js);
   if (at < 0) return null;
   let settings: Record<string, unknown>;
+  let end: number;
   try {
-    settings = readData(js, at).value as Record<string, unknown>;
+    const read = readData(js, at);
+    settings = read.value as Record<string, unknown>;
+    end = read.end;
   } catch {
     return null;
   }
   const text = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
   const config = settings.config && typeof settings.config === "object" ? (settings.config as Record<string, unknown>) : null;
+  const loader = loaderOf(js.slice(end));
   return {
     key: text(settings.key),
     script: text(settings.script),
     disable: Boolean(config?.disable),
-    missing: REQUIRED_SETTINGS.filter((part) => (part === "key" ? !text(settings.key) : !settings[part])),
+    loader,
+    // the chat key is the launcher's own requirement (asked first, whatever the list says)
+    missing: (loader.known ? loader.required : []).filter((part) => part !== "key" && !settings[part]),
   };
 }
 
 /** Is the ad script the host names actually SERVED by AV's CDN? The address is built exactly as the
- *  host's loader builds it. A file the CDN does not have answers 403 (read live) or 404 — the
- *  buyer's fix; anything else that is not a served script is a check that could not be made (a CDN
- *  outage must not send the buyer to ActiveView about a script that may be fine). */
+ *  host's loader builds it. A file the CDN does not have answers 403 (read live) or 404 in the
+ *  CDN's OWN words (its storage's XML) — the buyer's fix; anything else that is not a served script
+ *  — the same status from a block page or a proxy included — is a check that could not be made (it
+ *  must not send the buyer to ActiveView about a script that may be fine). */
 async function adScriptServed(host: string, script: string): Promise<Ready> {
   if (!SCRIPT_NAME_RE.test(script)) {
-    return { ready: false, failed: true, error: `destination_check_failed — the ad script of ${host} is named ${JSON.stringify(script)}, which is no file name` };
+    const name = script.length > NAME_ECHO_MAX ? `${script.slice(0, NAME_ECHO_MAX)}…` : script;
+    return { ready: false, failed: true, error: `destination_check_failed — the ad script of ${host} is named ${JSON.stringify(name)}, which is no file name` };
   }
   const url = `${scriptCdn()}/${script}.js`;
   let status: number;
   let type: string;
+  let server: string;
   try {
     const res = await get(url, "application/javascript,*/*;q=0.8", SCRIPT_TIMEOUT_MS);
     status = res.status;
     type = res.headers.get("content-type") ?? "";
+    server = res.headers.get("server") ?? "";
     await res.body?.cancel().catch(() => {});
   } catch (e) {
     return { ready: false, failed: true, error: `destination_check_failed — the ad script of ${host} could not be checked (${url}: ${errText(e)})` };
   }
-  if (status === 403 || status === 404) {
+  if ((status === 403 || status === 404) && (/xml/i.test(type) || /amazons3/i.test(server))) {
     return {
       ready: false,
       failed: false,
@@ -412,6 +504,13 @@ async function probeChatHost(host: string): Promise<Ready> {
   if (settings.disable) {
     return { ready: false, failed: false, error: `chat_not_monetized — ads are switched off on ${host} (Chat Builder → the subdomain's ad settings)` };
   }
+  if (!settings.loader.known) {
+    return {
+      ready: false,
+      failed: true,
+      error: `destination_check_failed — the settings file of ${host} is not in a form the launcher knows (${settings.loader.why}), so its ads cannot be vouched for — ActiveView may have changed its chat loader: tell the developer`,
+    };
+  }
   if (settings.missing.length) {
     return {
       ready: false,
@@ -424,21 +523,26 @@ async function probeChatHost(host: string): Promise<Ready> {
 
 /**
  * The launch's gate. Only a READY verdict is remembered (5 min): a host that was just activated,
- * approved or fixed is launchable at once, and a refusal is re-checked every time.
+ * approved or fixed is launchable at once, and a refusal is re-checked every time. When checks of
+ * one host overlap, the memory is written from the reading that STARTED last — whichever ends last,
+ * the one that started earlier read the host earlier — and a refusal takes the READY memory away
+ * whatever its age (the next launch then reads the host itself).
  */
 async function chatHostReady(host: string, force = false): Promise<Ready> {
   const seen = readyCache.get(host);
   if (!force && seen !== undefined && Date.now() - seen < READY_TTL_MS) return { ready: true };
   readyCache.delete(host);
+  const mine = ++probes;
+  probing.set(host, mine);
   const verdict = await probeChatHost(host);
-  if (verdict.ready) {
+  const newest = probing.get(host) === mine;
+  if (newest) probing.delete(host);
+  if (!verdict.ready) {
+    readyCache.delete(host);
+    if (newest) hintCache.set(host, { at: Date.now(), value: verdict });
+  } else if (newest) {
     readyCache.set(host, Date.now());
     hintCache.delete(host);
-  } else {
-    // The refusal is the newest word on the host: a READY an older, overlapping check wrote
-    // meanwhile must not outlive it.
-    readyCache.delete(host);
-    hintCache.set(host, { at: Date.now(), value: verdict });
   }
   return verdict;
 }
@@ -451,6 +555,9 @@ async function chatHostHint(host: string, force = false): Promise<Ready> {
   if (!force && c && Date.now() - c.at < HINT_TTL_MS) return c.value;
   return chatHostReady(host, force);
 }
+
+/** A status that says the server is having a moment, not what the address is. */
+const passing = (status: number): boolean => status === 408 || status === 425 || status === 429 || status >= 500;
 
 /** Does the chat's address answer 200 — itself, not something it redirects to? (Remembered 10 min
  *  once proven, like an article; bounded, since any id answers and ids are the buyer's to type.) */
@@ -466,6 +573,7 @@ async function chatLive(base: string): Promise<{ ok: true } | { ok: false; error
   } catch (e) {
     return { ok: false, error: `destination_check_failed — ${base} did not answer (${errText(e)})` };
   }
+  if (passing(status)) return { ok: false, error: `destination_check_failed — ${base} answered ${status}: try again in a moment` };
   if (status !== 200) return { ok: false, error: `chat_not_live — ${base} answered ${status}` };
   if (pageOkCache.size >= PAGE_OK_MAX) pageOkCache.delete(pageOkCache.keys().next().value as string);
   pageOkCache.set(base, Date.now());
@@ -510,14 +618,23 @@ export async function resolveAvChat(shape: AvChatShape, site: string): Promise<A
  * Only the conventional `chat.<site>` is probed (the API lists none and a subdomain cannot be
  * enumerated) — a chat on any other subdomain still resolves when its URL is pasted. A site with no
  * chat host is left out; a host that could not be CHECKED is listed as such, never dropped (that
- * would read as "there is none"). `force` re-reads past every cache (the card's Retry).
+ * would read as "there is none") — and that is remembered for a minute, here only: the catalog is
+ * read on every card load and a DNS that does not answer costs its whole timeouts, while a launch
+ * always asks DNS itself. `force` re-reads past every cache (the card's Retry).
  */
 export async function avChatHosts(sites: string[], force = false): Promise<AvChatHostOption[]> {
   const probed = await Promise.all(
     [...new Set(sites.map(normHost).filter(Boolean))].map(async (site): Promise<AvChatHostOption | null> => {
       const host = `chat.${site}`;
+      const unchecked = dnsHintCache.get(host);
+      if (!force && unchecked && Date.now() - unchecked.at < HINT_TTL_MS) return { host, site, live: false, liveReason: unchecked.value };
       const verdict = await avChatHost(host, force);
-      if (!verdict.chat) return verdict.failed ? { host, site, live: false, liveReason: `destination_check_failed — ${verdict.reason}` } : null;
+      if (!verdict.chat) {
+        if (!verdict.failed) return null;
+        const liveReason = `destination_check_failed — ${verdict.reason}`;
+        dnsHintCache.set(host, { at: Date.now(), value: liveReason });
+        return { host, site, live: false, liveReason };
+      }
       const ready = await chatHostHint(host, force);
       return { host, site, live: ready.ready, ...(ready.ready ? {} : { liveReason: ready.error }) };
     }),
@@ -530,5 +647,7 @@ export function _resetAvChatCaches(): void {
   hostCache.clear();
   readyCache.clear();
   hintCache.clear();
+  dnsHintCache.clear();
   pageOkCache.clear();
+  probing.clear();
 }

@@ -17,6 +17,7 @@ import {
   avKeysUploadFiles,
   avLink,
   avLinkSegments,
+  avMappingLabel,
   avPinAfterPick,
   avRegisteredCount,
   swapUtmCampaign,
@@ -157,17 +158,28 @@ test("destination base keeps a chat's address (root + its id) and nothing else o
   assert.deepEqual(avDestinationBase(avLink(CHAT, "av015")), { ok: true, base: CHAT, host: "chat.thecadrion.com", path: "/" }, "a launched chat link reads back as its base");
 });
 
-test("a root without a well-formed chat id stays refused as the home page", () => {
+test("a root that names no chat id is refused as the home page", () => {
+  for (const raw of ["https://chat.thecadrion.com/", "https://chat.thecadrion.com/?utm_campaign=av001", "https://chat.thecadrion.com/?ASST=6a2312cef9f4e11b130fc523"]) {
+    const r = avDestinationBase(raw);
+    assert.equal(r.ok, false, raw);
+    assert.match(!r.ok ? r.error : "", /^destination_invalid — .*home page/, raw);
+  }
+});
+
+test("a root whose chat id is damaged is refused for the ID, not as the home page — on every tab, launch and clone", () => {
   for (const raw of [
-    "https://chat.thecadrion.com/",
     "https://chat.thecadrion.com/?asst=",
     "https://chat.thecadrion.com/?asst=6a2312cef9f4e11b130fc52",
     "https://chat.thecadrion.com/?asst=6a2312cef9f4e11b130fc5233",
     "https://chat.thecadrion.com/?asst=6a2312cef9f4e11b130fc52g",
     "https://chat.thecadrion.com/?asst=../../etc/passwd",
-    "https://chat.thecadrion.com/?utm_campaign=av001",
+    "https://chat.thecadrion.com/?utm_source=facebook&asst=nothex&utm_campaign=av001",
   ]) {
-    assert.equal(avDestinationBase(raw).ok, false, raw);
+    const r = avDestinationBase(raw);
+    assert.equal(r.ok, false, raw);
+    assert.match(!r.ok ? r.error : "", /^chat_url_invalid — .*24-character id/, raw);
+    const c = avChatUrl(raw);
+    assert.equal(!c.ok && c.error, !r.ok && r.error, "the chat tab says the same");
   }
 });
 
@@ -261,29 +273,39 @@ test("destination kind falls back to article for anything it cannot place", () =
 
 const ASKED = { value: "https://thecadrion.com/a", mode: "chat" as const, picks: 3 };
 
+/** The field now: there, and on a tab the destination itself chose (none opened by hand). */
+const THERE = { mounted: true, pinned: false };
+
 test("a slow answer is applied when the field is as it was when it was asked for", () => {
-  assert.equal(avCheckOutcome(ASKED, { ...ASKED, mounted: true }), "apply");
+  assert.equal(avCheckOutcome(ASKED, { ...ASKED, ...THERE }), "apply");
+  assert.equal(avCheckOutcome(ASKED, { ...ASKED, mounted: true, pinned: true }), "apply", "on a tab the buyer opened and stayed on");
 });
 
 test("a slow answer writes nothing once the field is gone", () => {
-  assert.equal(avCheckOutcome(ASKED, { ...ASKED, mounted: false }), "drop");
-  assert.equal(avCheckOutcome(ASKED, { value: "https://thecadrion.com/other", mode: "article", picks: 9, mounted: false }), "drop");
+  assert.equal(avCheckOutcome(ASKED, { ...ASKED, mounted: false, pinned: false }), "drop");
+  assert.equal(avCheckOutcome(ASKED, { value: "https://thecadrion.com/other", mode: "article", picks: 9, mounted: false, pinned: true }), "drop");
 });
 
 test("a destination picked while the answer was on its way stands: the answer is not applied", () => {
-  assert.equal(avCheckOutcome({ value: "", mode: "chat", picks: 0 }, { value: "https://thecadrion.com/picked", mode: "chat", picks: 1, mounted: true }), "superseded");
+  assert.equal(avCheckOutcome({ value: "", mode: "chat", picks: 0 }, { value: "https://thecadrion.com/picked", mode: "chat", picks: 1, ...THERE }), "superseded");
 });
 
 test("a pick that was made and undone meanwhile still counts: the value is the same, the answer is not applied", () => {
-  assert.equal(avCheckOutcome(ASKED, { ...ASKED, picks: 5, mounted: true }), "superseded");
+  assert.equal(avCheckOutcome(ASKED, { ...ASKED, picks: 5, ...THERE }), "superseded");
 });
 
 test("a destination changed from OUTSIDE the field (copy settings) supersedes the answer too", () => {
-  assert.equal(avCheckOutcome(ASKED, { ...ASKED, value: "https://thecadrion.com/copied", mounted: true }), "superseded");
+  assert.equal(avCheckOutcome(ASKED, { ...ASKED, value: "https://thecadrion.com/copied", ...THERE }), "superseded");
 });
 
-test("a buyer who moved to another tab moved on: the answer is not applied behind their back", () => {
-  assert.equal(avCheckOutcome(ASKED, { ...ASKED, mode: "redirect", mounted: true }), "superseded");
+test("a buyer who opened another tab moved on: the answer is not applied behind their back", () => {
+  assert.equal(avCheckOutcome(ASKED, { ...ASKED, mode: "redirect", mounted: true, pinned: true }), "superseded");
+});
+
+test("a tab that changed BY ITSELF is no move of the buyer: the answer is applied", () => {
+  // The catalog landed while the check ran and the stored destination's kind was re-read
+  // (a path on a subdomain: "article" until the sites are known, "redirect" after).
+  assert.equal(avCheckOutcome({ ...ASKED, mode: "article" }, { ...ASKED, mode: "redirect", ...THERE }), "apply");
 });
 
 // ---------- which tab the Destination field shows ----------
@@ -314,4 +336,18 @@ test("a destination set by hand shows on its own tab; one CLEARED by hand keeps 
   assert.deepEqual(avPinAfterPick("", "chat"), { forValue: "", mode: "chat" });
   // …which is what keeps a half-filled form on the tab: the cleared field reads "redirect", not "article"
   assert.equal(avFieldTab(avPinAfterPick("", "redirect"), "", "article"), "redirect");
+});
+
+// ---------- a redirect path's targets, as the card names them ----------
+
+test("a redirect path's target reads as its weight and its last path segment", () => {
+  assert.equal(avMappingLabel({ url: "https://thecadrion.com/forklift-certification-us-en", percentage: 100 }), "100% forklift-certification-us-en");
+  assert.equal(avMappingLabel({ url: "https://thecadrion.com/jobs/forklift/", percentage: 60 }), "60% forklift");
+  assert.equal(avMappingLabel({ url: "https://thecadrion.com/", percentage: 10 }), "10% thecadrion.com");
+  assert.equal(avMappingLabel({ url: "not a url", percentage: 5 }), "5% not a url");
+});
+
+test("a target that is a CHAT reads as a chat — its address is the root, so the host alone would hide it", () => {
+  assert.equal(avMappingLabel({ url: A_CHAT, percentage: 40 }), "40% chat 6a2312…c523");
+  assert.equal(avMappingLabel({ url: "https://chat.thecadrion.com/6a2312cef9f4e11b130fc523/?utm_source=x", percentage: 40 }), "40% chat 6a2312…c523");
 });

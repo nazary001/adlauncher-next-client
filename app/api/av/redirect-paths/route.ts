@@ -3,9 +3,12 @@ import { sessionFromCookieHeader } from "@/lib/session";
 import { avRailEnabled } from "@/lib/av-launch";
 import { AvApiError, avApiConfigured, avCreateRedirectPath, avPutMappings } from "@/lib/av-api";
 import { AV_PATH_RE, avRedirectCatalog, avSites, invalidateAvRedirects, resolveAvDestination } from "@/lib/av-destination";
+import { avChatUrl } from "@/lib/av-link";
 
 export const runtime = "nodejs";
-export const maxDuration = 30;
+// The target goes through the destination resolver, whose slowest verdict (a subdomain that has to
+// be asked whether it is a chat host) is bounded by 29 s on top of the ActiveView API calls.
+export const maxDuration = 60;
 
 const bad = (error: string, status = 400) => NextResponse.json({ ok: false, error }, { status });
 
@@ -52,6 +55,8 @@ export async function POST(req: Request) {
   if (!AV_PATH_RE.test(path)) {
     return bad("path_invalid — a redirect path is lower-case letters, digits and dashes (2–60 chars), no leading slash");
   }
+  // A chat is never a target here — said by its address alone, before its host is asked anything.
+  if (avChatUrl(targetUrl).ok) return bad("target_invalid — the redirect target must be an article, not a chat");
 
   // The domain must be one of OUR redirect domains (a domain of a site this API key reaches) and it
   // must be LIVE — a path on a domain whose activation is unfinished would never route.
