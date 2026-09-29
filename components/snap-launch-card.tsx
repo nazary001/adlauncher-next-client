@@ -5,9 +5,10 @@
 // Engagement as before, or Sales · goal · bidding · bid · budget · start paused) · CREATIVES (ANY number of vertical videos/images, ≤32 MB each — every
 // file becomes its own ad inside the campaign's one ad squad · headline ≤34 · brand ≤32 · CTA) ·
 // TARGETING (countries + presets · min age · devices — Android only by default) · LANDING (the
-// PASTED landing, as on Facebook — the partner's quiz/captcha pages on fast-flow-like domains; the
+// PASTED landing, as on Facebook — the partner's quiz/captcha pages on fast-flow-like domains; owner
+// ask 22.09 — or one click on a DIRECT article of the partner's 16.09 brief, owner ask 29.09; the
 // card appends only Snap's tags utm_source=stone&utm_campaign=<key>, shown as the final link with
-// the NEXT free key highlighted; owner ask 22.09) · COPIES
+// the NEXT free key highlighted) · COPIES
 // (N campaigns = N keys). Every gate is
 // delegated to the SAME validator the server runs (snapLaunchWire) so the readiness dot can never
 // disagree with the route's refusal. Files stay session object URLs here and ride Vercel Blob at
@@ -39,9 +40,11 @@ import {
   SNAP_DEFAULT_OBJECTIVE,
   SNAP_OPTIMIZATION_GOALS,
   SNAP_DEFAULT_GOAL,
+  SNAP_DIRECT_LANDINGS,
   snapBidKind,
   snapCampaignName,
   snapCurrencySymbol,
+  snapDirectLanding,
   snapGoalNeedsPixel,
   snapLandingBase,
   snapLandingSegments,
@@ -372,6 +375,7 @@ export function SnapLaunchCard({
   const segments = landingBase ? snapLandingSegments(landingBase, firstKey) : [];
   const stripped = snapLandingBase(card.landingUrl)?.strippedQuery ?? false;
   const niche = snapNicheFromLanding(card.landingUrl) || "Custom";
+  const direct = snapDirectLanding(card.landingUrl);
   const namePreview = snapCampaignName({ ddmm: todaySaoPauloDotDDMM(), niche, geoLabel: card.geo.join("+"), key: firstKey || "glo-snp_???", user: user?.username ?? "", tail: card.suffix });
 
   const copyLink = () => {
@@ -574,6 +578,17 @@ export function SnapLaunchCard({
           {/* ---- LANDING ---- */}
           <section className="flex flex-col gap-2">
             <span className={micro}>Landing</span>
+            <div className="flex flex-wrap items-center gap-1">
+              <span className="mr-1 select-none font-mono text-[10px] uppercase tracking-[0.14em] text-faint">Direct</span>
+              {SNAP_DIRECT_LANDINGS.map((l) => {
+                const on = direct?.id === l.id;
+                return (
+                  <button key={l.id} type="button" onClick={() => patch({ landingUrl: l.url })} aria-pressed={on} title={l.url} className={"rounded-md border px-2 py-1 text-[11px] font-medium transition-all duration-150 active:scale-95 " + (on ? "border-[#FFFC00]/50 bg-[#FFFC00]/10 text-[#f3f0a3]" : "border-line bg-surface2 text-dim hover:border-line2 hover:text-ink")}>
+                    {l.niche}
+                  </button>
+                );
+              })}
+            </div>
             <div className="relative">
               <GlobeIcon className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-faint" />
               <input
@@ -586,7 +601,9 @@ export function SnapLaunchCard({
               />
             </div>
             <p className="text-[10px] leading-snug text-faint">
-              Paste the bare landing, as on Facebook — the partner&apos;s quiz / captcha page. Only Snap&apos;s tags are appended: utm_source=stone and the campaign&apos;s own key.
+              {direct
+                ? `Direct article — the partner's ${direct.niche} page (brief 16.09), no quiz / captcha hop. Only Snap's tags are appended: utm_source=stone and the campaign's own key.`
+                : "Paste the bare landing, as on Facebook — the partner's quiz / captcha page — or pick a direct article above. Only Snap's tags are appended: utm_source=stone and the campaign's own key."}
             </p>
             {segments.length ? (
               <div className="overflow-hidden rounded-lg border border-line bg-surface2/50">

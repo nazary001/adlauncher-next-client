@@ -36,10 +36,19 @@ export function snapKeyPool(): string[] {
 
 // ---------- partner landings ----------
 
-// The landing is the buyer's PASTED URL, nothing else (owner rule 22.09: the two direct partner
-// pages of the 16.09 brief — Digital marketing / Cars on azmvhs.com — were a test and are gone; the
-// partner's quiz/captcha pages on fast-flow-like domains break Snapchat's in-app browser, "as on
-// Facebook"). The card appends only Snap's tags.
+// The landing is the buyer's PASTED URL — the partner's quiz/captcha pages on fast-flow-like domains
+// break Snapchat's in-app browser, "as on Facebook" (owner rule 22.09) — or one of the partner's two
+// DIRECT articles of the 16.09 brief, back as one-click picks (owner ask 29.09: "верни по директу
+// запуски на снеп чат — те 2 статьи, что они нам изначально давали; то, что есть, оставляем").
+// Either way the card appends only Snap's tags.
+
+export type SnapDirectLanding = { id: "dmi" | "cars"; niche: string; url: string };
+
+/** The partner's direct articles (brief 16.09). The niche names the campaigns as it did then. */
+export const SNAP_DIRECT_LANDINGS: readonly SnapDirectLanding[] = [
+  { id: "dmi", niche: "Digital marketing", url: "https://azmvhs.com/v/dmi-online-marketing-course/" },
+  { id: "cars", niche: "Cars", url: "https://azmvhs.com/v/auto-financing-by-ford/" },
+];
 
 /**
  * The landing as the wire takes it: https only, a real hostname, and any pasted query/hash
@@ -63,6 +72,12 @@ export function snapLandingBase(raw: string): { base: string; strippedQuery: boo
   }
 }
 
+/** The direct article a landing points at (any pasted query ignored), null for every other page. */
+export function snapDirectLanding(raw: string): SnapDirectLanding | null {
+  const b = snapLandingBase(raw);
+  return b ? (SNAP_DIRECT_LANDINGS.find((l) => l.url === b.base) ?? null) : null;
+}
+
 /** Path segments that are the partner's gate/route words, not the niche: `ht`, `htai`, `v`, `r`,
  *  `captcha-1`, `age-gate`, `quiz…`, a language code (`en`, `pt-br`). */
 const LANDING_GATE_SEG = /^(?:[a-z]{1,2}|htai|[a-z]{2}-[a-z]{2}|\d+|captcha(?:-\w+)?|age-gate|quiz(?:-\w+)?|gate(?:-\w+)?)$/i;
@@ -74,11 +89,13 @@ export const SNAP_NICHE_MAX = 40;
  * pages read live 22.09: `/ht/age-gate/digital-marketing/en/` → "Digital marketing",
  * `/ht/captcha-1/cars/en/` → "Cars", `/htai/captcha-1/simparic-trio-what-…/` → "Simparic trio
  * what …". A path with no such segment falls back to the domain's second-level word ("Fast-flow");
- * not a URL at all → "".
+ * not a URL at all → "". A direct article names its own niche ("Digital marketing", "Cars").
  */
 export function snapNicheFromLanding(landing: string): string {
   const b = snapLandingBase(landing);
   if (!b) return "";
+  const direct = snapDirectLanding(b.base);
+  if (direct) return direct.niche;
   const u = new URL(b.base);
   const seg = u.pathname.split("/").map((s) => decodeURIComponent(s).trim()).filter(Boolean).find((s) => !LANDING_GATE_SEG.test(s));
   const raw = seg ?? u.hostname.replace(/^www\./i, "").split(".").slice(-2, -1)[0] ?? "";
@@ -404,7 +421,7 @@ export type SnapLaunchShotIn = {
   minAge: string;
   /** "ANDROID" | "iOS" | "ALL"; absent = SNAP_DEFAULT_DEVICE_OS (Android only, partner ask 21.09). */
   deviceOs?: string;
-  /** The pasted landing (https; any pasted query is dropped, Snap's own tags are appended). */
+  /** The pasted landing or a direct article's URL (https; any pasted query is dropped, Snap's own tags are appended). */
   landingUrl: string;
   /** The key the board previewed; the pump claims it or the next free one. */
   desiredKey?: string;
@@ -472,7 +489,7 @@ export function snapAdUnitName(name: string, index: number, total: number): stri
   return `${name.slice(0, SNAP_NAME_MAX - tag.length).trimEnd()}${tag}`;
 }
 
-/** Niche word for names/rows: read from the pasted landing ("Custom" when it yields nothing). */
+/** Niche word for names/rows: the direct article's niche or read from the pasted landing ("Custom" when it yields nothing). */
 export function snapShotNiche(shot: SnapLaunchShotIn): string {
   return snapNicheFromLanding(String(shot.landingUrl ?? "")) || "Custom";
 }
@@ -533,7 +550,7 @@ export function snapLaunchWire(
   const deviceOs = snapDeviceOs(shot.deviceOs);
   if (!deviceOs) return { refusal: `Devices must be one of ${SNAP_DEVICE_OPTIONS.map((o) => o.label).join(" / ")}` };
   const landingIn = snapLandingBase(String(shot.landingUrl ?? ""));
-  if (!landingIn) return { refusal: "Landing must be a pasted https:// address (the partner's quiz page)" };
+  if (!landingIn) return { refusal: "Landing must be a pasted https:// address (the partner's quiz page) or one of the direct articles" };
   const landingBase = landingIn.base;
   const profileId = String(resolved.profileId ?? "").trim();
   if (!profileId) return { refusal: "A Public Profile is required on every Snapchat ad — set SNAP_PROFILE_ID or pick one" };

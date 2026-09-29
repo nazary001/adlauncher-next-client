@@ -30,6 +30,8 @@ import {
   snapMicro,
   snapMoneyText,
   snapNicheFromLanding,
+  snapDirectLanding,
+  SNAP_DIRECT_LANDINGS,
   snapShotTaskId,
   type SnapLaunchShotIn,
   type SnapResolved,
@@ -267,11 +269,29 @@ test("snapNicheFromLanding reads the niche word past the partner's gate/language
     snapNicheFromLanding("https://fast-flow.org/htai/captcha-1/simparic-trio-what-should-dog-owners-ask-their-vet-before-switching-treatments/"),
     "Simparic trio what should dog owners as…", // 40 chars with the ellipsis
   );
-  assert.equal(snapNicheFromLanding("https://azmvhs.com/v/dmi-online-marketing-course/"), "Dmi online marketing course");
+  assert.equal(snapNicheFromLanding("https://azmvhs.com/v/dmi-online-marketing-course/"), "Digital marketing"); // direct article (29.09)
+  assert.equal(snapNicheFromLanding("https://azmvhs.com/v/auto-financing-by-ford/?utm_source=x"), "Cars");
+  assert.equal(snapNicheFromLanding("https://azmvhs.com/v/some-other-article/"), "Some other article"); // not a direct pick → read from the path
   assert.equal(snapNicheFromLanding("https://fast-flow.org/ht/quiz-2/pt-br/"), "Fast flow"); // nothing but gate words → the domain
   assert.equal(snapNicheFromLanding("https://fast-flow.org/"), "Fast flow");
   assert.equal(snapNicheFromLanding("http://fast-flow.org/ht/cars/"), ""); // not https → no landing at all
   assert.equal(snapNicheFromLanding("not a url"), "");
+});
+
+test("the partner's two direct articles are one-click landings on the same wire as a pasted link", () => {
+  assert.deepEqual(SNAP_DIRECT_LANDINGS.map((l) => [l.id, l.niche, l.url]), [
+    ["dmi", "Digital marketing", "https://azmvhs.com/v/dmi-online-marketing-course/"],
+    ["cars", "Cars", "https://azmvhs.com/v/auto-financing-by-ford/"],
+  ]);
+  assert.equal(snapDirectLanding("https://azmvhs.com/v/auto-financing-by-ford/")?.id, "cars");
+  assert.equal(snapDirectLanding("https://azmvhs.com/v/auto-financing-by-ford/?utm_campaign=glo-snp_001")?.id, "cars"); // pasted query ignored
+  assert.equal(snapDirectLanding("https://fast-flow.org/ht/captcha-1/cars/en/"), null);
+  assert.equal(snapDirectLanding("http://azmvhs.com/v/auto-financing-by-ford/"), null);
+  const ex = snapLaunchWire(shot({ landingUrl: SNAP_DIRECT_LANDINGS[0].url }), resolved);
+  if ("refusal" in ex) throw new Error(ex.refusal);
+  assert.equal(ex.niche, "Digital marketing");
+  assert.equal(ex.landingBase, "https://azmvhs.com/v/dmi-online-marketing-course/");
+  assert.equal(ex.wire.ads[0].creative.web_view_properties.url, "https://azmvhs.com/v/dmi-online-marketing-course/?utm_source=stone&utm_campaign=glo-snp_003");
 });
 
 test("refusal matrix names the field and the fix", () => {
