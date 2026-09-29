@@ -697,27 +697,24 @@ export function googleNameHeadPreview(args: { accountName: string; acr: string; 
   return `{HS-____} ${args.accountName || "<account>"} - (${acr}) #ADX [HIGH] - DEMANDA (YTB) - ${geo} - ${offer || "<offer>"} DIRETO`;
 }
 
-// ---------- account allowlist (owner rule 2026-09-14) ----------
+// ---------- launch accounts (owner rules 14.09 → 29.09) ----------
 
 /** The LION MCC our Google launches live on (GLO-HS-NNN accounts, BRL). */
 export const GOOGLE_LAUNCH_MCC = "2678500976";
 
-/** The GLO-HS accounts that are ACTIVE for Google launches — the owner's list of 21.09 (004,
- *  012–017, 019–046; the rest of the GLO-HS book is banned or parked, and the suspended "Ads N"
- *  book, GC-Vis and the pixel-less GC-HS-Lion-BR-N were never offered). An explicit list, not a
- *  name pattern: a new account appears only when the owner names it. One predicate feeds every
- *  picker AND the launch/clone target check, so "not shown" always means "not launchable".
- *  Names compared case-insensitively, trimmed. */
-export const GOOGLE_ACTIVE_LAUNCH_ACCOUNTS: ReadonlySet<string> = new Set(
-  [
-    4, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41,
-    42, 43, 44, 45, 46,
-  ].map((n) => `GLO-HS-${String(n).padStart(3, "0")}`),
-);
+/** A GLO-HS account name, the whole of it (compared trimmed, upper-cased). */
+const GOOGLE_LAUNCH_ACCOUNT_NAME = /^GLO-HS-\d{3,}$/;
 
+/** The book Google launches draw from: EVERY GLO-HS account on LION's MCC (owner ask 29.09: show
+ *  all the live ones LION shows — the hand-kept list of 21.09 hid the 047–095 batch LION added
+ *  after 25.09 and the reinstated 007). Whether one may launch today is LION's `status` word
+ *  (foldGoogleLaunchCatalog offers ENABLED only), so a new account appears and a banned one leaves
+ *  on their own. Never offered: the pixel-less GC-HS-Lion-BR-N on the same MCC and our own MCC's
+ *  books (Ads N, AMZN, GC-Vis). One predicate feeds every picker AND the launch/clone target
+ *  check, so "not shown" always means "not launchable". */
 export function isGoogleLaunchAccount(c: { name: string; mccId?: string }): boolean {
   const name = String(c.name ?? "").trim().toUpperCase();
-  return GOOGLE_ACTIVE_LAUNCH_ACCOUNTS.has(name) && (!c.mccId || c.mccId === GOOGLE_LAUNCH_MCC);
+  return GOOGLE_LAUNCH_ACCOUNT_NAME.test(name) && (!c.mccId || c.mccId === GOOGLE_LAUNCH_MCC);
 }
 
 // ---------- diagnostics ----------

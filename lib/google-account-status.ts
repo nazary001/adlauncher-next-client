@@ -43,7 +43,7 @@ export type GoogleHiddenAccount = { customerId: string; name: string; status: st
 
 /**
  * The launch catalog from the partner's list: `customers` = the accounts the console offers AND
- * accepts as targets (the owner's allowlist, ENABLED on Google), `suspended` = allowlisted accounts
+ * accepts as targets (a GLO-HS launch account, ENABLED on Google), `suspended` = launch accounts
  * hidden because they are not (the boards name them), `dead` = EVERY partner account that is not
  * ENABLED, listed or not (a JURO lands on its source's own account, which no picker ever offered —
  * the routes refuse from this list). Input order is kept.

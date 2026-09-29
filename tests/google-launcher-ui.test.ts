@@ -10,7 +10,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   isGoogleLaunchAccount,
-  GOOGLE_ACTIVE_LAUNCH_ACCOUNTS,
   GOOGLE_AD_GROUPS_MAX,
   GOOGLE_LAUNCH_BID_STRATEGIES,
   GOOGLE_GEO_PRESETS,
@@ -347,26 +346,23 @@ test("googleAdGroupsAtLaunch / googleStructureLabel speak the buyers' campaigns-
   assert.equal(googleStructureLabel([0, 0], false), "1-2-N");
 });
 
-// ---- isGoogleLaunchAccount: the active GLO-HS list (owner list 21.09) --------------------------
+// ---- isGoogleLaunchAccount: every GLO-HS account on LION's MCC (owner ask 29.09) ---------------
 
-test("isGoogleLaunchAccount accepts exactly the owner's active GLO-HS list on the LION MCC, and nothing else", () => {
-  // Owner list 21.09: 004, 012–017, 019–046 — 35 accounts, shown AND accepted, any spelling.
-  const active = [4, ...Array.from({ length: 6 }, (_, i) => 12 + i), ...Array.from({ length: 28 }, (_, i) => 19 + i)].map(
-    (n) => `GLO-HS-${String(n).padStart(3, "0")}`,
-  );
-  assert.equal(active.length, 35);
-  assert.deepEqual([...GOOGLE_ACTIVE_LAUNCH_ACCOUNTS].sort(), [...active].sort());
-  for (const n of active) assert.equal(isGoogleLaunchAccount({ name: n, mccId: "2678500976" }), true, n);
-  assert.equal(isGoogleLaunchAccount({ name: " glo-hs-004 " }), true);
-  // Everything else in the GLO-HS book is out of rotation — hidden AND refused.
-  for (const n of ["GLO-HS-001", "GLO-HS-002", "GLO-HS-003", "GLO-HS-005", "GLO-HS-006", "GLO-HS-007", "GLO-HS-008", "GLO-HS-009", "GLO-HS-010", "GLO-HS-011", "GLO-HS-018"]) {
-    assert.equal(isGoogleLaunchAccount({ name: n, mccId: "2678500976" }), false, n);
+test("isGoogleLaunchAccount takes every GLO-HS account on the LION MCC — no hand-kept list, LION's status gates the rest", () => {
+  // Owner ask 29.09: show every account LION lists as live. The old list (004, 012–046) hid the
+  // 047–095 batch LION added after 25.09 and the reinstated 007; whether one may launch today is
+  // the status fold's call (tests/google-account-status.test.ts), not this predicate's.
+  for (const n of ["GLO-HS-001", "GLO-HS-007", "GLO-HS-025", "GLO-HS-046", "GLO-HS-047", "GLO-HS-095", "GLO-HS-1000"]) {
+    assert.equal(isGoogleLaunchAccount({ name: n, mccId: "2678500976" }), true, n);
   }
-  assert.equal(isGoogleLaunchAccount({ name: " glo-hs-003 " }), false);
-  assert.equal(isGoogleLaunchAccount({ name: "GLO-HS-047", mccId: "2678500976" }), false); // a new account waits for the owner's word
+  assert.equal(isGoogleLaunchAccount({ name: " glo-hs-047 " }), true); // any spelling, MCC not given
+  // Never offered: the pixel-less book on the same MCC, our own MCC's books, a GLO-HS name elsewhere.
   assert.equal(isGoogleLaunchAccount({ name: "GC-HS-Lion-BR-1", mccId: "2678500976" }), false);
   assert.equal(isGoogleLaunchAccount({ name: "Ads 1", mccId: "4904785717" }), false);
   assert.equal(isGoogleLaunchAccount({ name: "GC-Vis-2", mccId: "4904785717" }), false);
   assert.equal(isGoogleLaunchAccount({ name: "GLO-HS-004", mccId: "4904785717" }), false); // right name, wrong MCC
-  assert.equal(isGoogleLaunchAccount({ name: "" }), false);
+  // Only the whole name counts: nothing around it, three digits at least, digits only.
+  for (const n of ["", "GLO-HS-", "GLO-HS-04", "GLO-HS-0A1", "GLO-HS-001 copy", "X GLO-HS-001", "GLO-HS2-001"]) {
+    assert.equal(isGoogleLaunchAccount({ name: n, mccId: "2678500976" }), false, JSON.stringify(n));
+  }
 });

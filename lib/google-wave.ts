@@ -108,7 +108,7 @@ export async function handleGoogleWave(req: Request, mode: GoogleMode): Promise<
   let customers: GwCustomer[];
   let suspendedById: Map<string, GwSuspendedCustomer>;
   try {
-    // The owner's GLO-HS list minus the accounts Google suspended — anything else is refused below.
+    // Every GLO-HS account minus the ones Google suspended — anything else is refused below.
     const catalog = await gwLaunchCatalog();
     customers = catalog.customers;
     suspendedById = new Map(catalog.dead.map((c) => [c.customerId, c])); // every dead account, listed or not
@@ -294,7 +294,7 @@ export async function handleGoogleLaunch(req: Request): Promise<NextResponse> {
   let customers: GwCustomer[];
   let suspendedById: Map<string, GwSuspendedCustomer>;
   try {
-    // The owner's GLO-HS list minus the accounts Google suspended — anything else is refused below.
+    // Every GLO-HS account minus the ones Google suspended — anything else is refused below.
     const catalog = await gwLaunchCatalog();
     customers = catalog.customers;
     suspendedById = new Map(catalog.dead.map((c) => [c.customerId, c])); // every dead account, listed or not

@@ -35,7 +35,7 @@ test("the reason a refusal and the board's note print", () => {
   assert.equal(googleAccountDeadReason({ status: "UNKNOWN", day: "2026-09-25" }), "unknown on Google (LION saw it 25.09)"); // Google's own word stays its own
 });
 
-test("the catalog offers exactly the allowlisted accounts whose status is ENABLED; the rest of the allowlist is `suspended` with a reason", () => {
+test("the catalog offers exactly the launch accounts whose status is ENABLED; the other launch accounts are `suspended` with a reason", () => {
   const all = [cust("1633475800", "GLO-HS-004", "ENABLED"), cust("6586636091", "GLO-HS-012", "SUSPENDED"), cust("1891859142", "GLO-HS-016", "enabled"), cust("1843099770", "GLO-HS-017")];
   const cat = foldGoogleLaunchCatalog(all, DAY, isGoogleLaunchAccount);
   assert.deepEqual(cat.customers.map((c) => c.name), ["GLO-HS-004", "GLO-HS-016"]); // input order kept
@@ -46,20 +46,22 @@ test("the catalog offers exactly the allowlisted accounts whose status is ENABLE
   assert.deepEqual(cat.dead, cat.suspended);
 });
 
-test("the owner's allowlist still gates the pickers; every dead partner account is in `dead` for the routes, listed or not", () => {
+test("every GLO-HS account LION lists as ENABLED is offered — reinstated and brand-new ones too (owner ask 29.09); every dead partner account is in `dead`", () => {
   const all = [
-    cust("8434519748", "GLO-HS-007", "SUSPENDED"), // parked by the owner AND suspended → dead, not "suspended" (never offered)
-    cust("6713307003", "GLO-HS-002", "ENABLED"), // parked by the owner though ENABLED → not offered, not dead
-    cust("1180779413", "Ads 13", "SUSPENDED", "4904785717"), // another MCC → dead only
-    cust("1633475800", "GLO-HS-004", "ENABLED"),
+    cust("8434519748", "GLO-HS-007", "ENABLED"), // reinstated by Google (suspended 17.09) → offered again
+    cust("6479855150", "GLO-HS-047", "ENABLED"), // registered at LION after 25.09 → offered at once, no code change
+    cust("9074716433", "GLO-HS-003", "SUSPENDED"), // → hidden with its reason, and dead
+    cust("4781482043", "GC-HS-Lion-BR-1", "ENABLED"), // the pixel-less book on the same MCC → never offered, not dead
+    cust("1180779413", "Ads 13", "SUSPENDED", "4904785717"), // our own MCC → dead only
+    cust("5529530200", "GC-Vis-2", "ENABLED", "4904785717"), // our own MCC → never offered
   ];
   const cat = foldGoogleLaunchCatalog(all, DAY, isGoogleLaunchAccount);
-  assert.deepEqual(cat.customers.map((c) => c.name), ["GLO-HS-004"]);
-  assert.deepEqual(cat.suspended, []);
-  assert.deepEqual(cat.dead.map((c) => c.name), ["GLO-HS-007", "Ads 13"]);
+  assert.deepEqual(cat.customers.map((c) => c.name), ["GLO-HS-007", "GLO-HS-047"]);
+  assert.deepEqual(cat.suspended.map((c) => c.name), ["GLO-HS-003"]);
+  assert.deepEqual(cat.dead.map((c) => c.name), ["GLO-HS-003", "Ads 13"]);
 });
 
-test("a list that came with no status on any row hides every allowlisted account (blank pickers with reasons, never a launch on a guess)", () => {
+test("a list that came with no status on any row hides every launch account (blank pickers with reasons, never a launch on a guess)", () => {
   const all = [cust("1633475800", "GLO-HS-004"), cust("1891859142", "GLO-HS-016")];
   const cat = foldGoogleLaunchCatalog(all, DAY, isGoogleLaunchAccount);
   assert.deepEqual(cat.customers, []);

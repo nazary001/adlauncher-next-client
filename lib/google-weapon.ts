@@ -171,9 +171,9 @@ export async function gwCustomers(): Promise<GwCustomer[]> {
 export type GwSuspendedCustomer = GoogleHiddenAccount;
 
 /**
- * The launch catalog: the accounts the console OFFERS and ACCEPTS as targets — the owner's GLO-HS
- * list over the partner's full list, minus the ones that are not ENABLED on Google (owner ask
- * 21.09) — and the hidden ones by name, so a board can say what it hid and a route can refuse
+ * The launch catalog: the accounts the console OFFERS and ACCEPTS as targets — every GLO-HS
+ * account of the partner's list (owner ask 29.09), minus the ones that are not ENABLED on Google
+ * (owner ask 21.09) — and the hidden ones by name, so a board can say what it hid and a route can refuse
  * with the reason. One catalog for the pickers AND the wave routes: "not shown" always means
  * "not launchable". The status is the `status` word google-weapon puts on every account of
  * `/customers/` (Google's CustomerStatus, since 25.09) — read live with the list, cached with it

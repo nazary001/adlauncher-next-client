@@ -268,9 +268,24 @@ cmp …`. Sections above that describe the poll/finisher flow are historical.
   (nothing reads or writes it) and may be deleted by hand.
 - **One fold for pickers and routes:** `foldGoogleLaunchCatalog(all, day, isGoogleLaunchAccount)`
   (pure, `tests/google-account-status.test.ts`) → `{ customers, suspended, dead }`; `gwLaunchCatalog`
-  binds the I/O. The owner's allowlist (`GOOGLE_ACTIVE_LAUNCH_ACCOUNTS`) still gates what is offered;
+  binds the I/O. The owner's allowlist (`GOOGLE_ACTIVE_LAUNCH_ACCOUNTS`, removed 29.09) still gated what is offered;
   `dead` names EVERY inactive partner account, so a JURO on an inactive source account is refused.
 - **Board note:** "30 suspended accounts hidden from the pickers — GLO-HS-012, 013, … +20 more"
   (ten names in the line, every name with its reason in the tooltip; "inactive" once a non-SUSPENDED
   word joins). Refusals read as before: "target account GLO-HS-012 is suspended on Google (LION saw
   it 25.09) — pick a live account".
+
+## Addendum 29.09 — the hand-kept account list is gone: every live GLO-HS account is offered
+
+- **Why (live read 29.09):** google-weapon `/customers/` lists 124 accounts; 52 GLO-HS are ENABLED
+  (007, 025, 046–095), yet the pickers offered two (025, 046) — the owner's list of 21.09
+  (004, 012–046) had lost everything else to bans, LION had added 047–095 after 25.09 (3 pixels
+  each, BRL) and Google had reinstated 007; the team was already cloning onto 047–081 outside the
+  console. Owner ask 29.09: "show all the live ones LION shows".
+- **Rule:** `isGoogleLaunchAccount` = a `GLO-HS-NNN` name (whole name, 3+ digits) on LION's MCC
+  2678500976; `GOOGLE_ACTIVE_LAUNCH_ACCOUNTS` is removed. The status fold of 25.09 is unchanged, so
+  only ENABLED accounts are offered and accepted: a new account appears and a banned one leaves
+  with no code change. Still never offered: the pixel-less GC-HS-Lion-BR-N (same MCC) and our own
+  MCC 4904785717 (Ads N, AMZN, GC-Vis).
+- **Board note** now counts every non-ENABLED GLO-HS account (43 on 29.09) instead of the
+  allowlisted ones.
