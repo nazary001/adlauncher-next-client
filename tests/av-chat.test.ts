@@ -206,7 +206,7 @@ function stubPages(pages: Record<string, Page>) {
 const DOH = (host: string) => `https://dns.google/resolve?name=${host}&type=CNAME`;
 const toHost = (calls: string[], host: string) => calls.filter((u) => new URL(u).hostname === host);
 
-const ENV = ["AV_CHAT_GATEWAYS", "AV_CHAT_SCRIPT_CDN"] as const;
+const ENV = ["AV_CHAT_GATEWAYS", "AV_CHAT_SCRIPT_CDN", "AV_CHAT_LOADER_CHECK"] as const;
 
 async function withStubs<T>(
   cnames: Record<string, string[] | string>,
@@ -777,6 +777,235 @@ test("what is wrong with the HOST is said before what is unknown about its loade
   }
 });
 
+// ---------- a loader in the forms a next release may take ----------
+
+/** The fixture's loader with its start-up call replaced. */
+const withCall = (call: string) => worker(SCRIPT).replace(CALL, call);
+const D = "disable: Boolean(assistantQuizSettings?.config?.disable)";
+/** The fixture's loader as the terser Next bundles minifies it (default options). */
+const MINIFIED =
+  'function validateSettings(e){return 0===["key","terms","theme","config","botNames"].filter((t=>!e[t])).length}' +
+  'function loadRemoteScript({disable:e,fileName:t,baseUrl:i="https://scr.actview.net"}){if(e||""===t)return console.log("[AV Assistant] Remote script loading is disabled"),Promise.resolve();' +
+  "const s=document.createElement(\"script\");s.src=`${i}/${t.trim()}.js`,document.head.appendChild(s)}" +
+  "loadRemoteScript({disable:Boolean(assistantQuizSettings?.config?.disable),fileName:assistantQuizSettings.script});";
+
+test("a loader that still loads the ad script the settings name is known in every form that keeps the name as it is", async () => {
+  const forms: [string, string][] = [
+    ["the script read by its quoted name", withCall(`loadRemoteScript({ ${D}, fileName: assistantQuizSettings["script"] });`)],
+    ["the script read by its quoted name, optionally", withCall(`loadRemoteScript({ ${D}, fileName: assistantQuizSettings?.['script'] });`)],
+    ["the property name quoted", withCall(`loadRemoteScript({ ${D}, "fileName": assistantQuizSettings.script });`)],
+    ["an empty fallback (only an empty script falls back — and that one is refused anyway)", withCall(`loadRemoteScript({ ${D}, fileName: assistantQuizSettings.script || "" });`)],
+    ["a nullish fallback", withCall(`loadRemoteScript({ ${D}, fileName: assistantQuizSettings.script ?? "" });`)],
+    ["the name as a string", withCall(`loadRemoteScript({ ${D}, fileName: String(assistantQuizSettings.script) });`)],
+    ["the name in parentheses", withCall(`loadRemoteScript({ ${D}, fileName: (assistantQuizSettings.script) });`)],
+    ["an optional call", withCall(`loadRemoteScript?.({ ${D}, fileName: assistantQuizSettings.script });`)],
+    ["a nested object before the name", withCall(`loadRemoteScript({ retry: { max: 2, delay: 1000 }, ${D}, fileName: assistantQuizSettings.script });`)],
+    ["a callback before the name", withCall(`loadRemoteScript({ onError: (e) => { console.error(e); }, ${D}, fileName: assistantQuizSettings.script });`)],
+    ["the settings handed to the chat app", withCall(`window.assistantQuizSettings = assistantQuizSettings;\nglobalThis . assistantQuizSettings = assistantQuizSettings;\n${CALL}`)],
+    ["a regex with a backtick before the call", withCall(`const ticks = /\`/g;\n${CALL}`)],
+    ["a regex with a quote on the call's line", withCall(`const q = /"/g; ${CALL}`)],
+    ["a regex that holds /* with no comment after it", withCall(`const trailing = /\\/*$/;\n${CALL}`)],
+    ["a regex ending in an escaped slash on the call's line", withCall(`const slash = /\\//; ${CALL}`)],
+    ["a division next to texts", withCall(`const half = "a".length / 2; const q = 'b' / 2;\n${CALL}`)],
+    ["a division right after a text, a slash in a text later on the line", withCall(`const q = "x" / 2, s = "/"; ${CALL}`)],
+    ["minified", `${literalOf(worker(SCRIPT))}${MINIFIED}`],
+  ];
+  for (const [what, body] of forms) {
+    assert.ok(body !== worker(SCRIPT), `the fixture really changed: ${what}`);
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async () => {
+      assert.deepEqual(await chat.resolveAvChat(SHAPE, "thecadrion.com"), { ok: true, kind: "chat", base: BASE, site: "thecadrion.com" }, what);
+    });
+  }
+  // the minified loader still requires its parts
+  const minifiedNoNames = `${literalOf(worker(SCRIPT).replace(/\s*"botNames": \[[^\]]*\],/, ""))}${MINIFIED}`;
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: minifiedNoNames } }, async () => {
+    const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+    refused(r);
+    assert.match(!r.ok ? r.error : "", /^chat_not_monetized — .*incomplete \(no botNames\)/);
+  });
+});
+
+test("a file minified as a whole (booleans written !0 / !1) is read like the one it was made from", async () => {
+  const settings = (disable: string) =>
+    `const assistantQuizSettings={key:"${KEY}",script:"${SCRIPT}",botNames:["Anna","Sophia"],terms:{company:"Thecadrion"},theme:{"chat-background":"#f4f4f5"},config:{disable:${disable},disableContent:!0,quantityResponses:2}};`;
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: `${settings("!1")}${MINIFIED}` } }, async () => {
+    assert.deepEqual(await chat.resolveAvChat(SHAPE, "thecadrion.com"), { ok: true, kind: "chat", base: BASE, site: "thecadrion.com" });
+  });
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: `${settings("!0")}${MINIFIED}` } }, async () => {
+    const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+    refused(r);
+    assert.match(!r.ok ? r.error : "", /^chat_not_monetized — ads are switched off/);
+  });
+});
+
+test("a file whose lines end in a carriage return only is read like any other", async () => {
+  const body = worker(SCRIPT).replace(CALL, `// the start-up\n${CALL}`).replace(/\n/g, "\r");
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async () => {
+    assert.deepEqual(await chat.resolveAvChat(SHAPE, "thecadrion.com"), { ok: true, kind: "chat", base: BASE, site: "thecadrion.com" });
+  });
+});
+
+test("a loader that switches the ads off by itself — whatever the settings say — is not known", async () => {
+  for (const [what, body] of [
+    ["in its call", withCall(`loadRemoteScript({ disable: true, fileName: assistantQuizSettings.script });`)],
+    ["from somewhere else", withCall(`loadRemoteScript({ disable: window.AV_ADS_OFF, fileName: assistantQuizSettings.script });`)],
+    ["as its default, the call naming none", worker(SCRIPT).replace("{ disable, fileName,", "{ disable = true, fileName,").replace(CALL, "loadRemoteScript({ fileName: assistantQuizSettings.script });")],
+  ] as const) {
+    assert.ok(body !== worker(SCRIPT), `the fixture really changed: ${what}`);
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 502, what);
+      assert.match(!r.ok ? r.error : "", /is not in a form the launcher knows \(its ads are switched off by something else than the settings\)/, what);
+      assert.deepEqual(pageCalls, [WORKER_URL], what);
+    });
+  }
+  for (const [what, body] of [
+    ["the settings' switch, as every live loader reads it", worker(SCRIPT)],
+    ["the settings' switch, read plainly", withCall(`loadRemoteScript({ disable: assistantQuizSettings.config.disable, fileName: assistantQuizSettings.script });`)],
+    ["the settings' switch, negated twice", withCall(`loadRemoteScript({ disable: !!assistantQuizSettings?.config?.["disable"], fileName: assistantQuizSettings.script });`)],
+    ["no switch in the call, none by default", worker(SCRIPT).replace(CALL, "loadRemoteScript({ fileName: assistantQuizSettings.script });")],
+    ["a switch that is off", withCall(`loadRemoteScript({ disable: false, fileName: assistantQuizSettings.script });`)],
+  ] as const) {
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async () => {
+      assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true, what);
+    });
+  }
+});
+
+test("a script name with blanks around it cannot be vouched for: whether the page trims them depends on its loader", async () => {
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: worker(` ${SCRIPT} `) } }, async ({ pageCalls }) => {
+    const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+    refused(r);
+    assert.equal(!r.ok && r.status, 502);
+    assert.match(!r.ok ? r.error : "", /^destination_check_failed — the ad script of chat\.thecadrion\.com is named " chatthecadrion " — with blanks around it/);
+    assert.deepEqual(pageCalls, [WORKER_URL]);
+  });
+});
+
+test("a loader that changes the script's NAME on the way is not known: the file checked would not be the file loaded", async () => {
+  for (const value of ["assistantQuizSettings.script.toLowerCase()", "assistantQuizSettings.script + '.min'", "`${assistantQuizSettings.script}-v2`", "prefix + assistantQuizSettings.script"]) {
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: withCall(`loadRemoteScript({ ${D}, fileName: ${value} });`) } }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 502, value);
+      assert.match(!r.ok ? r.error : "", /is not in a form the launcher knows \(nothing in it loads the ad script the settings name\)/, value);
+      assert.deepEqual(pageCalls, [WORKER_URL], value);
+    });
+  }
+});
+
+test("a loader that takes its ad scripts from another CDN than the one checked is not known — until the launcher is told where", async () => {
+  const other = worker(SCRIPT).replace('baseUrl = "https://scr.actview.net"', 'baseUrl = "https://cdn.new-av.example"');
+  const named = withCall(`loadRemoteScript({ ${D}, fileName: assistantQuizSettings.script, baseUrl: "https://cdn.new-av.example" });`);
+  const computed = withCall(`loadRemoteScript({ ${D}, fileName: assistantQuizSettings.script, baseUrl: CDN });`);
+  const nowhere = worker(SCRIPT).replace('baseUrl = "https://scr.actview.net"', "baseUrl = window.AV_CDN");
+  for (const [what, body, why] of [
+    ["its default", other, /its ad scripts come from https:\/\/cdn\.new-av\.example, the launcher checks https:\/\/scr\.actview\.net — AV_CHAT_SCRIPT_CDN/],
+    ["named in the call", named, /its ad scripts come from https:\/\/cdn\.new-av\.example, the launcher checks https:\/\/scr\.actview\.net — AV_CHAT_SCRIPT_CDN/],
+    ["computed in the call", computed, /where it takes its ad scripts from cannot be read/],
+    ["computed as the default", nowhere, /where it takes its ad scripts from cannot be read/],
+  ] as const) {
+    assert.ok(body !== worker(SCRIPT), `the fixture really changed: ${what}`);
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async ({ pageCalls }) => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 502, what);
+      assert.match(!r.ok ? r.error : "", why, what);
+      assert.deepEqual(pageCalls, [WORKER_URL], what);
+    });
+  }
+  const moved = `https://cdn.new-av.example/${SCRIPT}.js`;
+  for (const body of [other, named]) {
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body }, [moved]: SERVED }, async ({ pageCalls }) => {
+      process.env.AV_CHAT_SCRIPT_CDN = "https://cdn.new-av.example";
+      assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+      assert.deepEqual(pageCalls, [WORKER_URL, moved, BASE], "the file checked is the file the page loads");
+    });
+  }
+  // the checked CDN named in the call is the checked CDN
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: withCall(`loadRemoteScript({ ${D}, fileName: assistantQuizSettings.script, baseUrl: "https://scr.actview.net/" });`) } }, async () => {
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+  });
+});
+
+test("a loader with two lists of required parts cannot be judged by either: a failed check (502)", async () => {
+  const LIST = '["key", "terms", "theme", "config", "botNames"]';
+  const themeCheck = `function validateTheme(theme) {\n  const requiredFields = ["chat-background", "chat-text"];\n  return requiredFields.every((f) => Boolean(theme[f]));\n}\n\n`;
+  for (const [what, body] of [
+    ["another list of the same name first", worker(SCRIPT).replace("function validateSettings", `${themeCheck}function validateSettings`)],
+    ["another list of the same name after", worker(SCRIPT).replace(CALL, `${themeCheck}${CALL}`)],
+    ["two inline lists", worker(SCRIPT).replace(`const requiredFields = ${LIST};\n  const missingFields = requiredFields.filter`, `const missingFields = ${LIST}.filter`).replace(CALL, `const themeOk = ["chat-background"].every((f) => f);\n${CALL}`)],
+  ] as const) {
+    assert.ok(body !== worker(SCRIPT), `the fixture really changed: ${what}`);
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async () => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 502, what);
+      assert.match(!r.ok ? r.error : "", /is not in a form the launcher knows \(what its page requires cannot be read\)/, what);
+    });
+  }
+});
+
+test("a list of required parts that is no short list of names cannot be judged, and a refusal names only a few parts", async () => {
+  const LIST = '["key", "terms", "theme", "config", "botNames"]';
+  for (const [what, list] of [
+    ["a name longer than a name", JSON.stringify(["key", "x".repeat(200)])],
+    ["more parts than any page has", JSON.stringify(Array.from({ length: 60 }, (_, i) => `part${i}`))],
+  ] as const) {
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: worker(SCRIPT).replace(LIST, list) } }, async () => {
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.equal(!r.ok && r.status, 502, what);
+      assert.match(!r.ok ? r.error : "", /what its page requires cannot be read/, what);
+      assert.ok(!r.ok && r.error.length < 500, `${what}: the error is ${!r.ok ? r.error.length : 0} characters long`);
+    });
+  }
+  const tenMore = JSON.stringify(["key", "terms", "theme", "config", "botNames", ...Array.from({ length: 10 }, (_, i) => `extra${i}`)]);
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: worker(SCRIPT).replace(LIST, tenMore) } }, async () => {
+    const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+    refused(r);
+    assert.match(!r.ok ? r.error : "", /incomplete \(no extra0, extra1, extra2, extra3, extra4 and 5 more\)/);
+  });
+});
+
+test("a settings file that is mostly noise is judged at once: the reading of the loader is bounded", async () => {
+  for (const noise of ["assistantQuizSettings[ ", "assistantQuizSettings.x", "/[", "'"]) {
+    const body = `${worker(SCRIPT)}\n${noise.repeat(Math.floor(200_000 / noise.length))}`;
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async () => {
+      const started = performance.now();
+      await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      const took = performance.now() - started;
+      assert.ok(took < 1000, `${JSON.stringify(noise)} repeated: ${Math.round(took)} ms`);
+    });
+  }
+});
+
+test("AV_CHAT_LOADER_CHECK=off lets a loader the launcher does not know through — its settings are still judged", async () => {
+  const unknown = withCall(`const options = { ${D}, fileName: assistantQuizSettings.script };\nloadRemoteScript(options);`);
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: unknown } }, async () => {
+    const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+    refused(r);
+    assert.equal(!r.ok && r.status, 502, "known or not, the default is to check");
+  });
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: unknown } }, async () => {
+    process.env.AV_CHAT_LOADER_CHECK = "off";
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+  });
+  for (const [body, want] of [
+    [unknown.replace(/\s*"botNames": \[[^\]]*\],/, ""), /^chat_not_monetized — .*incomplete \(no botNames\)/],
+    [unknown.replace(`"script": "${SCRIPT}"`, '"script": ""'), /^chat_not_monetized — .*Pending monetization/],
+    [unknown.replace('"disable": false', '"disable": true'), /^chat_not_monetized — ads are switched off/],
+  ] as const) {
+    await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body } }, async () => {
+      process.env.AV_CHAT_LOADER_CHECK = "off";
+      const r = await chat.resolveAvChat(SHAPE, "thecadrion.com");
+      refused(r);
+      assert.match(!r.ok ? r.error : "", want);
+    });
+  }
+});
+
 test("an ad script that is NAMED but not served (AV's CDN answers 403 / 404) is refused: the chat loads no ad code", async () => {
   // The CDN's own word for a file it does not have (read live 29.09: 403, application/xml, Server: AmazonS3).
   for (const page of [
@@ -856,7 +1085,9 @@ test("a script name with a dot is a file name (read live: \"chatcuponseamostras.
 
 test("AV_CHAT_SCRIPT_CDN overrides where the ad script is looked for (an https origin only)", async () => {
   const moved = `https://cdn.new-av.example/${SCRIPT}.js`;
-  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [moved]: SERVED }, async ({ pageCalls }) => {
+  // ActiveView moved its CDN: its loaders take their ad scripts from there, and the launcher is told
+  const movedLoader = worker(SCRIPT).replace('baseUrl = "https://scr.actview.net"', 'baseUrl = "https://cdn.new-av.example"');
+  await withStubs({ [HOST]: [GATEWAY] }, { ...READY, [WORKER_URL]: { status: 200, body: movedLoader }, [moved]: SERVED }, async ({ pageCalls }) => {
     process.env.AV_CHAT_SCRIPT_CDN = "https://CDN.new-av.example/";
     assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
     assert.deepEqual(pageCalls, [WORKER_URL, moved, BASE]);
@@ -1532,5 +1763,107 @@ test("a DNS check that failed for the card is forgotten the moment a check of th
   } finally {
     up.restore();
     ready.restore();
+  }
+});
+
+// ---------- the card's hint: one probe per host at a time, and what it remembers ----------
+
+test("a read of the card's hint while a probe of the host is running joins it — the card's Retry included", async () => {
+  chat._resetAvChatCaches();
+  const d = stubCname({ [HOST]: [GATEWAY] });
+  const real = globalThis.fetch;
+  const asked: string[] = [];
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((r) => (release = r));
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    asked.push(url);
+    if (url === WORKER_URL) await gate;
+    const p = READY[url] as { status: number; body?: string; type?: string };
+    const res = new Response(p.body ?? "<html></html>", { status: p.status, headers: p.type ? { "content-type": p.type } : {} });
+    Object.defineProperty(res, "url", { value: url });
+    return res;
+  }) as typeof fetch;
+  try {
+    const load = chat.avChatHosts(["thecadrion.com"]);
+    await new Promise((r) => setImmediate(r));
+    const retry = chat.avChatHosts(["thecadrion.com"], true);
+    await new Promise((r) => setImmediate(r));
+    release?.();
+    const [a, b] = await Promise.all([load, retry]);
+    assert.deepEqual(a, [{ host: HOST, site: "thecadrion.com", live: true }]);
+    assert.deepEqual(b, a);
+    assert.deepEqual(asked.filter((u) => u === WORKER_URL), [WORKER_URL], "the host was read once");
+    assert.deepEqual(d.calls, [HOST], "DNS was asked once");
+    await chat.avChatHosts(["thecadrion.com"], true);
+    assert.deepEqual(asked.filter((u) => u === WORKER_URL), [WORKER_URL, WORKER_URL], "a Retry after the probe ended reads the host again");
+  } finally {
+    globalThis.fetch = real;
+    d.restore();
+  }
+});
+
+test("the card's memory of a failed DNS check yields to a host a launch proved meanwhile", async () => {
+  chat._resetAvChatCaches();
+  let fail: (() => void) | undefined;
+  let n = 0;
+  const m = mock.method(dns.Resolver.prototype, "resolveCname", async () => {
+    n += 1;
+    if (n === 1) return new Promise<string[]>((_resolve, reject) => (fail = () => reject(Object.assign(new Error("queryCname ETIMEOUT"), { code: "ETIMEOUT" }))));
+    return [GATEWAY];
+  });
+  const cancel = mock.method(dns.Resolver.prototype, "cancel", () => {});
+  const p = stubPages({ ...READY, [DOH(HOST)]: "throw" });
+  try {
+    const card = chat.avChatHosts(["thecadrion.com"]);
+    await new Promise((r) => setImmediate(r));
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true, "the launch proved the host");
+    fail?.();
+    assert.deepEqual(await card, [{ host: HOST, site: "thecadrion.com", live: true }], "the card's failing question yields to what the launch proved");
+    assert.deepEqual(await chat.avChatHosts(["thecadrion.com"]), [{ host: HOST, site: "thecadrion.com", live: true }], "and nothing of the failure is remembered");
+  } finally {
+    p.restore();
+    m.mock.restore();
+    cancel.mock.restore();
+  }
+});
+
+test("a site without a chat host is remembered so for the card a minute — its Retry asks again, a launch never reads it", async () => {
+  chat._resetAvChatCaches();
+  mock.timers.enable({ apis: ["Date"], now: T0 });
+  const d = stubCname({});
+  try {
+    assert.deepEqual(await chat.avChatHosts(["thecadrion.com"]), []);
+    assert.deepEqual(await chat.avChatHosts(["thecadrion.com"]), []);
+    assert.deepEqual(d.calls, [HOST], "the second card load answers from memory");
+    refused(await chat.resolveAvChat(SHAPE, "thecadrion.com"));
+    assert.deepEqual(d.calls, [HOST, HOST], "the launch asked DNS itself");
+    await chat.avChatHosts(["thecadrion.com"], true);
+    assert.deepEqual(d.calls, [HOST, HOST, HOST], "Retry asks again");
+    mock.timers.tick(60_000 + 1);
+    await chat.avChatHosts(["thecadrion.com"]);
+    assert.equal(d.calls.length, 4, "after a minute the card asks again");
+  } finally {
+    d.restore();
+    mock.timers.reset();
+  }
+});
+
+test("a CNAME added a moment ago is seen by the card at once when a launch saw it", async () => {
+  chat._resetAvChatCaches();
+  const before = stubCname({});
+  try {
+    assert.deepEqual(await chat.avChatHosts(["thecadrion.com"]), []);
+  } finally {
+    before.restore();
+  }
+  const after = stubCname({ [HOST]: [GATEWAY] });
+  const p = stubPages(READY);
+  try {
+    assert.equal((await chat.resolveAvChat(SHAPE, "thecadrion.com")).ok, true);
+    assert.deepEqual(await chat.avChatHosts(["thecadrion.com"]), [{ host: HOST, site: "thecadrion.com", live: true }]);
+  } finally {
+    p.restore();
+    after.restore();
   }
 });

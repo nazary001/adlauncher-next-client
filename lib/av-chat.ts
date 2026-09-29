@@ -24,6 +24,7 @@
 //
 // Only lib/av-link (pure) is imported, so `node --test tests/av-chat.test.ts` loads this straight
 // off Node with DNS and fetch stubbed.
+import { createHash } from "node:crypto";
 import dns from "node:dns/promises";
 import { avChatUrl } from "./av-link";
 
@@ -35,19 +36,54 @@ const DEFAULT_SCRIPT_CDN = "https://scr.actview.net";
 /** What a loader's validateSettings wants before the page starts, where the loader does not list it
  *  itself (every loader read live 29.09 that lists its parts lists these). */
 const REQUIRED_SETTINGS: readonly string[] = ["key", "terms", "theme", "config", "botNames"];
-/** How every loader read live takes its ads: the file the SETTINGS name, nothing else. */
-const LOADS_FROM_SETTINGS = /\bloadRemoteScript\s*\(\s*\{[^{}]*?\bfileName\s*:\s*assistantQuizSettings\s*(?:\?\.|\.)\s*script\b(?:\s*\??\.\s*trim\s*\(\s*\))?(?=\s*[,}])/;
+/** A list of required parts the launcher judges by: a few plain names. */
+const REQUIRED_MAX = 24;
+const PART_NAME_RE = /^[A-Za-z_$][\w$-]{0,39}$/;
+/** How many missing parts a refusal names (they come from the remote loader's list). */
+const PARTS_ECHO_MAX = 5;
+/** How a loader reads the settings' script: optionally or by its quoted name, trimmed or not. */
+const SCRIPT_READ = String.raw`assistantQuizSettings\s*(?:(?:\?\.\s*)?\[\s*(?:"script"|'script')\s*\]|\??\.\s*script\b)(?:\s*\??\.\s*trim\s*\(\s*\))?`;
+/**
+ * How every loader read live takes its ads: loadRemoteScript({ …, fileName: <the settings' script> }),
+ * read in the CODE of the file (codeOnly: a quoted plain name stays, any other text is blank). The
+ * name may be read optionally or by its quoted name, trimmed, made a string, put in parentheses, and
+ * fall back to something else when it is empty — an empty script is refused before the loader is
+ * asked. Anything that CHANGES the name (a suffix, its case) loads another file than the one checked.
+ */
+const LOADS_FROM_SETTINGS = new RegExp(
+  String.raw`\bloadRemoteScript\s*(?:\?\.\s*)?\(\s*\{(?:[^{}]|\{[^{}]*\})*?(?:\bfileName|"fileName"|'fileName')\s*:\s*` +
+    String.raw`(?:String\s*\(\s*${SCRIPT_READ}\s*\)|\(\s*${SCRIPT_READ}\s*\)|${SCRIPT_READ})(?:\s*(?:\|\||\?\?)\s*[^,{}()\n]{0,80})?(?=\s*[,}])`,
+);
+/** The settings themselves — never a member of another object (window.assistantQuizSettings is not
+ *  the page's `const`). */
+const SETTINGS_NAME = String.raw`(?<![\w$])(?<!\.\s*)assistantQuizSettings`;
+const MEMBERS = String.raw`(?:\s*(?:\?\.|\.)\s*[\w$]+|\s*\[[^\]\n]{0,120}\])*`;
 /** Code that would make the settings something else than the literal says. */
 const CHANGES_SETTINGS = [
-  /\bassistantQuizSettings\b\s*(?:(?:\?\.|\.)\s*[\w$]+\s*|\[[^\]]*\]\s*)*(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])/,
-  /\bassistantQuizSettings\b\s*(?:(?:\?\.|\.)\s*[\w$]+\s*|\[[^\]]*\]\s*)*(?:\+\+|--)/,
+  new RegExp(String.raw`${SETTINGS_NAME}${MEMBERS}\s*(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])`),
+  new RegExp(String.raw`${SETTINGS_NAME}${MEMBERS}\s*(?:\+\+|--)`),
   /\bdelete\s+assistantQuizSettings\b/,
   /\bObject\s*\.\s*(?:assign|defineProperty|defineProperties|setPrototypeOf)\s*\(\s*assistantQuizSettings\b/,
 ];
-const REQUIRED_LIST = /\brequiredFields\s*=\s*\[/;
+/** The loader's list of required parts: its declaration — or, minified, the list inlined where it is read. */
+const REQUIRED_LIST = /\brequiredFields\s*=\s*\[/g;
+const REQUIRED_INLINE = /\[\s*(?:(?:"[\w$-]+"|'[\w$-]+')\s*,\s*)*(?:"[\w$-]+"|'[\w$-]+')\s*,?\s*\]\s*\.\s*(?:filter|every|some)\s*\(/g;
 const VALIDATES = /\b(?:validateSettings|requiredFields)\b/;
+/** Where the loader says its ad scripts come from: a parameter's default, or a name in the call (the
+ *  value is read in the file itself — in the code a text is blank). */
+const BASE_URL_DEFAULT = /\bbaseUrl\s*(?::\s*[\w$]+\s*)?=(?![=>])/g;
+const BASE_URL_NAMED = /(?:\bbaseUrl|"baseUrl"|'baseUrl')\s*:/g;
+/** What switches the ads off: the settings' own switch (as every live loader reads it), or off. */
+const DISABLE_NAMED = /(?:\bdisable|"disable"|'disable')\s*:/g;
+const DISABLE_DEFAULT = /\bdisable\s*(?::\s*[\w$]+\s*)?=(?![=>])/g;
+const SETTINGS_SWITCH = /^\s*(?:(?:Boolean\s*\(|!!)\s*)?assistantQuizSettings\s*\??\.\s*config\s*(?:\??\.\s*disable\b|(?:\?\.\s*)?\[\s*(?:"disable"|'disable')\s*\])\s*\)?\s*(?=[,}])/;
+const SWITCHED_ON = /^\s*(?:false|!1|0|null|undefined|void\s+0)\s*(?=[,})])/;
 /** The longest script name a refusal repeats (a name is remote content). */
 const NAME_ECHO_MAX = 80;
+/** The longest regex literal the reading of a loader looks for (a longer "/…/" is read as divisions). */
+const REGEX_MAX = 300;
+/** Words after which a "/" opens a regex, not a division. */
+const REGEX_AFTER = new Set(["return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do", "else", "yield", "await"]);
 /** The template's default ad script: a name no host's own script carries (on the CDN it is another
  *  publisher's file). */
 const PLACEHOLDER_SCRIPTS = new Set(["localhost"]);
@@ -71,7 +107,9 @@ const DOH_MAX_BYTES = 64 * 1024;
 
 export type AvChatShape = { base: string; host: string; path: string };
 export type AvChatHostVerdict = { chat: true; gateway: string } | { chat: false; failed: boolean; reason?: string };
-export type AvChatHostOption = { host: string; site: string; live: boolean; liveReason?: string };
+/** A chat host as the card's catalog lists it. `pending`: its probe was still running when the
+ *  catalog answered (the card reads the catalog again in a moment). */
+export type AvChatHostOption = { host: string; site: string; live: boolean; liveReason?: string; pending?: true };
 export type AvChatResolved = { ok: true; kind: "chat"; base: string; site: string } | { ok: false; error: string; status: number };
 
 /** `failed` = the check could not be made (the route answers 502), else it is the buyer's fix (400). */
@@ -81,8 +119,17 @@ type Cached<T> = { at: number; value: T };
 const hostCache = new Map<string, Cached<{ chat: true; gateway: string }>>();
 const readyCache = new Map<string, number>();
 const hintCache = new Map<string, Cached<Ready>>();
-/** The card's memory of a DNS check that could not be made (host → its reason). */
-const dnsHintCache = new Map<string, Cached<string>>();
+/** The card's memory of what DNS said of a chat.<site> that is no chat host: null = it has no chat
+ *  CNAME, a row = the lookup could not be made. Never read by a launch. */
+const dnsHintCache = new Map<string, Cached<AvChatHostOption | null>>();
+/** The card's reading of a host while it runs: every read of the card joins it. */
+const hintFlights = new Map<string, Promise<AvChatHostOption | null>>();
+/** Hosts seen behind AV's chat gateway (this instance, bounded): a page of one is never taken for an
+ *  article because a DNS check could not be made (lib/av-destination). */
+const seenChatHosts = new Set<string>();
+const SEEN_MAX = 1000;
+/** Unknown loaders already told about in the log (bounded). */
+const toldLoaders = new Set<string>();
 const pageOkCache = new Map<string, number>();
 /** The newest probe STARTED per host, while it is in flight. */
 const probing = new Map<string, number>();
@@ -214,7 +261,10 @@ export async function avChatHost(host: string, force = false): Promise<AvChatHos
   const h = normHost(host);
   if (!HOST_RE.test(h)) return { chat: false, failed: false };
   const c = hostCache.get(h);
-  if (!force && c && Date.now() - c.at < HOST_TTL_MS) return c.value;
+  if (!force && c && Date.now() - c.at < HOST_TTL_MS) {
+    dnsHintCache.delete(h);
+    return c.value;
+  }
   hostCache.delete(h);
   let cnames: string[];
   try {
@@ -222,12 +272,24 @@ export async function avChatHost(host: string, force = false): Promise<AvChatHos
   } catch (e) {
     return { chat: false, failed: true, reason: `the DNS lookup of ${h} failed (${errText(e)})` };
   }
-  dnsHintCache.delete(h); // DNS answered: what the card remembered of a failed check is old news
+  dnsHintCache.delete(h); // DNS answered: what the card remembered of it is old news
   const gateway = gateways().find((g) => cnames.includes(g));
   if (!gateway) return { chat: false, failed: false };
   const verdict = { chat: true as const, gateway };
   hostCache.set(h, { at: Date.now(), value: verdict });
+  if (seenChatHosts.size < SEEN_MAX) seenChatHosts.add(h);
   return verdict;
+}
+
+/** Was `host` seen behind AV's chat gateway by this instance (lib/av-destination)? */
+export function avChatHostSeen(host: string): boolean {
+  return seenChatHosts.has(normHost(host));
+}
+
+/** Where the line that `i` is on ends (its "\n" or "\r"), or the end of `src`. */
+function lineEnd(src: string, i: number): number {
+  for (let j = i; j < src.length; j++) if (src[j] === "\n" || src[j] === "\r") return j;
+  return src.length;
 }
 
 /** Past the white space and the comments that start at `i`. */
@@ -235,8 +297,7 @@ function skipBlank(src: string, i: number): number {
   for (;;) {
     while (i < src.length && /\s/.test(src[i])) i++;
     if (src.startsWith("//", i)) {
-      const nl = src.indexOf("\n", i);
-      i = nl < 0 ? src.length : nl + 1;
+      i = Math.min(src.length, lineEnd(src, i) + 1);
     } else if (src.startsWith("/*", i)) {
       const end = src.indexOf("*/", i + 2);
       i = end < 0 ? src.length : end + 2;
@@ -254,7 +315,7 @@ function readText(src: string, i: number): { value: string; end: number } {
       const n = src[++j];
       value += n === "n" ? "\n" : n === "t" ? "\t" : n === "r" ? "\r" : (n ?? "");
     } else if (c === quote) return { value, end: j + 1 };
-    else if (c === "\n") break;
+    else if (c === "\n" || c === "\r") break;
     else value += c;
   }
   throw new Error("an unclosed text");
@@ -304,10 +365,11 @@ function readData(src: string, at: number, depth = 0): { value: unknown; end: nu
     }
     return { value: list ? items : entries, end: i + 1 };
   }
-  const word = /^(?:true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?![\w$.(])/.exec(src.slice(i, i + 40));
+  // !0 / !1 are how a minifier writes true / false
+  const word = /^(?:true|false|null|!0|!1|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?![\w$.(])/.exec(src.slice(i, i + 40));
   if (!word) throw new Error("not plain data");
   const w = word[0];
-  return { value: w === "true" ? true : w === "false" ? false : w === "null" ? null : Number(w), end: i + w.length };
+  return { value: w === "true" || w === "!0" ? true : w === "false" || w === "!1" ? false : w === "null" ? null : Number(w), end: i + w.length };
 }
 
 /** Where the settings literal opens (the index of its "{"): the first `assistantQuizSettings = {`
@@ -330,34 +392,92 @@ function settingsStart(js: string): number {
   return -1;
 }
 
-/** `src` with every comment and every quoted text blanked out — same length, same line breaks, so an
- *  index into what is left (the code) is an index into `src`. */
+/**
+ * `src` with every comment, every quoted text and every regex literal blanked out — same length,
+ * same line breaks, so an index into what is left (the code) is an index into `src`. A quoted plain
+ * name ("script", 'fileName') stays: code names a property that way, and it is never code itself.
+ */
 function codeOnly(src: string): string {
   const blank = (from: number, to: number) => src.slice(from, to).replace(/[^\n]/g, " ");
   let out = "";
+  // What came last in the code, kept as it goes (reading `out` back would flatten it every time): the
+  // last character that is no white space, where it is, the word it ends, and where the last text or
+  // regex (an operand) ended — a "/" right after an operand divides.
+  let lastSig = -1;
+  let lastChar = "";
+  let word = "";
+  let wordOpen = false;
+  let operandEnd = -1;
+  const regexMayStart = (): boolean => {
+    if (operandEnd > lastSig) return false;
+    if (lastSig < 0) return true;
+    if (/[\w$]/.test(lastChar)) return REGEX_AFTER.has(word);
+    return lastChar !== ")" && lastChar !== "]";
+  };
+  /** Past the regex literal that opens at `from` (its flags included), or -1: none closes on its line. */
+  const regexEnd = (from: number): number => {
+    let inClass = false;
+    for (let j = from + 1; j < src.length && j <= from + REGEX_MAX; j++) {
+      const c = src[j];
+      if (c === "\n" || c === "\r") return -1;
+      if (c === "\\") j++;
+      else if (inClass) inClass = c !== "]";
+      else if (c === "[") inClass = true;
+      else if (c === "/") {
+        let k = j + 1;
+        while (k < src.length && /[a-z]/i.test(src[k])) k++;
+        return k;
+      }
+    }
+    return -1;
+  };
   let i = 0;
   while (i < src.length) {
     const c = src[i];
     if (c === "/" && (src[i + 1] === "/" || src[i + 1] === "*")) {
       let end: number;
       if (src[i + 1] === "/") {
-        const nl = src.indexOf("\n", i);
-        end = nl < 0 ? src.length : nl;
+        end = lineEnd(src, i);
       } else {
         const close = src.indexOf("*/", i + 2);
         end = close < 0 ? src.length : close + 2;
       }
       out += blank(i, end);
+      wordOpen = false;
       i = end;
+      continue;
+    }
+    const regex = c === "/" && regexMayStart() ? regexEnd(i) : -1;
+    if (regex > 0) {
+      out += blank(i, regex);
+      operandEnd = out.length;
+      wordOpen = false;
+      i = regex;
     } else if (c === '"' || c === "'" || c === "`") {
       let j = i + 1;
       // a quoted text ends with its line at the latest; a template may run over lines
-      while (j < src.length && src[j] !== c && (c === "`" || src[j] !== "\n")) j += src[j] === "\\" ? 2 : 1;
+      while (j < src.length && src[j] !== c && (c === "`" || (src[j] !== "\n" && src[j] !== "\r"))) j += src[j] === "\\" ? 2 : 1;
       const end = Math.min(src.length, j + 1);
-      out += blank(i, end);
+      const text = src.slice(i, end);
+      const name = c !== "`" && /^(["'])[\w$-]{1,40}\1$/.test(text);
+      out += name ? text : blank(i, end);
+      if (name) {
+        lastSig = out.length - 1;
+        lastChar = text[text.length - 1];
+      }
+      operandEnd = out.length;
+      wordOpen = false;
       i = end;
     } else {
       out += c;
+      if (/\s/.test(c)) wordOpen = false;
+      else {
+        lastSig = out.length - 1;
+        lastChar = c;
+        const inWord = /[\w$]/.test(c);
+        word = inWord ? (wordOpen ? word + c : c) : "";
+        wordOpen = inWord;
+      }
       i += 1;
     }
   }
@@ -368,25 +488,92 @@ function codeOnly(src: string): string {
  *  parts its page will not start without. */
 type Loader = { known: true; required: readonly string[] } | { known: false; why: string };
 
-/**
- * What follows the settings literal. The settings say what the page WILL do only under the loader
- * they were read for: it takes its ads from the file the settings name, it leaves the settings as
- * the literal set them, and what it requires before it starts can be read (its own list — or none,
- * the older loaders validate nothing and are judged by the list the newer ones carry).
- */
-function loaderOf(rest: string): Loader {
-  const code = codeOnly(rest);
-  if (!LOADS_FROM_SETTINGS.test(code)) return { known: false, why: "nothing in it loads the ad script the settings name" };
-  if (CHANGES_SETTINGS.some((re) => re.test(code))) return { known: false, why: "it changes the settings after they are set" };
-  const list = REQUIRED_LIST.exec(code);
-  if (!list) return VALIDATES.test(code) ? { known: false, why: "what its page requires cannot be read" } : { known: true, required: REQUIRED_SETTINGS };
+/** The text of the quoted literal a value that starts at `at` is, or null when it is no literal. */
+function literalAt(src: string, at: number): string | null {
+  const i = skipBlank(src, at);
+  if (src[i] !== '"' && src[i] !== "'") return null;
   try {
-    const parts = readData(rest, list.index + list[0].length - 1).value;
-    if (Array.isArray(parts) && parts.every((p) => typeof p === "string" && p.trim())) return { known: true, required: parts as string[] };
+    return readText(src, i).value;
+  } catch {
+    return null;
+  }
+}
+
+/** A list of required parts at `at`: a few plain names, or null. */
+function partsAt(src: string, at: number): string[] | null {
+  try {
+    const parts = readData(src, at).value;
+    if (Array.isArray(parts) && parts.length <= REQUIRED_MAX && parts.every((p) => typeof p === "string" && PART_NAME_RE.test(p))) return parts as string[];
   } catch {
     /* not plain data */
   }
-  return { known: false, why: "what its page requires cannot be read" };
+  return null;
+}
+
+/** Past the "}" that closes the object opening at `open` in `code`, or -1. */
+function objectEnd(code: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < code.length; i++) {
+    if (code[i] === "{") depth += 1;
+    else if (code[i] === "}" && --depth === 0) return i + 1;
+  }
+  return -1;
+}
+
+const originOf = (url: string): string => url.trim().toLowerCase().replace(/\/+$/, "");
+
+/**
+ * What follows the settings literal. The settings say what the page WILL do only under the loader
+ * they were read for: it takes its ads from the file the settings name, off the CDN the launcher
+ * checks, it leaves the settings as the literal set them, and what it requires before it starts can
+ * be read (its own list — or none: the older loaders validate nothing and are judged by the list the
+ * newer ones carry). AV_CHAT_LOADER_CHECK=off takes any loader as known — for a release the launcher
+ * does not know yet; the settings are still judged.
+ */
+function loaderOf(rest: string): Loader {
+  if (String(process.env.AV_CHAT_LOADER_CHECK ?? "").trim().toLowerCase() === "off") return { known: true, required: REQUIRED_SETTINGS };
+  const code = codeOnly(rest);
+  const call = LOADS_FROM_SETTINGS.exec(code);
+  if (!call) return { known: false, why: "nothing in it loads the ad script the settings name" };
+  if (CHANGES_SETTINGS.some((re) => re.test(code))) return { known: false, why: "it changes the settings after they are set" };
+
+  // Where the ad scripts come from: named in the call, else the loader's default(s).
+  const cdn = scriptCdn();
+  const open = code.indexOf("{", call.index);
+  const close = objectEnd(code, open);
+  const inCall = close < 0 ? [] : [...code.slice(open, close).matchAll(BASE_URL_NAMED)].map((m) => literalAt(rest, open + (m.index ?? 0) + m[0].length));
+  const defaults = [...code.matchAll(BASE_URL_DEFAULT)].map((m) => literalAt(rest, (m.index ?? 0) + m[0].length)).filter((v): v is string => v !== null);
+  if (inCall.some((v) => v === null)) return { known: false, why: "where it takes its ad scripts from cannot be read" };
+  const named = (inCall.length ? inCall : defaults) as string[];
+  if (!named.length && !rest.includes(cdn)) return { known: false, why: "where it takes its ad scripts from cannot be read" };
+  const other = named.find((v) => originOf(v) !== cdn);
+  if (other !== undefined) {
+    return { known: false, why: `its ad scripts come from ${originOf(other).slice(0, NAME_ECHO_MAX)}, the launcher checks ${cdn} — AV_CHAT_SCRIPT_CDN names the CDN to check` };
+  }
+
+  // What switches its ads off: the settings' switch only (the call's `disable`, else its default).
+  const switches = close < 0 ? [] : [...code.slice(open, close).matchAll(DISABLE_NAMED)].map((m) => code.slice(open + (m.index ?? 0) + m[0].length, close));
+  const switchDefaults = switches.length ? [] : [...code.matchAll(DISABLE_DEFAULT)].map((m) => code.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 200));
+  if (switches.some((v) => !SETTINGS_SWITCH.test(v) && !SWITCHED_ON.test(v)) || switchDefaults.some((v) => !SWITCHED_ON.test(v))) {
+    return { known: false, why: "its ads are switched off by something else than the settings" };
+  }
+
+  // What its page requires before it starts: ONE list, of a few plain names.
+  const declared = [...code.matchAll(REQUIRED_LIST)];
+  if (!declared.length && !VALIDATES.test(code)) return { known: true, required: REQUIRED_SETTINGS };
+  const inline = declared.length ? [] : [...code.matchAll(REQUIRED_INLINE)];
+  const lists = declared.length ? declared.map((m) => (m.index ?? 0) + m[0].length - 1) : inline.map((m) => m.index ?? 0);
+  const required = lists.length === 1 ? partsAt(rest, lists[0]) : null;
+  return required ? { known: true, required } : { known: false, why: "what its page requires cannot be read" };
+}
+
+/** An unknown loader is logged once per host and file, so a new release is noticed the day it lands. */
+function tellUnknownLoader(host: string, why: string, js: string): void {
+  if (process.env.NODE_ENV !== "production") return;
+  const id = createHash("sha1").update(js).digest("hex").slice(0, 12);
+  if (toldLoaders.has(`${host} ${id}`) || toldLoaders.size >= SEEN_MAX) return;
+  toldLoaders.add(`${host} ${id}`);
+  console.warn(`[av-chat] ${host}: its loader is not in a form the launcher knows (${why}) — file ${id}; AV_CHAT_LOADER_CHECK=off lets it through`);
 }
 
 /**
@@ -395,9 +582,10 @@ function loaderOf(rest: string): Loader {
  * deeper never stands in for the host's; the loader below names `script` / `disable` too), and then
  * read the way the host's own loader reads it: a missing or blank `script` is no script,
  * Boolean(config.disable) switches the ads off, and `missing` lists the parts the loader requires
- * and finds falsy — an EMPTY list or object is there. null = not that file, or not plain data.
+ * and finds falsy — an EMPTY list or object is there. `padded`: the script's name has blanks around
+ * it (some loaders trim them, some do not). null = not that file, or not plain data.
  */
-function chatSettings(js: string): { key: string; script: string; disable: boolean; loader: Loader; missing: string[] } | null {
+function chatSettings(js: string): { key: string; script: string; padded: boolean; disable: boolean; loader: Loader; missing: string[] } | null {
   const at = settingsStart(js);
   if (at < 0) return null;
   let settings: Record<string, unknown>;
@@ -415,6 +603,7 @@ function chatSettings(js: string): { key: string; script: string; disable: boole
   return {
     key: text(settings.key),
     script: text(settings.script),
+    padded: typeof settings.script === "string" && settings.script.trim() !== "" && settings.script !== settings.script.trim(),
     disable: Boolean(config?.disable),
     loader,
     // the chat key is the launcher's own requirement (asked first, whatever the list says)
@@ -494,6 +683,14 @@ async function probeChatHost(host: string): Promise<Ready> {
       error: `chat_not_monetized — ${host} shows no ads yet: ActiveView has not assigned its ad script (the chat is "Pending monetization") — ask ActiveView to finish the review before buying traffic`,
     };
   }
+  if (settings.padded) {
+    const name = settings.script.length > NAME_ECHO_MAX ? `${settings.script.slice(0, NAME_ECHO_MAX)}…` : settings.script;
+    return {
+      ready: false,
+      failed: true,
+      error: `destination_check_failed — the ad script of ${host} is named " ${name} " — with blanks around it, which some of ActiveView's loaders trim and some do not, so the file its page loads cannot be vouched for — ask ActiveView to fix the name`,
+    };
+  }
   if (PLACEHOLDER_SCRIPTS.has(settings.script.toLowerCase())) {
     return {
       ready: false,
@@ -505,6 +702,7 @@ async function probeChatHost(host: string): Promise<Ready> {
     return { ready: false, failed: false, error: `chat_not_monetized — ads are switched off on ${host} (Chat Builder → the subdomain's ad settings)` };
   }
   if (!settings.loader.known) {
+    tellUnknownLoader(host, settings.loader.why, body);
     return {
       ready: false,
       failed: true,
@@ -512,10 +710,12 @@ async function probeChatHost(host: string): Promise<Ready> {
     };
   }
   if (settings.missing.length) {
+    const more = settings.missing.length - PARTS_ECHO_MAX;
+    const parts = `${settings.missing.slice(0, PARTS_ECHO_MAX).join(", ")}${more > 0 ? ` and ${more} more` : ""}`;
     return {
       ready: false,
       failed: false,
-      error: `chat_not_monetized — the settings of ${host} are incomplete (no ${settings.missing.join(", ")}): its page stops before it loads the ad script, so the chat shows no ads — ask ActiveView to regenerate them`,
+      error: `chat_not_monetized — the settings of ${host} are incomplete (no ${parts}): its page stops before it loads the ad script, so the chat shows no ads — ask ActiveView to regenerate them`,
     };
   }
   return adScriptServed(host, settings.script);
@@ -618,28 +818,47 @@ export async function resolveAvChat(shape: AvChatShape, site: string): Promise<A
  * Only the conventional `chat.<site>` is probed (the API lists none and a subdomain cannot be
  * enumerated) — a chat on any other subdomain still resolves when its URL is pasted. A site with no
  * chat host is left out; a host that could not be CHECKED is listed as such, never dropped (that
- * would read as "there is none") — and that is remembered for a minute, here only: the catalog is
- * read on every card load and a DNS that does not answer costs its whole timeouts, while a launch
- * always asks DNS itself. `force` re-reads past every cache (the card's Retry).
+ * would read as "there is none"). What DNS said is remembered for a minute, here only: the catalog
+ * is read on every card load and a DNS that does not answer costs its whole timeouts, while a launch
+ * always asks DNS itself — and what a launch proved (the host IS a chat host) wins over it. One
+ * reading per host runs at a time: a read that comes while one runs (the card's Retry included)
+ * joins it. `force` re-reads past every cache (the card's Retry).
  */
 export async function avChatHosts(sites: string[], force = false): Promise<AvChatHostOption[]> {
   const probed = await Promise.all(
-    [...new Set(sites.map(normHost).filter(Boolean))].map(async (site): Promise<AvChatHostOption | null> => {
+    [...new Set(sites.map(normHost).filter(Boolean))].map((site) => {
       const host = `chat.${site}`;
-      const unchecked = dnsHintCache.get(host);
-      if (!force && unchecked && Date.now() - unchecked.at < HINT_TTL_MS) return { host, site, live: false, liveReason: unchecked.value };
-      const verdict = await avChatHost(host, force);
-      if (!verdict.chat) {
-        if (!verdict.failed) return null;
-        const liveReason = `destination_check_failed — ${verdict.reason}`;
-        dnsHintCache.set(host, { at: Date.now(), value: liveReason });
-        return { host, site, live: false, liveReason };
+      let flight = hintFlights.get(host);
+      if (!flight) {
+        flight = chatHostForCard(site, host, force).finally(() => hintFlights.delete(host));
+        hintFlights.set(host, flight);
       }
-      const ready = await chatHostHint(host, force);
-      return { host, site, live: ready.ready, ...(ready.ready ? {} : { liveReason: ready.error }) };
+      return flight;
     }),
   );
   return probed.filter((h): h is AvChatHostOption => h !== null);
+}
+
+/** Is the host a chat host by what this instance proved (a fresh YES)? */
+const provenChatHost = (host: string): boolean => {
+  const c = hostCache.get(host);
+  return Boolean(c && Date.now() - c.at < HOST_TTL_MS);
+};
+
+async function chatHostForCard(site: string, host: string, force: boolean): Promise<AvChatHostOption | null> {
+  const remembered = dnsHintCache.get(host);
+  if (!force && remembered && Date.now() - remembered.at < HINT_TTL_MS && !provenChatHost(host)) return remembered.value;
+  let verdict = await avChatHost(host, force);
+  // A launch may have proven the host while this question was failing: what it proved stands.
+  if (!verdict.chat && verdict.failed && provenChatHost(host)) verdict = (hostCache.get(host) as Cached<{ chat: true; gateway: string }>).value;
+  if (!verdict.chat) {
+    const row = verdict.failed ? { host, site, live: false, liveReason: `destination_check_failed — ${verdict.reason}` } : null;
+    dnsHintCache.set(host, { at: Date.now(), value: row });
+    return row;
+  }
+  dnsHintCache.delete(host);
+  const ready = await chatHostHint(host, force);
+  return { host, site, live: ready.ready, ...(ready.ready ? {} : { liveReason: ready.error }) };
 }
 
 /** Test seam: drop every per-instance cache. */
@@ -648,6 +867,9 @@ export function _resetAvChatCaches(): void {
   readyCache.clear();
   hintCache.clear();
   dnsHintCache.clear();
+  hintFlights.clear();
+  seenChatHosts.clear();
+  toldLoaders.clear();
   pageOkCache.clear();
   probing.clear();
 }

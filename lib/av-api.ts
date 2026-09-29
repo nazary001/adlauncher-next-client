@@ -157,13 +157,21 @@ const normPath = (p: unknown): string => {
   return s ? (s.startsWith("/") ? s : `/${s}`) : "";
 };
 
+/** A target's weight: a number however it is written ("40", "40%"); one that cannot be read stays
+ *  unknown (NaN) — never 0, which reads as "gets no visitors" (lib/av-destination checks the chats
+ *  a path sends visitors to). */
+function weightOf(v: unknown): number {
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number.parseFloat(v) : NaN;
+  return Number.isFinite(n) ? n : NaN;
+}
+
 function mappingsOf(v: unknown): AvMapping[] {
   const o = obj(v);
   const list = Array.isArray(v) ? v : arr(o.redirectMappings ?? o.mappings ?? o.data);
   return list
     .map((m) => {
       const x = obj(m);
-      return { url: str(x.url), percentage: Number(x.percentage) || 0 };
+      return { url: str(x.url), percentage: weightOf(x.percentage) };
     })
     .filter((m) => m.url);
 }

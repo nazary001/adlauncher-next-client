@@ -63,6 +63,13 @@ function validateSettings(settings) {
   return requiredFields.filter((field) => !settings[field]).length === 0;
 }
 
+function loadRemoteScript({ disable, fileName, baseUrl = "https://scr.actview.net" }) {
+  if (disable || fileName === "") return Promise.resolve();
+  const script = document.createElement("script");
+  script.src = \`\${baseUrl}/\${fileName.trim()}.js\`;
+  document.head.appendChild(script);
+}
+
 async function initializeAssistant() {
   if (!validateSettings(assistantQuizSettings)) throw new Error("Invalid assistantQuizSettings configuration");
   await loadRemoteScript({
@@ -85,7 +92,9 @@ type World = {
   /** The redirect domain the list names (default: redirect.thecadrion.com). */
   redirectDomain?: string;
   /** Where the one redirect path (/jobs) sends its visitors (default: 100% to the article). */
-  mappings?: { url: string; percentage: number }[];
+  mappings?: { url: string; percentage: number | string | null }[];
+  /** How many reads of those targets ActiveView refuses before it answers (403 is never retried). */
+  mappingsFail?: number;
   /** CNAMEs per host, or "down" (neither the resolver nor DNS-over-HTTPS can be asked); a host
    *  missing here has none (ENOTFOUND). */
   cnames?: Record<string, string[] | "down">;
@@ -107,7 +116,13 @@ async function inWorld<T>(w: World, run: (calls: string[], dnsCalls: string[]) =
       if (w.redirects === "forbidden") return json({ message: "route disabled" }, 403);
       return json(w.redirectDomain ? { redirectDomains: [{ ...REDIRECTS.redirectDomains[0], name: w.redirectDomain }] } : REDIRECTS);
     }
-    if (url === "https://av.test/v1/redirects/paths/path1/mappings") return json(w.mappings ?? MAPPINGS);
+    if (url === "https://av.test/v1/redirects/paths/path1/mappings") {
+      if (w.mappingsFail && w.mappingsFail > 0) {
+        w.mappingsFail -= 1;
+        return json({ message: "route disabled" }, 403);
+      }
+      return json(w.mappings ?? MAPPINGS);
+    }
     if (url === "https://thecadrion.com/sitemap.xml") return new Response(SITEMAP, { status: 200 });
     if (/\/sitemap\.xml$/.test(url)) return new Response("<urlset></urlset>", { status: 200 });
     const page = w.pages?.[url];
@@ -681,4 +696,141 @@ test("a target on a subdomain of ours that is no chat host does not stop the pat
     assert.equal((await dest.resolveAvDestination(JOBS)).ok, true);
     assert.deepEqual(dnsCalls, ["pages.thecadrion.com"]);
   });
+});
+
+// ---------- what a redirect path sends to a chat, when it cannot be read or weighed ----------
+
+test("a redirect path whose targets could not be read is not launched: a chat among them cannot be ruled out", async () => {
+  await inWorld({ ...CHAT_HOST, mappingsFail: 2 }, async (calls) => {
+    const r = await dest.resolveAvDestination(JOBS);
+    assert.equal(r.ok, false);
+    assert.equal(!r.ok && r.status, 502);
+    assert.match(!r.ok ? r.error : "", /^destination_check_failed — the targets of redirect\.thecadrion\.com\/jobs could not be read \(.*\): a chat among them cannot be ruled out/);
+    assert.equal(calls.filter((u) => u.endsWith("/mappings")).length, 2, "the targets were asked for once more before giving up");
+  });
+  await inWorld({ ...CHAT_READY, mappingsFail: 1, mappings: toChat(40) }, async () => {
+    const r = await dest.resolveAvDestination(JOBS);
+    assert.equal(r.ok && r.kind, "redirect", "read on the second try — and its chat is ready");
+    assert.deepEqual(r.ok && r.kind === "redirect" && r.mappings, toChat(40));
+  });
+  await inWorld({ ...CHAT_HOST, mappingsFail: 1, mappings: toChat(40), pages: { ...HOST_PENDING, [CHAT]: 200 } }, async () => {
+    const r = await dest.resolveAvDestination(JOBS);
+    assert.match(!r.ok ? r.error : "", /^redirect_target_not_ready — .*chat_not_monetized — /, "read on the second try — and its chat is refused");
+  });
+});
+
+test("a chat target whose weight could not be read is checked as one that gets visitors", async () => {
+  for (const percentage of ["40%", null, "abc"]) {
+    await inWorld({ ...CHAT_HOST, mappings: [{ url: ARTICLE, percentage: 60 }, { url: CHAT, percentage }], pages: { ...HOST_PENDING, [CHAT]: 200 } }, async () => {
+      const r = await dest.resolveAvDestination(JOBS);
+      assert.equal(r.ok, false, String(percentage));
+      assert.match(!r.ok ? r.error : "", /^redirect_target_not_ready — .*chat_not_monetized — /, String(percentage));
+    });
+  }
+});
+
+test("a chat target on a site ActiveView lists without its parent is refused, as the chat itself would be", async () => {
+  const other = "https://chat.other-site.com/?asst=6a2312cef9f4e11b130fc523";
+  await inWorld({ sites: ["thecadrion.com", "chat.other-site.com"], mappings: toChat(30, other) }, async (calls, dnsCalls) => {
+    const r = await dest.resolveAvDestination(JOBS);
+    assert.equal(r.ok, false);
+    assert.equal(!r.ok && r.status, 400);
+    assert.match(!r.ok ? r.error : "", /^redirect_target_not_ready — .*sends 30% of its visitors to the chat https:\/\/chat\.other-site\.com\/\?asst=.*: destination_invalid — .* is a chat's address/);
+    assert.deepEqual(dnsCalls, []);
+    assert.ok(!calls.some((u) => u.startsWith("https://chat.other-site.com/")), "nothing of it is fetched");
+  });
+});
+
+test("the chat targets of a redirect path are checked side by side, and within 25 s", async () => {
+  const second = "https://talk.thecadrion.com/?asst=6a2312cef9f4e11b130fc523";
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    await inWorld(
+      {
+        cnames: { "chat.thecadrion.com": [GATEWAY], "talk.thecadrion.com": [GATEWAY] },
+        mappings: [{ url: CHAT, percentage: 50 }, { url: second, percentage: 50 }],
+        pages: { [WORKER_URL]: "hang", "https://talk.thecadrion.com/worker.js": "hang" },
+      },
+      async (calls) => {
+        let answer: Awaited<ReturnType<typeof dest.resolveAvDestination>> | null = null;
+        const pending = dest.resolveAvDestination(JOBS).then((r) => (answer = r));
+        for (let i = 0; i < 40; i++) await new Promise((r) => setImmediate(r));
+        assert.ok(calls.includes(WORKER_URL) && calls.includes("https://talk.thecadrion.com/worker.js"), "both hosts are read at once");
+        mock.timers.tick(24_999);
+        for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+        assert.equal(answer, null);
+        mock.timers.tick(1);
+        const r = await pending;
+        assert.equal(r.ok, false);
+        assert.equal(!r.ok && r.status, 502);
+        assert.match(!r.ok ? r.error : "", /^destination_check_failed — the chat targets of redirect\.thecadrion\.com\/jobs could not all be checked in 25 s/);
+      },
+    );
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+// ---------- a DNS check that could not be made never opens the article branch on a chat host ----------
+
+test("a page of the site's own chat host is never an ARTICLE on a DNS check that could not be made", async () => {
+  // ActiveView lists the chat host as a site of its own; DNS cannot be asked: its CNAME cannot be seen.
+  const page = "https://chat.thecadrion.com/start";
+  for (const sites of BOTH_ORDERS("thecadrion.com", "chat.thecadrion.com")) {
+    await inWorld({ sites, cnames: { "chat.thecadrion.com": "down" }, pages: { [page]: 200 } }, async (calls) => {
+      const r = await dest.resolveAvDestination(page);
+      assert.equal(r.ok, false, sites.join(","));
+      assert.equal(!r.ok && r.status, 502, sites.join(","));
+      assert.match(!r.ok ? r.error : "", /^destination_check_failed — the DNS lookup of chat\.thecadrion\.com failed/, sites.join(","));
+      assert.ok(!calls.includes(page), "never fetched as an article");
+    });
+  }
+});
+
+test("a listed host once seen behind AV's chat gateway stays a chat host for its pages, also when DNS cannot be asked later", async () => {
+  const host = "talk.thecadrion.com";
+  const base = `https://${host}/?asst=6a2312cef9f4e11b130fc523`;
+  const page = `https://${host}/start`;
+  const cnames: Record<string, string[] | "down"> = { [host]: [GATEWAY] };
+  const world: World = { sites: ["thecadrion.com", host], cnames, pages: { [`https://${host}/worker.js`]: { body: WORKER }, [SCRIPT_URL]: SERVED, [base]: 200, [page]: 200 } };
+  mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-29T10:00:00Z") });
+  try {
+    await inWorld(world, async (calls) => {
+      assert.equal((await dest.resolveAvDestination(base)).ok, true, "seen behind the gateway");
+      cnames[host] = "down";
+      mock.timers.tick(6 * 60_000); // past the CNAME verdict's 5 minutes
+      const r = await dest.resolveAvDestination(page);
+      assert.equal(r.ok, false);
+      assert.equal(!r.ok && r.status, 502);
+      assert.match(!r.ok ? r.error : "", /^destination_check_failed — the DNS lookup of talk\.thecadrion\.com failed/);
+      assert.ok(!calls.includes(page), "never fetched as an article");
+    });
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+// ---------- the catalog hands on a probe that is still running ----------
+
+test("a chat probe that loses the catalog's race is listed as pending, and handed on to finish after the answer", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    await inWorld({ ...CHAT_HOST, pages: { [WORKER_URL]: "hang" } }, async () => {
+      const handed: Promise<unknown>[] = [];
+      const pending = dest.avDestinationCatalog({ titles: false, onPending: (p) => handed.push(p) });
+      for (let i = 0; i < 30; i++) await new Promise((r) => setImmediate(r));
+      mock.timers.tick(2_500);
+      const cat = await pending;
+      assert.deepEqual(cat.chats.map((c) => [c.host, c.live, c.pending]), [["chat.thecadrion.com", false, true]]);
+      assert.equal(handed.length, 1, "the probe still running is handed on (the route keeps it alive)");
+    });
+    await inWorld({ ...CHAT_HOST, pages: HOST_READY }, async () => {
+      const handed: Promise<unknown>[] = [];
+      const cat = await dest.avDestinationCatalog({ titles: false, onPending: (p) => handed.push(p) });
+      assert.deepEqual(cat.chats, [{ host: "chat.thecadrion.com", site: "thecadrion.com", live: true }]);
+      assert.equal(handed.length, 0, "a probe that answered in time is not");
+    });
+  } finally {
+    mock.timers.reset();
+  }
 });

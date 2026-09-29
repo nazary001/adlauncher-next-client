@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { avRailEnabled } from "@/lib/av-launch";
 import { AvApiError, avApiConfigured } from "@/lib/av-api";
@@ -19,6 +19,9 @@ export const maxDuration = 60;
  * a total failure to reach ActiveView (sites won't load) is an error status.
  *
  * `?fresh=1` forces a re-fetch past the caches (the "Retry" affordance on the card).
+ *
+ * The chat hosts' probe gets 2.5 s; one still running then is listed as `pending` and kept alive
+ * past the answer (after()), so its verdict is in the instance's memory for the card's next read.
  */
 export async function GET(req: Request) {
   if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
@@ -35,7 +38,7 @@ export async function GET(req: Request) {
   }
   const fresh = new URL(req.url).searchParams.get("fresh") === "1";
   try {
-    const catalog = await avDestinationCatalog({ force: fresh });
+    const catalog = await avDestinationCatalog({ force: fresh, onPending: (probe) => after(probe) });
     return NextResponse.json({ ok: true, ...catalog });
   } catch (e) {
     // Sites (GET /me) failed to load — the whole catalog is unavailable. Surface ActiveView's own

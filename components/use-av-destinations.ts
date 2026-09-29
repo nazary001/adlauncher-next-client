@@ -20,13 +20,18 @@ import type { AvDestinationCatalog, AvResolved } from "@/lib/av-destination";
 export type AvCreatedPath = { id: string; path: string; url: string };
 /** An article as the card's search lists it (label = title, sub = path · variant, grouped by site). */
 export type AvArticleOption = { value: string; label: string; subLabel: string; group: string };
+/** Which parts of the catalog on screen are the LAST good read's, because this read of them failed. */
+export type AvStaleParts = { articles: boolean; redirects: boolean };
 
 export type AvDestinations = {
   /** The last good catalog (kept across a failed refresh so the picker never blanks — a PART that
-   *  failed in a read keeps what the last good read listed, next to its *Error). */
+   *  failed in a read keeps what the last good read listed, next to its *Error; `stale` says so). */
   data: AvDestinationCatalog | null;
   /** The catalog's articles as search options. */
   articleOptions: AvArticleOption[];
+  stale: AvStaleParts;
+  /** How many reads of the catalog have landed — a line on the card is weighed against later ones. */
+  reads: number;
   loading: boolean;
   /** Whole-request failure (av_not_configured / network / non-ok) — shown with a Retry. Per-part
    *  failures ride the catalog itself (articlesError / redirectsError). */
@@ -43,6 +48,13 @@ export type AvDestinations = {
 };
 
 const errText = (e: unknown): string => (e as Error)?.message ?? String(e);
+const FRESH: AvStaleParts = { articles: false, redirects: false };
+/** A chat host the server was still checking when it answered (`pending`): the catalog is read again
+ *  this much later — not forced, the probe's verdict waits in the server's memory — at most so often. */
+const FOLLOW_UP_MS = 3_000;
+const FOLLOW_UPS = 2;
+
+type State = { key: string; data: AvDestinationCatalog | null; stale: AvStaleParts; reads: number; loading: boolean; error: string | null };
 
 export function useAvDestinations(enabled: boolean): AvDestinations {
   // Keyed by `enabled` so switching partners resets to the loading state WITHOUT a synchronous
@@ -50,19 +62,25 @@ export function useAvDestinations(enabled: boolean): AvDestinations {
   // state, exactly like useAdAccounts / useFanpages. Every write happens from an async fetch
   // callback or an event handler (refresh / createPath), never in the effect body.
   const key = enabled ? "on" : "off";
-  const [state, setState] = useState<{ key: string; data: AvDestinationCatalog | null; loading: boolean; error: string | null }>({
-    key,
-    data: null,
-    loading: enabled,
-    error: null,
-  });
+  const [state, setState] = useState<State>({ key, data: null, stale: FRESH, reads: 0, loading: enabled, error: null });
   // Monotonic request id: a later refresh (force) must win over an in-flight earlier one, so a slow
   // first load can't clobber a fresh catalog the buyer just asked for.
   const reqId = useRef(0);
+  const followUp = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (followUp.current) clearTimeout(followUp.current);
+    },
+    [],
+  );
 
   const doFetch = useCallback(
-    (force?: boolean) => {
+    function read(force?: boolean, round = 0) {
       const id = ++reqId.current;
+      if (followUp.current) {
+        clearTimeout(followUp.current);
+        followUp.current = null;
+      }
       fetch(`/api/av/destinations${force ? "?fresh=1" : ""}`)
         .then(async (r) => (await r.json().catch(() => ({}))) as AvDestinationCatalog & { ok?: boolean; error?: string })
         .then((d) => {
@@ -75,28 +93,38 @@ export function useAvDestinations(enabled: boolean): AvDestinations {
               const last = s.key === key ? s.data : null;
               const articles = d.articles ?? [];
               const redirects = d.redirects ?? [];
+              const keepArticles = Boolean(d.articlesError && articles.length === 0 && last?.articles.length);
+              const keepRedirects = Boolean(d.redirectsError && redirects.length === 0 && last?.redirects.length);
               return {
                 key,
                 data: {
                   sites: d.sites ?? [],
-                  articles: d.articlesError && articles.length === 0 && last ? last.articles : articles,
-                  redirects: d.redirectsError && redirects.length === 0 && last ? last.redirects : redirects,
+                  articles: keepArticles && last ? last.articles : articles,
+                  redirects: keepRedirects && last ? last.redirects : redirects,
                   chats: d.chats ?? [],
                   ...(d.articlesError ? { articlesError: d.articlesError } : {}),
                   ...(d.redirectsError ? { redirectsError: d.redirectsError } : {}),
                 },
+                stale: { articles: keepArticles, redirects: keepRedirects },
+                reads: (s.key === key ? s.reads : 0) + 1,
                 loading: false,
                 error: null,
               };
             });
+            if ((d.chats ?? []).some((c) => c.pending) && round < FOLLOW_UPS) {
+              followUp.current = setTimeout(() => {
+                followUp.current = null;
+                if (id === reqId.current) read(false, round + 1);
+              }, FOLLOW_UP_MS);
+            }
           } else {
             // Keep the last good catalog on-screen; surface the reason for a Retry.
-            setState((s) => ({ key, data: s.data, loading: false, error: d?.error || "av_destinations_failed — the ActiveView catalog did not load" }));
+            setState((s) => ({ ...s, key, loading: false, error: d?.error || "av_destinations_failed — the ActiveView catalog did not load" }));
           }
         })
         .catch((e) => {
           if (id !== reqId.current) return;
-          setState((s) => ({ key, data: s.data, loading: false, error: `av_destinations_failed — ${errText(e)}` }));
+          setState((s) => ({ ...s, key, loading: false, error: `av_destinations_failed — ${errText(e)}` }));
         });
     },
     [key],
@@ -110,6 +138,8 @@ export function useAvDestinations(enabled: boolean): AvDestinations {
   // A key mismatch (partner just flipped to AV) reads as loading with no data until the fetch lands.
   const matched = state.key === key;
   const data = matched ? state.data : null;
+  const stale = matched ? state.stale : FRESH;
+  const reads = matched ? state.reads : 0;
   const loading = enabled && (!matched || state.loading);
   const error = matched ? state.error : null;
 
@@ -170,5 +200,8 @@ export function useAvDestinations(enabled: boolean): AvDestinations {
     [data],
   );
 
-  return useMemo(() => ({ data, articleOptions, loading, error, refresh, check, createPath }), [data, articleOptions, loading, error, refresh, check, createPath]);
+  return useMemo(
+    () => ({ data, articleOptions, stale, reads, loading, error, refresh, check, createPath }),
+    [data, articleOptions, stale, reads, loading, error, refresh, check, createPath],
+  );
 }

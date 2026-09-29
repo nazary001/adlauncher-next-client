@@ -7,7 +7,9 @@ import { AlertIcon, CheckIcon, PlusIcon, RetryIcon, XIcon } from "./icons";
 import {
   type AvCheckAsked,
   type AvDestinationKind,
+  type AvRowState,
   type AvTabPin,
+  type AvVerdict,
   avChatUrl,
   avCheckOutcome,
   avDestinationBase,
@@ -15,6 +17,8 @@ import {
   avFieldTab,
   avMappingLabel,
   avPinAfterPick,
+  avRefusalOfHost,
+  avVerdictStands,
 } from "@/lib/av-link";
 import type { AvArticleOption, AvDestinations } from "./use-av-destinations";
 import type { AvChatHostOption, AvDestinationCatalog, AvRedirectOption, AvResolved } from "@/lib/av-destination";
@@ -32,9 +36,9 @@ import type { AvChatHostOption, AvDestinationCatalog, AvRedirectOption, AvResolv
 // request in flight survive a look at another tab. Two answers arrive seconds after their click — a
 // check's verdict and a created redirect path — and both go through lib/av-link avCheckOutcome
 // before they may set the destination. A line that stays on screen is shown only for as long as
-// what it says is still so: a success with the destination it set (and while the catalog does not
-// list its host as not ready), a refusal until the buyer has the hosts read again (Retry), a
-// "created, not applied" note until that path is the destination.
+// what it says is still so (lib/av-link avVerdictStands): a success with the destination it set, and
+// until a NEWER reading of the catalog lists its host as not ready; a refusal of the host until a
+// newer reading lists it as ready; a "created, not applied" note until that path is picked.
 
 /** Client mirror of lib/av-destination AV_PATH_RE (that module is server-only — it imports node:dns
  *  — so its value can't cross into this client bundle). The POST route re-validates with the real
@@ -50,17 +54,21 @@ const hostOf = (url: string): string => {
 };
 
 /** A chat host's row in the catalog: ready for traffic, NOT ready (a launch will be refused), or
- *  not CHECKED (the probe could not be made — that says nothing about the host). */
-const hostState = (h: AvChatHostOption): "ready" | "blocked" | "unchecked" => (h.live ? "ready" : (h.liveReason ?? "").startsWith("destination_check_failed") ? "unchecked" : "blocked");
+ *  not CHECKED (the probe could not be made, or is still running — that says nothing about the host). */
+const hostState = (h: AvChatHostOption): Exclude<AvRowState, null> =>
+  h.live ? "ready" : h.pending || (h.liveReason ?? "").startsWith("destination_check_failed") ? "unchecked" : "blocked";
 
-/** A muted / warning / danger inline notice — the field's catalog states share one look. */
-function Notice({ tone = "muted", children }: { tone?: "muted" | "warn" | "danger"; children: React.ReactNode }) {
+/** A muted / informative / warning / danger inline notice — the field's catalog states share one look.
+ *  `info` is a line the buyer acts on that is no warning (it reads as clearly as the rest). */
+function Notice({ tone = "muted", children }: { tone?: "muted" | "info" | "warn" | "danger"; children: React.ReactNode }) {
   const cls =
     tone === "danger"
       ? "border-danger/40 bg-danger/10 text-red-300"
       : tone === "warn"
         ? "border-warn/40 bg-warn/10 text-warn"
-        : "border-line bg-surface2/40 text-faint";
+        : tone === "info"
+          ? "border-line bg-surface2/40 text-dim"
+          : "border-line bg-surface2/40 text-faint";
   return <div className={`rounded-lg border px-3 py-2 text-[11.5px] leading-relaxed ${cls}`}>{children}</div>;
 }
 
@@ -205,11 +213,28 @@ export function AvDestinationField({
     onChange(v);
   }
 
+  // What the catalog on screen says of a chat host — what a line under a paste box is weighed
+  // against; `probes` names the hosts it speaks for (chat.<root site>).
+  const siteDomains = cat ? cat.sites.map((s) => s.domain) : null;
+  const probes = (siteDomains ?? []).filter((d) => !(siteDomains ?? []).some((o) => d.endsWith(`.${o}`))).map((d) => `chat.${d}`);
+  const chats = cat?.chats ?? NO_CHATS;
+  const rowOf = (host: string): AvRowState => {
+    const h = chats.find((c) => c.host === host);
+    return h ? hostState(h) : null;
+  };
+  // A chat just checked whose host the catalog does not list as ready (a stale row, no row, no
+  // catalog yet): the catalog is read again — a host it cannot speak for excepted. As it is when the
+  // answer LANDS.
+  const rereadForChat = useLatest((host: string): boolean => {
+    if ((siteDomains && !probes.includes(host)) || rowOf(host) === "ready") return false;
+    destinations?.refresh(true);
+    return true;
+  });
+
   if (!destinations) {
     return <Notice tone="warn">AV destinations are unavailable on this rail.</Notice>;
   }
 
-  const siteDomains = cat ? cat.sites.map((s) => s.domain) : null;
   const panel = (m: AvDestinationKind) => (mode === m ? "flex flex-col gap-2" : "hidden");
 
   return (
@@ -278,7 +303,7 @@ export function AvDestinationField({
           <Notice tone="warn">
             <div className="flex items-start gap-2">
               <span className="min-w-0 flex-1">
-                {articleOptions.length ? "Showing the last list — it could not be refreshed. " : ""}
+                {destinations.stale.articles ? "Showing the last list — it could not be refreshed. " : ""}
                 {cat.articlesError}
               </span>
               <RetryButton onClick={() => destinations.refresh(true)} busy={loading} />
@@ -299,7 +324,12 @@ export function AvDestinationField({
           }
           check={destinations.check}
           live={live}
-          onApply={(res) => pick(res.base)}
+          reading={destinations.reads}
+          rowOf={rowOf}
+          onApply={(res) => {
+            pick(res.base);
+            return res.kind === "chat" && rereadForChat.current(hostOf(res.base));
+          }}
           applied={(res) =>
             res.kind === "chat"
               ? `Chat host ready (it shows ads) — ${res.base} set as the destination. The chat id itself cannot be checked: open the chat once to confirm.`
@@ -323,7 +353,7 @@ export function AvDestinationField({
 
       <div className={panel("chat")}>
         <ChatPicker
-          chats={cat?.chats ?? NO_CHATS}
+          chats={chats}
           siteDomains={siteDomains}
           loading={loading}
           failed={Boolean(error) && !cat}
@@ -331,6 +361,9 @@ export function AvDestinationField({
           current={valueKind === "chat" ? value : ""}
           onChange={pick}
           live={live}
+          reading={destinations.reads}
+          rowOf={rowOf}
+          reread={rereadForChat}
           destinations={destinations}
         />
       </div>
@@ -357,8 +390,8 @@ function PasteCheck({
   onRefused,
   applied,
   note,
-  successStands = true,
-  asked = 0,
+  reading,
+  rowOf,
 }: {
   /** The input's accessible name (its placeholder is not one). */
   label: string;
@@ -370,60 +403,60 @@ function PasteCheck({
   foreign: (host: string) => string | null;
   check: AvDestinations["check"];
   live: React.RefObject<Live>;
-  onApply: (res: Resolved) => void;
-  /** The server refused the address that was checked. */
-  onRefused?: (base: string) => void;
+  /** Set the destination; true when the box also had the catalog read again (that reading only
+   *  shows what the rows said — it does not weigh the line). */
+  onApply: (res: Resolved) => boolean | void;
+  /** The server refused the address that was checked; true when the catalog is read again. */
+  onRefused?: (base: string) => boolean | void;
   /** The words for an applied answer. */
   applied: (res: Resolved) => string;
   /** Shown under the box whatever the verdict — what a check cannot prove must not disappear
    *  exactly when the check succeeds. */
   note?: React.ReactNode;
-  /** False once what a success said is known to be no longer so (the catalog lists the host as not
-   *  ready): the line goes, the destination stays. */
-  successStands?: boolean;
-  /** How many times the buyer asked for the state to be read AGAIN (the tab's Retry): a refusal
-   *  belongs to the reading it was made in — after a Retry the rows speak, not an old line. */
-  asked?: number;
+  /** How many reads of the catalog have landed, and what the catalog says of a chat host: a line is
+   *  weighed against LATER readings (lib/av-link avVerdictStands). */
+  reading: number;
+  rowOf: (host: string) => AvRowState;
 }) {
   const [paste, setPaste] = useState("");
   const [checking, setChecking] = useState(false);
-  const [verdict, setVerdict] = useState<{ ok: boolean; text: string; forValue?: string; at: number } | null>(null);
+  const [verdict, setVerdict] = useState<AvVerdict | null>(null);
   const mounted = useMounted();
-  const reading = useLatest(asked);
+  const readingNow = useLatest(reading);
 
   const pasted = paste.trim() ? shape(paste) : null;
   const canCheck = Boolean(pasted?.ok) && !checking;
-  // A success names the destination it set: once the destination is another one — or what it said
-  // stopped being so — it is stale. A refusal is stale once the buyer had the state read again.
-  const shown = !verdict ? null : verdict.ok ? (successStands && (verdict.forValue === undefined || verdict.forValue === value) ? verdict : null) : verdict.at === asked ? verdict : null;
+  const shown = verdict && avVerdictStands(verdict, { value, reading, row: verdict.host ? rowOf(verdict.host) : null }) ? verdict : null;
 
   async function runCheck() {
     if (!pasted?.ok || checking) return;
     const why = foreign(pasted.host);
     if (why) {
-      setVerdict({ ok: false, text: why, at: reading.current });
+      setVerdict({ ok: false, text: why, readAt: readingNow.current });
       return;
     }
     const was = { ...live.current };
+    const host = pasted.host;
     setChecking(true);
     setVerdict(null);
     const res = await check(pasted.base);
     const outcome = avCheckOutcome(was, { ...live.current, mounted: mounted.current });
     setChecking(false);
     if (outcome === "drop") return;
-    // The line belongs to the reading that is current when the answer LANDS.
-    const at = reading.current;
+    // The line stands through the reading on screen when the answer LANDS — and through the one the
+    // box asks for because of the answer.
+    const readAt = readingNow.current;
     if (!res.ok) {
-      setVerdict({ ok: false, text: res.error, at });
-      onRefused?.(pasted.base);
+      const reread = onRefused?.(pasted.base) === true;
+      setVerdict({ ok: false, text: res.error, host, hostLevel: avRefusalOfHost(res.error, pasted.base), readAt: readAt + (reread ? 1 : 0) });
       return;
     }
     if (outcome === "superseded") {
-      setVerdict({ ok: false, text: `${res.base} passed the check, but the destination or the tab was changed while it was being checked — not applied. Press Check again to use it.`, at });
+      setVerdict({ ok: false, text: `${res.base} passed the check, but the destination or the tab was changed while it was being checked — not applied. Press Check again to use it.`, readAt });
       return;
     }
-    onApply(res);
-    setVerdict({ ok: true, text: applied(res), forValue: res.base, at });
+    const reread = onApply(res) === true;
+    setVerdict({ ok: true, text: applied(res), forValue: res.base, host: res.kind === "chat" ? hostOf(res.base) : undefined, readAt: readAt + (reread ? 1 : 0) });
     setPaste("");
   }
 
@@ -479,6 +512,9 @@ function ChatPicker({
   current,
   onChange,
   live,
+  reading,
+  rowOf,
+  reread,
   destinations,
 }: {
   chats: AvChatHostOption[];
@@ -493,6 +529,11 @@ function ChatPicker({
   current: string;
   onChange: (v: string) => void;
   live: React.RefObject<Live>;
+  /** How many reads of the catalog have landed, and what it says of a chat host (see PasteCheck). */
+  reading: number;
+  rowOf: (host: string) => AvRowState;
+  /** Has the catalog read again for a chat just checked (see AvDestinationField); true when it did. */
+  reread: React.RefObject<(host: string) => boolean>;
   destinations: AvDestinations;
 }) {
   // The catalog probes chat.<site> of the ROOT sites only (a site's own subdomain has none).
@@ -511,14 +552,9 @@ function ChatPicker({
       : siteDomains && !failed && probed.includes(currentHost)
         ? "blocked"
         : "unknown";
-  // An answer reads the rows as they are when it LANDS: the catalog may have loaded meanwhile.
+  // An answer reads the catalog as it is when it LANDS: it may have loaded meanwhile.
   const rows = useLatest(chats);
-  // The tab's Retry: the hosts are read again, and what the box said of the old reading goes.
-  const [retries, setRetries] = useState(0);
-  const retry = () => {
-    setRetries((n) => n + 1);
-    destinations.refresh(true);
-  };
+  const retry = () => destinations.refresh(true);
 
   return (
     <>
@@ -543,12 +579,16 @@ function ChatPicker({
               <div className="flex items-center gap-2">
                 <span className={"h-1.5 w-1.5 shrink-0 rounded-full " + (s === "ready" ? "bg-launch2 shadow-[0_0_8px_rgba(52,211,153,0.8)]" : s === "blocked" ? "bg-warn" : "bg-faint")} />
                 <span className="truncate font-mono text-[11.5px] text-dim">{h.host}</span>
-                <span className="ml-auto text-[9px] font-semibold uppercase tracking-[0.14em] text-faint">{s === "ready" ? "ready" : s === "blocked" ? "not ready" : "not checked"}</span>
+                <span className="ml-auto text-[9px] font-semibold uppercase tracking-[0.14em] text-faint">
+                  {s === "ready" ? "ready" : s === "blocked" ? "not ready" : h.pending ? "checking…" : "not checked"}
+                </span>
                 <RetryButton onClick={retry} busy={loading} />
               </div>
               {s !== "ready" ? (
                 <div className="mt-2">
-                  <Notice tone={s === "blocked" ? "warn" : "muted"}>{h.liveReason ?? "This chat host is not ready for traffic yet."}</Notice>
+                  <Notice tone={s === "blocked" ? "warn" : "info"}>
+                    {h.pending ? `${h.host} is slow to answer — its state is read again in a moment.` : (h.liveReason ?? "This chat host is not ready for traffic yet.")}
+                  </Notice>
                 </div>
               ) : null}
             </div>
@@ -612,17 +652,17 @@ function ChatPicker({
         live={live}
         onApply={(res) => {
           onChange(res.base);
-          // The host's row may still say what it said before this check — re-read it.
-          if (rows.current.some((h) => h.host === hostOf(res.base) && !h.live)) destinations.refresh(true);
+          // What the catalog says of the host may be older than this check: have it read again.
+          return reread.current(hostOf(res.base));
         }}
         onRefused={(base) => {
-          if (rows.current.some((h) => h.host === hostOf(base) && h.live)) destinations.refresh(true);
+          if (!rows.current.some((h) => h.host === hostOf(base) && h.live)) return false;
+          destinations.refresh(true);
+          return true;
         }}
         applied={(res) => `Chat host ready (it shows ads) — ${res.base} set as the destination.`}
-        // The check vouched for the HOST: once the catalog lists it as not ready the line is no
-        // longer so. A refusal stays until the buyer has the hosts read again (Retry).
-        successStands={state !== "blocked"}
-        asked={retries}
+        reading={reading}
+        rowOf={rowOf}
         note="Copy the address from ActiveView → Chat Builder → View your chat. ActiveView answers for ANY id, so a mistyped one cannot be caught here — open the chat once to confirm."
       />
     </>
@@ -655,17 +695,24 @@ function RedirectPicker({
 }) {
   const redirects = cat?.redirects ?? [];
   const listed = redirects.some((rd) => rd.live && rd.paths.some((p) => p.url === current));
+  // Why the path is not in a list below: its domain is not live (it is listed there, with nothing to
+  // pick), the list is being read again (a path just created), or it is not listed at all.
+  const onDeadDomain = redirects.some((rd) => !rd.live && rd.paths.some((p) => p.url === current));
   const unlisted =
     current && !listed ? (
       <CurrentRow url={current} clearLabel="Clear the redirect destination" onClear={() => onChange("")}>
-        This path is not in the list below — the launch checks it.
+        {onDeadDomain
+          ? "Its redirect domain is not live — a launch to it will be refused until it is."
+          : loading
+            ? "Reading the list of paths again…"
+            : "This path is not in the list below — the launch checks it."}
       </CurrentRow>
     ) : null;
   const unavailable = cat?.redirectsError ? (
     <Notice tone="warn">
       <div className="flex items-start gap-2">
         <span className="min-w-0 flex-1">
-          {redirects.length ? "Showing the last list — it could not be refreshed. " : ""}
+          {destinations.stale.redirects ? "Showing the last list — it could not be refreshed. " : ""}
           {cat.redirectsError}
         </span>
         <RetryButton onClick={() => destinations.refresh(true)} busy={loading} />
@@ -717,7 +764,7 @@ function RedirectDomainBlock({
   const [target, setTarget] = useState("");
   const [creating, setCreating] = useState(false);
   const [createErr, setCreateErr] = useState<string | null>(null);
-  /** A path that was created while the buyer moved on: said until that path IS the destination. */
+  /** A path that was created while the buyer moved on: said until a path is picked from this list. */
   const [created, setCreated] = useState<string | null>(null);
   const mounted = useMounted();
 
@@ -777,7 +824,10 @@ function RedirectDomainBlock({
         <div className="flex flex-col gap-2">
           <SearchSelect
             value={rd.paths.some((p) => p.url === value) ? value : ""}
-            onChange={(v) => onChange(v)}
+            onChange={(v) => {
+              setCreated(null); // a path picked from the list answers the note
+              onChange(v);
+            }}
             options={pathOptions}
             placeholder="Search redirect paths"
             emptyHint="No paths on this domain yet — create one below"

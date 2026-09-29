@@ -89,6 +89,18 @@ test("errors map to stable codes; unconfigured key refuses without a call", asyn
   }
 });
 
+test("a target weight is read as a number whatever it is written as — one that cannot be read stays unknown, never 0", async () => {
+  const stub = stubFetch(() =>
+    json({ response: [{ url: "https://a", percentage: "40" }, { url: "https://b", percentage: "40%" }, { url: "https://c", percentage: 20 }, { url: "https://d", percentage: null }, { url: "https://e", percentage: "abc" }] }),
+  );
+  try {
+    const got = await api.avRedirectMappings("p9");
+    assert.deepEqual(got.map((m) => m.percentage), [40, 40, 20, NaN, NaN]);
+  } finally {
+    stub.restore();
+  }
+});
+
 test("path bodies are read defensively (create's {redirectDomains:{…}}, detail, mappings shapes)", async () => {
   const stub = stubFetch((r) => {
     if (r.method === "POST") return json({ redirectDomains: { id: "p9", path: "/jobs", fallbackUrl: "https://thecadrion.com/a", redirectType: "FIXED", redirectMappings: [] } });

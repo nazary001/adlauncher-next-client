@@ -290,6 +290,9 @@ export async function POST(req: Request) {
 
   const encoder = new TextEncoder();
   const detailCache = new Map<string, SourceDetail>();
+  // AV: the verdict on a source's destination, kept for this batch — many clones of one source ask
+  // the same question, and a chat target that does not answer would cost its timeouts per clone.
+  const avDestinationCache = new Map<string, ReturnType<typeof resolveAvDestination>>();
   // Media already migrated into a target account this batch, keyed "<sourceCampaignId>→<accountId>".
   const migratedCache = new Map<string, SourceMedia>();
 
@@ -376,7 +379,12 @@ export async function POST(req: Request) {
             if (!shape.ok) {
               throw new FbError(`clone_destination_invalid — the source ad's link is not an AV destination (${shape.error})`, { campaignId: edit.campaignId });
             }
-            const resolved = await resolveAvDestination(shape.base);
+            let verdict = avDestinationCache.get(shape.base);
+            if (!verdict) {
+              verdict = resolveAvDestination(shape.base);
+              avDestinationCache.set(shape.base, verdict);
+            }
+            const resolved = await verdict;
             if (!resolved.ok) {
               throw new FbError(`clone_destination_invalid — ${resolved.error}`, { campaignId: edit.campaignId });
             }

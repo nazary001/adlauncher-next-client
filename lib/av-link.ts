@@ -172,11 +172,40 @@ export function avPinAfterPick(value: string, mode: AvDestinationKind): AvTabPin
   return value ? null : { forValue: "", mode };
 }
 
+/** A line under a paste box: what it said, of which host, and up to which reading of the catalog it
+ *  stands whatever the rows say (the catalog's successful reads are counted: the reading on screen
+ *  when the answer landed — and the one the box asked for itself because of the answer, which only
+ *  shows what the rows said, not a change). `hostLevel`: a refusal of the host. */
+export type AvVerdict = { ok: boolean; text: string; forValue?: string; host?: string; hostLevel?: boolean; readAt: number };
+/** What the catalog's row says of a chat host now (null: no row speaks for it). */
+export type AvRowState = "ready" | "blocked" | "unchecked" | null;
+
+/**
+ * Is a line under a paste box still so? A success names the destination it set — it goes with it —
+ * and says the host shows ads — it goes once a LATER reading of the catalog lists the host as not
+ * ready (the reading it landed in may be stale, and a later one is what the buyer sees). A refusal
+ * of the host goes once a later reading lists the host as ready; any other line stays until the box
+ * changes.
+ */
+export function avVerdictStands(v: AvVerdict, now: { value: string; reading: number; row: AvRowState }): boolean {
+  const newer = now.reading > v.readAt;
+  if (v.ok) return (v.forValue === undefined || v.forValue === now.value) && !(newer && now.row === "blocked");
+  return !(v.hostLevel && newer && now.row === "ready");
+}
+
+/** Is a refusal of a checked chat about its HOST (not activated, no ads, not checkable) — what the
+ *  catalog's row speaks for — rather than about the address itself? */
+export function avRefusalOfHost(error: string, base: string): boolean {
+  return /^(?:chat_not_live|chat_not_monetized|destination_check_failed) — /.test(error) && !error.includes(base);
+}
+
 /** A redirect path's target as the card names it: its weight and the target's last path segment. A
  *  CHAT is named as one — its address is the root of its host, which alone would hide what it is. */
-export function avMappingLabel(m: { url: string; percentage: number }): string {
+export function avMappingLabel(m: { url: string; percentage: number | null }): string {
+  // a weight ActiveView's answer did not make readable is unknown (it reaches the card as null)
+  const weight = typeof m.percentage === "number" && Number.isFinite(m.percentage) ? m.percentage : "?";
   const chat = avChatUrl(m.url);
-  if (chat.ok) return `${m.percentage}% chat ${chat.id.slice(0, 6)}…${chat.id.slice(-4)}`;
+  if (chat.ok) return `${weight}% chat ${chat.id.slice(0, 6)}…${chat.id.slice(-4)}`;
   let seg = "";
   try {
     const u = new URL(m.url);
@@ -184,7 +213,7 @@ export function avMappingLabel(m: { url: string; percentage: number }): string {
   } catch {
     seg = m.url;
   }
-  return `${m.percentage}% ${seg}`;
+  return `${weight}% ${seg}`;
 }
 
 /**

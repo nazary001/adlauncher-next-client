@@ -15,7 +15,7 @@
 
 import { lookup } from "node:dns/promises";
 import { type AvMapping, type AvSite, AvApiError, avMe, avRedirectMappings, avRedirects } from "./av-api";
-import { type AvChatHostOption, _resetAvChatCaches, avChatHosts, resolveAvChat } from "./av-chat";
+import { type AvChatHostOption, _resetAvChatCaches, avChatHostSeen, avChatHosts, resolveAvChat } from "./av-chat";
 import { avArticleTitle, avChatUrl, avDestinationBase } from "./av-link";
 
 const UA = "Mozilla/5.0 (compatible; adlauncher-av/1.0)";
@@ -31,6 +31,8 @@ const TITLE_BUDGET_MS = 8_000;
 const TITLE_CONCURRENCY = 8;
 /** How long the catalog waits for the chat hosts' probe: they are a hint, the articles are not. */
 const CHAT_HINT_BUDGET_MS = 2_500;
+/** How long the chats a redirect path sends visitors to may take to check, all together. */
+const CHAT_TARGETS_BUDGET_MS = 25_000;
 
 type Cached<T> = { at: number; value: T };
 const sitesCache: { v?: Cached<AvSite[]> } = {};
@@ -237,9 +239,10 @@ export function invalidateAvRedirects(): void {
  *  redirects degrade independently with their own error text; the chat hosts are a probe that
  *  never throws (a host it could not check is listed with that reason) and runs alongside the
  *  rest — a chat host that does not answer must not hold the articles back: the probe has 2.5 s
- *  from the start of the read, after that its hosts are listed as still being checked (it goes on
- *  and leaves its verdict for the next read). */
-export async function avDestinationCatalog(opts: { force?: boolean; titles?: boolean } = {}): Promise<AvDestinationCatalog> {
+ *  from the start of the read, after that its hosts are listed as still being checked (`pending`)
+ *  and the probe is handed to `onPending` — it goes on after the answer (the route keeps it alive)
+ *  and leaves its verdict for the next read. */
+export async function avDestinationCatalog(opts: { force?: boolean; titles?: boolean; onPending?: (probe: Promise<unknown>) => void } = {}): Promise<AvDestinationCatalog> {
   const sites = await avSites(opts.force);
   // chat.<site> is probed for the ROOT sites only: a site's own subdomain that AV lists as a site
   // (its chat host, say) has no chat.<subdomain> of its own.
@@ -274,6 +277,7 @@ export async function avDestinationCatalog(opts: { force?: boolean; titles?: boo
   }
   const probed = await Promise.race([chats, budget]);
   clearTimeout(budgetTimer);
+  if (!probed) opts.onPending?.(chats);
   return {
     sites,
     articles,
@@ -286,29 +290,52 @@ export async function avDestinationCatalog(opts: { force?: boolean; titles?: boo
         host: `chat.${site}`,
         site,
         live: false,
-        liveReason: `destination_check_failed — chat.${site} is still being checked (its DNS or the host itself is slow to answer): press Retry in a moment`,
+        pending: true as const,
+        liveReason: `destination_check_failed — chat.${site} is still being checked (its DNS or the host itself is slow to answer)`,
       })),
   };
 }
 
+/** An address that names a chat, on a host ActiveView lists as a site without listing the site it
+ *  is a subdomain of: nothing of a chat can be checked there. */
+const chatOnParentlessSite = (base: string, site: string): string =>
+  `destination_invalid — ${base} is a chat's address, but ActiveView lists ${site} as a site, not as the chat subdomain of one: its ads cannot be checked, so it is not launched`;
+
 /**
  * A redirect path may send (part of) its visitors to a CHAT — its targets are set in ActiveView's
  * dashboard, not here. Such a chat goes through the chat's own gate: a redirect is no way around it.
- * A target that gets no visitors, a host that is none of ours and a subdomain that is no chat host
- * are not the launch's business. null = nothing stands in the way.
+ * A target that gets no visitors (a weight of 0 — one that could not be read counts as visitors), a
+ * host that is none of ours and a subdomain that is no chat host are not the launch's business. The
+ * chats are asked side by side and all within 25 s. null = nothing stands in the way.
  */
 async function chatTargetRefusal(rd: AvRedirectOption, p: AvRedirectPathOption, sites: AvSite[]): Promise<{ ok: false; error: string; status: number } | null> {
-  for (const m of p.mappings) {
-    if (!(m.percentage > 0)) continue;
+  const refusal = (weight: number, base: string, error: string, status: number) => ({
+    ok: false as const,
+    status,
+    error: `redirect_target_not_ready — ${rd.domain}${p.path} sends ${Number.isFinite(weight) ? `${weight}%` : "a share"} of its visitors to the chat ${base}: ${error}`,
+  });
+  const checks = p.mappings.map(async (m) => {
+    if (m.percentage <= 0) return null;
     const target = avChatUrl(m.url);
-    if (!target.ok) continue;
-    const root = placeOfHost(target.host, sites).parents[0];
-    if (!root) continue;
-    const chat = await resolveAvChat({ base: target.base, host: target.host, path: "/" }, root.domain);
-    if (chat.ok || chat.error.startsWith("destination_not_av")) continue;
-    return { ok: false, status: chat.status, error: `redirect_target_not_ready — ${rd.domain}${p.path} sends ${m.percentage}% of its visitors to the chat ${target.base}: ${chat.error}` };
+    if (!target.ok) return null;
+    const { exact, parents } = placeOfHost(target.host, sites);
+    if (!parents.length) return exact ? refusal(m.percentage, target.base, chatOnParentlessSite(target.base, exact.domain), 400) : null;
+    const chat = await resolveAvChat({ base: target.base, host: target.host, path: "/" }, parents[0].domain);
+    if (chat.ok || chat.error.startsWith("destination_not_av")) return null;
+    return refusal(m.percentage, target.base, chat.error, chat.status);
+  });
+  if (!checks.length) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<"late">((resolve) => {
+    timer = setTimeout(() => resolve("late"), CHAT_TARGETS_BUDGET_MS);
+    (timer as { unref?: () => void }).unref?.();
+  });
+  const answers = await Promise.race([Promise.all(checks), deadline]);
+  clearTimeout(timer);
+  if (answers === "late") {
+    return { ok: false, status: 502, error: `destination_check_failed — the chat targets of ${rd.domain}${p.path} could not all be checked in ${CHAT_TARGETS_BUDGET_MS / 1000} s — try again` };
   }
-  return null;
+  return answers.find((a) => a !== null) ?? null;
 }
 
 /** Does the article answer 200 on its own site (following redirects that stay on the site)? */
@@ -376,8 +403,22 @@ export async function resolveAvDestination(raw: string): Promise<AvResolved> {
   if (rd) {
     const live = await avRedirectDomainLive(rd.domain);
     if (!live.live) return { ok: false, error: `redirect_not_live — ${live.reason}`, status: 400 };
-    const p = rd.paths.find((x) => x.path === b.path);
-    if (!p) return { ok: false, error: `redirect_path_unknown — ${b.path} is not a path of ${rd.domain} (create it on the card first)`, status: 400 };
+    const listed = rd.paths.find((x) => x.path === b.path);
+    if (!listed) return { ok: false, error: `redirect_path_unknown — ${b.path} is not a path of ${rd.domain} (create it on the card first)`, status: 400 };
+    // Where the path sends its visitors must be known: a chat among the targets goes through the
+    // chat's gate. Targets the list could not read are asked for once more.
+    let p = listed;
+    if (listed.mappingsError) {
+      try {
+        p = { ...listed, mappings: await avRedirectMappings(listed.id), mappingsError: undefined };
+      } catch (e) {
+        return {
+          ok: false,
+          status: 502,
+          error: `destination_check_failed — the targets of ${rd.domain}${listed.path} could not be read (${errText(e)}): a chat among them cannot be ruled out — try again`,
+        };
+      }
+    }
     const refusal = await chatTargetRefusal(rd, p, sites);
     if (refusal) return refusal;
     return { ok: true, kind: "redirect", base: b.base, site: owner.domain, domainId: rd.domainId, pathId: p.id, mappings: p.mappings };
@@ -387,11 +428,13 @@ export async function resolveAvDestination(raw: string): Promise<AvResolved> {
     // CNAME says so, whatever the redirect list did and whether or not ActiveView ALSO lists the
     // host as a site of its own (a chat host must never reach an ad through the article branch,
     // past the chat's gate). Its verdict stands unless the host is simply not a chat host — or the
-    // host IS a listed site whose DNS could not be asked and the address names no chat: that is a
-    // page of the site, and an article never needed DNS.
+    // host IS a listed site whose DNS could not be asked, the address names no chat, and the host is
+    // no chat host as far as anyone knows (not the site's chat.<root>, never seen behind the gateway):
+    // that is a page of the site, and an article never needed DNS.
     const chat = await resolveAvChat(b, root.domain);
     const notChatHost = !chat.ok && chat.error.startsWith("destination_not_av");
-    const pageOfSite = !chat.ok && chat.status === 502 && Boolean(exact) && !avChatUrl(b.base).ok;
+    const chatHostByName = b.host === `chat.${root.domain}` || avChatHostSeen(b.host);
+    const pageOfSite = !chat.ok && chat.status === 502 && Boolean(exact) && !avChatUrl(b.base).ok && !chatHostByName;
     if (!notChatHost && !pageOfSite) return chat;
     if (!exact) {
       // While the redirect list is unavailable the host may still be a redirect domain we could not
@@ -412,13 +455,7 @@ export async function resolveAvDestination(raw: string): Promise<AvResolved> {
   // An address that names a chat id is a chat's. A host with a listed parent went through the chat
   // check above; this one has none to be a chat subdomain OF, so nothing of a chat can be checked
   // — and it is not launched as an article past those checks.
-  if (!root && avChatUrl(b.base).ok) {
-    return {
-      ok: false,
-      error: `destination_invalid — ${b.base} is a chat's address, but ActiveView lists ${site.domain} as a site, not as the chat subdomain of one: its ads cannot be checked, so it is not launched`,
-      status: 400,
-    };
-  }
+  if (!root && avChatUrl(b.base).ok) return { ok: false, error: chatOnParentlessSite(b.base, site.domain), status: 400 };
   const live = await articleLive(b.base, site);
   if (!live.ok) return { ok: false, error: live.error, status: live.error.startsWith("destination_check_failed") ? 502 : 400 };
   return { ok: true, kind: "article", base: b.base, site: site.domain };

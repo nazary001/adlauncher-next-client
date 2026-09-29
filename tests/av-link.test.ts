@@ -19,7 +19,9 @@ import {
   avLinkSegments,
   avMappingLabel,
   avPinAfterPick,
+  avRefusalOfHost,
   avRegisteredCount,
+  avVerdictStands,
   swapUtmCampaign,
 } from "../lib/av-link.ts";
 
@@ -345,9 +347,56 @@ test("a redirect path's target reads as its weight and its last path segment", (
   assert.equal(avMappingLabel({ url: "https://thecadrion.com/jobs/forklift/", percentage: 60 }), "60% forklift");
   assert.equal(avMappingLabel({ url: "https://thecadrion.com/", percentage: 10 }), "10% thecadrion.com");
   assert.equal(avMappingLabel({ url: "not a url", percentage: 5 }), "5% not a url");
+  assert.equal(avMappingLabel({ url: "https://thecadrion.com/a", percentage: NaN }), "?% a", "a weight that could not be read");
+  assert.equal(avMappingLabel({ url: "https://thecadrion.com/a", percentage: null }), "?% a", "…as it reaches the card");
 });
 
 test("a target that is a CHAT reads as a chat — its address is the root, so the host alone would hide it", () => {
   assert.equal(avMappingLabel({ url: A_CHAT, percentage: 40 }), "40% chat 6a2312…c523");
   assert.equal(avMappingLabel({ url: "https://chat.thecadrion.com/6a2312cef9f4e11b130fc523/?utm_source=x", percentage: 40 }), "40% chat 6a2312…c523");
+});
+
+// ---------- is a line under a paste box still so? ----------
+
+/** Readings of the catalog, counted: the one the answer landed in, and a later one. */
+const R1 = 1;
+const R2 = 2;
+const HOST = "chat.thecadrion.com";
+
+test("a success stands while it is the destination and no newer reading lists its host as not ready", () => {
+  const ok = { ok: true, text: "Chat host ready", forValue: A_CHAT, host: HOST, readAt: R1 };
+  assert.equal(avVerdictStands(ok, { value: A_CHAT, reading: R1, row: "blocked" }), true, "the reading it landed in may be stale — it stands");
+  assert.equal(avVerdictStands(ok, { value: A_CHAT, reading: R2, row: "ready" }), true);
+  assert.equal(avVerdictStands(ok, { value: A_CHAT, reading: R2, row: null }), true, "no row speaks for the host");
+  assert.equal(avVerdictStands(ok, { value: A_CHAT, reading: R2, row: "unchecked" }), true, "a row that could not be checked says nothing");
+  assert.equal(avVerdictStands(ok, { value: A_CHAT, reading: R2, row: "blocked" }), false, "a newer reading says the host is not ready");
+  assert.equal(avVerdictStands(ok, { value: ART, reading: R1, row: null }), false, "the destination is another one");
+});
+
+test("a refusal of the HOST goes once a newer reading lists the host as ready; any other line stays", () => {
+  const host = { ok: false, text: "chat_not_monetized — chat.thecadrion.com shows no ads yet", host: HOST, hostLevel: true, readAt: R1 };
+  assert.equal(avVerdictStands(host, { value: "", reading: R1, row: "ready" }), true);
+  assert.equal(avVerdictStands(host, { value: "", reading: R2, row: "blocked" }), true);
+  assert.equal(avVerdictStands(host, { value: "", reading: R2, row: null }), true);
+  assert.equal(avVerdictStands(host, { value: "", reading: R2, row: "ready" }), false);
+  const address = { ...host, text: `chat_not_live — ${A_CHAT} answered 404`, hostLevel: false };
+  assert.equal(avVerdictStands(address, { value: "", reading: R2, row: "ready" }), true, "a refusal of the ADDRESS is not the row's to take back");
+  const other = { ok: false, text: "destination_not_av — talk.thecadrion.com …", host: "talk.thecadrion.com", hostLevel: false, readAt: R1 };
+  assert.equal(avVerdictStands(other, { value: "", reading: R2, row: null }), true);
+});
+
+test("a line stands through the reading the box asked for itself — only a LATER one weighs it", () => {
+  const refusal = { ok: false, text: "chat_not_monetized — chat.thecadrion.com shows no ads yet", host: HOST, hostLevel: true, readAt: R2 };
+  assert.equal(avVerdictStands(refusal, { value: "", reading: R2, row: "ready" }), true, "the box's own re-read disagrees: both are shown");
+  assert.equal(avVerdictStands(refusal, { value: "", reading: 3, row: "ready" }), false, "a later reading still says ready");
+});
+
+test("a refusal is of the host when it says what the host is — not what the address answered", () => {
+  assert.equal(avRefusalOfHost("chat_not_live — chat.thecadrion.com has no certificate of its own yet", A_CHAT), true);
+  assert.equal(avRefusalOfHost("chat_not_monetized — chat.thecadrion.com shows no ads yet", A_CHAT), true);
+  assert.equal(avRefusalOfHost("destination_check_failed — the DNS lookup of chat.thecadrion.com failed (ETIMEOUT)", A_CHAT), true);
+  assert.equal(avRefusalOfHost(`chat_not_live — ${A_CHAT} answered 404`, A_CHAT), false);
+  assert.equal(avRefusalOfHost(`destination_check_failed — ${A_CHAT} answered 503: try again in a moment`, A_CHAT), false);
+  assert.equal(avRefusalOfHost("chat_url_invalid — a chat's address is …", A_CHAT), false);
+  assert.equal(avRefusalOfHost("destination_not_av — chat.thecadrion.com is not …", A_CHAT), false);
 });
