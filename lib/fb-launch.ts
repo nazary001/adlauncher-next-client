@@ -1,5 +1,6 @@
 import type { Campaign } from "./types";
 import { bidKind, normalizeRoasGoal, parseMoney } from "./types";
+import { placementPlatformFields } from "./publisher-platforms";
 
 /** Resolved, server-enforced binds for a launch (locked partner values). */
 export type LaunchBinds = {
@@ -52,8 +53,10 @@ function placementBits(placement: string) {
   };
 }
 
-/** Targeting spec from geo / age / gender / placement / OS / resolved locales. */
-export function targeting(c: Campaign, localeIds: number[]): Record<string, unknown> {
+/** Targeting spec from geo / age / gender / placement / OS / resolved locales — plus, for the AV
+ *  card's Platforms pick (owner ask 30.09), the Meta platforms it runs on ([] = the placement set's
+ *  own; only the AV route passes one). */
+export function targeting(c: Campaign, localeIds: number[], platforms: readonly string[] = []): Record<string, unknown> {
   const t: Record<string, unknown> = {};
   // Any special ad category (finance/housing/employment/politics) forbids custom age & gender —
   // Meta rejects the ad set otherwise ("Custom age/gender selection is unavailable…").
@@ -77,13 +80,9 @@ export function targeting(c: Campaign, localeIds: number[]): Record<string, unkn
   const gendered = !special && (male || female);
   if (gendered) t.genders = male ? [1] : [2];
 
-  if (compliance) {
-    // Restricted-niche safe set: feeds only.
-    t.publisher_platforms = ["facebook", "instagram"];
-    t.facebook_positions = ["feed"];
-    t.instagram_positions = ["stream"];
-  }
-  // FULL → omit platforms/positions = Advantage+ (automatic) placements.
+  // COMPLIANCE = the restricted-niche safe set (feeds only); FULL without a pick omits
+  // platforms/positions = Advantage+ (automatic) placements; a pick narrows either to its platforms.
+  Object.assign(t, placementPlatformFields(compliance, platforms));
 
   if (c.userOs === "android") {
     t.user_os = ["Android"];
@@ -128,6 +127,8 @@ export function adsetPayload(
   campaignId: string,
   binds: LaunchBinds,
   localeIds: number[],
+  /** Meta platforms the ad set runs on — the AV card's pick; every other rail omits it. */
+  platforms: readonly string[] = [],
 ): Record<string, unknown> {
   const p: Record<string, unknown> = {
     name,
@@ -135,7 +136,7 @@ export function adsetPayload(
     billing_event: "IMPRESSIONS",
     optimization_goal: optimizationGoal(c),
     status: "ACTIVE", // launches go live immediately (2026-08-11) — see campaignPayload
-    targeting: targeting(c, localeIds),
+    targeting: targeting(c, localeIds, platforms),
   };
 
   const bid = bidAmountCents(c);

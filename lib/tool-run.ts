@@ -137,6 +137,9 @@ export type ToolInputExtras = {
   status: "ACTIVE" | "PAUSED";
   adsetStartTime?: string;
   accountCurrency: string;
+  /** Meta platforms the ad set runs on (the AV card's pick, parsed by lib/publisher-platforms).
+   *  Passed ONLY by the AV route — every other rail omits it and keeps its placements as they are. */
+  platforms?: readonly string[];
 };
 
 /**
@@ -172,6 +175,7 @@ export function toolInputFromCampaign(c: Campaign, extras: ToolInputExtras): Too
     localeIds: extras.localeIds,
     category: c.category,
     placement: c.placement,
+    platforms: extras.platforms ? [...extras.platforms] : [],
     ageMin: c.ageMin,
     userOs: c.userOs,
     adsetStartTime: extras.adsetStartTime,

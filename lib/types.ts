@@ -47,6 +47,10 @@ export type Campaign = {
   locales: string[];
   category: string;
   placement: string;
+  /** AV cards: which Meta platforms the launch runs on — "auto" | "facebook" | "instagram" |
+   *  "facebook+instagram" (lib/publisher-platforms, owner ask 30.09). Missing = auto (drafts saved
+   *  before the pick existed); only the AV route reads it. */
+  platforms?: string;
   ageMin: string;
   userOs: string;
   files: FileItem[];
@@ -82,6 +86,7 @@ export function makeCampaign(id: string, namePrefix = "", name = ""): Campaign {
     locales: [],
     category: "",
     placement: "FULL",
+    platforms: "auto",
     ageMin: "18",
     userOs: "all",
     files: [],

@@ -115,3 +115,25 @@ key swap); contract mock `_e2e/_av_mock.mjs` (external API + a fake AV site/site
 (`_e2e/_adl_av_smoke.mts`: dormant 404, config errors, key stub refusal, destinations, redirect
 path create on the mock, launch refusal paths); headless-Chrome walk of the board / clone / keys /
 tokens / accounts pages. No live FB launch (no AV token yet, keys not registered).
+
+## Addendum 30.09 — Platforms pick ("which social the launch runs on")
+
+- **Ask (owner 30.09):** "при заливе на AV выбирать соц, на который будет залив" — and check that the
+  TOOL rail allows it. It does: TOOL `CampaignRequest.adsets[].targeting.publisher_platforms`
+  (facebook / instagram / audience_network / messenger / threads) + `facebook_positions` /
+  `instagram_positions`, status **CONFIRMED** on `/capabilities` (live read 30.09) — no
+  `allow_inferred`. Picking the Ads Manager SESSION is not possible: `POST /accounts/{id}/campaigns`
+  picks the session and proxy itself (no session field; `additionalProperties:false`).
+- **Card (AV only):** Targeting → **Platforms** = All (auto) · Facebook · Instagram · Facebook +
+  Instagram (`lib/publisher-platforms.ts`, stored on `Campaign.platforms`, default `auto`; also in
+  Copy settings, AV only). Threads / Messenger / Audience Network are left out — Meta runs them only
+  alongside Instagram / Facebook.
+- **Wire:** auto = no platforms (Advantage+, as before). A pick sets `publisher_platforms`; with
+  placement FULL every position of the picked platforms runs, with COMPLIANCE only their feeds
+  (`facebook_positions:["feed"]` / `instagram_positions:["stream"]`). Same rule on both AV channels —
+  TOOL (`buildToolCampaign`, literal twin) and direct Graph (`fb-launch.targeting` via
+  `placementPlatformFields`), pinned together by `tests/av-platforms.test.ts`. Only the AV route
+  passes the pick (`ToolInputExtras.platforms` / `adsetPayload(…, platforms)`); HS / MO / AIF keep
+  their placements untouched. An unknown word → 400 `platforms_invalid` before any write.
+- **Not covered:** AV clones (Graph on the AV token) still rebuild placement from the source as
+  FULL/COMPLIANCE — a source's platforms are not carried yet.

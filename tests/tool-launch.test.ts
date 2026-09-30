@@ -185,6 +185,33 @@ test("COMPLIANCE placement → feeds-only platforms/positions", () => {
   assert.deepEqual(t.instagram_positions, ["stream"]);
 });
 
+test("platforms pick (AV, owner ask 30.09) → publisher_platforms of the pick, every position on them", () => {
+  for (const platforms of [["facebook"], ["instagram"], ["facebook", "instagram"]]) {
+    const t = built({ platforms }).body.adsets[0].targeting;
+    assert.deepEqual(t.publisher_platforms, platforms, platforms.join("+"));
+    assert.equal(t.facebook_positions, undefined);
+    assert.equal(t.instagram_positions, undefined);
+  }
+  // No pick / an empty pick = Advantage+ placements, exactly what a card sent before the pick existed.
+  for (const over of [{}, { platforms: [] }]) assert.equal(built(over).body.adsets[0].targeting.publisher_platforms, undefined);
+});
+
+test("COMPLIANCE × platforms pick → the feeds of the picked platforms only", () => {
+  const fb = built({ placement: "COMPLIANCE", platforms: ["facebook"] }).body.adsets[0].targeting;
+  assert.deepEqual([fb.publisher_platforms, fb.facebook_positions, fb.instagram_positions], [["facebook"], ["feed"], undefined]);
+  const ig = built({ placement: "COMPLIANCE_MULHER", platforms: ["instagram"] }).body.adsets[0].targeting;
+  assert.deepEqual([ig.publisher_platforms, ig.facebook_positions, ig.instagram_positions], [["instagram"], undefined, ["stream"]]);
+  assert.deepEqual(ig.genders, [2]);
+  const both = built({ placement: "COMPLIANCE", platforms: ["facebook", "instagram"] }).body.adsets[0].targeting;
+  assert.deepEqual([both.publisher_platforms, both.facebook_positions, both.instagram_positions], [["facebook", "instagram"], ["feed"], ["stream"]]);
+});
+
+test("a platforms pick is CONFIRMED on TOOL (/capabilities 30.09) — it never turns allow_inferred on", () => {
+  const { body, inferred } = built({ platforms: ["instagram"] });
+  assert.deepEqual(inferred, []);
+  assert.equal(body.options?.allow_inferred, false);
+});
+
 test("android → user_os [Android]", () => {
   assert.deepEqual(built({ userOs: "android" }).body.adsets[0].targeting.user_os, ["Android"]);
 });

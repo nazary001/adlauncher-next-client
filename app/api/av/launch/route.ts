@@ -18,6 +18,7 @@ import { avKeysRegistered, avRail, avRailEnabled } from "@/lib/av-launch";
 import { backfillAvKey, claimAvKey, releaseAvKey } from "@/lib/av-keys";
 import { resolveAvDestination } from "@/lib/av-destination";
 import { avApiConfigured } from "@/lib/av-api";
+import { publisherPlatformsOf } from "@/lib/publisher-platforms";
 import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import { taskWriter } from "@/lib/task-store";
@@ -180,6 +181,20 @@ export async function POST(req: Request) {
     taskId = typeof j.taskId === "string" && /^[\w-]{6,64}$/.test(j.taskId) ? j.taskId : null;
   } catch (e) {
     return NextResponse.json({ ok: false, stage: "parse", error: String(e) }, { status: 400 });
+  }
+  // The card's Platforms pick (owner ask 30.09: "выбирать соц, на который будет залив") — the Meta
+  // platforms this launch runs on, on BOTH channels. A word outside the card's choices is refused
+  // before any write: never widened to every platform, never narrowed on a guess.
+  const platforms = publisherPlatformsOf(campaign.platforms);
+  if (platforms === null) {
+    return NextResponse.json(
+      {
+        ok: false,
+        stage: "parse",
+        error: `platforms_invalid: ${String(campaign.platforms).slice(0, 40)} — pick All (auto), Facebook, Instagram or Facebook + Instagram`,
+      },
+      { status: 400 },
+    );
   }
 
   // The AV token (slot av.launch) is resolved on BOTH channels (owner ask 28.09). The direct-Graph
@@ -628,6 +643,7 @@ export async function POST(req: Request) {
               creatives,
               status: "ACTIVE", // AV launches go live; TOOL creates PAUSED then activates on success
               accountCurrency: toolAcctCurrency,
+              platforms,
             }),
           );
           if (!built.ok) {
@@ -760,7 +776,7 @@ export async function POST(req: Request) {
 
         progress("adset");
         const adset = await withParentRetry(String(camp.id), () =>
-          rail.createAdset(`act_${binds.accountId}/adsets`, adsetPayload(serverCampaign, name, String(camp.id), binds, localeIds)),
+          rail.createAdset(`act_${binds.accountId}/adsets`, adsetPayload(serverCampaign, name, String(camp.id), binds, localeIds, platforms)),
         );
         created.adset_id = String(adset.id);
 

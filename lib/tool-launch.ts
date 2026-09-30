@@ -397,6 +397,9 @@ export type ToolBuildInput = {
   /** Meta special-ad-category enum, "" = none. */
   category: string;
   placement: string;
+  /** Meta publisher_platforms the ad set runs on (the AV card's pick, already parsed by
+   *  lib/publisher-platforms); absent / [] = automatic. */
+  platforms?: readonly string[];
   ageMin: string;
   userOs: string;
   adsetStartTime?: string;
@@ -453,11 +456,18 @@ function buildTargeting(input: ToolBuildInput, inferred: string[]): ToolTargetin
   const gendered = !special && (male || female);
   if (gendered) t.genders = male ? [1] : [2];
 
+  // Platforms: the literal twin of lib/publisher-platforms.placementPlatformFields (this file stays
+  // import-free; tests/av-platforms pins the two together). No pick: COMPLIANCE = FB + IG feeds (the
+  // restricted-niche safe set), FULL sets nothing (Advantage+). A pick (AV, owner ask 30.09): FULL
+  // runs every position of the picked platforms, COMPLIANCE only their feeds.
+  const platforms = input.platforms?.length ? [...input.platforms] : null;
   if (compliance) {
-    // Restricted-niche safe set: feeds only (same as fb-launch's COMPLIANCE branch).
-    t.publisher_platforms = ["facebook", "instagram"];
-    t.facebook_positions = ["feed"];
-    t.instagram_positions = ["stream"];
+    const set = platforms ?? ["facebook", "instagram"];
+    t.publisher_platforms = set;
+    if (set.includes("facebook")) t.facebook_positions = ["feed"];
+    if (set.includes("instagram")) t.instagram_positions = ["stream"];
+  } else if (platforms) {
+    t.publisher_platforms = platforms;
   }
 
   if (input.userOs === "android") {
