@@ -76,7 +76,7 @@ function missingRequirements(
 ): string[] {
   const m: string[] = [];
   if (acctFull) m.push("account at its 5/30min launch limit — pick another or wait for the reset");
-  if (!c.name.trim()) m.push("name");
+  if (!opts.nameOptional && !c.name.trim()) m.push("name");
   if (c.countries.length === 0) m.push("geo");
   if (opts.account && !c.account) m.push("account");
   if (opts.pixel && !c.pixel) m.push("pixel");
@@ -448,9 +448,13 @@ function CampaignCardBase({
   // TOOL wins over the FB-token/SOC markers when it is the effective channel (owner ask 28.09):
   // HS carries GCL TOOL in the TOKEN slot (hsNamePrefix "tool"); MO/AIF carry it right after the
   // partner prefix (toolEnsureMark), dropping any SOC marker. The server re-ensures it either way.
+  // AV's prefix already carries the locked "<topic> | <GEO> | <lang> | " (pinAvNamePrefix), so its TOOL
+  // mark goes right after the partner prefix, exactly where the server puts it (toolEnsureMark).
   const displayPrefix = hsMode
     ? hsNamePrefix(c, hs?.acr ?? "", todaySaoPauloDDMM(), toolRail ? "tool" : hsTokenRail ? "token" : "lion")
-    : c.namePrefix + (moToolRail ? TOOL_MARK : moSocRail ? MO_SOC_MARK : "");
+    : avMode && moToolRail
+      ? toolEnsureMark(c.namePrefix)
+      : c.namePrefix + (moToolRail ? TOOL_MARK : moSocRail ? MO_SOC_MARK : "");
   const displayName = hsMode
     ? c.name.trim()
       ? displayPrefix + c.name
@@ -619,14 +623,14 @@ function CampaignCardBase({
                     hsMode
                       ? "prefix follows LION's format — date, buyer, redirect, geo"
                       : avMode
-                        ? "fills from the destination — topic | GEO | lang | — type yours after the last |"
+                        ? "locked: topic | GEO | lang | from the destination — type your tail after it"
                         : undefined
                   }
                 >
                   {displayPrefix ? (
                     <div className="flex h-9 items-center overflow-hidden rounded-lg border border-line bg-surface2 transition-[border-color,box-shadow] duration-150 hover:border-line2 focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/15">
                       <span
-                        title={hsMode ? "LION name prefix (auto-built)" : "Fixed prefix"}
+                        title={`${hsMode ? "LION name prefix (auto-built)" : "Fixed prefix"}: ${displayPrefix}`}
                         className="flex h-full min-w-0 shrink select-none items-center gap-1.5 overflow-hidden whitespace-pre border-r border-line bg-surface px-3 font-mono text-[12px] text-faint"
                       >
                         <LockIcon className="h-3 w-3 shrink-0" />
@@ -638,8 +642,8 @@ function CampaignCardBase({
                         value={c.name}
                         onChange={(e) => patch({ name: e.target.value })}
                         maxLength={Math.max(1, 400 - displayPrefix.length)}
-                        placeholder="suffix — e.g. Auto | vd-01"
-                        className="h-full min-w-0 flex-1 bg-transparent px-3 text-[13px] text-ink placeholder:text-faint outline-none"
+                        placeholder={avMode ? "your tail — e.g. vd-01" : "suffix — e.g. Auto | vd-01"}
+                        className="h-full min-w-[8rem] flex-1 bg-transparent px-3 text-[13px] text-ink placeholder:text-faint outline-none"
                       />
                     </div>
                   ) : (

@@ -17,6 +17,7 @@ import { fetchValidatedImage } from "@/lib/fb-media";
 import { avKeysRegistered, avRail, avRailEnabled } from "@/lib/av-launch";
 import { backfillAvKey, claimAvKey, releaseAvKey } from "@/lib/av-keys";
 import { resolveAvDestination } from "@/lib/av-destination";
+import { avServerName } from "@/lib/av-link";
 import { avApiConfigured } from "@/lib/av-api";
 import { publisherPlatformsOf } from "@/lib/publisher-platforms";
 import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
@@ -481,7 +482,12 @@ export async function POST(req: Request) {
   // The partner mark in the prefix is the ROUTE's, not the client's: a card that kept its MO/AIF
   // prefix across a partner switch still launches here as "(AV)" (live bug 23.09). A TOOL-born run
   // carries `GCL TOOL - ` after the partner prefix (toolEnsureMark) — the client name is never trusted.
-  const baseName = withPartnerMark(`${serverCampaign.namePrefix}${serverCampaign.name}`.trim(), partner.label);
+  // The locked "<topic> | <GEO> | <lang> | " is the server's too (owner ask 30.09, avServerName): built
+  // from the RESOLVED destination + the card's countries, then only the buyer's typed tail.
+  const baseName = withPartnerMark(
+    avServerName(serverCampaign.namePrefix, serverCampaign.name, resolved.base, serverCampaign.countries),
+    partner.label,
+  );
   const name = viaTool ? toolEnsureMark(baseName) : baseName;
 
   const encoder = new TextEncoder();

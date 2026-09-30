@@ -425,6 +425,7 @@ export function launchReadyOpts(p: PartnerConfig): {
   link: boolean;
   adText: boolean;
   roasPixel: string;
+  nameOptional: boolean;
 } {
   return {
     // AIF reuses the landing slot for its free-typed destination slug — required all the same.
@@ -449,6 +450,9 @@ export function launchReadyOpts(p: PartnerConfig): {
     // since 09-08 — both VO-probed); LION partners validate pixels their own way.
     // AV has no value pixel (and refuses min-ROAS) — no pin.
     roasPixel: p.avLaunch ? "" : p.aifLaunch ? AIF_VALUE_PIXEL.id : p.accountsFromToken ? ROAS_PIXEL.id : "",
+    // AV: the name body is the locked "<topic> | <GEO> | <lang> | " from the (required) destination —
+    // the buyer's typed tail may stay empty (owner ask 30.09).
+    nameOptional: Boolean(p.avLaunch),
   };
 }
 

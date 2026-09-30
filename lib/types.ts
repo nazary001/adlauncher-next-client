@@ -327,6 +327,8 @@ type ReadyOpts = {
   /** When set (MO), a min-ROAS card is ready ONLY with this exact pixel id — the partner's HS
    *  value pixel; every other pixel fails value optimization or is banned by owner rule. */
   roasPixel?: string;
+  /** AV: the name body is the locked destination part inside the prefix — the typed tail may be empty. */
+  nameOptional?: boolean;
 };
 
 /** A usable ad destination — http(s) and no whitespace inside. */
@@ -346,8 +348,9 @@ export function isReady(c: Campaign, opts: ReadyOpts = {}): boolean {
     link = false,
     adText = false,
     roasPixel = "",
+    nameOptional = false,
   } = opts;
-  if (!c.name.trim() || c.countries.length === 0) return false;
+  if ((!nameOptional && !c.name.trim()) || c.countries.length === 0) return false;
   if (profile && !c.profile) return false;
   if (landing && !c.landing) return false;
   if (page && !c.page) return false;

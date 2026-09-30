@@ -348,13 +348,15 @@ function isCode(code: string, type: "region" | "language"): boolean {
 }
 
 /**
- * The default campaign-name body of an AV card (owner ask 30.09: "нейминг был forklift certification |
- * US | es | … чтобы туда попадало по дефолту гео язык и название статьи … а дописывать тоже чтобы
- * можно было"): "<topic> | <GEO> | <lang> | ", the buyer types after the last bar. Our articles end in
- * "-<geo>-<lang>" (forklift-certification-mobile-app-us-es → "forklift certification mobile app | US |
- * es | "); the topic is the rest of the slug in lower-case words (AV's template prefix and variant id
- * stripped, avArticleTitle). A slug without the pair takes the geo from the card's countries ("US+CA")
- * and names no language; an AI-chat destination (no path) reads "ai chat". "" = not a URL.
+ * The destination-derived part of an AV campaign name (owner asks 30.09: "нейминг был forklift
+ * certification | US | es | … чтобы туда попадало по дефолту гео язык и название статьи … а дописывать
+ * тоже чтобы можно было", then "изменить именно этого было нельзя … под замочком"): "<topic> | <GEO> |
+ * <lang> | " — LOCKED, it rides inside the card's fixed name prefix (pinAvNamePrefix), the buyer types
+ * only the tail after the last bar. Our articles end in "-<geo>-<lang>"
+ * (forklift-certification-mobile-app-us-es → "forklift certification mobile app | US | es | "); the
+ * topic is the rest of the slug in lower-case words (AV's template prefix and variant id stripped,
+ * avArticleTitle). A slug without the pair takes the geo from the card's countries ("US+CA") and names
+ * no language; an AI-chat destination (no path) reads "ai chat". "" = not a URL.
  */
 export function avAutoName(destination: string, countries: readonly string[] = []): string {
   let u: URL;
@@ -382,27 +384,37 @@ export function avAutoName(destination: string, countries: readonly string[] = [
 }
 
 /**
- * The name an AV card should carry after an edit: when the destination or the countries change, a name
- * the buyer has not taken over — empty, the default (their username), or one still starting with the
- * previous auto-name — becomes the new auto-name plus whatever was typed after the old one. null =
- * leave the name alone (the buyer typed their own, or the auto-name did not change).
+ * The board's name-prefix pin for AV cards: the partner prefix ("[DD/MM] (AV) - ") plus the card's own
+ * locked auto part (avAutoName of its destination + countries), so the card shows it under the lock,
+ * the launch bay reads it and the buyer's `name` stays the typed tail alone. Identity-preserving — the
+ * SAME array when every card already carries its prefix.
  */
-export function avFollowName(
-  prev: { landing: string; countries: readonly string[] },
-  next: { landing: string; countries: readonly string[]; name: string },
-  owner: string,
-): string | null {
-  const before = avAutoName(prev.landing, prev.countries);
-  const after = avAutoName(next.landing, next.countries);
-  if (before === after) return null;
-  const name = String(next.name ?? "");
-  let tail: string | null = null;
-  if (!name.trim() || name.trim() === owner.trim()) tail = "";
-  else if (before && name.startsWith(before)) tail = name.slice(before.length);
-  else if (before && name.trimEnd() === before.trimEnd()) tail = "";
-  if (tail === null) return null;
-  if (after) return after + tail;
-  return tail.trim() ? tail.trim() : owner; // destination cleared: back to what the buyer typed, else the default
+export function pinAvNamePrefix<T extends { namePrefix: string; landing: string; countries: string[] }>(rows: T[], base: string): T[] {
+  let changed = false;
+  const next = rows.map((c) => {
+    const want = base + avAutoName(c.landing, c.countries);
+    if (c.namePrefix === want) return c;
+    changed = true;
+    return { ...c, namePrefix: want };
+  });
+  return changed ? next : rows;
+}
+
+const AV_DATE_PREFIX = /^\[\d{2}[./]\d{2}\]\s*\([^)]*\)\s*-\s*/;
+
+/**
+ * The AV campaign name the SERVER builds — the locked part is never the client's word: the client's
+ * "[DD/MM] (AV) - " date prefix, the auto part from the RESOLVED destination + the card's countries, then
+ * the buyer's typed tail. A tail still starting with the auto part (a tab of the 30.09 build that kept
+ * it in the editable field) loses that copy, so the locked part never doubles.
+ */
+export function avServerName(clientPrefix: string, clientName: string, destination: string, countries: readonly string[]): string {
+  const date = AV_DATE_PREFIX.exec(String(clientPrefix ?? ""))?.[0] ?? "";
+  const auto = avAutoName(destination, countries);
+  let tail = String(clientName ?? "").trim();
+  const locked = auto.trim();
+  if (locked && tail.startsWith(locked)) tail = tail.slice(locked.length).trim();
+  return `${date}${auto}${tail}`.trim();
 }
 
 /** Files for AV's "UTM Campaign Values → Upload file" form: one key per line, ≤200 per file (AV's

@@ -7,7 +7,8 @@ import {
   AV_KNOWN_CHATS,
   avArticleTitle,
   avAutoName,
-  avFollowName,
+  avServerName,
+  pinAvNamePrefix,
   avChatProbeHosts,
   avChatUrl,
   avCheckOutcome,
@@ -471,23 +472,32 @@ test("avAutoName: no -geo-lang pair → the card's countries, no language; AV's 
   assert.equal(avAutoName("not a url", ["US"]), "");
 });
 
-test("avFollowName: the name follows the destination until the buyer takes it over; an appended tail survives", () => {
+test("pinAvNamePrefix: the locked part rides in the card's fixed prefix; the typed name is untouched; identity kept when nothing changes", () => {
+  const base = "[30/09] (AV) - ";
   const es = "https://thecadrion.com/forklift-certification-mobile-app-us-es";
-  const en = "https://thecadrion.com/forklift-certification-mobile-app-us-en";
-  const none = { landing: "", countries: ["US"] };
-  // fresh card: the default is the buyer's username → the auto-name replaces it
-  assert.equal(avFollowName(none, { landing: es, countries: ["US"], name: "nazar" }, "nazar"), "forklift certification mobile app | US | es | ");
-  assert.equal(avFollowName(none, { landing: es, countries: ["US"], name: "" }, "nazar"), "forklift certification mobile app | US | es | ");
-  // appended tail kept across a destination change
-  const typed = "forklift certification mobile app | US | es | test1";
-  assert.equal(avFollowName({ landing: es, countries: ["US"] }, { landing: en, countries: ["US"], name: typed }, "nazar"), "forklift certification mobile app | US | en | test1");
-  // the buyer's own name is never touched
-  assert.equal(avFollowName({ landing: es, countries: ["US"] }, { landing: en, countries: ["US"], name: "my own name" }, "nazar"), null);
-  // nothing changed in the auto part → leave the name alone
-  assert.equal(avFollowName({ landing: es, countries: ["US"] }, { landing: es, countries: ["CA"], name: typed }, "nazar"), null);
-  // countries drive the geo only for slugs without the pair
-  const gov = "https://thecadrion.com/cow-long-rec-govdeals-surplus-auctions-1-twjmh";
-  assert.equal(avFollowName({ landing: gov, countries: ["US"] }, { landing: gov, countries: ["US", "CA"], name: "govdeals surplus auctions | US | x" }, "nazar"), "govdeals surplus auctions | US+CA | x");
-  // destination cleared → back to what was typed after the auto part, else the default
-  assert.equal(avFollowName({ landing: es, countries: ["US"] }, { landing: "", countries: ["US"], name: "forklift certification mobile app | US | es | " }, "nazar"), "nazar");
+  const rows = [
+    { id: "a", namePrefix: base, landing: es, countries: ["US"], name: "vd-01" },
+    { id: "b", namePrefix: base, landing: "", countries: ["US"], name: "" },
+  ];
+  const pinned = pinAvNamePrefix(rows, base);
+  assert.equal(pinned[0].namePrefix, "[30/09] (AV) - forklift certification mobile app | US | es | ");
+  assert.equal(pinned[0].name, "vd-01", "the buyer's tail is never part of the lock");
+  assert.equal(pinned[1], rows[1], "no destination → the plain partner prefix, same object");
+  assert.equal(pinAvNamePrefix(pinned, base), pinned, "already pinned → the same array");
+  const moved = pinAvNamePrefix([{ ...pinned[0], landing: "https://thecadrion.com/forklift-certification-mobile-app-us-en" }], base);
+  assert.equal(moved[0].namePrefix, "[30/09] (AV) - forklift certification mobile app | US | en | ", "a new destination re-pins the lock");
+});
+
+test("avServerName: date prefix + the auto part from the RESOLVED destination + the typed tail — the client's locked part is never trusted", () => {
+  const es = "https://thecadrion.com/forklift-certification-mobile-app-us-es";
+  // this build: the client prefix already carries the lock, the name is the tail
+  assert.equal(avServerName("[30/09] (AV) - forklift certification mobile app | US | es | ", "vd-01", es, ["US"]), "[30/09] (AV) - forklift certification mobile app | US | es | vd-01");
+  // empty tail → the name ends on the lock's last bar
+  assert.equal(avServerName("[30/09] (AV) - forklift certification mobile app | US | es | ", "", es, ["US"]), "[30/09] (AV) - forklift certification mobile app | US | es |");
+  // a tampered / stale client lock is replaced by the server's
+  assert.equal(avServerName("[30/09] (AV) - something else | BR | pt | ", "x", es, ["US"]), "[30/09] (AV) - forklift certification mobile app | US | es | x");
+  // a tab of the earlier 30.09 build: plain prefix, the auto part still inside the typed name → not doubled
+  assert.equal(avServerName("[30/09] (AV) - ", "forklift certification mobile app | US | es | test1", es, ["US"]), "[30/09] (AV) - forklift certification mobile app | US | es | test1");
+  // an older tab: plain prefix + the username default
+  assert.equal(avServerName("[30/09] (AV) - ", "Nazar", es, ["US"]), "[30/09] (AV) - forklift certification mobile app | US | es | Nazar");
 });

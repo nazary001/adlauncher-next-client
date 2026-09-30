@@ -1,7 +1,7 @@
 // Node's built-in runner (v24 strips types natively): `node --test tests/types.test.ts`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bidAmountMissing, bidTag, limitMoneyCents, moneyCentsLabel, normalizeRoasGoal, parseMoney, todayPrefixDDMM } from "../lib/types.ts";
+import { bidAmountMissing, bidTag, isReady, limitMoneyCents, makeCampaign, moneyCentsLabel, normalizeRoasGoal, parseMoney, todayPrefixDDMM } from "../lib/types.ts";
 
 // ---- todayPrefixDDMM: the MO/AIF [DD/MM] born-prefix date is the team's (Kyiv) calendar day ----
 // (live 09-09: the launcher/clone boards computed it from the RENDERER's clock — Vercel's UTC on
@@ -107,4 +107,11 @@ test("moneyCentsLabel round-trips through limitMoneyCents (digits fill cents)", 
   assert.equal(limitMoneyCents(moneyCentsLabel("10"), 10000), "10,00");
   assert.equal(limitMoneyCents("1000", 10000), "10,00");
   assert.equal(limitMoneyCents("100050", 10000), "1000,50");
+});
+
+test("isReady: an empty typed name blocks every partner except one whose name body is locked (AV — nameOptional)", () => {
+  const c = { ...makeCampaign("c1", "[30/09] (AV) - forklift certification mobile app | US | es | ", ""), countries: ["US"] };
+  assert.equal(isReady(c), false, "default: the typed name is required");
+  assert.equal(isReady(c, { nameOptional: true }), true, "AV: the locked destination part is the name");
+  assert.equal(isReady({ ...c, countries: [] }, { nameOptional: true }), false, "geo still required");
 });
