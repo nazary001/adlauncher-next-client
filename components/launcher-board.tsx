@@ -105,8 +105,9 @@ function normalize(rows: Campaign[], partner: PartnerConfig, reserved: Set<strin
 /** Fresh card with the partner's own defaults on top of makeCampaign's (e.g. HS is born with the
  *  HIGH-ADX redirect — owner call 08-13). Duplicates copy their source instead, on purpose. */
 function freshCard(id: string, partner: PartnerConfig, owner: string): Campaign {
-  // AV: the name body is the locked destination part — the typed tail starts empty (owner ask 30.09).
-  const c = makeCampaign(id, namePrefixFor(partner, todayDDMM()), partner.avLaunch ? "" : owner);
+  // The typed tail starts as the buyer's username on every partner — AV too, after its locked
+  // "<topic> | <GEO> | <lang> | " (owner 30.09: "в суфикс тот добавь сразу имя как оно и было, например Tima").
+  const c = makeCampaign(id, namePrefixFor(partner, todayDDMM()), owner);
   if (partner.defaultRedirect) c.redirectType = partner.defaultRedirect;
   return c;
 }
