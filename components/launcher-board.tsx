@@ -35,6 +35,7 @@ import { CopySettingsModal } from "./copy-settings-modal";
 import { ChevronsIcon, CopyIcon, PlusIcon } from "./icons";
 import { useAifTaskManager, useAvTaskManager, useTaskManager } from "./task-manager";
 import { useAvDestinations } from "./use-av-destinations";
+import { avFollowName } from "@/lib/av-link";
 import { type HsLaunchChannel, useHsTaskManager } from "./hs-task-manager";
 import type { SessionUser } from "./user-menu";
 
@@ -776,9 +777,23 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     window.history.replaceState(null, "", url);
   }
 
+  const owner = user?.username ?? "";
   const patch = useCallback(
-    (id: string, p: Partial<Campaign>) => mutate((cs) => cs.map((c) => (c.id === id ? { ...c, ...p } : c))),
-    [mutate],
+    (id: string, p: Partial<Campaign>) =>
+      mutate((cs) =>
+        cs.map((c) => {
+          if (c.id !== id) return c;
+          const next = { ...c, ...p };
+          // AV (owner ask 30.09): the name follows the destination — "<topic> | <GEO> | <lang> | " —
+          // until the buyer takes it over; what they typed after it survives a destination change.
+          if (partnerRef.current.avLaunch && !("name" in p) && ("landing" in p || "countries" in p)) {
+            const name = avFollowName(c, next, owner);
+            if (name !== null) next.name = name;
+          }
+          return next;
+        }),
+      ),
+    [mutate, owner],
   );
 
   const toggleCollapse = useCallback(
@@ -845,7 +860,14 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
         for (const [k, v] of Object.entries(patch)) {
           mine[k] = Array.isArray(v) ? v.map((x) => (x && typeof x === "object" ? { ...(x as object) } : x)) : v;
         }
-        return { ...c, ...(mine as Partial<Campaign>) };
+        const next = { ...c, ...(mine as Partial<Campaign>) };
+        // AV: a copied destination / geo renames a card whose name still follows its old destination
+        // (same rule as a hand pick — the patch handler above); a copied name wins as copied.
+        if (partner.avLaunch && !("name" in mine) && ("landing" in mine || "countries" in mine)) {
+          const name = avFollowName(c, next, owner);
+          if (name !== null) next.name = name;
+        }
+        return next;
       });
     });
   };

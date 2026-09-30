@@ -6,6 +6,8 @@ import {
   AV_KEY_POOL_MAX,
   AV_KNOWN_CHATS,
   avArticleTitle,
+  avAutoName,
+  avFollowName,
   avChatProbeHosts,
   avChatUrl,
   avCheckOutcome,
@@ -451,4 +453,41 @@ test("the shipped registry names the lp1 chat of thecadrion.com, and its address
     [`https://lp1.thecadrion.com/?asst=${LP1_ID}`],
     "the default registry is what the card offers",
   );
+});
+
+test("avAutoName: '<topic> | <GEO> | <lang> | ' from our -geo-lang slugs (owner ask 30.09)", () => {
+  assert.equal(avAutoName("https://thecadrion.com/forklift-certification-mobile-app-us-es"), "forklift certification mobile app | US | es | ");
+  assert.equal(avAutoName("https://thecadrion.com/forklift-certification-mobile-app-us-en?utm_source=x"), "forklift certification mobile app | US | en | ");
+  assert.equal(avAutoName("https://thecadrion.com/trabalho-na-construcao-civil-no-brasil-br-pt/"), "trabalho na construcao civil no brasil | BR | pt | ");
+  assert.equal(avAutoName("https://thecadrion.com/funciones-guardia-de-seguridad-co-es", ["US"]), "funciones guardia de seguridad | CO | es | ", "the slug's geo wins over the card's");
+});
+
+test("avAutoName: no -geo-lang pair → the card's countries, no language; AV's template slugs cleaned; chats; junk", () => {
+  assert.equal(avAutoName("https://thecadrion.com/cow-long-rec-govdeals-surplus-auctions-1-twjmh", ["US", "CA"]), "govdeals surplus auctions | US+CA | ");
+  assert.equal(avAutoName("https://thecadrion.com/cow-long-rec-govdeals-surplus-auctions-1-twjmh"), "govdeals surplus auctions | ");
+  assert.equal(avAutoName("https://thecadrion.com/best-offers-xx-zz", ["BR"]), "best offers xx zz | BR | ", "xx/zz are no region/language → part of the topic");
+  assert.equal(avAutoName("https://lp1.thecadrion.com/?asst=68d9a7f2c1b4e3a5d6f70812", ["US"]), "ai chat | US | ");
+  assert.equal(avAutoName(""), "");
+  assert.equal(avAutoName("not a url", ["US"]), "");
+});
+
+test("avFollowName: the name follows the destination until the buyer takes it over; an appended tail survives", () => {
+  const es = "https://thecadrion.com/forklift-certification-mobile-app-us-es";
+  const en = "https://thecadrion.com/forklift-certification-mobile-app-us-en";
+  const none = { landing: "", countries: ["US"] };
+  // fresh card: the default is the buyer's username → the auto-name replaces it
+  assert.equal(avFollowName(none, { landing: es, countries: ["US"], name: "nazar" }, "nazar"), "forklift certification mobile app | US | es | ");
+  assert.equal(avFollowName(none, { landing: es, countries: ["US"], name: "" }, "nazar"), "forklift certification mobile app | US | es | ");
+  // appended tail kept across a destination change
+  const typed = "forklift certification mobile app | US | es | test1";
+  assert.equal(avFollowName({ landing: es, countries: ["US"] }, { landing: en, countries: ["US"], name: typed }, "nazar"), "forklift certification mobile app | US | en | test1");
+  // the buyer's own name is never touched
+  assert.equal(avFollowName({ landing: es, countries: ["US"] }, { landing: en, countries: ["US"], name: "my own name" }, "nazar"), null);
+  // nothing changed in the auto part → leave the name alone
+  assert.equal(avFollowName({ landing: es, countries: ["US"] }, { landing: es, countries: ["CA"], name: typed }, "nazar"), null);
+  // countries drive the geo only for slugs without the pair
+  const gov = "https://thecadrion.com/cow-long-rec-govdeals-surplus-auctions-1-twjmh";
+  assert.equal(avFollowName({ landing: gov, countries: ["US"] }, { landing: gov, countries: ["US", "CA"], name: "govdeals surplus auctions | US | x" }, "nazar"), "govdeals surplus auctions | US+CA | x");
+  // destination cleared → back to what was typed after the auto part, else the default
+  assert.equal(avFollowName({ landing: es, countries: ["US"] }, { landing: "", countries: ["US"], name: "forklift certification mobile app | US | es | " }, "nazar"), "nazar");
 });

@@ -337,6 +337,74 @@ export function avArticleTitle(path: string): { title: string; variant: string }
   return { title, variant };
 }
 
+/** An ISO region / language code by Intl's own tables (a code Intl can't name comes back unchanged). */
+function isCode(code: string, type: "region" | "language"): boolean {
+  try {
+    const name = new Intl.DisplayNames(["en"], { type }).of(type === "region" ? code.toUpperCase() : code.toLowerCase());
+    return Boolean(name) && name!.toLowerCase() !== code.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The default campaign-name body of an AV card (owner ask 30.09: "нейминг был forklift certification |
+ * US | es | … чтобы туда попадало по дефолту гео язык и название статьи … а дописывать тоже чтобы
+ * можно было"): "<topic> | <GEO> | <lang> | ", the buyer types after the last bar. Our articles end in
+ * "-<geo>-<lang>" (forklift-certification-mobile-app-us-es → "forklift certification mobile app | US |
+ * es | "); the topic is the rest of the slug in lower-case words (AV's template prefix and variant id
+ * stripped, avArticleTitle). A slug without the pair takes the geo from the card's countries ("US+CA")
+ * and names no language; an AI-chat destination (no path) reads "ai chat". "" = not a URL.
+ */
+export function avAutoName(destination: string, countries: readonly string[] = []): string {
+  let u: URL;
+  try {
+    u = new URL(String(destination ?? "").trim());
+  } catch {
+    return "";
+  }
+  if (!/^https?:$/.test(u.protocol)) return "";
+  const slug = u.pathname.replace(/^\/+|\/+$/g, "").split("/").pop() ?? "";
+  let topicSlug = slug;
+  let geo = "";
+  let lang = "";
+  const pair = /-([a-z]{2})-([a-z]{2})$/i.exec(slug);
+  if (pair && isCode(pair[1], "region") && isCode(pair[2], "language")) {
+    geo = pair[1].toUpperCase();
+    lang = pair[2].toLowerCase();
+    topicSlug = slug.slice(0, pair.index);
+  }
+  if (!geo) geo = countries.map((c) => String(c).trim().toUpperCase()).filter(Boolean).join("+");
+  const chat = slug === "" || Boolean(u.searchParams.get("asst")) || Boolean(chatIdOf(slug));
+  const topic = chat ? "ai chat" : avArticleTitle(topicSlug).title.toLowerCase();
+  const parts = [topic, geo, lang].filter(Boolean);
+  return parts.length ? `${parts.join(" | ")} | ` : "";
+}
+
+/**
+ * The name an AV card should carry after an edit: when the destination or the countries change, a name
+ * the buyer has not taken over — empty, the default (their username), or one still starting with the
+ * previous auto-name — becomes the new auto-name plus whatever was typed after the old one. null =
+ * leave the name alone (the buyer typed their own, or the auto-name did not change).
+ */
+export function avFollowName(
+  prev: { landing: string; countries: readonly string[] },
+  next: { landing: string; countries: readonly string[]; name: string },
+  owner: string,
+): string | null {
+  const before = avAutoName(prev.landing, prev.countries);
+  const after = avAutoName(next.landing, next.countries);
+  if (before === after) return null;
+  const name = String(next.name ?? "");
+  let tail: string | null = null;
+  if (!name.trim() || name.trim() === owner.trim()) tail = "";
+  else if (before && name.startsWith(before)) tail = name.slice(before.length);
+  else if (before && name.trimEnd() === before.trimEnd()) tail = "";
+  if (tail === null) return null;
+  if (after) return after + tail;
+  return tail.trim() ? tail.trim() : owner; // destination cleared: back to what the buyer typed, else the default
+}
+
 /** Files for AV's "UTM Campaign Values → Upload file" form: one key per line, ≤200 per file (AV's
  *  per-upload cap), plain text (accepted: CSV / XLSX / TXT, ≤50 KB). `from`…`to` inclusive. */
 export function avKeysUploadFiles(from: number, to: number, perFile = 200): { name: string; content: string }[] {
