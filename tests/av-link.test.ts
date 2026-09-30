@@ -456,11 +456,15 @@ test("the shipped registry names the lp1 chat of thecadrion.com, and its address
   );
 });
 
-test("avAutoName: '<topic> | <GEO> | <lang> | ' from our -geo-lang slugs (owner ask 30.09)", () => {
-  assert.equal(avAutoName("https://thecadrion.com/forklift-certification-mobile-app-us-es"), "forklift certification mobile app | US | es | ");
-  assert.equal(avAutoName("https://thecadrion.com/forklift-certification-mobile-app-us-en?utm_source=x"), "forklift certification mobile app | US | en | ");
-  assert.equal(avAutoName("https://thecadrion.com/trabalho-na-construcao-civil-no-brasil-br-pt/"), "trabalho na construcao civil no brasil | BR | pt | ");
-  assert.equal(avAutoName("https://thecadrion.com/funciones-guardia-de-seguridad-co-es", ["US"]), "funciones guardia de seguridad | CO | es | ", "the slug's geo wins over the card's");
+test("avAutoName: '<topic> | <GEO> | <lang> | ' — the GEO is the launcher's countries, the slug gives topic + language (owner 30.09)", () => {
+  const es = "https://thecadrion.com/forklift-certification-mobile-app-us-es";
+  assert.equal(avAutoName(es, ["US"]), "forklift certification mobile app | US | es | ");
+  assert.equal(avAutoName("https://thecadrion.com/forklift-certification-mobile-app-us-en?utm_source=x", ["US"]), "forklift certification mobile app | US | en | ");
+  assert.equal(avAutoName("https://thecadrion.com/trabalho-na-construcao-civil-no-brasil-br-pt/", ["BR"]), "trabalho na construcao civil no brasil | BR | pt | ");
+  assert.equal(avAutoName("https://thecadrion.com/funciones-guardia-de-seguridad-co-es", ["US"]), "funciones guardia de seguridad | US | es | ", "the launcher's geo, never the slug's");
+  assert.equal(avAutoName(es, ["US", "CA"]), "forklift certification mobile app | US+CA | es | ");
+  assert.equal(avAutoName(es, ["us", "CA", "GB", "AU", "NZ"]), "forklift certification mobile app | US+CA+GB+2 | es | ", "three codes, the rest counted");
+  assert.equal(avAutoName(es), "forklift certification mobile app | es | ", "no countries picked yet → no geo");
 });
 
 test("avAutoName: no -geo-lang pair → the card's countries, no language; AV's template slugs cleaned; chats; junk", () => {

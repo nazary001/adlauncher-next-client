@@ -623,7 +623,7 @@ function CampaignCardBase({
                     hsMode
                       ? "prefix follows LION's format — date, buyer, redirect, geo"
                       : avMode
-                        ? "locked: topic | GEO | lang | from the destination — type your tail after it"
+                        ? "locked: article topic | your geo | article language | — type your tail after it"
                         : undefined
                   }
                 >

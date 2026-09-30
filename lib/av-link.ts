@@ -352,11 +352,13 @@ function isCode(code: string, type: "region" | "language"): boolean {
  * certification | US | es | … чтобы туда попадало по дефолту гео язык и название статьи … а дописывать
  * тоже чтобы можно было", then "изменить именно этого было нельзя … под замочком"): "<topic> | <GEO> |
  * <lang> | " — LOCKED, it rides inside the card's fixed name prefix (pinAvNamePrefix), the buyer types
- * only the tail after the last bar. Our articles end in "-<geo>-<lang>"
- * (forklift-certification-mobile-app-us-es → "forklift certification mobile app | US | es | "); the
- * topic is the rest of the slug in lower-case words (AV's template prefix and variant id stripped,
- * avArticleTitle). A slug without the pair takes the geo from the card's countries ("US+CA") and names
- * no language; an AI-chat destination (no path) reads "ai chat". "" = not a URL.
+ * only the tail after the last bar. The GEO is the card's own targeting — the countries picked in the
+ * launcher (owner 30.09: "гео ж должны ставится такие как мы выбираем в лаунчере"), up to three joined
+ * by "+" and the rest counted ("US+CA+GB+2"), none picked → no GEO yet. Our articles end in
+ * "-<geo>-<lang>" (forklift-certification-mobile-app-us-es): the slug gives the LANGUAGE ("es") and the
+ * pair is cut from the topic — its geo never overrides the launcher's. The topic is the rest of the slug
+ * in lower-case words (AV's template prefix and variant id stripped, avArticleTitle); a slug without the
+ * pair names no language; an AI-chat destination (no path) reads "ai chat". "" = not a URL.
  */
 export function avAutoName(destination: string, countries: readonly string[] = []): string {
   let u: URL;
@@ -368,15 +370,14 @@ export function avAutoName(destination: string, countries: readonly string[] = [
   if (!/^https?:$/.test(u.protocol)) return "";
   const slug = u.pathname.replace(/^\/+|\/+$/g, "").split("/").pop() ?? "";
   let topicSlug = slug;
-  let geo = "";
   let lang = "";
   const pair = /-([a-z]{2})-([a-z]{2})$/i.exec(slug);
   if (pair && isCode(pair[1], "region") && isCode(pair[2], "language")) {
-    geo = pair[1].toUpperCase();
     lang = pair[2].toLowerCase();
     topicSlug = slug.slice(0, pair.index);
   }
-  if (!geo) geo = countries.map((c) => String(c).trim().toUpperCase()).filter(Boolean).join("+");
+  const codes = countries.map((c) => String(c).trim().toUpperCase()).filter(Boolean);
+  const geo = codes.length > 3 ? `${codes.slice(0, 3).join("+")}+${codes.length - 3}` : codes.join("+");
   const chat = slug === "" || Boolean(u.searchParams.get("asst")) || Boolean(chatIdOf(slug));
   const topic = chat ? "ai chat" : avArticleTitle(topicSlug).title.toLowerCase();
   const parts = [topic, geo, lang].filter(Boolean);
