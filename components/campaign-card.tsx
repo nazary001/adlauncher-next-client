@@ -615,7 +615,13 @@ function CampaignCardBase({
                 <Field
                   label="Campaign name"
                   className="col-span-12"
-                  hint={hsMode ? "prefix follows LION's format — date, buyer, redirect, geo" : undefined}
+                  hint={
+                    hsMode
+                      ? "prefix follows LION's format — date, buyer, redirect, geo"
+                      : avMode
+                        ? "fills from the destination — topic | GEO | lang | — type yours after the last |"
+                        : undefined
+                  }
                 >
                   {displayPrefix ? (
                     <div className="flex h-9 items-center overflow-hidden rounded-lg border border-line bg-surface2 transition-[border-color,box-shadow] duration-150 hover:border-line2 focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/15">
