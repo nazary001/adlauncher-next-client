@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { AIF_VALUE_PIXEL, AV_OBJECTIVE, ROAS_PIXEL, aifOfferablePixels, partnerConfig, pickAifPixel, type PartnerId } from "@/lib/partners";
+import { AIF_VALUE_PIXEL, AV_PIXEL, ROAS_PIXEL, aifOfferablePixels, avDelivery, partnerConfig, pickAifPixel, type PartnerId } from "@/lib/partners";
 import { resolveMoSigner } from "@/lib/mo-soc";
 import { bidAmountMissing, bidKind, moEnsureSocMark, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
@@ -148,7 +148,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "partner_not_launchable" }, { status: 400 });
   }
   // The partner picks the RAIL: AV clones ride the AV token, the AV key registry and a
-  // destination+key link rewrite (no pixel); AIF clones ride the AIF token, the aif-maps brand
+  // destination+key link rewrite (no pixel tail — AV's site script fires AV_PIXEL); AIF clones ride the AIF token, the aif-maps brand
   // registry and a brand-only link rewrite; everything else stays byte-identical to the MO flow
   // (token default, gcm registry, gcm+pixel link rewrite). One route, three claim/backfill/release
   // bundles.
@@ -197,7 +197,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: moRes?.ok === false ? moRes.error : "no_token" }, { status: 400 });
   }
   /** The AV rail (null off the AV rail) — its token signs every Graph call and its catalogs validate
-   *  the picked page/account; AV never needs a pixel catalog (the page has no pixel). */
+   *  the picked page/account and (Purchase clones) that the build account carries AV_PIXEL. */
   const avr = avRes?.ok ? avRes.rail : null;
   const rail = aifRes?.ok ? aifRes.rail : null;
   /** The MO signer (null on the AIF/AV rails) — its bearer signs EVERY Graph call (source read,
@@ -209,9 +209,9 @@ export async function POST(req: Request) {
   const pageOk = (p: string) => (av ? avr!.isAdvertisablePage(p) : aif ? rail!.isAdvertisablePage(p) : isAdvertisablePage(p, cat));
   const pageNameOf = (p: string) => (av ? avr!.advertisablePageName(p) : aif ? rail!.advertisablePageName(p) : advertisablePageName(p, cat));
   const acctOk = (a: string) => (av ? avr!.isTokenAccount(a) : aif ? rail!.isTokenAccount(a) : isTokenAccount(a, cat));
-  // AV never needs a pixel catalog (the page has no pixel) — this is only ever called on the AIF/MO
-  // paths below (every AV pixel branch is skipped).
-  const pixelsOf = (a: string) => (aif ? rail!.accountPixels(a) : accountPixels(a, cat));
+  // AV reads the AV token's own catalog (a Purchase clone checks the build account carries AV_PIXEL);
+  // AIF its rail's; MO the signer's.
+  const pixelsOf = (a: string) => (av ? accountPixels(a, avr!.cat) : aif ? rail!.accountPixels(a) : accountPixels(a, cat));
   const acctNameOf = (a: string) => (av ? avr!.accountName(a) : aif ? rail!.accountName(a) : tokenAccountName(a, cat));
   const post: typeof fbPost = (path, params) =>
     av ? avr!.fbPost(path, params as Json) : aif ? rail!.fbPost(path, params as Json) : fbPost(path, params, railToken);
@@ -249,8 +249,8 @@ export async function POST(req: Request) {
       if (!/^\d{5,}$/.test(acct)) {
         return NextResponse.json({ ok: false, error: "account_invalid — bad target ad account id" }, { status: 400 });
       }
-      // AV never binds a pixel (the page has none) — ignore any pixel a stale row carries so it is
-      // neither validated (no AV pixel catalog) nor sent.
+      // AV's pixel is never a row pick (a Purchase clone gets AV_PIXEL server-side, avDelivery) —
+      // ignore any pixel a stale row carries so it is neither validated here nor sent.
       const px = av ? "" : String(e.pixelId ?? "").trim();
       if (px && !/^\d{10,20}$/.test(px)) {
         return NextResponse.json({ ok: false, error: "pixel_invalid — bad pixel id" }, { status: 400 });
@@ -398,17 +398,17 @@ export async function POST(req: Request) {
             throw new FbError(`source account act_${src.accountId} is not available to the launch token`, { campaignId: edit.campaignId });
           }
           const binds = resolveCloneBinds(edit, src);
-          // AV binds NO pixel, ever — the page has none (resolveCloneBinds would otherwise carry the
-          // source's pixel through for a same-account clone).
+          // AV never carries the SOURCE's pixel through (resolveCloneBinds would, for a same-account
+          // clone): its pixel is AV_PIXEL or none, set from the clone's delivery below (avDelivery).
           if (av) binds.pixelId = "";
           // The clone's EFFECTIVE strategy (per-row switch wins, else the source's) — resolved
           // once here so the pixel derivations below and cloneToCampaign can never disagree.
           const targetStrategy = cloneBidStrategy(edit, src);
-          // AV delivery is Traffic / link clicks (no pixel) — a min-ROAS target (the row's switch or
-          // an inherited roas source) has nothing to optimize on, refused before any claim.
+          // Min-ROAS optimizes purchase VALUE and AV's Purchase events carry none — a min-ROAS target
+          // (the row's switch or an inherited roas source) has nothing to optimize on, refused before any claim.
           if (av && bidKind(targetStrategy) === "roas") {
             throw new FbError(
-              "bid_strategy_invalid — min-ROAS needs a conversion signal; the AV page has no pixel (Traffic / link clicks only)",
+              "bid_strategy_invalid — min-ROAS needs purchase value; AV's Purchase events carry none (use lowest cost or a cost cap)",
               { campaignId: edit.campaignId },
             );
           }
@@ -483,10 +483,22 @@ export async function POST(req: Request) {
           // burning a code or leaving an orphaned PAUSED campaign.
           const campaign = cloneToCampaign(edit, src);
           if (av) {
-            // AV delivery is pinned Traffic / link clicks regardless of what the source optimized
-            // (a conversion source cloned onto the pixel-less AV page can only run link clicks).
-            campaign.objective = AV_OBJECTIVE;
-            campaign.optimization = "clicks";
+            // AV delivery follows the SOURCE (owner ask 30.09 — both AV modes): a Purchase source
+            // clones as Sales / Purchase on AV_PIXEL, a link-click source as Traffic / link clicks
+            // with no pixel (avDelivery). AV's own site script fires the pixel, so the build account
+            // must carry it — checked here, before any claim.
+            const d = avDelivery(campaign.optimization);
+            campaign.objective = d.objective;
+            campaign.optimization = d.optimization;
+            if (d.conversionEvent) campaign.conversionEvent = d.conversionEvent;
+            campaign.pixel = d.pixel;
+            editBinds.pixelId = d.pixel;
+            if (d.pixel && !(await pixelsOf(binds.accountId)).some((p) => p.id === d.pixel)) {
+              throw new FbError(
+                `pixel_not_on_account — Purchase clones run on ${AV_PIXEL.name} (${AV_PIXEL.id}); share it to act_${binds.accountId} in Business Manager first`,
+                { campaignId: edit.campaignId },
+              );
+            }
           }
           if (!SUPPORTED_BID_STRATEGIES.has(campaign.bidStrategy)) {
             throw new FbError(`source bid strategy ${campaign.bidStrategy} can't be cloned — recreate it manually (or switch the row's strategy)`, { campaignId: edit.campaignId });

@@ -352,8 +352,8 @@ function CloneInner({
     Boolean(d.pixelId) &&
     Boolean(adAccounts?.length) &&
     !targetPixelsFor(d.accountId).some((p) => p.id === d.pixelId);
-  // AV never binds a pixel (the AV page has none — Traffic / link clicks), so a pixel is never
-  // required and never blocks Duplicate; MO/AIF keep the concrete-account pixel requirement.
+  // AV's pixel is never picked (the route gives a Purchase clone AV_PIXEL, a click clone none), so a
+  // pixel is never required and never blocks Duplicate; MO/AIF keep the concrete-account pixel requirement.
   const pixelMissingFor = (d: CloneRowDest): boolean => !avMode && isTargetFor(d) && (!d.pixelId || pixelStaleFor(d));
   const destMissingFor = (d: CloneRowDest): boolean =>
     fanpageMissingFor(d) || accountMissingFor(d) || pixelMissingFor(d);
@@ -873,7 +873,7 @@ function CloneInner({
                             // Auto-pick the target's pixel (FARM-1 when it carries it) the same way
                             // a fresh launch card does; no pixel in source mode / when cleared.
                             // AIF auto-picks the value pixel VD-C1-HS-1 (the only offerable one, 09-02 pt2).
-                            // AV never binds a pixel (autoPixelFor returns "").
+                            // AV's pixel is never picked (autoPixelFor returns ""; the route sets it).
                             pixelId: autoPixelFor(v),
                           })
                         }

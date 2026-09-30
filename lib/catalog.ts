@@ -61,6 +61,13 @@ export const OPTIMIZATIONS: Option[] = [
   { value: "clicks", label: "Clicks" },
 ];
 
+/** AV's two modes (owner ask 30.09, lib/partners avDelivery): Purchase on the AV site pixel (default)
+ *  or Traffic / link clicks with no pixel. */
+export const AV_OPTIMIZATIONS: Option[] = [
+  { value: "conversions", label: "Purchase (AV pixel)" },
+  { value: "clicks", label: "Link clicks" },
+];
+
 export const BID_STRATEGIES: Option[] = [
   { value: "LOWEST_COST_WITHOUT_CAP", label: "Lowest cost" },
   { value: "LOWEST_COST_WITH_BID_CAP", label: "Lowest cost + bid cap" },

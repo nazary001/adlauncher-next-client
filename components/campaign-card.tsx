@@ -15,6 +15,7 @@ import {
   LOCALES,
   OBJECTIVES,
   OPTIMIZATIONS,
+  AV_OPTIMIZATIONS,
   OS_OPTIONS,
   PLACEMENTS,
   PROFILES,
@@ -28,7 +29,7 @@ import { hsFinalLink, hsLinkSegments, hsNamePrefix, todaySaoPauloDDMM } from "@/
 import { TOOL_MARK, toolEnsureMark } from "@/lib/tool-launch";
 import { DEFAULT_PLATFORM_CHOICE, PLATFORM_CHOICES } from "@/lib/publisher-platforms";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
-import { AIF_VALUE_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifOfferablePixels, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
+import { AIF_VALUE_PIXEL, AV_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifOfferablePixels, avDelivery, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
 import { aifFlowOf } from "@/lib/aif-link";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
@@ -706,12 +707,12 @@ function CampaignCardBase({
                       onChange={(v) =>
                         patch({
                           account: v,
-                          // AV binds no pixel at all (Traffic / link clicks) — never fill one on an
-                          // account switch. A roas card keeps its pinned value pixel across account
+                          // AV's pixel follows its mode, never the account (AV_PIXEL for Purchase, none
+                          // for link clicks). A roas card keeps its pinned value pixel across account
                           // switches — defaultPixelFor would swap it back to the FARM-1 preference.
                           // AIF pixels are derived from the optimization (normalize re-pins) — never refilled.
                           pixel: avMode
-                            ? ""
+                            ? avDelivery(c.optimization).pixel
                             : aifMode
                               ? c.pixel
                               : kind === "roas"
@@ -807,7 +808,9 @@ function CampaignCardBase({
                   className={setupCol}
                   hint={
                     avMode
-                      ? "the AV page carries no pixel"
+                      ? conversions
+                        ? "fired by the AV site script"
+                        : "clicks need no pixel"
                       : aifMode
                         ? kind === "roas"
                           ? "pinned by min ROAS"
@@ -846,9 +849,14 @@ function CampaignCardBase({
                   }
                 >
                   {avMode ? (
-                    // AV pages carry no Meta pixel — delivery is Traffic / link clicks, so the
-                    // field is locked empty (the account switch never fills it, the route sends "").
-                    <LockedField value="No pixel — link clicks" hint="auto" />
+                    // AV's pixel is never a pick: Purchase runs on the AV site pixel (ActiveView's own
+                    // site script fires it), link clicks bind none — the Optimization select decides,
+                    // the locks and the route pin it (avDelivery).
+                    conversions ? (
+                      <LockedField value={`${AV_PIXEL.name} · ${AV_PIXEL.id}`} hint="Purchase" mono />
+                    ) : (
+                      <LockedField value="No pixel — link clicks" hint="auto" />
+                    )
                   ) : aifMode ? (
                     // Pixel is a CHOICE on this rail (owner ask 09-02): conversions pick from
                     // the cabinet's own token-catalog pixels — the board auto-fills the
@@ -925,10 +933,10 @@ function CampaignCardBase({
               <SectionLabel icon={<TargetIcon className="h-3.5 w-3.5" />}>Delivery</SectionLabel>
               <div className="grid grid-cols-12 gap-3">
                 {avMode ? (
-                  // AV: the page has no pixel, so the only honest objective is Traffic (link
-                  // clicks) — pinned in the card and re-forced by the route (applyPartnerLocks).
+                  // AV: the objective follows the Optimization pick — Sales for Purchase on the AV
+                  // site pixel, Traffic for link clicks (avDelivery; the locks and the route re-pin it).
                   <Field label="Objective" className="col-span-6 md:col-span-4">
-                    <LockedField value="Traffic" hint="AV" />
+                    <LockedField value={conversions ? "Sales" : "Traffic"} hint="AV" />
                   </Field>
                 ) : !aifMode ? (
                   <Field label="Objective" className={hsMode ? "col-span-6 md:col-span-4" : "col-span-6 md:col-span-3"}>
@@ -949,11 +957,16 @@ function CampaignCardBase({
                   </Field>
                 ) : null}
                 {/* The optimization toggle is an MO funnel concept — HS tails get fire=click
-                    unconditionally on HIGH ADX (redirect type decides, see hsLinkSegments). AV is
-                    pinned to link clicks (no pixel to optimize conversions on). */}
+                    unconditionally on HIGH ADX (redirect type decides, see hsLinkSegments). AV picks
+                    between its two modes here (owner ask 30.09): Purchase on the AV site pixel (the
+                    default) or link clicks with no pixel. */}
                 {avMode ? (
-                  <Field label="Optimization" className="col-span-6 md:col-span-4" hint="no pixel — link clicks">
-                    <LockedField value="Link clicks" hint="AV" />
+                  <Field label="Optimization" className="col-span-6 md:col-span-4" hint={conversions ? "Purchase on the AV site pixel" : "Traffic — no pixel"}>
+                    <Select
+                      value={conversions ? "conversions" : "clicks"}
+                      onChange={(e) => patch({ ...avDelivery(e.target.value) })}
+                      options={AV_OPTIMIZATIONS}
+                    />
                   </Field>
                 ) : !hsMode ? (
                   <Field

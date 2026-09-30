@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { type Campaign, bidAmountMissing, bidKind, bidTag, withPartnerMark } from "@/lib/types";
-import { AV_OBJECTIVE, type PartnerId, fullLandingUrl, partnerConfig } from "@/lib/partners";
+import { AV_PIXEL, type PartnerId, avDelivery, fullLandingUrl, partnerConfig } from "@/lib/partners";
 import {
   type LaunchBinds,
   SUPPORTED_BID_STRATEGIES,
@@ -12,7 +12,7 @@ import {
   money,
 } from "@/lib/fb-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { FbError, fbGet, withFbBudget, withParentRetry } from "@/lib/fb-graph";
+import { FbError, accountPixels, fbGet, withFbBudget, withParentRetry } from "@/lib/fb-graph";
 import { fetchValidatedImage } from "@/lib/fb-media";
 import { avKeysRegistered, avRail, avRailEnabled } from "@/lib/av-launch";
 import { backfillAvKey, claimAvKey, releaseAvKey } from "@/lib/av-keys";
@@ -103,9 +103,10 @@ async function resolveLocales(names: string[], fbGetter: (path: string) => Promi
  * OWN token (slot av.launch, no env seed), the marker is an AV KEY from the registered pool
  * (lib/av-keys — av001…), and the ad link is the campaign's AV DESTINATION (an article of an AV
  * site, a Redirect path, or a Chat Builder chat — lib/av-destination) with the key in utm_campaign
- * (lib/av-link). The AV page carries no Meta pixel: delivery is Traffic / link clicks only —
- * conversions and min-ROAS are refused server-side (nothing to optimize on), so no pixel is ever
- * bound and the link carries no &pixel=/&fire= tail. Every gate runs BEFORE any claim, and the
+ * (lib/av-link). Delivery is the card's pick (owner ask 30.09, lib/partners avDelivery): Purchase
+ * on the AV site pixel (AV_PIXEL — fired by ActiveView's own site script; the default) or Traffic /
+ * link clicks with no pixel. Min-ROAS is refused either way (AV's Purchase carries no value), and the
+ * link never carries a &pixel=/&fire= tail (the site script fires). Every gate runs BEFORE any claim, and the
  * destination is RE-RESOLVED here (host must be an AV site / redirect domain / chat host, article
  * live, redirect path present + domain live, chat host showing ads) so a stale draft can never
  * point a live ad at a dead page — or at a chat that earns nothing.
@@ -230,14 +231,16 @@ export async function POST(req: Request) {
 
   const partner = partnerConfig("av" as PartnerId);
   // The account and fanka are the buyer's PICKS, validated against the AV token's own data below.
-  // AV has NO pixel — the bound pixel is always empty (Traffic / link clicks).
+  // The delivery is the card's optimization pick, mapped server-side (the client's objective / pixel
+  // are never trusted): Purchase binds AV_PIXEL, link clicks bind none.
+  const delivery = avDelivery(String(campaign.optimization ?? ""));
   const pickedAccount = String(campaign.account ?? "").trim().replace(/^act_/, "");
   const pickedPage = String(campaign.page ?? "").trim();
   const binds: LaunchBinds = {
     accountId: pickedAccount,
     pageId: pickedPage,
     pageName: "", // resolved below, once the picked page passes validation
-    pixelId: "", // AV never binds a pixel
+    pixelId: delivery.pixel,
   };
   // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST.
   if (!(await accountAllowedFor(session, pickedAccount))) {
@@ -275,6 +278,19 @@ export async function POST(req: Request) {
       if (!(await rail.isTokenAccount(pickedAccount))) {
         return NextResponse.json(
           { ok: false, stage: "config", error: "account_not_allowed — the AV token cannot use this ad account" },
+          { status: 400 },
+        );
+      }
+      // Purchase optimizes on AV_PIXEL — the cabinet must carry it, or Meta would only reject the ad
+      // set once the campaign already exists (orphan + burnt key). On TOOL the cabinet is not on the
+      // AV token, so TOOL's own validation answers there.
+      if (binds.pixelId && !(await accountPixels(pickedAccount, rail.cat)).some((p) => p.id === binds.pixelId)) {
+        return NextResponse.json(
+          {
+            ok: false,
+            stage: "config",
+            error: `pixel_not_on_account — Purchase runs on ${AV_PIXEL.name} (${AV_PIXEL.id}); share it to act_${pickedAccount} in Business Manager first, or switch the card to Link clicks`,
+          },
           { status: 400 },
         );
       }
@@ -358,14 +374,15 @@ export async function POST(req: Request) {
       }
     }
   }
-  // AV delivery = Traffic / link clicks: the page has no pixel, so a min-ROAS strategy has nothing
-  // to optimize on (the UI pins it away, the server is the truth). Refused BEFORE any claim.
+  // Min-ROAS optimizes purchase VALUE, and AV's Purchase events carry none (AV's telemetry is off) —
+  // nothing to optimize on in either AV mode (the UI pins it away, the server is the truth).
+  // Refused BEFORE any claim.
   if (bidKind(campaign.bidStrategy) === "roas") {
     return NextResponse.json(
       {
         ok: false,
         stage: "config",
-        error: "bid_strategy_invalid — min-ROAS needs a conversion signal; the AV page has no pixel (Traffic / link clicks only)",
+        error: "bid_strategy_invalid — min-ROAS needs purchase value; AV's Purchase events carry none (use lowest cost or a cost cap)",
       },
       { status: 400 },
     );
@@ -458,9 +475,9 @@ export async function POST(req: Request) {
   }
 
   // Server-pinned invariants (the UI pins them too, but a stale/edited draft is the client's word,
-  // not the truth): AV objective Traffic, optimization link clicks, no pixel — the only honest
-  // delivery for a page with no conversion signal.
-  const serverCampaign: Campaign = { ...campaign, objective: AV_OBJECTIVE, optimization: "clicks", pixel: "" };
+  // not the truth): the delivery the optimization pick maps to — Sales / Purchase on AV_PIXEL, or
+  // Traffic / link clicks with no pixel (avDelivery).
+  const serverCampaign: Campaign = { ...campaign, ...delivery };
   // The partner mark in the prefix is the ROUTE's, not the client's: a card that kept its MO/AIF
   // prefix across a partner switch still launches here as "(AV)" (live bug 23.09). A TOOL-born run
   // carries `GCL TOOL - ` after the partner prefix (toolEnsureMark) — the client name is never trusted.
@@ -533,7 +550,7 @@ export async function POST(req: Request) {
         const avKey = key.key;
         // The AV link = <destination>?utm_source=facebook&utm_medium={{campaign.id}}&utm_campaign=
         // <key>&utm_term={{adset.id}}&utm_content={{ad.id}} (macros literal, FB fills them). No
-        // pixel / fire tail — tracking is entirely in the utm params AV's script reads.
+        // pixel / fire tail even for Purchase — AV's own site script fires AV_PIXEL and reads the utms.
         const link = fullLandingUrl(partner, resolved.base, avKey, false);
         if (!link) throw new FbError("no destination — cannot build the AV link", {});
 
@@ -543,7 +560,7 @@ export async function POST(req: Request) {
         // terminal state settles the row and RETURNS, so the Graph code below stays byte-for-byte and
         // never runs on this rail. TOOL creates PAUSED and activates last on full success, so there is
         // nothing to pause on failure (AV never paused on failure anyway). Money is USD, ROAS a
-        // coefficient — but AV is Traffic/clicks with no pixel, so no ROAS ever reaches here.
+        // coefficient — but AV refuses min-ROAS (its Purchase carries no value), so no ROAS ever reaches here.
         // ============================================================================================
         if (viaTool) {
           const deadlineAt = startedAt + TOOL_DEADLINE_MS;
@@ -639,7 +656,7 @@ export async function POST(req: Request) {
             toolInputFromCampaign(serverCampaign, {
               name,
               pageId: binds.pageId,
-              pixelId: "", // AV never binds a pixel (Traffic / link clicks)
+              pixelId: binds.pixelId, // AV_PIXEL for Purchase, "" for link clicks (avDelivery)
               localeIds,
               creatives,
               status: "ACTIVE", // AV launches go live; TOOL creates PAUSED then activates on success

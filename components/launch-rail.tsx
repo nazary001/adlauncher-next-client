@@ -171,9 +171,11 @@ export function LaunchRail({
           <div className="-mx-2 flex min-h-0 flex-col overflow-y-auto overscroll-contain">
             {campaigns.map((c, i) => {
               const ready = launchableOf(c);
-              // AV runs Traffic / link clicks — its card carries a conversion event nobody optimizes on.
+              // AV runs one of its two modes — Purchase on the AV site pixel or link clicks (avDelivery).
               const eventLabel = partner.avLaunch
-                ? "link clicks"
+                ? c.optimization === "clicks"
+                  ? "link clicks"
+                  : "Purchase"
                 : (CONVERSION_EVENTS.find((e) => e.value === c.conversionEvent)?.label ?? "");
               return (
                 <button

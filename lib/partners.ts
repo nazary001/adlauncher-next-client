@@ -4,6 +4,7 @@ import type { Campaign } from "./types";
 import { bidKind } from "./types";
 import { type AifFlow, AIF_RW_BASE, aifFlowOf, aifLinkSegments } from "./aif-link";
 import { AV_KEY_POOL_MAX, avKeyCode, avLinkSegments } from "./av-link";
+import { avLockPatch } from "./av-delivery";
 
 export type Bound = { id: string; name: string };
 
@@ -74,8 +75,9 @@ export type PartnerConfig = {
   /** ActiveView (AV, lib/av-*): a direct Graph launch on AV's OWN token (slots av.launch/av.clone,
    *  no env default) onto an AV destination — an article of an AV site or an AV Redirect path, kept
    *  as a bare URL in Campaign.landing — with an AV key (av001…, the AIF-brand twin, only the range
-   *  registered in AV's "UTM Campaign Values" is launchable) in utm_campaign. The page carries NO
-   *  pixel: delivery is pinned to Traffic / link clicks (applyPartnerLocks + the route). */
+   *  registered in AV's "UTM Campaign Values" is launchable) in utm_campaign. The page's pixel is
+   *  fired by AV's own site script (AV_PIXEL): delivery is Purchase on it (default) or Traffic / link
+   *  clicks with no pixel — the optimization picks, avDelivery maps (applyPartnerLocks + the route). */
   avLaunch?: boolean;
   /** Not built out yet → the switcher renders this partner disabled ("in development"). */
   inDevelopment?: boolean;
@@ -393,9 +395,9 @@ export const PARTNERS: PartnerConfig[] = [
   },
 ];
 
-/** AV cards run on Traffic: the AV page carries no Meta pixel, so link clicks (LINK_CLICKS, no
- *  promoted_object) is the only honest optimization. Pinned by applyPartnerLocks and the route. */
-export const AV_OBJECTIVE = "OUTCOME_TRAFFIC";
+// AV delivery modes (owner ask 30.09) — Purchase on the AV site pixel (default) or Traffic / link
+// clicks with no pixel; pure module (lib/av-delivery) so node --test covers it.
+export { AV_OBJECTIVE, AV_PIXEL, AV_SALES_OBJECTIVE, type AvDelivery, avDelivery, avLockPatch } from "./av-delivery";
 
 export function partnerConfig(id: PartnerId): PartnerConfig {
   return PARTNERS.find((p) => p.id === id) ?? PARTNERS[0];
@@ -433,7 +435,8 @@ export function launchReadyOpts(p: PartnerConfig): {
     // AIF's pixel is a pick with a server-side auto-derive fallback (empty pick → the
     // cabinet's own pixel), and click cards legitimately carry none — requiring it here would
     // dead-lock them, so readiness never gates on it for AIF.
-    // AV never binds a pixel (Traffic / link clicks — the AV page has none).
+    // AV's pixel is never a pick: Purchase binds AV_PIXEL, link clicks bind none (avDelivery, pinned
+    // by the locks) — nothing for readiness to gate on.
     pixel: (Boolean(p.accountsFromToken) && !p.aifLaunch && !p.avLaunch) || Boolean(p.lionLaunch),
     // Marker-pool partners (MO gcm / AIF brand) need a claimed code before the card counts as
     // ready — a card whose code hasn't loaded (registry unreachable / pre-load window) must not
@@ -496,8 +499,8 @@ export function landingUrlSegments(
   // from the catalog entry — so the card's preview and the launched link can never disagree
   // with the server's own catalog check (lib/aif-link builds both shapes).
   if (p.aifLaunch) return aifLinkSegments(aifFlowOf(p.landings, slug), slug, gcm, pixel);
-  // AV: `slug` IS the destination URL (article / redirect path) and `gcm` the AV key; no pixel,
-  // no fire — lib/av-link builds <destination>?utm_source=facebook&utm_medium={{campaign.id}}
+  // AV: `slug` IS the destination URL (article / redirect path) and `gcm` the AV key; no pixel /
+  // fire tail even for Purchase (AV's own site script fires the pixel) — lib/av-link builds <destination>?utm_source=facebook&utm_medium={{campaign.id}}
   // &utm_campaign=<key>&utm_term={{adset.id}}&utm_content={{ad.id}}.
   if (p.avLaunch) return avLinkSegments(slug, gcm);
   const medium = p.nameTier ? `&utm_medium=${p.nameTier}` : "";
@@ -555,15 +558,10 @@ export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[
       if (r.conversionEvent !== "PURCHASE") patch.conversionEvent = "PURCHASE";
     }
     if (p.avLaunch) {
-      // Traffic / link clicks, no pixel — the AV page has none, so conversions and min-ROAS have
-      // nothing to optimize on (the route refuses both; this converges copied/restored drafts).
-      if (r.objective !== AV_OBJECTIVE) patch.objective = AV_OBJECTIVE;
-      if (r.optimization !== "clicks") patch.optimization = "clicks";
-      if (r.pixel) patch.pixel = "";
-      if (bidKind(r.bidStrategy) === "roas") {
-        patch.bidStrategy = "LOWEST_COST_WITHOUT_CAP";
-        patch.bidCap = "";
-      }
+      // Two AV modes (owner ask 30.09), picked by the optimization: Purchase on the AV site pixel
+      // (conversions — what a fresh card carries) or Traffic / link clicks with no pixel; min-ROAS
+      // snaps to lowest cost (no purchase value). The route re-pins it all (avLockPatch).
+      Object.assign(patch, avLockPatch(r));
     }
     if (Object.keys(patch).length === 0) return r;
     changed = true;

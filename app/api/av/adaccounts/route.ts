@@ -7,7 +7,7 @@ import { sessionFromCookieHeader } from "@/lib/session";
 
 export const runtime = "nodejs";
 // Cold refresh = paginated account list; warm calls answer from the shared cache instantly. AV
-// accounts carry no pixel list (the AV page has none — Traffic / link clicks only).
+// accounts carry no pixel list (AV's pixel is never a pick — AV_PIXEL for Purchase, set by the locks/route).
 export const maxDuration = 60;
 
 /**
@@ -16,8 +16,8 @@ export const maxDuration = 60;
  * ACTIVE ad accounts the AV token can use — feeds the account picker on the AV launcher / clone
  * board. The launch route validates the picked account against the same server-cached data. Gated
  * by the proxy + the rail flag. `rail` picks the owner's launch or clone token (/tokens) — the
- * picker shows exactly what the bearer that will build can use. `pixels` is omitted (AV never binds
- * a pixel).
+ * picker shows exactly what the bearer that will build can use. `pixels` is omitted (AV's pixel is
+ * never a pick — lib/partners avDelivery).
  *
  * Degrades quietly (ok:false, 200) when no token is assigned; real API failures return their mapped
  * status (429 rate-limited / 502 otherwise).

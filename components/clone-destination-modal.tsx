@@ -111,7 +111,7 @@ export function CloneDestinationModal({
   const pageIsAuto = Boolean(partner.fanpagesFromToken) && !draft.pageId && Boolean(autoPageId);
   const accountIsAuto = Boolean(partner.accountsFromToken) && !draft.accountId && Boolean(autoAccountId);
   const isTarget = Boolean(effAccountId) && effAccountId !== SOURCE_ACCOUNT;
-  // AV never binds a pixel — it stays empty, is never picked and never gates the modal.
+  // AV's pixel is never picked (the route sets AV_PIXEL for Purchase clones) — it stays empty here and never gates the modal.
   const effPixelId = avMode
     ? ""
     : draft.pixelId ||
@@ -218,7 +218,7 @@ export function CloneDestinationModal({
                       accountId: v,
                       // Same auto-pick as the Settings picker: the target's preferred pixel
                       // (AIF: the value pixel) when the account carries it; none in source mode.
-                      // AV never binds a pixel.
+                      // AV's pixel is never picked (set by the route).
                       pixelId:
                         !avMode && v && v !== SOURCE_ACCOUNT
                           ? aifMode
