@@ -26,7 +26,7 @@
 // off Node with DNS and fetch stubbed.
 import { createHash } from "node:crypto";
 import dns from "node:dns/promises";
-import { avChatUrl } from "./av-link";
+import { AV_KNOWN_CHATS, type AvKnownChat, avChatProbeHosts, avChatUrl } from "./av-link";
 
 const UA = "Mozilla/5.0 (compatible; adlauncher-av/1.0)";
 /** The CNAME target the Chat Builder wizard hands out (step 2 "Copy your DNS keys", read 29.09). */
@@ -813,21 +813,24 @@ export async function resolveAvChat(shape: AvChatShape, site: string): Promise<A
   return { ok: true, kind: "chat", base: url.base, site: s };
 }
 
+/** The known chats whose hosts the card's hint probes too (lib/av-link AV_KNOWN_CHATS). */
+let knownChats: readonly AvKnownChat[] = AV_KNOWN_CHATS;
+
 /**
  * The card's hint: which of our sites have a chat host, and whether traffic may be bought for it.
- * Only the conventional `chat.<site>` is probed (the API lists none and a subdomain cannot be
- * enumerated) — a chat on any other subdomain still resolves when its URL is pasted. A site with no
- * chat host is left out; a host that could not be CHECKED is listed as such, never dropped (that
- * would read as "there is none"). What DNS said is remembered for a minute, here only: the catalog
- * is read on every card load and a DNS that does not answer costs its whole timeouts, while a launch
- * always asks DNS itself — and what a launch proved (the host IS a chat host) wins over it. One
- * reading per host runs at a time: a read that comes while one runs (the card's Retry included)
- * joins it. `force` re-reads past every cache (the card's Retry).
+ * The API lists no chats and a subdomain cannot be enumerated, so the conventional `chat.<site>` is
+ * probed, plus the host of every KNOWN chat of the site (lib/av-link avChatProbeHosts — owner 30.09:
+ * lp1.thecadrion.com); a chat on any other subdomain still resolves when its URL is pasted. A host
+ * that is no chat host is left out; a host that could not be CHECKED is listed as such, never
+ * dropped (that would read as "there is none"). What DNS said is remembered for a minute, here only:
+ * the catalog is read on every card load and a DNS that does not answer costs its whole timeouts,
+ * while a launch always asks DNS itself — and what a launch proved (the host IS a chat host) wins
+ * over it. One reading per host runs at a time: a read that comes while one runs (the card's Retry
+ * included) joins it. `force` re-reads past every cache (the card's Retry).
  */
 export async function avChatHosts(sites: string[], force = false): Promise<AvChatHostOption[]> {
   const probed = await Promise.all(
-    [...new Set(sites.map(normHost).filter(Boolean))].map((site) => {
-      const host = `chat.${site}`;
+    avChatProbeHosts(sites.map(normHost).filter(Boolean), knownChats).map(({ host, site }) => {
       let flight = hintFlights.get(host);
       if (!flight) {
         flight = chatHostForCard(site, host, force).finally(() => hintFlights.delete(host));
@@ -859,6 +862,11 @@ async function chatHostForCard(site: string, host: string, force: boolean): Prom
   dnsHintCache.delete(host);
   const ready = await chatHostHint(host, force);
   return { host, site, live: ready.ready, ...(ready.ready ? {} : { liveReason: ready.error }) };
+}
+
+/** Test seam: the known chats the hint probes (the shipped registry otherwise). */
+export function _setAvKnownChats(list: readonly AvKnownChat[]): void {
+  knownChats = list;
 }
 
 /** Test seam: drop every per-instance cache. */

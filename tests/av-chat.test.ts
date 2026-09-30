@@ -13,6 +13,9 @@ import assert from "node:assert/strict";
 import dns from "node:dns/promises";
 
 const chat = await import("../lib/av-chat.ts");
+// The shipped registry of known chats (lib/av-link AV_KNOWN_CHATS — lp1.thecadrion.com) would add
+// its hosts to every probe of thecadrion.com; the tests below name the known chats they need.
+chat._setAvKnownChats([]);
 
 const GATEWAY = "assistant-quiz-infrastructure-gateway.activeview.app";
 const HOST = "chat.thecadrion.com";
@@ -1623,6 +1626,39 @@ test("the chat-host probe lists chat.<site> only for the sites that have one, re
   await withStubs({ [HOST]: [GATEWAY], "chat.second-site.com": ["parking.example"] }, { [WORKER_URL]: { status: 200, body: worker(SCRIPT) }, [SCRIPT_URL]: SERVED }, async () => {
     assert.deepEqual(await chat.avChatHosts(["thecadrion.com", "second-site.com"]), [{ host: HOST, site: "thecadrion.com", live: true }]);
   });
+});
+
+test("the probe also reads a KNOWN chat's host — a subdomain other than chat.<site> (lp1, owner 30.09) — through the same gate", async () => {
+  const LP1 = "lp1.thecadrion.com";
+  chat._setAvKnownChats([{ host: LP1, id: ID, name: "Emily" }]);
+  try {
+    await withStubs({ [LP1]: [GATEWAY] }, { [`https://${LP1}/worker.js`]: { status: 200, body: worker("") } }, async ({ dnsCalls }) => {
+      const hosts = await chat.avChatHosts(["thecadrion.com"], true);
+      assert.deepEqual([...dnsCalls].sort(), [HOST, LP1].sort(), "chat.<site> and the known host are both read");
+      assert.equal(hosts.length, 1, "chat.<site> is no chat host here — only the known one is listed");
+      assert.equal(hosts[0].host, LP1);
+      assert.equal(hosts[0].site, "thecadrion.com");
+      assert.equal(hosts[0].live, false, "no ad script yet: the money gate still says not ready");
+      assert.match(hosts[0].liveReason ?? "", /^chat_not_monetized — /);
+    });
+    await withStubs({ [LP1]: [GATEWAY] }, { [`https://${LP1}/worker.js`]: { status: 200, body: worker(SCRIPT) }, [SCRIPT_URL]: SERVED }, async () => {
+      assert.deepEqual(await chat.avChatHosts(["thecadrion.com"], true), [{ host: LP1, site: "thecadrion.com", live: true }]);
+    });
+  } finally {
+    chat._setAvKnownChats([]);
+  }
+});
+
+test("a known chat host that is no subdomain of our sites is never probed", async () => {
+  chat._setAvKnownChats([{ host: "lp1.elsewhere.com", id: ID, name: "not ours" }]);
+  try {
+    await withStubs({}, {}, async ({ dnsCalls }) => {
+      assert.deepEqual(await chat.avChatHosts(["thecadrion.com"], true), []);
+      assert.deepEqual(dnsCalls, [HOST]);
+    });
+  } finally {
+    chat._setAvKnownChats([]);
+  }
 });
 
 test("a chat host whose activation is unfinished is listed as not live, pointing at Chat Builder", async () => {

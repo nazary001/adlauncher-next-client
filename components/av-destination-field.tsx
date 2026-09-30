@@ -10,11 +10,13 @@ import {
   type AvRowState,
   type AvTabPin,
   type AvVerdict,
+  avChatProbeHosts,
   avChatUrl,
   avCheckOutcome,
   avDestinationBase,
   avDestinationKind,
   avFieldTab,
+  avKnownChats,
   avMappingLabel,
   avPinAfterPick,
   avRefusalOfHost,
@@ -214,9 +216,9 @@ export function AvDestinationField({
   }
 
   // What the catalog on screen says of a chat host — what a line under a paste box is weighed
-  // against; `probes` names the hosts it speaks for (chat.<root site>).
+  // against; `probes` names the hosts it speaks for (chat.<root site> + the known chats' hosts).
   const siteDomains = cat ? cat.sites.map((s) => s.domain) : null;
-  const probes = (siteDomains ?? []).filter((d) => !(siteDomains ?? []).some((o) => d.endsWith(`.${o}`))).map((d) => `chat.${d}`);
+  const probes = avChatProbeHosts(siteDomains ?? []).map((p) => p.host);
   const chats = cat?.chats ?? NO_CHATS;
   const rowOf = (host: string): AvRowState => {
     const h = chats.find((c) => c.host === host);
@@ -382,6 +384,7 @@ function PasteCheck({
   label,
   placeholder,
   value,
+  suggestions,
   shape,
   foreign,
   check,
@@ -398,6 +401,9 @@ function PasteCheck({
   placeholder: string;
   /** The stored destination — a success verdict is shown only while it IS the destination. */
   value: string;
+  /** Addresses offered in one click (the AI chat tab: our known chats) — a click fills the box and
+   *  runs the very check a paste does, so a pick is never taken on trust. */
+  suggestions?: { label: string; url: string; title?: string }[];
   shape: (raw: string) => Shape;
   /** Why this host is none of ours, or null — a foreign host never needs a round trip. */
   foreign: (host: string) => string | null;
@@ -428,7 +434,9 @@ function PasteCheck({
   const canCheck = Boolean(pasted?.ok) && !checking;
   const shown = verdict && avVerdictStands(verdict, { value, reading, row: verdict.host ? rowOf(verdict.host) : null }) ? verdict : null;
 
-  async function runCheck() {
+  /** Check what is in the box — or `raw`, a suggestion just put there (state lands after this runs). */
+  async function runCheck(raw: string = paste) {
+    const pasted = raw.trim() ? shape(raw) : null;
     if (!pasted?.ok || checking) return;
     const why = foreign(pasted.host);
     if (why) {
@@ -462,6 +470,40 @@ function PasteCheck({
 
   return (
     <div className="flex flex-col gap-1.5">
+      {suggestions && suggestions.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] text-faint">Our chats:</span>
+          {suggestions.map((s) => {
+            const on = value === s.url;
+            return (
+              <button
+                key={s.url}
+                type="button"
+                title={s.title ?? s.url}
+                aria-pressed={on}
+                disabled={checking || on}
+                onClick={() => {
+                  setPaste(s.url);
+                  setVerdict(null);
+                  void runCheck(s.url);
+                }}
+                className={
+                  "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11.5px] font-semibold transition-colors " +
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
+                  (on
+                    ? "cursor-default border-accent/50 bg-accent/20 text-[#9db8ff]"
+                    : checking
+                      ? "cursor-not-allowed border-line bg-surface text-faint opacity-60"
+                      : "border-line2 bg-raise text-dim hover:border-accent/40 hover:text-ink")
+                }
+              >
+                {on ? <CheckIcon className="h-3 w-3" /> : null}
+                {s.label}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
       <div className="flex gap-2">
         <TextInput
           value={paste}
@@ -536,8 +578,10 @@ function ChatPicker({
   reread: React.RefObject<(host: string) => boolean>;
   destinations: AvDestinations;
 }) {
-  // The catalog probes chat.<site> of the ROOT sites only (a site's own subdomain has none).
-  const probed = (siteDomains ?? []).filter((d) => !(siteDomains ?? []).some((o) => d.endsWith(`.${o}`))).map((d) => `chat.${d}`);
+  // The catalog probes chat.<site> of the ROOT sites (a site's own subdomain has none) and the hosts
+  // of our known chats (lib/av-link AV_KNOWN_CHATS — lp1.thecadrion.com), which it offers in one click.
+  const probed = avChatProbeHosts(siteDomains ?? []).map((p) => p.host);
+  const known = siteDomains ? avKnownChats(siteDomains) : [];
   // What is KNOWN about the picked chat's host: listed ready; listed not ready, or probed and not
   // found — its launch will be refused —; or not known here (not listed, or the probe could not be
   // made): the launch checks it.
@@ -644,6 +688,7 @@ function ChatPicker({
         label="Chat URL"
         placeholder={current ? "Paste another chat URL" : "Paste the chat URL from Chat Builder"}
         value={value}
+        suggestions={known.map((c) => ({ label: c.name, url: c.base, title: c.base }))}
         shape={(raw) => avChatUrl(raw)}
         foreign={(host) =>
           siteDomains && !siteDomains.some((d) => host.endsWith(`.${d}`)) ? `Not a chat of ours — ${host} is no subdomain of ${siteDomains.join(", ") || "our sites"}.` : null

@@ -110,6 +110,62 @@ export function avChatUrl(raw: string): AvChatUrl {
   return { ok: false, error: AV_CHAT_URL_INVALID };
 }
 
+/** A chat of ours built in ActiveView → Chat Builder: its host (a subdomain of an AV site), its
+ *  24-character id and the name the card shows. */
+export type AvKnownChat = { host: string; id: string; name: string };
+
+/**
+ * The chats the card offers with one click. AV's API lists no chats and a subdomain cannot be
+ * enumerated, so a chat on a subdomain OTHER than the conventional chat.<site> is known from here
+ * (owner 30.09: the Chat Builder host of thecadrion.com is lp1, its first chat "Emily"). A pick is
+ * checked exactly like a pasted chat — on the pick and again on every launch the host must show ads
+ * — so this list only saves the paste; it never vouches for a chat.
+ */
+export const AV_KNOWN_CHATS: readonly AvKnownChat[] = [
+  { host: "lp1.thecadrion.com", id: "6abc53bbe2e270105e4c5586", name: "Emily — AI Companion (lp1)" },
+];
+
+const normChatHost = (h: unknown): string => String(h ?? "").trim().toLowerCase().replace(/\.+$/, "");
+
+/** Our ROOT sites: a site that is a subdomain of another listed site has no chat host of its own. */
+const rootSites = (siteDomains: string[]): string[] => {
+  const sites = [...new Set(siteDomains.map(normChatHost).filter(Boolean))];
+  return sites.filter((d) => !sites.some((o) => d.endsWith(`.${o}`)));
+};
+
+/** The root site a host is a subdomain of (never the site itself or its www), or "". */
+const siteOfChatHost = (host: string, roots: string[]): string => roots.find((s) => host.endsWith(`.${s}`) && host !== `www.${s}`) ?? "";
+
+/**
+ * The chat hosts the card's catalog probes for our sites: chat.<site> of every ROOT site, then the
+ * host of every known chat that is a subdomain of one of them — each host once, in that order. A
+ * known chat of a site that is not ours is never probed (lib/av-chat would refuse it anyway).
+ */
+export function avChatProbeHosts(siteDomains: string[], known: readonly AvKnownChat[] = AV_KNOWN_CHATS): { host: string; site: string }[] {
+  const roots = rootSites(siteDomains);
+  const out = roots.map((site) => ({ host: `chat.${site}`, site }));
+  for (const c of known) {
+    const host = normChatHost(c.host);
+    const site = siteOfChatHost(host, roots);
+    if (site && !out.some((o) => o.host === host)) out.push({ host, site });
+  }
+  return out;
+}
+
+/** The known chats of our sites, each with its ONE canonical address (lib/av-link avChatUrl); a
+ *  chat of another site or with a damaged id is left out. */
+export function avKnownChats(siteDomains: string[], known: readonly AvKnownChat[] = AV_KNOWN_CHATS): Array<AvKnownChat & { base: string }> {
+  const roots = rootSites(siteDomains);
+  const out: Array<AvKnownChat & { base: string }> = [];
+  for (const c of known) {
+    const host = normChatHost(c.host);
+    if (!siteOfChatHost(host, roots)) continue;
+    const url = avChatUrl(`https://${host}/?asst=${String(c.id ?? "").trim()}`);
+    if (url.ok) out.push({ host, id: url.id, name: c.name, base: url.base });
+  }
+  return out;
+}
+
 export type AvDestinationKind = "article" | "redirect" | "chat";
 
 /**
