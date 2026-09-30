@@ -4,17 +4,22 @@
 // On TOOL it is targeting.publisher_platforms (+ positions) — CONFIRMED on its /capabilities (live
 // read 30.09: "adset.targeting.publisher_platforms/positions" status CONFIRMED), so it never needs
 // allow_inferred; the direct-Graph path puts the same words on the Marketing API targeting.
-// "auto" = no platforms at all = Advantage+ placements (every platform Meta picks), exactly what a
-// card sent before the pick existed. TOOL's schema also knows threads / messenger /
+// The default is Facebook only (owner 30.09); "auto" = no platforms at all = Advantage+ placements
+// (every platform Meta picks), what AV launches ran on before the pick. TOOL's schema also knows threads / messenger /
 // audience_network, but Meta runs those only alongside Instagram (Threads) or Facebook (Messenger,
 // Audience Network), so the card offers just the choices that run on their own.
 
-/** The card's choices (value = the word stored on Campaign.platforms). */
+/** The pick an AV launch runs on unless the card says otherwise — Facebook only (owner 30.09:
+ *  «Только фейсбук мне пока что важен»). lib/types.makeCampaign keeps a literal twin (that file
+ *  stays import-free); tests/av-platforms pins the two together. */
+export const DEFAULT_PLATFORM_CHOICE = "facebook";
+
+/** The card's choices (value = the word stored on Campaign.platforms), the default first. */
 export const PLATFORM_CHOICES: { value: string; label: string }[] = [
-  { value: "auto", label: "All (auto)" },
   { value: "facebook", label: "Facebook" },
   { value: "instagram", label: "Instagram" },
   { value: "facebook+instagram", label: "Facebook + Instagram" },
+  { value: "auto", label: "All (auto)" },
 ];
 
 const PLATFORMS_OF: Readonly<Record<string, readonly string[]>> = {
@@ -25,15 +30,14 @@ const PLATFORMS_OF: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
- * The Meta publisher_platforms a card's pick stands for: [] = automatic (auto, blank, or a draft
- * saved before the pick existed); null = a word we do not know — the launch route refuses it rather
- * than widen or narrow a launch on a guess.
+ * The Meta publisher_platforms a card's pick stands for: no pick at all (blank, or a draft saved
+ * before the pick existed) = the default's (the card shows that same default); "auto" = [] =
+ * automatic; null = a word we do not know — the launch route refuses it rather than widen or narrow
+ * a launch on a guess.
  */
 export function publisherPlatformsOf(choice: unknown): string[] | null {
-  if (choice == null) return [];
-  if (typeof choice !== "string") return null;
-  const word = choice.trim().toLowerCase();
-  if (word === "") return [];
+  if (typeof choice !== "string" && choice != null) return null;
+  const word = String(choice ?? "").trim().toLowerCase() || DEFAULT_PLATFORM_CHOICE;
   return Object.hasOwn(PLATFORMS_OF, word) ? [...PLATFORMS_OF[word]] : null;
 }
 

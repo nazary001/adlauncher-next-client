@@ -47,9 +47,9 @@ export type Campaign = {
   locales: string[];
   category: string;
   placement: string;
-  /** AV cards: which Meta platforms the launch runs on — "auto" | "facebook" | "instagram" |
-   *  "facebook+instagram" (lib/publisher-platforms, owner ask 30.09). Missing = auto (drafts saved
-   *  before the pick existed); only the AV route reads it. */
+  /** AV cards: which Meta platforms the launch runs on — "facebook" | "instagram" |
+   *  "facebook+instagram" | "auto" (lib/publisher-platforms, owner ask 30.09). Missing = the default,
+   *  Facebook (drafts saved before the pick existed); only the AV route reads it. */
   platforms?: string;
   ageMin: string;
   userOs: string;
@@ -86,7 +86,7 @@ export function makeCampaign(id: string, namePrefix = "", name = ""): Campaign {
     locales: [],
     category: "",
     placement: "FULL",
-    platforms: "auto",
+    platforms: "facebook", // = publisher-platforms DEFAULT_PLATFORM_CHOICE (this file stays import-free)
     ageMin: "18",
     userOs: "all",
     files: [],

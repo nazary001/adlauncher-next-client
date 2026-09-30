@@ -26,7 +26,7 @@ import {
 } from "@/lib/catalog";
 import { hsFinalLink, hsLinkSegments, hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { TOOL_MARK, toolEnsureMark } from "@/lib/tool-launch";
-import { PLATFORM_CHOICES } from "@/lib/publisher-platforms";
+import { DEFAULT_PLATFORM_CHOICE, PLATFORM_CHOICES } from "@/lib/publisher-platforms";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { AIF_VALUE_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifOfferablePixels, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
 import { aifFlowOf } from "@/lib/aif-link";
@@ -1391,10 +1391,11 @@ function CampaignCardBase({
                   />
                 </Field>
                 {avMode ? (
-                  // Which Meta platforms the AV launch runs on (owner ask 30.09) — auto = Meta picks.
+                  // Which Meta platforms the AV launch runs on (owner ask 30.09) — Facebook unless
+                  // picked otherwise; a card with no pick shows the default the server applies.
                   <Field label="Platforms" className="col-span-6 xl:col-span-3">
                     <Select
-                      value={c.platforms || "auto"}
+                      value={c.platforms || DEFAULT_PLATFORM_CHOICE}
                       onChange={(e) => patch({ platforms: e.target.value })}
                       options={PLATFORM_CHOICES}
                     />

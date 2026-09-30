@@ -183,15 +183,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, stage: "parse", error: String(e) }, { status: 400 });
   }
   // The card's Platforms pick (owner ask 30.09: "выбирать соц, на который будет залив") — the Meta
-  // platforms this launch runs on, on BOTH channels. A word outside the card's choices is refused
-  // before any write: never widened to every platform, never narrowed on a guess.
+  // platforms this launch runs on, on BOTH channels; no pick = Facebook only (the default, owner
+  // 30.09). A word outside the card's choices is refused before any write: never widened to every
+  // platform, never narrowed on a guess.
   const platforms = publisherPlatformsOf(campaign.platforms);
   if (platforms === null) {
     return NextResponse.json(
       {
         ok: false,
         stage: "parse",
-        error: `platforms_invalid: ${String(campaign.platforms).slice(0, 40)} — pick All (auto), Facebook, Instagram or Facebook + Instagram`,
+        error: `platforms_invalid: ${String(campaign.platforms).slice(0, 40)} — pick Facebook, Instagram, Facebook + Instagram or All (auto)`,
       },
       { status: 400 },
     );

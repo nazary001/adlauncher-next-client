@@ -16,7 +16,7 @@ import {
   REDIRECT_TYPES,
   countryName,
 } from "@/lib/catalog";
-import { PLATFORM_CHOICES } from "@/lib/publisher-platforms";
+import { DEFAULT_PLATFORM_CHOICE, PLATFORM_CHOICES } from "@/lib/publisher-platforms";
 import { CheckIcon, CopyIcon, XIcon } from "./icons";
 
 type Group = "Setup" | "Delivery" | "Creative" | "Targeting";
@@ -116,7 +116,7 @@ const FIELDS: Field[] = [
   { key: "category", label: "Special category", group: "Targeting", preview: (c) => optLabel(CATEGORIES, c.category) },
   { key: "placement", label: "Placement", group: "Targeting", preview: (c) => optLabel(PLACEMENTS, c.placement) },
   // AV only (the one rail that reads the pick, owner ask 30.09).
-  { key: "platforms", label: "Platforms", group: "Targeting", when: (p) => Boolean(p.avLaunch), preview: (c) => optLabel(PLATFORM_CHOICES, c.platforms || "auto") },
+  { key: "platforms", label: "Platforms", group: "Targeting", when: (p) => Boolean(p.avLaunch), preview: (c) => optLabel(PLATFORM_CHOICES, c.platforms || DEFAULT_PLATFORM_CHOICE) },
   { key: "ageMin", label: "Age", group: "Targeting", preview: (c) => optLabel(AGES, c.ageMin) },
   { key: "userOs", label: "Devices", group: "Targeting", preview: (c) => optLabel(OS_OPTIONS, c.userOs) },
 ];

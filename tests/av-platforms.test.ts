@@ -13,10 +13,10 @@ const { targeting, adsetPayload } = await import("../lib/fb-launch.ts");
 const tl = await import("../lib/tool-launch.ts");
 const { makeCampaign } = await import("../lib/types.ts");
 
-test("the card offers All (auto) first, then Facebook, Instagram, Facebook + Instagram — every choice parses", () => {
+test("the card offers Facebook first (the default), then Instagram, Facebook + Instagram, All (auto) — every choice parses", () => {
   assert.deepEqual(
     pp.PLATFORM_CHOICES.map((o) => o.value),
-    ["auto", "facebook", "instagram", "facebook+instagram"],
+    ["facebook", "instagram", "facebook+instagram", "auto"],
   );
   for (const o of pp.PLATFORM_CHOICES) {
     assert.ok(o.label.trim(), o.value);
@@ -24,8 +24,15 @@ test("the card offers All (auto) first, then Facebook, Instagram, Facebook + Ins
   }
 });
 
-test("publisherPlatformsOf: auto / blank / missing = [] (Advantage+); a pick = its Meta words; any other word = null", () => {
-  for (const v of ["auto", "", "  ", undefined, null]) assert.deepEqual(pp.publisherPlatformsOf(v), [], String(v));
+test("the AV default is Facebook only (owner 30.09: «Только фейсбук мне пока что важен»)", () => {
+  assert.equal(pp.DEFAULT_PLATFORM_CHOICE, "facebook");
+  // A card with no pick at all (a draft saved before the pick existed, a blank value) launches on
+  // the default — the card SHOWS the same default for it, so what you see is what is sent.
+  for (const v of ["", "  ", undefined, null]) assert.deepEqual(pp.publisherPlatformsOf(v), ["facebook"], String(v));
+});
+
+test("publisherPlatformsOf: auto = [] (Advantage+); a pick = its Meta words; any other word = null", () => {
+  assert.deepEqual(pp.publisherPlatformsOf("auto"), []);
   assert.deepEqual(pp.publisherPlatformsOf("facebook"), ["facebook"]);
   assert.deepEqual(pp.publisherPlatformsOf(" Instagram "), ["instagram"]); // spelling is normalized
   assert.deepEqual(pp.publisherPlatformsOf("facebook+instagram"), ["facebook", "instagram"]);
@@ -35,8 +42,8 @@ test("publisherPlatformsOf: auto / blank / missing = [] (Advantage+); a pick = i
   }
 });
 
-test("a fresh card starts on All (auto)", () => {
-  assert.equal(makeCampaign("c1").platforms, "auto");
+test("a fresh card starts on the AV default (types.ts keeps a literal twin — it must stay import-free)", () => {
+  assert.equal(makeCampaign("c1").platforms, pp.DEFAULT_PLATFORM_CHOICE);
 });
 
 test("both AV channels put the SAME platforms/positions on the ad set, for every choice × placement set", () => {

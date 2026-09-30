@@ -124,11 +124,12 @@ tokens / accounts pages. No live FB launch (no AV token yet, keys not registered
   `instagram_positions`, status **CONFIRMED** on `/capabilities` (live read 30.09) — no
   `allow_inferred`. Picking the Ads Manager SESSION is not possible: `POST /accounts/{id}/campaigns`
   picks the session and proxy itself (no session field; `additionalProperties:false`).
-- **Card (AV only):** Targeting → **Platforms** = All (auto) · Facebook · Instagram · Facebook +
-  Instagram (`lib/publisher-platforms.ts`, stored on `Campaign.platforms`, default `auto`; also in
-  Copy settings, AV only). Threads / Messenger / Audience Network are left out — Meta runs them only
+- **Card (AV only):** Targeting → **Platforms** = Facebook · Instagram · Facebook + Instagram · All
+  (auto) (`lib/publisher-platforms.ts`, stored on `Campaign.platforms`; also in Copy settings, AV
+  only). **Default = Facebook only** (owner 30.09: «Только фейсбук мне пока что важен») — for a new
+  card AND for a card with no pick (older drafts): the card shows the default the server applies. Threads / Messenger / Audience Network are left out — Meta runs them only
   alongside Instagram / Facebook.
-- **Wire:** auto = no platforms (Advantage+, as before). A pick sets `publisher_platforms`; with
+- **Wire:** auto = no platforms (Advantage+, what AV launches ran on before the pick). A pick sets `publisher_platforms`; with
   placement FULL every position of the picked platforms runs, with COMPLIANCE only their feeds
   (`facebook_positions:["feed"]` / `instagram_positions:["stream"]`). Same rule on both AV channels —
   TOOL (`buildToolCampaign`, literal twin) and direct Graph (`fb-launch.targeting` via
