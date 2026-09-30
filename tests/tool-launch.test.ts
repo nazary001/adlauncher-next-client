@@ -679,3 +679,72 @@ test("runToolDuplicate: onSubmitted fires once with the child job id on accept, 
   await tl.runToolDuplicate(d2, "acct", duplicateBody, { deadlineAt: Date.now() + 60_000, onSubmitted: (id) => seen2.push(id) });
   assert.deepEqual(seen2, []); // refused submit → onSubmitted silent
 });
+
+// ================================================================================================
+// TOOL session pick (owner ask 30.09: "добавили session id и теперь можем сделать выбор профилей") —
+// the AV card's Profile pick rides the create body (CampaignRequest.session_id) and every media
+// registration (MediaCreateByUrl.session_id); Auto sends neither, so TOOL keeps picking by account.
+// ================================================================================================
+
+test("buildToolCampaign: an explicit TOOL session rides the create body as session_id", () => {
+  assert.equal(built({ sessionId: 13 }).body.session_id, 13);
+});
+
+test("buildToolCampaign: Auto (no / non-positive / fractional session) sends no session_id — TOOL picks by account", () => {
+  assert.ok(!("session_id" in built().body));
+  for (const bad of [0, -1, 1.5, Number.NaN]) assert.ok(!("session_id" in built({ sessionId: bad }).body), `sessionId ${bad}`);
+});
+
+test("runToolMedia: the picked session rides every registration — the creative AND its custom cover", async () => {
+  const { deps, calls } = fakeDeps({
+    mediaFromUrl: (_acct: string, kind: "image" | "video") => ok({ media_id: kind === "video" ? "med_v" : "med_c", status: "ready" }),
+  });
+  const r = await tl.runToolMedia(deps, "acct", [{ url: "https://blob/v.mp4", kind: "video", coverUrl: "https://blob/c.jpg", name: "clip" }], {
+    deadlineAt: Date.now() + 60_000,
+    sessionId: 12,
+  });
+  assert.ok(r.ok);
+  assert.equal(calls.mediaFromUrl.length, 2);
+  assert.deepEqual(calls.mediaFromUrl[0][2], { url: "https://blob/v.mp4", filename: "clip", session_id: 12 });
+  assert.deepEqual(calls.mediaFromUrl[1][2], { url: "https://blob/c.jpg", filename: "clip-cover", session_id: 12 });
+});
+
+test("runToolMedia: Auto sends the from-url body without session_id", async () => {
+  const { deps, calls } = fakeDeps({ mediaFromUrl: () => ok({ media_id: "med_1", status: "ready" }) });
+  const r = await tl.runToolMedia(deps, "acct", [{ url: "https://blob/x.jpg", kind: "image" }], { deadlineAt: Date.now() + 60_000 });
+  assert.ok(r.ok);
+  assert.deepEqual(calls.mediaFromUrl[0][2], { url: "https://blob/x.jpg" });
+});
+
+test("toolSessionPick: empty / auto / missing = Auto (null); a positive integer id = that session; anything else is refused", () => {
+  for (const auto of [undefined, null, "", "  ", "auto", "AUTO"]) assert.deepEqual(tl.toolSessionPick(auto), { ok: true, id: null }, String(auto));
+  assert.deepEqual(tl.toolSessionPick("13"), { ok: true, id: 13 });
+  assert.deepEqual(tl.toolSessionPick(" 8 "), { ok: true, id: 8 });
+  assert.deepEqual(tl.toolSessionPick(12), { ok: true, id: 12 });
+  for (const bad of ["0", "-3", "1.5", "av-01", "13abc", "1234567890123", 0, 2.5, {}]) assert.equal(tl.toolSessionPick(bad).ok, false, String(bad));
+});
+
+test("toolSessionChoices: the sessions that see an account, live ones only, labelled with the FB profile, sorted by name", () => {
+  const sessions = [
+    { id: 12, name: "av-06" },
+    { id: 13, name: "av-01" },
+    { id: 9, name: "av-03" },
+  ];
+  const dir = new Map([
+    [13, { name: "av-01", profile: "Ольга Воедилова", status: "active" }],
+    [9, { name: "av-03", profile: "Виолетта Сулышкина", status: "expired" }],
+    [12, { name: "av-06", profile: "Валерия Капайкина", status: "active" }],
+  ]);
+  assert.deepEqual(tl.toolSessionChoices(sessions, dir), [
+    { id: 13, name: "av-01", profile: "Ольга Воедилова" },
+    { id: 12, name: "av-06", profile: "Валерия Капайкина" },
+  ]);
+  // No directory (GET /sessions unreadable) → every session /accounts listed, names only.
+  assert.deepEqual(tl.toolSessionChoices(sessions, null), [
+    { id: 13, name: "av-01", profile: "" },
+    { id: 9, name: "av-03", profile: "" },
+    { id: 12, name: "av-06", profile: "" },
+  ]);
+  // A session missing from the directory keeps its /accounts name; junk ids are dropped.
+  assert.deepEqual(tl.toolSessionChoices([{ id: 20, name: "av-07" }, { id: 0, name: "x" }], dir), [{ id: 20, name: "av-07", profile: "" }]);
+});

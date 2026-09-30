@@ -51,6 +51,9 @@ export type Campaign = {
    *  "facebook+instagram" | "auto" (lib/publisher-platforms, owner ask 30.09). Missing = the default,
    *  Facebook (drafts saved before the pick existed); only the AV route reads it. */
   platforms?: string;
+  /** AV cards: the TOOL session (FB profile) the launch runs on — its id as digits; "" / missing =
+   *  Auto (TOOL picks a session that sees the account). Owner ask 30.09; only the AV route reads it. */
+  toolSession?: string;
   ageMin: string;
   userOs: string;
   files: FileItem[];

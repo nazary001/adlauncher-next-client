@@ -36,6 +36,7 @@ import type { HsCatalog } from "./use-hs";
 import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-adaccounts";
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
 import { Field, MoneyInput, Select, TextArea, TextInput, IconButton } from "./ui";
+import type { ToolSessionOption } from "./use-tool-ready";
 import { SearchSelect } from "./search-select";
 import { AvDestinationField } from "./av-destination-field";
 import type { AvDestinations } from "./use-av-destinations";
@@ -243,6 +244,7 @@ function CampaignCardBase({
   moToolRail,
   toolAccounts,
   moSocRail,
+  toolSessions,
   onPatch,
   onToggleCollapse,
   onDuplicate,
@@ -289,6 +291,9 @@ function CampaignCardBase({
   /** MO: a soc signer is picked — the name preview carries the fixed SOC marker the server
    *  will really put into the created campaign's name. */
   moSocRail?: boolean;
+  /** AV: the live TOOL sessions (FB profiles) per cabinet (bare-digit account id → sessions) for the
+   *  card's Profile pick (owner ask 30.09). null = the roster is still loading; undefined off AV. */
+  toolSessions?: ReadonlyMap<string, ToolSessionOption[]> | null;
   onPatch: (id: string, patch: Partial<Campaign>) => void;
   onToggleCollapse: (id: string) => void;
   onDuplicate: (id: string) => void;
@@ -467,10 +472,24 @@ function CampaignCardBase({
 
   // Indians pin one account → its pixel and fanpage render locked, not searchable.
   const locked = Boolean(partner.lockedAccount);
-  // Profile is a LION concept (Brazilians); hidden for direct-API partners like Indians.
-  const setupCol = partner.usesProfile
+  // Profile is a LION concept (Brazilians); hidden for direct-API partners like Indians. AV has its
+  // own Profile — the TOOL session (FB profile) the launch runs on — so it lays out four across too.
+  const setupCol = partner.usesProfile || avMode
     ? "col-span-12 md:col-span-6 xl:col-span-3"
     : "col-span-12 md:col-span-6 xl:col-span-4";
+  // AV Profile pick (owner ask 30.09: TOOL took session_id — "теперь можем сделать выбор профилей"):
+  // the live TOOL sessions that see the picked cabinet, plus Auto (TOOL picks, as before). A stored
+  // pick the roster no longer lists for this cabinet stays visible, flagged — never silently Auto.
+  const avSessions: ToolSessionOption[] =
+    avMode && toolSessions && c.account ? (toolSessions.get(c.account.replace(/^act_/, "")) ?? []) : [];
+  const avSessionPick = avMode ? (c.toolSession ?? "").trim() : "";
+  const avSessionStale =
+    Boolean(avSessionPick) && Boolean(toolSessions) && Boolean(c.account) && !avSessions.some((s) => s.id === avSessionPick);
+  const avSessionOptions = [
+    { value: "", label: "Auto — TOOL picks" },
+    ...avSessions.map((s) => ({ value: s.id, label: s.profile ? `${s.name} · ${s.profile}` : s.name })),
+    ...(avSessionStale ? [{ value: avSessionPick, label: `#${avSessionPick} — not live on this account` }] : []),
+  ];
   // Fanpages (Indians) come from the partner, not the profile; other partners use profile pages.
   const pageOptions = partner.fanpages.length ? partner.fanpages : pagesFor(c.profile);
   // Niche section headers + language tags in the picker; searching "dental" / "es" narrows.
@@ -728,6 +747,11 @@ function CampaignCardBase({
                               : kind === "roas"
                                 ? ROAS_PIXEL.id
                                 : defaultPixelFor(adAccounts ?? null, v, partner.preferredPixel),
+                          // AV: a picked profile that does not see the new cabinet falls back to Auto
+                          // (the buyer just re-picked the account — re-pick the profile if needed).
+                          ...(avMode && avSessionPick && toolSessions && !(toolSessions.get(v.replace(/^act_/, "")) ?? []).some((s) => s.id === avSessionPick)
+                            ? { toolSession: "" }
+                            : {}),
                         })
                       }
                       options={decorateAccountOptions(moAccountOptions, limits)}
@@ -752,6 +776,23 @@ function CampaignCardBase({
                     />
                   )}
                 </Field>
+                {avMode ? (
+                  // Which TOOL session (FB profile) uploads the media and builds the campaign (owner
+                  // ask 30.09). Auto = TOOL picks one that sees the cabinet, exactly as before.
+                  <Field
+                    label="Profile"
+                    className={setupCol}
+                    hint={toolSessions === null ? "loading profiles…" : "TOOL session"}
+                    error={avSessionStale ? "Not live on this account — pick another profile or Auto" : undefined}
+                  >
+                    <Select
+                      value={avSessionPick}
+                      onChange={(e) => patch({ toolSession: e.target.value })}
+                      options={avSessionOptions}
+                      aria-label="TOOL profile"
+                    />
+                  </Field>
+                ) : null}
                 <Field
                   label={partner.pageLabel}
                   className={setupCol}

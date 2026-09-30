@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { type Campaign, bidAmountMissing, bidKind, bidTag, withPartnerMark } from "@/lib/types";
-import { AV_PIXEL, type PartnerId, avDelivery, fullLandingUrl, partnerConfig } from "@/lib/partners";
+import { AV_PIXEL, type PartnerId, avAdText, avDelivery, fullLandingUrl, partnerConfig } from "@/lib/partners";
 import {
   type LaunchBinds,
   SUPPORTED_BID_STRATEGIES,
@@ -39,11 +39,12 @@ import {
   runToolMedia,
   runToolPublish,
   toolEnsureMark,
+  toolSessionPick,
   type ToolCreated,
   type ToolCreativeInput,
   type ToolNdjsonStage,
 } from "@/lib/tool-launch";
-import { toolDeps, toolInputFromCampaign, toolLaunchReady } from "@/lib/tool-run";
+import { toolDeps, toolInputFromCampaign, toolLaunchReady, toolSessionDirectory } from "@/lib/tool-run";
 import { resolveMoSigner } from "@/lib/mo-soc";
 
 export const runtime = "nodejs";
@@ -195,6 +196,22 @@ export async function POST(req: Request) {
         ok: false,
         stage: "parse",
         error: `platforms_invalid: ${String(campaign.platforms).slice(0, 40)} — pick Facebook, Instagram, Facebook + Instagram or All (auto)`,
+      },
+      { status: 400 },
+    );
+  }
+  // The card's Profile pick (owner ask 30.09: TOOL added session_id — "теперь можем сделать выбор
+  // профилей у нас"): Auto (null) lets TOOL pick a session by account, as before; an id names the
+  // TOOL session (FB profile) that uploads the media and builds the campaign. A garbled pick is
+  // refused before any write — never silently widened to Auto. Checked against the account's live
+  // sessions in the TOOL gate below.
+  const sessionPick = toolSessionPick(campaign.toolSession);
+  if (!sessionPick.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        stage: "parse",
+        error: `tool_session_invalid: ${String(campaign.toolSession).slice(0, 20)} — pick a profile on the card (or Auto)`,
       },
       { status: 400 },
     );
@@ -439,6 +456,9 @@ export async function POST(req: Request) {
   let toolAcctCurrency = "USD";
   let toolAcctName = "";
   let toolLocaleToken = "";
+  /** The validated Profile pick (undefined = Auto) and its label for notes / errors. */
+  let toolSessionId: number | undefined;
+  let toolSessionLabel = "";
   if (viaTool) {
     const ready = await toolLaunchReady();
     if (!ready.ok) {
@@ -462,6 +482,33 @@ export async function POST(req: Request) {
     }
     toolAcctCurrency = row.currency || "USD";
     toolAcctName = row.name || "";
+    // Profile pick (owner ask 30.09): the named session must be one TOOL lists as seeing THIS cabinet
+    // (one forced roster refresh on a miss — the 60 s cache may predate a session check) and must not
+    // be known as expired / disabled. Refused pre-stream, nothing claimed.
+    if (sessionPick.id !== null) {
+      const pickId = sessionPick.id;
+      const seen = (r: typeof row) => r?.sessions.find((s) => s.id === pickId);
+      let hit = seen(row);
+      if (!hit) {
+        const fresh = findAv(await toolLaunchReady(true));
+        if (fresh) row = fresh;
+        hit = seen(row);
+      }
+      const info = (await toolSessionDirectory())?.get(pickId);
+      const label = hit?.name || info?.name || `#${pickId}`;
+      if (!hit || (info && info.status !== "active")) {
+        return NextResponse.json(
+          {
+            ok: false,
+            stage: "config",
+            error: `tool_session_unavailable — profile ${label}${info && info.status !== "active" ? ` is ${info.status} on TOOL` : ` does not see ${toolAcctName || pickedAccount} on TOOL now`}; pick another profile or Auto`,
+          },
+          { status: 400 },
+        );
+      }
+      toolSessionId = pickId;
+      toolSessionLabel = info?.profile ? `${label} · ${info.profile}` : label;
+    }
     const wantsLocales = Array.isArray(campaign.locales) && campaign.locales.some((n) => !/\(all\)/i.test(String(n)));
     if (wantsLocales) {
       const signer = await resolveMoSigner("launch");
@@ -479,6 +526,10 @@ export async function POST(req: Request) {
   // not the truth): the delivery the optimization pick maps to — Sales / Purchase on AV_PIXEL, or
   // Traffic / link clicks with no pixel (avDelivery).
   const serverCampaign: Campaign = { ...campaign, ...delivery };
+  // AV's ad text is SWAPPED (owner ask 30.09, avAdText): the card's Title feeds the ad's headline and
+  // its Headline the description. Only the creatives read this copy — names, targeting, delivery and
+  // the key registry keep reading serverCampaign.
+  const creativeCampaign: Campaign = { ...serverCampaign, ...avAdText(serverCampaign) };
   // The partner mark in the prefix is the ROUTE's, not the client's: a card that kept its MO/AIF
   // prefix across a partner switch still launches here as "(AV)" (live bug 23.09). A TOOL-born run
   // carries `GCL TOOL - ` after the partner prefix (toolEnsureMark) — the client name is never trusted.
@@ -628,28 +679,31 @@ export async function POST(req: Request) {
               name: medias.length > 1 ? `${name} · ${i + 1}` : name,
               coverUrl: m.coverUrl || undefined,
             })),
-            { deadlineAt, onStage },
+            // The picked profile uploads the media too (owner ask 30.09); Auto = TOOL's own pick.
+            { deadlineAt, onStage, ...(toolSessionId ? { sessionId: toolSessionId } : {}) },
           );
           if (!mediaRun.ok) {
-            await toolFail(`TOOL media registration failed: ${mediaRun.error}`);
+            await toolFail(`TOOL media registration failed: ${mediaRun.error}${toolSessionLabel ? ` (profile ${toolSessionLabel})` : ""}`);
             return;
           }
 
           // Build the creatives with the TOOL MediaRefs + the AV link + the card's copy (same field
-          // mapping as fb-launch: copy→primary_text, headline||title→headline, title→description).
+          // mapping as fb-launch: copy→primary_text, headline||title→headline, title→description) —
+          // over AV's SWAPPED ad text (avAdText, owner ask 30.09): the card's Title is the ad's
+          // headline, its Headline the description.
           const creatives: ToolCreativeInput[] = medias.map((m, i) => {
             const ref = mediaRun.refs[i];
             const c: ToolCreativeInput = {
               name: medias.length > 1 ? `${name} · ${i + 1}` : name,
               media: ref.media,
-              primaryText: serverCampaign.copy || "",
-              headline: serverCampaign.headline || serverCampaign.title || "",
+              primaryText: creativeCampaign.copy || "",
+              headline: creativeCampaign.headline || creativeCampaign.title || "",
               url: link,
-              cta: serverCampaign.cta || "",
+              cta: creativeCampaign.cta || "",
             };
             if (ref.thumbnail) c.thumbnail = ref.thumbnail;
-            if (serverCampaign.title && serverCampaign.headline && serverCampaign.title !== serverCampaign.headline)
-              c.description = serverCampaign.title;
+            if (creativeCampaign.title && creativeCampaign.headline && creativeCampaign.title !== creativeCampaign.headline)
+              c.description = creativeCampaign.title;
             return c;
           });
 
@@ -668,6 +722,7 @@ export async function POST(req: Request) {
               status: "ACTIVE", // AV launches go live; TOOL creates PAUSED then activates on success
               accountCurrency: toolAcctCurrency,
               platforms,
+              ...(toolSessionId ? { sessionId: toolSessionId } : {}), // the Profile pick; Auto = TOOL picks
             }),
           );
           if (!built.ok) {
@@ -701,7 +756,7 @@ export async function POST(req: Request) {
               adset_id: pub.adsetId,
               ad_id: pub.adIds[0],
               ad_count: pub.adIds.length,
-              notes: `launched via TOOL job #${pub.jobId}`,
+              notes: `launched via TOOL job #${pub.jobId}${toolSessionLabel ? ` · profile ${toolSessionLabel}` : ""}`,
             }).catch(() => {});
             settled = true;
             tw.write({
@@ -812,8 +867,8 @@ export async function POST(req: Request) {
           const creative = await rail.fbPost(
             `act_${binds.accountId}/adcreatives`,
             r.kind === "image"
-              ? imageCreativePayload(serverCampaign, adName, binds, { imageHash: r.imageHash, link })
-              : creativePayload(serverCampaign, adName, binds, {
+              ? imageCreativePayload(creativeCampaign, adName, binds, { imageHash: r.imageHash, link })
+              : creativePayload(creativeCampaign, adName, binds, {
                   videoId: r.videoId,
                   thumbUrl: r.thumbUrl,
                   link,

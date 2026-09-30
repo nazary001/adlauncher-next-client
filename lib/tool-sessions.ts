@@ -203,18 +203,23 @@ export const createDuplicates = (accountId: string, body: DuplicateRequest, opts
 
 /** POST /accounts/{id}/media/{images|videos}/from-url — register a media from a PUBLIC http(s) URL
  *  → 201 MediaOut {media_id, status, facebook{image_hash|video_id}}; poll GET /media/{id} for
- *  `ready`. account_id rides the path (server default); engine defaults to `session`. */
+ *  `ready`. account_id rides the path (server default); engine defaults to `session`; `session_id`
+ *  (TOOL 30.09) names the Ads Manager session that uploads — absent = TOOL's own pick. */
 export const mediaFromUrl = (
   accountId: string,
   kind: "image" | "video",
-  body: { url: string; filename?: string },
+  body: { url: string; filename?: string; session_id?: number },
   opts: ToolWriteOpts = {},
 ) =>
   toolFetch<Record<string, unknown>>(
     "POST",
     `/accounts/${acctPath(accountId)}/media/${kind === "video" ? "videos" : "images"}/from-url`,
     {
-      body: body.filename ? { url: body.url, filename: body.filename } : { url: body.url },
+      body: {
+        url: body.url,
+        ...(body.filename ? { filename: body.filename } : {}),
+        ...(body.session_id ? { session_id: body.session_id } : {}),
+      },
       timeoutMs: 60_000,
       headers: idemHeaders(opts),
     },

@@ -6,7 +6,17 @@ import { useCallback, useEffect, useState } from "react";
  *  `name` and `currency`. `rows` is ADDED for every partner (additive) with the SAME ids/order as
  *  `accounts` — the AV TOOL card builds its account picker straight from these (AV has no FB token,
  *  so there is no catalog to intersect with; the rows ARE the catalog). */
-export type ToolAccountRow = { id: string; name: string; currency: string };
+export type ToolAccountRow = {
+  id: string;
+  name: string;
+  currency: string;
+  /** AV (owner ask 30.09): the live TOOL sessions (FB profiles) that see this cabinet — the card's
+   *  Profile pick. Empty when the answer carried none (other partners, an older server). */
+  sessions: ToolSessionOption[];
+};
+
+/** One pickable TOOL session: its id (the card stores it as digits), name (av-01) and FB profile. */
+export type ToolSessionOption = { id: string; name: string; profile: string };
 
 /** The TOOL launch channel's readiness for one partner × rail, as /api/tool/ready resolved it
  *  (owner ask 28.09). `accounts` are the bare-digit account ids the TOOL rail may launch into (the
@@ -47,7 +57,21 @@ function parseRows(raw: unknown): ToolAccountRow[] {
     const o = r as Record<string, unknown>;
     const id = String(o.id ?? "");
     if (!id) continue;
-    out.push({ id, name: String(o.name ?? ""), currency: String(o.currency ?? "") });
+    out.push({ id, name: String(o.name ?? ""), currency: String(o.currency ?? ""), sessions: parseSessions(o.sessions) });
+  }
+  return out;
+}
+
+/** Coerce a row's `sessions` — digit ids only, never throws. */
+function parseSessions(raw: unknown): ToolSessionOption[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ToolSessionOption[] = [];
+  for (const s of raw) {
+    if (!s || typeof s !== "object") continue;
+    const o = s as Record<string, unknown>;
+    const id = String(o.id ?? "");
+    if (!/^\d{1,9}$/.test(id)) continue;
+    out.push({ id, name: String(o.name ?? ""), profile: String(o.profile ?? "") });
   }
   return out;
 }

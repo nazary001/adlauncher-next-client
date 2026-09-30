@@ -216,6 +216,9 @@ export type CampaignRequest = {
   options?: ToolOptions;
   delay_seconds?: number;
   start_at?: string | null;
+  /** An explicit Ads Manager session (GET /accounts → sessions[].id; TOOL added it 30.09). Absent =
+   *  TOOL picks a session that sees the account, as before. */
+  session_id?: number | null;
 };
 
 export type DuplicateTarget = {
@@ -406,9 +409,12 @@ export type ToolBuildInput = {
   creatives: ToolCreativeInput[];
   status: "ACTIVE" | "PAUSED";
   accountCurrency: string;
+  /** The TOOL session (FB profile) to build with — the AV card's Profile pick, parsed by
+   *  toolSessionPick. Absent (Auto) = TOOL picks one that sees the account. */
+  sessionId?: number;
 };
 
-export type BuildResult = { ok: true; body: CampaignRequest; inferred: string[] } | { ok: false; error: string };
+export type BuildResult ={ ok: true; body: CampaignRequest; inferred: string[] } | { ok: false; error: string };
 
 /** objective|goal|bid_strategy combos TOOL's /capabilities marks CONFIRMED (read 28.09: its `rules`
  *  + `tested_scenarios`). Anything else rides with allow_inferred (TOOL refuses it otherwise). */
@@ -605,8 +611,61 @@ export function buildToolCampaign(input: ToolBuildInput): BuildResult {
     mode: "publish",
     options: { allow_inferred: inferred.length > 0, activate: status === "ACTIVE" },
   };
+  // The picked profile (owner ask 30.09) — only a real session id rides; Auto leaves TOOL's own pick.
+  if (isToolSessionId(input.sessionId)) body.session_id = input.sessionId;
 
   return { ok: true, body, inferred };
+}
+
+// ================================================================================================
+// 4b. The TOOL session (FB profile) pick — TOOL 30.09 takes an explicit `session_id` on
+//     POST /accounts/{id}/campaigns and on media registration (owner ask 30.09: "добавили session id
+//     и теперь можем сделать выбор профилей у нас"). The card stores the id as a string ("" = Auto).
+// ================================================================================================
+
+/** A usable TOOL session id: a positive integer (TOOL's ids are small serials). */
+export const isToolSessionId = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
+
+/**
+ * The card's Profile pick → a session id. Missing / "" / "auto" = Auto (`id: null` — TOOL picks the
+ * session by account); a positive integer (number or digit string, ≤9 digits) = that session;
+ * anything else is refused (`ok: false`) so a garbled pick is never silently widened to Auto.
+ */
+export function toolSessionPick(raw: unknown): { ok: true; id: number | null } | { ok: false } {
+  if (raw == null) return { ok: true, id: null };
+  if (typeof raw === "number") return isToolSessionId(raw) ? { ok: true, id: raw } : { ok: false };
+  if (typeof raw !== "string") return { ok: false };
+  const s = raw.trim();
+  if (s === "" || s.toLowerCase() === "auto") return { ok: true, id: null };
+  if (!/^\d{1,9}$/.test(s)) return { ok: false };
+  const id = Number(s);
+  return isToolSessionId(id) ? { ok: true, id } : { ok: false };
+}
+
+/** One pickable profile for an account: the TOOL session id + name, and its FB profile name ("" when
+ *  GET /sessions was unreadable). */
+export type ToolSessionChoice = { id: number; name: string; profile: string };
+
+/**
+ * The profiles a card may pick for one account: the sessions TOOL's GET /accounts lists as seeing it,
+ * minus any the session directory (GET /sessions) knows is not `active` (expired / disabled), each
+ * labelled with its FB profile name, sorted by session name (av-01, av-02, …). No directory = every
+ * listed session, names only. Ids that are not real session ids are dropped.
+ */
+export function toolSessionChoices(
+  sessions: readonly { id: number; name: string }[],
+  directory: ReadonlyMap<number, { name: string; profile: string; status: string }> | null,
+): ToolSessionChoice[] {
+  const out: ToolSessionChoice[] = [];
+  const seen = new Set<number>();
+  for (const s of sessions) {
+    if (!isToolSessionId(s.id) || seen.has(s.id)) continue;
+    const known = directory?.get(s.id);
+    if (known && known.status !== "active") continue;
+    seen.add(s.id);
+    out.push({ id: s.id, name: str(s.name) || str(known?.name) || `#${s.id}`, profile: str(known?.profile) });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name, "en", { numeric: true }));
 }
 
 // ================================================================================================
@@ -800,7 +859,7 @@ export type ToolDeps = {
   mediaFromUrl: (
     accountId: string,
     kind: "image" | "video",
-    body: { url: string; filename?: string },
+    body: { url: string; filename?: string; session_id?: number },
     opts?: { idempotencyKey?: string },
   ) => Promise<ToolCallResult>;
   getMedia: (mediaId: string) => Promise<ToolCallResult>;
@@ -835,8 +894,13 @@ async function awaitOneMedia(
   idempotencyKey: string | undefined,
   deadlineAt: number,
   onStage?: StageCb,
+  sessionId?: number,
 ): Promise<{ ok: true; mediaId: string } | { ok: false; error: string }> {
-  const reg = await deps.mediaFromUrl(accountId, kind, filename ? { url, filename } : { url }, { idempotencyKey });
+  const body: { url: string; filename?: string; session_id?: number } = { url };
+  if (filename) body.filename = filename;
+  // The picked profile uploads the media too (owner ask 30.09) — Auto leaves TOOL's own pick.
+  if (isToolSessionId(sessionId)) body.session_id = sessionId;
+  const reg = await deps.mediaFromUrl(accountId, kind, body, { idempotencyKey });
   if (!reg.ok) return { ok: false, error: toolFailureText(reg, accountId) };
   const first = rec(reg.data);
   const mediaId = str(first.media_id);
@@ -866,17 +930,18 @@ async function awaitOneMedia(
  * Register every creative's media through TOOL (media/{images|videos}/from-url with our public
  * URL) and wait for each to be `ready`, returning a MediaRef per item — plus a `thumbnail` MediaRef
  * for a video that carries a custom coverUrl. The first failure short-circuits with its index.
+ * `sessionId` (the card's Profile pick) rides every registration; absent = TOOL picks the session.
  */
 export async function runToolMedia(
   deps: ToolDeps,
   accountId: string,
   items: ToolMediaItem[],
-  opts: { deadlineAt: number; onStage?: StageCb; idempotencyKey?: string },
+  opts: { deadlineAt: number; onStage?: StageCb; idempotencyKey?: string; sessionId?: number },
 ): Promise<ToolMediaRun> {
   const refs: ToolMediaRefOut[] = [];
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
-    const m = await awaitOneMedia(deps, accountId, it.kind, it.url, it.name, opts.idempotencyKey, opts.deadlineAt, opts.onStage);
+    const m = await awaitOneMedia(deps, accountId, it.kind, it.url, it.name, opts.idempotencyKey, opts.deadlineAt, opts.onStage, opts.sessionId);
     if (!m.ok) return { ok: false, error: m.error, index: i };
     const out: ToolMediaRefOut = { media: { type: it.kind, media_id: m.mediaId } };
     if (it.kind === "video" && it.coverUrl) {
@@ -889,6 +954,7 @@ export async function runToolMedia(
         opts.idempotencyKey,
         opts.deadlineAt,
         opts.onStage,
+        opts.sessionId,
       );
       if (!cover.ok) return { ok: false, error: cover.error, index: i };
       out.thumbnail = { type: "image", media_id: cover.mediaId };

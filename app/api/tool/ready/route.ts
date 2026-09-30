@@ -5,7 +5,8 @@ import { railParam, resolveMoSigner } from "@/lib/mo-soc";
 import { aifRail } from "@/lib/aif-launch";
 import { tokenAdAccounts } from "@/lib/fb-graph";
 import { filterAccountsFor } from "@/lib/acct-assignments";
-import { toolLaunchReady } from "@/lib/tool-run";
+import { toolLaunchReady, toolSessionDirectory } from "@/lib/tool-run";
+import { type ToolSessionChoice, toolSessionChoices } from "@/lib/tool-launch";
 
 export const runtime = "nodejs";
 // The MO/AIF catalog read is a paginated Graph sweep (warm from cache); the TOOL /accounts + /me
@@ -31,9 +32,11 @@ export const maxDuration = 60;
  * where `live` is the TOOL-visible count BEFORE the partner filter (so the UI can say "TOOL sees N
  * but none of yours"), and `rows` (owner ask 28.09) carries the same ids as `accounts`, in the same
  * order, with their TOOL-side name + currency so the card can label the picker by cabinet name.
+ * AV rows also carry `sessions` (owner ask 30.09: "теперь можем сделать выбор профилей") — the live
+ * TOOL sessions that see the cabinet, each with its FB profile name, for the card's Profile pick.
  * Never cached (Cache-Control: no-store).
  */
-type ReadyRow = { id: string; name: string; currency: string };
+type ReadyRow = { id: string; name: string; currency: string; sessions?: ToolSessionChoice[] };
 
 export async function GET(req: Request) {
   const noStore = { headers: { "Cache-Control": "no-store" } };
@@ -94,9 +97,12 @@ export async function GET(req: Request) {
       );
     }
     const avById = new Map(avAccounts.map((a) => [a.account_id, a]));
+    // The Profile pick's pool per cabinet: the sessions GET /accounts lists for it, minus any the
+    // session directory knows is not active, labelled with the FB profile (null directory = names only).
+    const dir = await toolSessionDirectory();
     const avRows: ReadyRow[] = avFiltered.map((id) => {
       const a = avById.get(id);
-      return { id, name: a?.name ?? "", currency: a?.currency ?? "" };
+      return { id, name: a?.name ?? "", currency: a?.currency ?? "", sessions: toolSessionChoices(a?.sessions ?? [], dir) };
     });
     return NextResponse.json({ ok: true, ready: true, accounts: avFiltered, rows: avRows, live: liveAv }, noStore);
   }

@@ -16,12 +16,13 @@ import {
   getJob,
   getMedia,
   jobEvents,
+  listSessions,
   mediaFromUrl,
   teamAccounts,
   toolConfigured,
   toolMe,
 } from "./tool-sessions";
-import { type ToolAccount, hasScope, toAccount } from "./tool-sessions-model";
+import { type ToolTeamAccount, hasScope, toSession, toTeamAccount } from "./tool-sessions-model";
 import { type Campaign, bidKind, normalizeRoasGoal, parseMoney } from "./types";
 import type { ToolBid, ToolBuildInput, ToolCreativeInput, ToolDeps } from "./tool-launch";
 
@@ -43,7 +44,9 @@ export const toolDeps: ToolDeps = {
 // ---- readiness (spec §2.3) ---------------------------------------------------------------------
 
 export type ToolReadyReason = "not_configured" | "key_rejected" | "scope_missing" | "unreachable" | "no_live_session";
-export type ToolReadyResult = { ok: true; accounts: ToolAccount[] } | { ok: false; reason: ToolReadyReason; message: string };
+/** Each live account carries the TOOL sessions that see it (GET /accounts → sessions[]) — the pool
+ *  the AV card's Profile pick is drawn from (owner ask 30.09). */
+export type ToolReadyResult = { ok: true; accounts: ToolTeamAccount[] } | { ok: false; reason: ToolReadyReason; message: string };
 
 /** Scopes a launch through TOOL needs (jobs to write the create/duplicate job, media to register
  *  creatives, accounts to read the live roster). media:write is not in SCOPE_OF, so it is literal. */
@@ -57,6 +60,8 @@ let readyInflight: Promise<ToolReadyResult> | null = null;
 export function _resetToolRunCaches(): void {
   readyCache = null;
   readyInflight = null;
+  dirCache = null;
+  dirInflight = null;
 }
 
 /** Compute readiness from scratch (key → scopes → GET /accounts, status-1 rows only). FULL body. */
@@ -84,7 +89,7 @@ async function computeReady(): Promise<ToolReadyResult> {
     return { ok: false, reason: "unreachable", message: acc.message };
   }
   const rows = Array.isArray(acc.data?.accounts)
-    ? acc.data.accounts.map(toAccount).filter((a) => a.status === 1)
+    ? acc.data.accounts.map(toTeamAccount).filter((a) => a.status === 1)
     : [];
   if (rows.length === 0) {
     // GET /accounts is empty exactly when the only session is expired (live 26.09) — the actionable
@@ -109,6 +114,46 @@ export async function toolLaunchReady(force = false): Promise<ToolReadyResult> {
     }
   })();
   return readyInflight;
+}
+
+// ---- session directory (owner ask 30.09: pick the FB profile a launch runs on) ------------------
+
+/** What the Profile picker shows per TOOL session: its name (av-01), the FB profile behind it and
+ *  its status (only `active` sessions are offered). */
+export type ToolSessionInfo = { name: string; profile: string; status: string };
+
+let dirCache: { at: number; val: ReadonlyMap<number, ToolSessionInfo> | null } | null = null;
+let dirInflight: Promise<ReadonlyMap<number, ToolSessionInfo> | null> | null = null;
+
+/** Build the directory from GET /sessions — null when TOOL answers anything but a list (key without
+ *  sessions:read, TOOL down): the picker then falls back to the session names GET /accounts carries. */
+async function computeDirectory(): Promise<ReadonlyMap<number, ToolSessionInfo> | null> {
+  if (!toolConfigured()) return null;
+  const r = await listSessions();
+  if (!r.ok || !Array.isArray(r.data)) return null;
+  const m = new Map<number, ToolSessionInfo>();
+  for (const raw of r.data) {
+    const s = toSession(raw);
+    if (s.id > 0) m.set(s.id, { name: s.name, profile: s.fb_user_name ?? "", status: s.status });
+  }
+  return m;
+}
+
+/** The team's TOOL sessions by id (name, FB profile, status), cached 60 s like readiness, in-flight
+ *  deduped; `force` skips the cache. Never throws — null = unreadable (see computeDirectory). */
+export async function toolSessionDirectory(force = false): Promise<ReadonlyMap<number, ToolSessionInfo> | null> {
+  if (!force && dirCache && Date.now() - dirCache.at < READY_TTL_MS) return dirCache.val;
+  if (dirInflight) return dirInflight;
+  dirInflight = (async () => {
+    try {
+      const val = await computeDirectory().catch(() => null);
+      dirCache = { at: Date.now(), val };
+      return val;
+    } finally {
+      dirInflight = null;
+    }
+  })();
+  return dirInflight;
 }
 
 /** Fire-time check: is this account among the live TOOL-visible ones? Forces ONE refresh on a miss
@@ -140,6 +185,9 @@ export type ToolInputExtras = {
   /** Meta platforms the ad set runs on (the AV card's pick, parsed by lib/publisher-platforms).
    *  Passed ONLY by the AV route — every other rail omits it and keeps its placements as they are. */
   platforms?: readonly string[];
+  /** The TOOL session (FB profile) the AV card picked (toolSessionPick, validated against the
+   *  account's live sessions by the route). Absent = Auto — TOOL picks by account. */
+  sessionId?: number;
 };
 
 /**
@@ -182,5 +230,6 @@ export function toolInputFromCampaign(c: Campaign, extras: ToolInputExtras): Too
     creatives: extras.creatives,
     status: extras.status,
     accountCurrency: extras.accountCurrency,
+    ...(extras.sessionId ? { sessionId: extras.sessionId } : {}),
   };
 }

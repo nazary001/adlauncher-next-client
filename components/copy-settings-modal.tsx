@@ -41,6 +41,8 @@ const FIELDS: Field[] = [
   { key: "name", label: "Name", group: "Setup", preview: (c) => c.name || "—" },
   { key: "profile", label: "Profile", group: "Setup", when: (p) => p.usesProfile, preview: (c) => c.profile || "—" },
   { key: "account", label: "Account", group: "Setup", when: (p) => !p.lockedAccount, preview: (c) => c.account || "—" },
+  // AV's TOOL profile (owner ask 30.09) — the session id (the modal has no roster to resolve names).
+  { key: "toolSession", label: "TOOL profile", group: "Setup", when: (p) => Boolean(p.avLaunch), preview: (c) => (c.toolSession ? `session #${c.toolSession}` : "Auto") },
   // Token-fanpage partners (Indians) pick a fanka per card → copyable; preview shows the raw page
   // id (the modal has no page list to resolve names against).
   {

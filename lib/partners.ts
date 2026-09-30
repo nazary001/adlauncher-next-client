@@ -397,7 +397,7 @@ export const PARTNERS: PartnerConfig[] = [
 
 // AV delivery modes (owner ask 30.09) — Purchase on the AV site pixel (default) or Traffic / link
 // clicks with no pixel; pure module (lib/av-delivery) so node --test covers it.
-export { AV_OBJECTIVE, AV_PIXEL, AV_SALES_OBJECTIVE, type AvDelivery, avDelivery, avLockPatch } from "./av-delivery";
+export { AV_OBJECTIVE, AV_PIXEL, AV_SALES_OBJECTIVE, type AvDelivery, avAdText, avDelivery, avLockPatch } from "./av-delivery";
 
 export function partnerConfig(id: PartnerId): PartnerConfig {
   return PARTNERS.find((p) => p.id === id) ?? PARTNERS[0];

@@ -7,8 +7,9 @@ import "./_resolve-hook.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const { AV_OBJECTIVE, AV_PIXEL, AV_SALES_OBJECTIVE, avDelivery, avLockPatch } = await import("../lib/av-delivery.ts");
+const { AV_OBJECTIVE, AV_PIXEL, AV_SALES_OBJECTIVE, avAdText, avDelivery, avLockPatch } = await import("../lib/av-delivery.ts");
 const { makeCampaign } = await import("../lib/types.ts");
+const { creativePayload, imageCreativePayload } = await import("../lib/fb-launch.ts");
 
 test("the AV site pixel is the one ActiveView's script fires", () => {
   assert.equal(AV_PIXEL.id, "1830814271425766");
@@ -45,4 +46,33 @@ test("avLockPatch: a stray foreign pixel is replaced; min-ROAS snaps to lowest c
   assert.deepEqual(avLockPatch(purchase), { pixel: AV_PIXEL.id, bidStrategy: "LOWEST_COST_WITHOUT_CAP", bidCap: "" });
   const clicks = { ...makeCampaign("c5"), optimization: "clicks" as const, bidStrategy: "LOWEST_COST_WITH_MIN_ROAS", bidCap: "1,20" };
   assert.deepEqual(avLockPatch(clicks), { objective: AV_OBJECTIVE, bidStrategy: "LOWEST_COST_WITHOUT_CAP", bidCap: "" });
+});
+
+// AV ad text (owner ask 30.09: "для AV поменяй местами … headline должен передаваться как title, а
+// title как headline"): on AV the card's Title feeds the ad's HEADLINE and its Headline feeds the slot
+// Title feeds on every other rail (the description). Checked through the shared creative builders, so
+// the test pins what Meta / TOOL actually receive.
+const binds = { accountId: "1219398880126269", pageId: "103944112039841", pageName: "", pixelId: "" };
+
+test("avAdText swaps Title and Headline: the card's Title becomes the ad headline, its Headline the description", () => {
+  const c = { ...makeCampaign("t1"), title: "🟢 LEER MÁS →", headline: "TOP JOBS", copy: "body" };
+  assert.deepEqual(avAdText(c), { title: "TOP JOBS", headline: "🟢 LEER MÁS →" });
+  const av = { ...c, ...avAdText(c) };
+  const ld = (imageCreativePayload(av, "ad", binds, { imageHash: "h", link: "https://x.co" }).object_story_spec as { link_data: Record<string, unknown> }).link_data;
+  assert.equal(ld.name, "🟢 LEER MÁS →"); // the bold headline under the image
+  assert.equal(ld.description, "TOP JOBS");
+  assert.equal(ld.message, "body"); // primary text untouched
+  const vd = (creativePayload(av, "ad", binds, { videoId: "v", thumbUrl: "t", link: "https://x.co" }).object_story_spec as { video_data: Record<string, unknown> }).video_data;
+  assert.equal(vd.title, "🟢 LEER MÁS →");
+  assert.equal(vd.link_description, "TOP JOBS");
+});
+
+test("avAdText: a card with only a Title (or the same text in both) launches exactly as before", () => {
+  const onlyTitle = { ...makeCampaign("t2"), title: "TOP JOBS", headline: "" };
+  const ld = (imageCreativePayload({ ...onlyTitle, ...avAdText(onlyTitle) }, "ad", binds, { imageHash: "h", link: "https://x.co" })
+    .object_story_spec as { link_data: Record<string, unknown> }).link_data;
+  assert.equal(ld.name, "TOP JOBS");
+  assert.equal(ld.description, undefined);
+  const same = { ...makeCampaign("t3"), title: "Same", headline: "Same" };
+  assert.deepEqual(avAdText(same), { title: "Same", headline: "Same" });
 });

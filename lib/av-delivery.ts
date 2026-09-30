@@ -46,3 +46,15 @@ export function avLockPatch(r: Campaign): Partial<Campaign> {
   }
   return patch;
 }
+
+/**
+ * The ad text an AV launch builds its creatives from (owner ask 30.09: "для AV поменяй местами …
+ * headline должен передаваться как title, а title как headline"): AV swaps what the card's two text
+ * fields feed. The shared creative mapping (fb-launch / the TOOL creatives: headline || title → the
+ * ad's headline, title → the description when both differ) then puts the card's TITLE in the ad's
+ * bold headline and its HEADLINE in the description. A card with only a Title — or the same text in
+ * both — launches exactly as before. Spread it over the campaign ONLY where creatives are built.
+ */
+export function avAdText(c: Pick<Campaign, "title" | "headline">): Pick<Campaign, "title" | "headline"> {
+  return { title: c.headline, headline: c.title };
+}

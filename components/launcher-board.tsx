@@ -30,7 +30,7 @@ import { type AdAccountOption, defaultPixelFor, useAdAccounts } from "./use-adac
 import { type AcctLimits, acctIdKey, useAcctLimits } from "./use-acct-limit";
 import { useHs } from "./use-hs";
 import { LaunchRail } from "./launch-rail";
-import { useToolReady } from "./use-tool-ready";
+import { type ToolSessionOption, useToolReady } from "./use-tool-ready";
 import { CopySettingsModal } from "./copy-settings-modal";
 import { ChevronsIcon, CopyIcon, PlusIcon } from "./icons";
 import { useAifTaskManager, useAvTaskManager, useTaskManager } from "./task-manager";
@@ -417,6 +417,13 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     }));
   }, [partner.avLaunch, toolReady.rows]);
   const boardAccounts = partner.avLaunch ? avToolAccounts : adAccounts;
+  // The AV card's Profile pick (owner ask 30.09: TOOL took session_id — "теперь можем сделать выбор
+  // профилей"): the live TOOL sessions per cabinet, straight from the ready rows. null until the first
+  // answer lands, so a card never flags its pick as unavailable while the roster is still loading.
+  const avToolSessions = useMemo<ReadonlyMap<string, ToolSessionOption[]> | null>(() => {
+    if (!partner.avLaunch || !toolReady.loaded) return null;
+    return new Map(toolReady.rows.map((r) => [r.id, r.sessions]));
+  }, [partner.avLaunch, toolReady.loaded, toolReady.rows]);
   // The TOOL-visible account set to constrain MO/AIF auto-fill to (null unless a TOOL wave is
   // armed) — mirrors the card picker's filter so the board default lands in the same set.
   const toolVisible = graphToolActive ? toolReady.accounts : null;
@@ -1049,6 +1056,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
                 toolRail={hsToolActive}
                 moToolRail={graphToolActive}
                 toolAccounts={toolReady.ready ? toolReady.accounts : undefined}
+                // AV: the live TOOL profiles per cabinet for the card's Profile pick (owner ask 30.09).
+                toolSessions={partner.avLaunch ? avToolSessions : undefined}
                 // Соц-class channel picked (MO) → the card's name preview carries the SOC marker
                 // (alternate SYSTEM entries launch unmarked — preview stays unmarked too). TOOL
                 // drops SOC, so never show it on a TOOL wave.
