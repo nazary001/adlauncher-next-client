@@ -43,6 +43,33 @@ async function probeReadable(blob: Blob): Promise<boolean> {
   }
 }
 
+/** The token broker (/api/blob-upload) said no — the SDK words every non-OK answer as "Failed to
+ *  retrieve the client token" (with a double space in one of its two throws). */
+function isTokenRefused(e: unknown): boolean {
+  return /retrieve the client token/i.test(String((e as Error | null)?.message ?? e));
+}
+
+/** False only when the launcher definitively says this tab's login is gone (401). Unknown (a
+ *  network blip on the probe) counts as alive — never claim an expiry we didn't see. */
+export async function sessionAlive(): Promise<boolean> {
+  try {
+    const r = await fetch("/api/auth/session", { cache: "no-store", signal: AbortSignal.timeout(10_000) });
+    return r.status !== 401;
+  } catch {
+    return true;
+  }
+}
+
+function sessionExpiredError(label: string): Error {
+  // Live 01.10: a 7-day login ran out in an open tab mid-wave and every creative failed as
+  // "upload rejected by the media store — Vercel Blob: Failed to retrieve the client token",
+  // sending the buyer after the FILE. A login in another tab revives this one (same cookie).
+  return new Error(
+    `${label}: your launcher login expired — log in again in a new tab (keep this one open: the cards ` +
+      `and attached files stay), then press Retry here`,
+  );
+}
+
 function unreadableError(label: string): Error {
   return new Error(
     `${label} is no longer readable in this tab — the file was moved/renamed/edited on disk, ` +
@@ -79,13 +106,16 @@ export async function readCreative(
  * classification/retry logic is testable with a fake attempt. Behavior: each attempt is bounded
  * by UPLOAD_TIMEOUT_MS; network-class failures retry up to UPLOAD_ATTEMPTS with a growing pause;
  * `reprobe` (when given) runs after a failure to detect the source dying MID-upload — that's the
- * unreadable case wearing a network mask, reported with its own remedy; anything else (broker
- * 4xx, quota…) surfaces once with the real message. Every error names the creative via `label`.
+ * unreadable case wearing a network mask, reported with its own remedy; a refused token while
+ * `loggedIn` (when given) reports the login gone is the expired-session case, with the log-in-again
+ * remedy; anything else (broker 4xx, quota…) surfaces once with the real message. Every error
+ * names the creative via `label`.
  */
 export async function withUploadRetries<T>(
   attempt: (signal: AbortSignal) => Promise<T>,
   label: string,
   reprobe?: () => Promise<boolean>,
+  loggedIn?: () => Promise<boolean>,
 ): Promise<T> {
   for (let n = 1; n <= UPLOAD_ATTEMPTS; n++) {
     const abort = new AbortController();
@@ -101,6 +131,7 @@ export async function withUploadRetries<T>(
       if (reprobe && !(await reprobe())) throw unreadableError(label);
       const msg = String((e as Error | null)?.message ?? e);
       if (!isNetworkFlake(e)) {
+        if (loggedIn && isTokenRefused(e) && !(await loggedIn())) throw sessionExpiredError(label);
         throw new Error(`${label}: upload rejected by the media store — ${msg}`);
       }
       if (n === UPLOAD_ATTEMPTS) {
@@ -132,6 +163,7 @@ export function uploadCreativeFile(path: string, file: File, label: string): Pro
     },
     label,
     () => probeReadable(file),
+    sessionAlive,
   );
 }
 

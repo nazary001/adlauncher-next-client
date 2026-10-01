@@ -11,25 +11,64 @@ if (RAW_SECRET && RAW_SECRET.length < 32) {
   console.error("AUTH_SECRET is too short (<32 chars) — sessions are DISABLED until it is strengthened.");
 }
 export const SESSION_COOKIE = "adl_session";
-const DEFAULT_TTL = 60 * 60 * 24 * 7; // 7 days
+export const SESSION_TTL_SEC = 60 * 60 * 24 * 7; // 7 days
+// Sliding renewal (owner 01.10): a fixed 7 days from login cut buyers off MID-WAVE — the open tab
+// kept launching on a dead cookie and every upload died as "upload rejected by the media store —
+// Vercel Blob: Failed to retrieve the client token". A live session older than RENEW_AFTER gets a
+// fresh 7-day cookie on its next proxied request (at most one Set-Cookie a day per user); the
+// LOGIN time (iat) rides across renewals so activity can't stretch a session past MAX_LIFETIME.
+export const SESSION_RENEW_AFTER_SEC = 60 * 60 * 24; // 1 day
+export const SESSION_MAX_LIFETIME_SEC = 60 * 60 * 24 * 30; // 30 days from login
 
 export type Session = {
   sub: string | number;
   username: string;
   email?: string;
   role?: string | null;
+  iat?: number; // login time, epoch seconds (absent on tokens signed before 01.10)
   exp: number; // epoch seconds
 };
 
 const b64u = (s: string) => Buffer.from(s).toString("base64url");
 const unb64u = (s: string) => Buffer.from(s, "base64url").toString();
 const sign = (part: string) => createHmac("sha256", SECRET).update(part).digest("base64url");
+const nowSec = () => Math.floor(Date.now() / 1000);
 
-/** Create a signed, expiring session token. */
-export function signSession(data: Omit<Session, "exp">, ttlSec = DEFAULT_TTL): string {
-  const payload: Session = { ...data, exp: Math.floor(Date.now() / 1000) + ttlSec };
+function signPayload(payload: Session): string {
   const body = b64u(JSON.stringify(payload));
   return `${body}.${sign(body)}`;
+}
+
+/** Create a signed, expiring session token. A fresh login stamps `iat` (the login time). */
+export function signSession(data: Omit<Session, "exp">, ttlSec = SESSION_TTL_SEC): string {
+  const now = nowSec();
+  return signPayload({ ...data, iat: data.iat ?? now, exp: now + ttlSec });
+}
+
+/** The session cookie's attributes — one source for the login route and the proxy's renewal. */
+export function sessionCookieOptions(maxAgeSec: number) {
+  return {
+    httpOnly: true,
+    sameSite: "lax" as const,
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: maxAgeSec,
+  };
+}
+
+/**
+ * Sliding renewal for a VERIFIED live session: a fresh token (+ its cookie max-age) once the
+ * current one is RENEW_AFTER old, keeping the login time — or null when no renewal is due or the
+ * absolute lifetime from login is spent (then it simply runs out, as before). A token signed
+ * before `iat` existed counts its login as exp − TTL (what the old code issued).
+ */
+export function renewedSessionToken(s: Session, now = nowSec()): { token: string; maxAge: number } | null {
+  if (s.exp - now > SESSION_TTL_SEC - SESSION_RENEW_AFTER_SEC) return null; // < a day old
+  const loginAt = s.iat ?? s.exp - SESSION_TTL_SEC;
+  const exp = Math.min(now + SESSION_TTL_SEC, loginAt + SESSION_MAX_LIFETIME_SEC);
+  if (exp <= s.exp) return null; // at the lifetime cap — nothing to extend
+  const { sub, username, email, role } = s;
+  return { token: signPayload({ sub, username, email, role, iat: loginAt, exp }), maxAge: exp - now };
 }
 
 /** Read + verify the session straight from a request's Cookie header. Used by routes that are
@@ -64,7 +103,7 @@ export function verifySession(token: string | undefined | null): Session | null 
   if (sig.length !== expected.length || !timingSafeEqual(sig, expected)) return null;
   try {
     const payload = JSON.parse(unb64u(body)) as Session;
-    if (!payload.exp || payload.exp < Math.floor(Date.now() / 1000)) return null;
+    if (!payload.exp || payload.exp < nowSec()) return null;
     return payload;
   } catch {
     return null;

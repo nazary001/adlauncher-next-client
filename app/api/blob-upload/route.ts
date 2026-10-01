@@ -4,6 +4,8 @@ import { sessionFromCookieHeader } from "@/lib/session";
 
 export const runtime = "nodejs";
 
+const UNAUTHORIZED = "unauthorized";
+
 /**
  * Client-upload broker for creative videos. The browser hits this to get a short-lived,
  * single-upload token, then streams the file straight to Vercel Blob — never through the
@@ -27,7 +29,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       // Runs only for the browser's token request — enforce auth here.
       onBeforeGenerateToken: async () => {
         if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
-          throw new Error("unauthorized");
+          throw new Error(UNAUTHORIZED);
         }
         return {
           allowedContentTypes: ["video/mp4", "video/quicktime", "video/webm", "image/*"],
@@ -41,6 +43,11 @@ export async function POST(req: Request): Promise<NextResponse> {
     });
     return NextResponse.json(json);
   } catch (e) {
-    return NextResponse.json({ error: (e as Error).message }, { status: 400 });
+    const message = (e as Error).message;
+    // A dead login is the buyer's to fix (log in again) — 401 keeps it apart in the logs from a
+    // real broker failure, which now logs its reason (01.10: 300 bare 400s and no clue why).
+    if (message === UNAUTHORIZED) return NextResponse.json({ error: UNAUTHORIZED }, { status: 401 });
+    console.error(`[blob-upload] ${body.type}: ${message}`);
+    return NextResponse.json({ error: message }, { status: 400 });
   }
 }

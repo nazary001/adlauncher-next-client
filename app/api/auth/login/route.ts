@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { SESSION_COOKIE, signSession } from "@/lib/session";
+import { SESSION_COOKIE, SESSION_TTL_SEC, sessionCookieOptions, signSession } from "@/lib/session";
 
 export const runtime = "nodejs";
 
@@ -73,13 +73,7 @@ export async function POST(req: Request) {
     const token = signSession({ sub: (u.id as string | number) ?? username, username, email: u.email as string, role });
 
     const out = NextResponse.json({ ok: true, user: { username, email: u.email ?? null, role } });
-    out.cookies.set(SESSION_COOKIE, token, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 7,
-    });
+    out.cookies.set(SESSION_COOKIE, token, sessionCookieOptions(SESSION_TTL_SEC));
     return out;
   } catch {
     return NextResponse.json({ ok: false, error: "Auth service is unavailable. Try again." }, { status: 502 });

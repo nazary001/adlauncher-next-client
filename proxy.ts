@@ -1,15 +1,23 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { SESSION_COOKIE, verifySession } from "@/lib/session";
+import { SESSION_COOKIE, renewedSessionToken, sessionCookieOptions, verifySession } from "@/lib/session";
 
 /**
  * Auth gate. Runs on everything except static assets, the login page and /api/auth/*.
- * Valid session → continue; otherwise API calls get 401 and page/asset requests are sent
- * to /login. (Next 16 proxy runs on the Node.js runtime, so node:crypto is available.)
+ * Valid session → continue (renewed once it is a day old — the open launcher polls proxied
+ * routes every few seconds, so a working buyer never hits the 7-day wall mid-wave; see
+ * lib/session renewedSessionToken); otherwise API calls get 401 and page/asset requests are
+ * sent to /login. (Next 16 proxy runs on the Node.js runtime, so node:crypto is available.)
  */
 export function proxy(request: NextRequest) {
   const token = request.cookies.get(SESSION_COOKIE)?.value;
-  if (verifySession(token)) return NextResponse.next();
+  const session = verifySession(token);
+  if (session) {
+    const res = NextResponse.next();
+    const renewed = renewedSessionToken(session);
+    if (renewed) res.cookies.set(SESSION_COOKIE, renewed.token, sessionCookieOptions(renewed.maxAge));
+    return res;
+  }
 
   if (request.nextUrl.pathname.startsWith("/api")) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
