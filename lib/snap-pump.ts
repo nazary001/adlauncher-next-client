@@ -1,5 +1,6 @@
 // Snapchat rail — binds the real world into the pure pump (lib/snap-pump-core.ts): the Snapchat
-// client (exactly-once creates), the key registry (app-cache rows), the Blob download and the
+// client (exactly-once creates), the key registry (app-cache rows), the creative download (the
+// board's Blob file, or Snap's own download link for a clone re-hosted on another account) and the
 // shared task-store writer. Runs inside after() from the wave route; rows are already stamped.
 
 import { taskWriter, type TaskRowData } from "./task-store";
@@ -50,7 +51,7 @@ export function pumpSnapWave(user: string, shots: SnapPumpShot[], deadline: numb
       const b = snapLaunchWire(shot, resolved);
       return "refusal" in b ? b : { wire: b.wire, label: b.label };
     },
-    buildName: ({ key, niche, geoLabel, tail }) => snapCampaignName({ ddmm: todaySaoPauloDotDDMM(), niche, geoLabel, key, user, tail }),
+    buildName: ({ key, niche, geoLabel, tail, cloneOf }) => snapCampaignName({ ddmm: todaySaoPauloDotDDMM(), niche, geoLabel, key, user, tail, cloneOf }),
     write: (taskId, fields) => writerOf(taskId).write(fields as TaskRowData),
     flush: async () => {
       await Promise.all([...writers.values()].map((w) => w.flush()));

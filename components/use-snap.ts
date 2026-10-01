@@ -101,7 +101,7 @@ export function useSnapCatalog(): { catalog: SnapCatalog | null; error: string |
 
 export type SnapKeysState = { poolMax: number; used: SnapKeyRow[]; free: string[]; next: string | null };
 const pickKeys = (d: Record<string, unknown>): SnapKeysState => ({
-  poolMax: Number(d.poolMax) || 100,
+  poolMax: Number(d.poolMax) || 500,
   used: Array.isArray(d.used) ? (d.used as SnapKeyRow[]) : [],
   free: Array.isArray(d.free) ? (d.free as string[]) : [],
   next: typeof d.next === "string" ? d.next : null,

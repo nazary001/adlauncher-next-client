@@ -714,3 +714,104 @@ test("a wire without a single ad unit is a terminal error row, never a throw tha
   assert.equal(w.last("t2").status, "error", "the wave went on (same stubbed wire)");
   assert.equal(w.flushed(), 1);
 });
+
+// ---------- the CLONER: creatives that already live on Snapchat ----------
+
+const SRC_MEDIA = "0a970ec7-0fe2-4114-8382-1a591f44f398";
+const fromSnap = (n: number, account = "acct-a", url = `https://storage.googleapis.com/ad-manager-creatives-production-us/m${n}/f${n}.mp4`) => ({
+  url,
+  kind: "video" as const,
+  name: `clip${n}.mp4`,
+  snapMediaId: n === 1 ? SRC_MEDIA : `${SRC_MEDIA.slice(0, -1)}${n}`,
+  snapAccountId: account,
+});
+const clonePumpShot = (taskId: string, media: ReturnType<typeof fromSnap>[]): SnapPumpShot => ({
+  ...pumpShot(taskId, { media, cloneOf: "cf459275-d6aa-48a2-bd91-26ad85d10750", cloneKey: "glo-snp_250" }),
+  ctx: { ...pumpShot(taskId).ctx, cloneMark: "glo-snp_250" },
+});
+
+test("a clone on the source's own account reuses its media ids: no download, no upload, no READY wait", async () => {
+  const w = world();
+  await runSnapPump("nazar", [clonePumpShot("t1", [fromSnap(1), fromSnap(2)])], 1_000_000 + 700_000, w.deps);
+  for (const step of ["fetchBytes", "createMedia", "uploadMedia", "mediaReady"]) assert.equal(count(w, step), 0, `${step} never runs`);
+  const creatives = w.calls.filter((c) => c[0] === "createCreative").map((c) => (c[2] as { top_snap_media_id: string }).top_snap_media_id);
+  assert.deepEqual(creatives, [SRC_MEDIA, `${SRC_MEDIA.slice(0, -1)}2`]);
+  assert.equal(w.last("t1").status, "done");
+  assert.deepEqual(w.stages("t1"), ["key", "media", "campaign", "adsquad", "creative", "ad", "activate", "live"]);
+});
+
+test("a clone to another account re-hosts each file from Snap's download link ONCE per wave, typed as video even when the host says multipart", async () => {
+  const w = world();
+  const mimes: string[] = [];
+  const upload = w.deps.uploadMedia;
+  w.deps.fetchBytes = async (url) => {
+    w.calls.push(["fetchBytes", url]);
+    return { bytes: new Uint8Array([1, 2, 3]), mime: "multipart/form-data", size: 3 };
+  };
+  w.deps.uploadMedia = async (id, bytes, filename, mime) => {
+    mimes.push(`${filename} ${mime}`);
+    return upload(id, bytes, filename, mime);
+  };
+  // the source media live on acct-z; the clone lands on acct-a (the ctx account) — two copies
+  await runSnapPump("nazar", [clonePumpShot("t1", [fromSnap(1, "acct-z")]), clonePumpShot("t2", [fromSnap(1, "acct-z")])], 1_000_000 + 700_000, w.deps);
+  assert.equal(count(w, "fetchBytes"), 1, "downloaded once for both copies");
+  assert.equal(count(w, "createMedia"), 1);
+  assert.deepEqual(mimes, ["clip1.mp4 video/mp4"]);
+  const created = w.calls.filter((c) => c[0] === "createCreative").map((c) => (c[2] as { top_snap_media_id: string }).top_snap_media_id);
+  assert.deepEqual(created, ["media-1", "media-1"], "the re-hosted id, never the source account's");
+  assert.equal(w.last("t2").status, "done");
+});
+
+test("a clone creative Snap gave no download link for cannot move accounts: it is skipped with the reason, the rest launch", async () => {
+  const w = world();
+  await runSnapPump("nazar", [clonePumpShot("t1", [fromSnap(1, "acct-z", ""), fromSnap(2, "acct-z")])], 1_000_000 + 700_000, w.deps);
+  const t1 = w.last("t1");
+  assert.equal(t1.status, "done");
+  assert.match(String(t1.error), /creative #1 \(clip1\.mp4\) skipped: .*no download link.*own ad account/);
+  assert.equal(count(w, "createAd"), 1);
+});
+
+test("a clone's key claim names its source, the name carries the CLONE_FROM marker, the backfill gets the claim itself", async () => {
+  const w = world();
+  const names: unknown[] = [];
+  w.deps.buildName = (args) => {
+    names.push(args);
+    return `[16.09] (SNP) ${args.niche} - ${args.geoLabel} - ${args.key} - nazar - GC-Launcher - CLONE_FROM=${args.cloneOf}`;
+  };
+  const backfillArgs: unknown[][] = [];
+  w.deps.backfillKey = async (...a) => {
+    backfillArgs.push(a);
+  };
+  await runSnapPump("nazar", [clonePumpShot("t1", [fromSnap(1)])], 1_000_000 + 700_000, w.deps);
+  const claim = w.calls.find((c) => c[0] === "claimKey");
+  assert.ok(claim);
+  assert.deepEqual(names, [{ key: "glo-snp_001", niche: "Cars", geoLabel: "US", tail: "", cloneOf: "glo-snp_250" }]);
+  assert.match(String(w.last("t1").name), /CLONE_FROM=glo-snp_250$/);
+  assert.equal(backfillArgs.length, 1);
+  assert.deepEqual(backfillArgs[0][2], { key: "glo-snp_001", documentId: "doc-1" }, "the registry row is addressed by the claim, not re-found by key");
+});
+
+test("the clone's claim meta carries clone_of", async () => {
+  const w = world();
+  let meta: Record<string, unknown> = {};
+  const claim = w.deps.claimKey;
+  w.deps.claimKey = async (desired, m) => {
+    meta = m;
+    return claim(desired, m);
+  };
+  await runSnapPump("nazar", [clonePumpShot("t1", [fromSnap(1)])], 1_000_000 + 700_000, w.deps);
+  assert.equal(meta.clone_of, "cf459275-d6aa-48a2-bd91-26ad85d10750");
+});
+
+test("a clone whose media are all reused is admitted with the short reserve near the deadline (nothing to upload)", async () => {
+  const w = world();
+  w.deps.mediaWaitMs = 120_000;
+  // 150 s left: a fresh upload (120 s wait + 120 s margin) would not fit, a reused media does
+  await runSnapPump("nazar", [clonePumpShot("t1", [fromSnap(1)])], 1_000_000 + 150_000, w.deps);
+  assert.equal(w.last("t1").status, "done");
+  const w2 = world();
+  w2.deps.mediaWaitMs = 120_000;
+  await runSnapPump("nazar", [clonePumpShot("t1", [fromSnap(1, "acct-z")])], 1_000_000 + 150_000, w2.deps);
+  assert.equal(w2.last("t1").status, "error", "a re-host needs the long reserve");
+  assert.match(String(w2.last("t1").error), /time budget/);
+});

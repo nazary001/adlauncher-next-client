@@ -340,6 +340,60 @@ export async function snapAccountAdsRaw(adAccountId: string): Promise<unknown[]>
   return cached(`live-ads:${adAccountId}`, () => snapPages(`${API_BASE}/adaccounts/${encodeURIComponent(adAccountId)}/ads`), LIVE_TTL_MS);
 }
 
+// ---------- clone sources: one live campaign read back for the cloner (/snap/clone) ----------
+// RAW bodies again — lib/snap-source.ts folds them (pure, tested). Reads retry once on 5xx (they
+// are reads); short caches spare the token's 10 rps that the pump shares: the campaign / ad squads /
+// ads for 1 min (status and review move), an account's creative and media LIBRARIES for 2 min — one
+// listing per account (limit=1000: an account held ~300 of each on 01.10) answers every creative /
+// media id of every source on it, instead of two GETs per ad; an id the listing lacks (a campaign
+// born a minute ago) is read by id.
+
+const SOURCE_TTL_MS = 60_000;
+const LIBRARY_TTL_MS = 2 * 60_000;
+const SOURCE_TIMEOUT_MS = 20_000;
+const LIBRARY_MAX_PAGES = 5;
+
+/** A paged READ (retried once on 5xx), following paging.next_link while it stays on our host. */
+async function snapReadPages(url: string, maxPages = LIBRARY_MAX_PAGES): Promise<unknown[]> {
+  const pages: unknown[] = [];
+  let next = url;
+  for (let i = 0; i < maxPages && next; i++) {
+    const body = await snapFetch(next, {}, 2, SOURCE_TIMEOUT_MS);
+    pages.push(body);
+    const link = str(rec(rec(body).paging).next_link);
+    next = link.startsWith(`${API_BASE}/`) ? link : "";
+  }
+  return pages;
+}
+
+export async function snapCampaignRaw(campaignId: string): Promise<unknown> {
+  return cached(`src-campaign:${campaignId}`, () => snapFetch(`${API_BASE}/campaigns/${encodeURIComponent(campaignId)}`, {}, 2, SOURCE_TIMEOUT_MS), SOURCE_TTL_MS);
+}
+
+export async function snapCampaignAdSquadsRaw(campaignId: string): Promise<unknown[]> {
+  return cached(`src-adsquads:${campaignId}`, () => snapReadPages(`${API_BASE}/campaigns/${encodeURIComponent(campaignId)}/adsquads`), SOURCE_TTL_MS);
+}
+
+export async function snapCampaignAdsRaw(campaignId: string): Promise<unknown[]> {
+  return cached(`src-ads:${campaignId}`, () => snapReadPages(`${API_BASE}/campaigns/${encodeURIComponent(campaignId)}/ads`), SOURCE_TTL_MS);
+}
+
+export async function snapAccountCreativesRaw(adAccountId: string): Promise<unknown[]> {
+  return cached(`lib-creatives:${adAccountId}`, () => snapReadPages(`${API_BASE}/adaccounts/${encodeURIComponent(adAccountId)}/creatives?limit=1000`), LIBRARY_TTL_MS);
+}
+
+export async function snapAccountMediaRaw(adAccountId: string): Promise<unknown[]> {
+  return cached(`lib-media:${adAccountId}`, () => snapReadPages(`${API_BASE}/adaccounts/${encodeURIComponent(adAccountId)}/media?limit=1000`), LIBRARY_TTL_MS);
+}
+
+export async function snapCreativeRaw(creativeId: string): Promise<unknown> {
+  return cached(`src-creative:${creativeId}`, () => snapFetch(`${API_BASE}/creatives/${encodeURIComponent(creativeId)}`, {}, 2, SOURCE_TIMEOUT_MS), LIBRARY_TTL_MS);
+}
+
+export async function snapMediaRaw(mediaId: string): Promise<unknown> {
+  return cached(`src-media:${mediaId}`, () => snapFetch(`${API_BASE}/media/${encodeURIComponent(mediaId)}`, {}, 2, SOURCE_TIMEOUT_MS), LIBRARY_TTL_MS);
+}
+
 // ---------- media ----------
 
 export async function snapCreateMedia(adAccountId: string, name: string, type: "VIDEO" | "IMAGE"): Promise<{ id: string }> {

@@ -1,8 +1,11 @@
 // Snapchat rail — pure decisions (docs/superpowers/specs/2026-09-16-snapchat-rail-design.md).
-// Deliberately dependency-free (no "@/" imports, no relative imports) so `node --test` runs it
-// straight off Node's type stripping. Part 1 (this task): the PARTNER contract — the 100 fixed
-// revenue keys, the two landings, the exact link shape, the console name. Part 2 (Task 2): the
-// launch vocabulary and `snapLaunchWire`, the ONE validator the board dry-runs and the pump runs.
+// Deliberately dependency-free (no "@/" imports, no relative runtime imports — `import type` only)
+// so `node --test` runs it straight off Node's type stripping. Part 1: the PARTNER contract — the
+// fixed revenue keys, the landings, the exact link shape, the console name. Part 2: the launch
+// vocabulary and `snapLaunchWire`, the ONE validator the board dry-runs and the pump runs. Part 3:
+// the CLONER — the link's refs, the console name read back, and the draft a live campaign gives.
+
+import type { SnapCloneSource } from "./snap-source";
 
 // ---------- partner keys ----------
 
@@ -137,21 +140,28 @@ export const SNAP_NAME_MAX = 375;
 const squash = (s: string): string => String(s ?? "").replace(/\s+/g, " ").trim();
 const noPipes = (s: string): string => s.replace(/\|/g, "/");
 
+/** What a clone's name ends with: ` - CLONE_FROM=<the source's key, or the head of its campaign id>`
+ *  — the same trace the Google / TikTok clones carry (`CLONE_FROM=<id>`), in Snap's " - " grammar. */
+export const SNAP_CLONE_MARK = "CLONE_FROM";
+
 /**
  * The console name, used verbatim on the campaign, the ad squad, the creative and the ad:
- * `[DD.MM] (SNP) <niche> - <GEO> - <key> - <user> - GC-Launcher[ - <tail>]`. The key inside the
- * name makes LION's per-key report readable from Ads Manager; pipes are replaced so a tail can't
- * fake a segment; the tail is trimmed first when the whole thing would pass SNAP_NAME_MAX.
+ * `[DD.MM] (SNP) <niche> - <GEO> - <key> - <user> - GC-Launcher[ - <tail>][ - CLONE_FROM=<source>]`.
+ * The key inside the name makes LION's per-key report readable from Ads Manager; pipes are replaced
+ * so a tail can't fake a segment; the tail is trimmed first when the whole thing would pass
+ * SNAP_NAME_MAX (a clone's marker always stays).
  */
-export function snapCampaignName(args: { ddmm: string; niche: string; geoLabel: string; key: string; user: string; tail?: string }): string {
+export function snapCampaignName(args: { ddmm: string; niche: string; geoLabel: string; key: string; user: string; tail?: string; cloneOf?: string }): string {
   const user = noPipes(squash(args.user)) || "buyer";
   const niche = noPipes(squash(args.niche)) || "Snap";
   const geo = squash(args.geoLabel) || "??";
   const head = `[${args.ddmm}] (SNP) ${niche} - ${geo} - ${args.key} - ${user} - ${SNAP_NAME_MARK}`;
+  const mark = noPipes(squash(args.cloneOf ?? "")).replace(/\s+/g, "");
+  const end = mark ? ` - ${SNAP_CLONE_MARK}=${mark}` : "";
   let tail = noPipes(squash(args.tail ?? ""));
-  const room = SNAP_NAME_MAX - head.length - 3; // " - " between head and tail
+  const room = SNAP_NAME_MAX - head.length - end.length - 3; // " - " between head and tail
   if (tail && tail.length > room) tail = room > 0 ? tail.slice(0, room).trim() : "";
-  return `${head}${tail ? ` - ${tail}` : ""}`;
+  return `${head}${tail ? ` - ${tail}` : ""}${end}`;
 }
 
 // ---------- São Paulo clock (LION's day boundary; the team's name date) ----------
@@ -369,22 +379,42 @@ export function snapGeoWire(geo: unknown): { geos: { country_code: string }[]; l
 
 // ---------- task ids ----------
 
-/** Deterministic per-shot task ids: `snl-<wave>-NN` (Snap launch). */
-export function snapShotTaskId(waveId: string, index: number): string {
-  return `snl-${waveId}-${String(index + 1).padStart(2, "0")}`;
+/** Deterministic per-shot task ids: `snl-<wave>-NN` (Snap launch) / `snc-<wave>-NN` (Snap clone). */
+export function snapShotTaskId(waveId: string, index: number, kind: "launch" | "clone" = "launch"): string {
+  return `${kind === "clone" ? "snc" : "snl"}-${waveId}-${String(index + 1).padStart(2, "0")}`;
 }
 
 // ---------- the wire ----------
 
-/** One creative of a shot: the public Blob URL the board uploaded, its kind, its file name. */
-export type SnapShotMedia = { url: string; kind: "video" | "image"; name?: string };
+/** Snap ids (campaigns, media, ad accounts) are lower-case UUIDs. */
+export const SNAP_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** A Snap id as the wire takes it: trimmed, lower-cased, "" when it is not a UUID. */
+export const snapIdIn = (v: unknown): string => {
+  const s = (v == null ? "" : String(v)).trim().toLowerCase();
+  return SNAP_ID_RE.test(s) ? s : "";
+};
+/** An opaque Snap object id where only EQUALITY matters (a clone's source media + its ad account):
+ *  a UUID on the real API, any lower-case slug on the local mock. Junk is dropped. */
+const snapOpaqueIdIn = (v: unknown): string => {
+  const s = (v == null ? "" : String(v)).trim().toLowerCase();
+  return /^[0-9a-z][0-9a-z-]{7,63}$/.test(s) ? s : "";
+};
+
+/**
+ * One creative of a shot: the public file URL (the Blob upload of a launch, Snap's own download
+ * link for a clone), its kind and file name. A CLONE also names the media it comes from: on that
+ * same ad account the pump reuses `snapMediaId` as is (no download, no upload, no READY wait); on
+ * another account it re-hosts the file from `url`.
+ */
+export type SnapShotMedia = { url: string; kind: "video" | "image"; name?: string; snapMediaId?: string; snapAccountId?: string };
 
 /**
  * The creatives of a shot as it arrived on the wire, normalized (strings trimmed, kind coerced). A
  * body without a `media` list that still sends the pre-multi-creative fields (`mediaUrl` /
  * `mediaKind` / `mediaName`) is read as a one-item list, so a tab opened before the deploy — and
  * any script built on the old shape — keeps launching. Anything else is an empty list (the
- * validator then refuses with "At least one creative…").
+ * validator then refuses with "At least one creative…"). A source media id rides only as a pair
+ * with its account, both valid Snap ids — anything else is dropped (the file URL then decides).
  */
 export function snapShotMediaIn(raw: unknown): SnapShotMedia[] {
   const t = (v: unknown): string => (v == null ? "" : String(v)).trim();
@@ -393,7 +423,14 @@ export function snapShotMediaIn(raw: unknown): SnapShotMedia[] {
   return list.map((m) => {
     const r = (m ?? {}) as Record<string, unknown>;
     const name = t(r.name);
-    return { url: t(r.url), kind: r.kind === "image" ? ("image" as const) : ("video" as const), ...(name ? { name } : {}) };
+    const snapMediaId = snapOpaqueIdIn(r.snapMediaId);
+    const snapAccountId = snapOpaqueIdIn(r.snapAccountId);
+    return {
+      url: t(r.url),
+      kind: r.kind === "image" ? ("image" as const) : ("video" as const),
+      ...(name ? { name } : {}),
+      ...(snapMediaId && snapAccountId ? { snapMediaId, snapAccountId } : {}),
+    };
   });
 }
 
@@ -428,6 +465,10 @@ export type SnapLaunchShotIn = {
   suffix: string;
   /** Display material the board resolved (currency of the ad account). */
   currency?: string;
+  /** A CLONE: the source Snapchat campaign id (registry `clone_of`, the row's tag) … */
+  cloneOf?: string;
+  /** … and the source's partner key, the name's `CLONE_FROM=` marker (else the head of cloneOf). */
+  cloneKey?: string;
 };
 
 /** `objective_v2_properties` rides only for an objective with a `wire` value (Sales); Awareness & Engagement
@@ -539,8 +580,11 @@ export function snapLaunchWire(
   for (let i = 0; i < media.length; i++) {
     const at = media.length === 1 ? "The creative" : `Creative ${i + 1}`;
     const url = String(media[i]?.url ?? "").trim();
-    if (!url) return { refusal: `${at} has no file — a vertical video or image is required` };
-    if (!isMediaUrl(url)) return { refusal: `${at} must be a public https:// file` };
+    // A clone's creative may carry no file URL at all when it reuses its source media id (Snap gave
+    // no download link) — the pump then reuses it on its own account and refuses it elsewhere.
+    const reused = String(media[i]?.snapMediaId ?? "").trim();
+    if (!url && !reused) return { refusal: `${at} has no file — a vertical video or image is required` };
+    if (url && !isMediaUrl(url)) return { refusal: `${at} must be a public https:// file` };
     if (media[i].kind !== "video" && media[i].kind !== "image") return { refusal: `${at}: kind must be video or image` };
   }
   const geo = snapGeoWire(shot.geo);
@@ -625,4 +669,341 @@ export function snapLaunchWire(
     deviceOs,
     ...(bidMicro != null ? { bidMicro } : {}),
   };
+}
+
+// ======================================================================================
+// Part 3 — the CLONER: a live Snapchat campaign → a fresh launch through the same validator
+// ======================================================================================
+// A clone is a NEW campaign on a NEW partner key (one campaign = one key; the source's key stays
+// with the source), built by the same wave + pump as a launch. What it copies comes from the source
+// read back from Snapchat (lib/snap-source.ts); what the launcher cannot carry is said in a note.
+
+/** A Snapchat campaign id as a clone link carries it (Snap ids are lower-case UUIDs). */
+export const SNAP_CAMPAIGN_ID_RE = SNAP_ID_RE;
+/** Sources one clone board takes at once — the same 30 as the Google / TikTok cloners. */
+export const SNAP_CLONE_MAX_SOURCES = 30;
+
+/**
+ * The refs a clone link or the board's input carries, in order: Snapchat campaign ids (UUIDs,
+ * lower-cased) and partner keys (`glo-snp_NNN`, the source's own key → its campaign through the
+ * registry). Any separator (comma, space, semicolon, newline), repeated params (arrays), any
+ * mix; duplicates and anything else are dropped silently; at most SNAP_CLONE_MAX_SOURCES.
+ */
+export function snapCloneRefs(...raw: unknown[]): string[] {
+  const tokens = raw
+    .flatMap((r) => (Array.isArray(r) ? r : [r]))
+    .flatMap((r) => (r == null ? [] : String(r).split(/[\s,;]+/)))
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+  const out: string[] = [];
+  for (const t of tokens) {
+    if (!(SNAP_ID_RE.test(t) || isSnapKey(t)) || out.includes(t)) continue;
+    out.push(t);
+    if (out.length >= SNAP_CLONE_MAX_SOURCES) break;
+  }
+  return out;
+}
+
+/** The console name read back (the inverse of snapCampaignName); null for any other name. The
+ *  tail comes without a trailing clone marker — a clone of a clone never chains two of them. */
+export function snapParseCampaignName(name: string): { ddmm: string; niche: string; geo: string; key: string; user: string; tail: string; cloneOf: string } | null {
+  const m = /^\[(\d{2}\.\d{2})\] \(SNP\) (.+?) - (\S+) - (glo-snp_\d{3}) - (.+?) - GC-Launcher(?: - (.*))?$/.exec(squash(name));
+  if (!m) return null;
+  let rest = (m[6] ?? "").trim();
+  let cloneOf = "";
+  const mark = new RegExp(`(?:^| - )${SNAP_CLONE_MARK}=(\\S+)$`).exec(rest);
+  if (mark) {
+    cloneOf = mark[1];
+    rest = rest.slice(0, mark.index).trim();
+  }
+  return { ddmm: m[1], niche: m[2], geo: m[3], key: m[4], user: m[5], tail: rest, cloneOf };
+}
+
+/** The partner key a live ad URL carries in `utm_campaign` ("" when it carries none of ours). */
+export function snapKeyOfLink(url: string): string {
+  try {
+    const key = (new URL(String(url ?? "").trim()).searchParams.get("utm_campaign") ?? "").trim().toLowerCase();
+    return isSnapKey(key) ? key : "";
+  } catch {
+    return "";
+  }
+}
+
+/** The clone marker's value: the source's partner key, else the head of its campaign id. */
+export function snapCloneMark(sourceKey: string, sourceCampaignId: string): string {
+  const key = String(sourceKey ?? "").trim().toLowerCase();
+  if (isSnapKey(key)) return key;
+  return String(sourceCampaignId ?? "").trim().toLowerCase().slice(0, 8);
+}
+
+/** Micro-currency → the card's comma money with cents ("30,00", "0,27"); "" for none. */
+export function snapMicroText(micro: number | null | undefined): string {
+  if (micro == null || !Number.isFinite(micro)) return "";
+  const cents = Math.round(micro / 10_000);
+  return `${Math.floor(cents / 100)},${String(cents % 100).padStart(2, "0")}`;
+}
+
+/** One ad of the source as the clone board offers it: the media it reuses (on its own account) or
+ *  re-hosts (elsewhere), its moderation verdict, and whether it rides by default. */
+export type SnapCloneCreative = {
+  adId: string;
+  /** Its number on the source card — the "#N" of the source ad's name (else its place). */
+  n: number;
+  /** Display name of the file. */
+  name: string;
+  /** The file name a re-host uploads under (always with an extension). */
+  uploadName: string;
+  kind: "video" | "image";
+  /** Snap's public download link of the original ("" = none; then it can only stay on its account). */
+  url: string;
+  mediaId: string;
+  /** The ad account the media lives on. */
+  accountId: string;
+  sizeBytes: number | null;
+  width: number | null;
+  height: number | null;
+  durationSec: number | null;
+  /** Snap's verdict on the source ad: APPROVED / PENDING / REJECTED. */
+  review: string;
+  reasons: string[];
+  adStatus: string;
+  /** Why this ad cannot be cloned at all ("" = it can). */
+  issue: string;
+  /** Rides by default: clonable, running in the source and not rejected by Snap's review. */
+  pick: boolean;
+};
+
+/** The launch fields a clone starts from (the card's own names). */
+export type SnapCloneFields = {
+  adAccount: string;
+  pixel: string;
+  profileId: string;
+  objective: string;
+  optimizationGoal: string;
+  bidStrategy: string;
+  bid: string;
+  budget: string;
+  headline: string;
+  brandName: string;
+  cta: string;
+  geo: string[];
+  minAge: string;
+  deviceOs: SnapDeviceOs;
+  landingUrl: string;
+  suffix: string;
+};
+
+export type SnapCloneDraft = {
+  /** The source's partner key ("" for a campaign the launcher did not build). */
+  key: string;
+  /** What the clone's name ends with after CLONE_FROM=. */
+  mark: string;
+  /** The source name follows the console grammar (its tail is carried). */
+  launcherName: boolean;
+  fields: SnapCloneFields;
+  creatives: SnapCloneCreative[];
+  /** Every source setting the clone does not carry as is — shown on the row. */
+  notes: string[];
+};
+
+const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
+const adNo = (adName: string): number | null => {
+  const m = /\s#(\d{1,3})$/.exec(adName);
+  return m ? Number(m[1]) : null;
+};
+
+/**
+ * How a live campaign maps onto the launcher's vocabulary. Same account, same goal / bid / budget
+ * / countries / age / devices / texts / landing; the media are reused on their own account. A
+ * setting the launcher does not offer lands on the launcher's own default and is NAMED in `notes`
+ * — the board shows them, the buyer decides. Pure: the board drafts every source row with it.
+ */
+export function snapCloneDraft(src: SnapCloneSource): SnapCloneDraft {
+  const notes: string[] = [];
+  const q = src.squad;
+  if (!q) notes.push("Source has no ad squad — nothing to clone");
+  if (src.squadCount > 1) notes.push(`Source has ${src.squadCount} ad squads — the clone copies the one with the most ads; ${plural(src.otherSquadAds, "ad")} under the others ${src.otherSquadAds === 1 ? "is" : "are"} left out`);
+
+  // ---- creatives: one per source ad, in its card order ----
+  const creatives: SnapCloneCreative[] = src.ads.map((a, i) => {
+    const m = a.media;
+    const n = adNo(a.adName) ?? i + 1;
+    const issue =
+      a.creativeType !== "WEB_VIEW"
+        ? a.creativeType
+          ? `not a web-view ad (${a.creativeType}) — the launcher builds web-view ads only`
+          : a.mediaError || "the creative could not be read"
+        : !m
+          ? a.mediaError || "the creative carries no media"
+          : !m.kind
+            ? "the media is not a video or an image"
+            : !m.ready
+              ? "the media is not ready on Snapchat"
+              : "";
+    const kind = m?.kind === "image" ? "image" : "video";
+    const name = m?.name || `creative #${n}`;
+    const ext = /\.([a-z0-9]{2,5})$/i.exec(m?.fileName ?? "")?.[1] ?? (kind === "image" ? "jpg" : "mp4");
+    return {
+      adId: a.adId,
+      n,
+      name,
+      uploadName: /\.[a-z0-9]{2,5}$/i.test(name) ? name : `${name}.${ext}`,
+      kind,
+      url: m?.downloadUrl ?? "",
+      mediaId: m?.id ?? "",
+      accountId: m?.accountId || src.adAccountId,
+      sizeBytes: m?.sizeBytes ?? null,
+      width: m?.width ?? null,
+      height: m?.height ?? null,
+      durationSec: m?.durationSec ?? null,
+      review: a.review,
+      reasons: a.reviewReasons,
+      adStatus: a.adStatus,
+      issue,
+      pick: !issue && a.adStatus.toUpperCase() !== "PAUSED" && a.review !== "REJECTED",
+    };
+  });
+
+  // ---- texts / landing / profile: the first PICKED web-view ad leads (else the first web-view one) ----
+  const adById = new Map(src.ads.map((a) => [a.adId, a]));
+  const webAds = creatives.filter((c) => adById.get(c.adId)?.creativeType === "WEB_VIEW");
+  const leadC = webAds.find((c) => c.pick) ?? webAds[0];
+  const lead = leadC ? adById.get(leadC.adId) : undefined;
+  const landingOf = (url: string) => snapLandingBase(url)?.base ?? "";
+  if (lead && leadC) {
+    const others = webAds.filter((c) => c.adId !== leadC.adId).map((c) => ({ c, a: adById.get(c.adId)! }));
+    const differ = (pick: (a: NonNullable<typeof lead>) => string, what: string) => {
+      const off = others.filter(({ a }) => pick(a) !== pick(lead)).map(({ c }) => `#${c.n}`);
+      if (off.length) notes.push(`Creative${off.length === 1 ? "" : "s"} ${off.join(", ")} carr${off.length === 1 ? "ies" : "y"} another ${what} — every ad of the clone uses #${leadC.n}'s`);
+    };
+    differ((a) => a.headline, "headline");
+    differ((a) => a.brandName, "brand name");
+    differ((a) => a.cta, "call to action");
+    differ((a) => landingOf(a.url), "landing");
+  }
+  const ctaIn = lead?.cta ?? "";
+  const cta = CTA_SET.has(ctaIn) ? ctaIn : "MORE";
+  if (ctaIn && cta !== ctaIn) notes.push(`Call to action ${ctaIn} is not offered — the clone uses More`);
+
+  // ---- campaign objective ----
+  const objIn = src.objective;
+  const objective = OBJECTIVE_BY_VALUE.has(objIn) ? objIn : SNAP_DEFAULT_OBJECTIVE;
+  if (objIn && objective !== objIn) notes.push(`Objective ${objIn} is not offered — the clone runs ${snapObjectiveLabel(objective)} (Snap's own default; either goal works under it)`);
+
+  // ---- ad squad: goal, bid, budget, targeting ----
+  let optimizationGoal = SNAP_DEFAULT_GOAL;
+  let bidStrategy = "AUTO_BID";
+  let bid = "";
+  let budget = SNAP_DEFAULT_BUDGET;
+  let geo: string[] = [];
+  let minAge = "18";
+  let deviceOs: SnapDeviceOs = "ALL";
+  if (q) {
+    if (GOAL_BY_VALUE.has(q.goal)) optimizationGoal = q.goal;
+    else if (q.goal) notes.push(`Goal ${q.goal} is not offered (only Pixel purchase / Landing page view) — the clone optimizes ${snapGoalLabel(SNAP_DEFAULT_GOAL)}`);
+    const kind = snapBidKind(q.bidStrategy);
+    if (kind === "none") bidStrategy = q.bidStrategy;
+    else if (kind === "bid" && q.bidMicro != null && q.bidMicro > 0) {
+      bidStrategy = q.bidStrategy;
+      bid = snapMicroText(q.bidMicro);
+    } else if (kind === "bid") notes.push(`Source's ${snapStrategyLabel(q.bidStrategy)} carries no bid — the clone bids Auto`);
+    else if (q.bidStrategy) notes.push(`Bidding ${q.bidStrategy} is not offered — the clone bids Auto`);
+    if (q.dailyBudgetMicro != null && q.dailyBudgetMicro > 0) {
+      const v = q.dailyBudgetMicro / 1_000_000;
+      const clamped = Math.min(SNAP_BUDGET_MAX, Math.max(SNAP_BUDGET_MIN, v));
+      budget = snapMicroText(clamped * 1_000_000);
+      if (clamped !== v) notes.push(`Daily budget ${snapMicroText(q.dailyBudgetMicro)} is outside ${SNAP_BUDGET_MIN}–${SNAP_BUDGET_MAX} — the clone runs ${budget}`);
+    } else if (q.lifetimeBudgetMicro != null && q.lifetimeBudgetMicro > 0) {
+      notes.push(`Source runs a lifetime budget (${snapMicroText(q.lifetimeBudgetMicro)}) — the clone runs a daily budget of ${SNAP_DEFAULT_BUDGET}`);
+    }
+    geo = [...q.countries];
+    if (q.subCountryGeo) notes.push("Source narrows countries to regions / metros / postal codes — the clone targets the whole countries");
+    const age = Number.parseInt(q.minAge, 10);
+    minAge = !Number.isFinite(age) || age <= 18 ? "18" : age <= 21 ? "21" : "25";
+    if (q.minAge && minAge !== q.minAge) notes.push(`Minimum age ${q.minAge} → ${minAge} (the launcher offers ${SNAP_MIN_AGES.join(" / ")})`);
+    if (q.maxAge) notes.push(`Source caps the age at ${q.maxAge} — the clone has no upper age`);
+    if (q.gender) notes.push(`Source targets ${q.gender} only — the clone targets every gender`);
+    if (q.languages.length) notes.push(`Source targets languages (${q.languages.join(", ")}) — the clone does not`);
+    const os = new Set(q.deviceOs.map((o) => o.toUpperCase()));
+    deviceOs = os.size === 1 && os.has("ANDROID") ? "ANDROID" : os.size === 1 && os.has("IOS") ? "iOS" : "ALL";
+    if (os.size > 1) notes.push(`Source targets ${q.deviceOs.join(" + ")} — the clone targets all devices`);
+    if (q.deviceDetails) notes.push("Source narrows devices by OS version / make / carrier / connection — the clone does not");
+    if (q.extraTargeting.length) notes.push(`Source targeting also uses ${q.extraTargeting.join(", ")} — not carried (the clone targets countries, age and devices)`);
+  }
+
+  // ---- name ----
+  const parsed = snapParseCampaignName(src.name);
+  const key = parsed?.key || (lead ? snapKeyOfLink(lead.url) : "") || src.ads.map((a) => snapKeyOfLink(a.url)).find(Boolean) || "";
+  return {
+    key,
+    mark: snapCloneMark(key, src.campaignId),
+    launcherName: Boolean(parsed),
+    fields: {
+      adAccount: src.adAccountId,
+      pixel: q?.pixelId ?? "",
+      profileId: lead?.profileId ?? "",
+      objective,
+      optimizationGoal,
+      bidStrategy,
+      bid,
+      budget,
+      headline: lead?.headline ?? "",
+      brandName: lead?.brandName ?? "",
+      cta,
+      geo,
+      minAge,
+      deviceOs,
+      landingUrl: lead ? landingOf(lead.url) : "",
+      suffix: parsed?.tail ?? "",
+    },
+    creatives,
+    notes,
+  };
+}
+
+/** One ref of a clone link resolved to the campaign it means. A KEY means the campaign the
+ *  registry binds to it NOW (a key released and claimed again points at its new campaign). */
+export type SnapCloneTarget = { ref: string; campaignId: string; holder?: string; error?: string };
+
+export function snapCloneResolve(refs: string[], registry: { key: string; campaign_id?: string; user?: string }[] | null, registryError = ""): SnapCloneTarget[] {
+  const byKey = new Map((registry ?? []).map((r) => [r.key, r]));
+  return refs.map((ref) => {
+    if (!isSnapKey(ref)) return { ref, campaignId: ref };
+    if (!registry) return { ref, campaignId: "", error: `the key registry could not be read (${registryError || "unknown error"}) — retry, or open the campaign by its id` };
+    const row = byKey.get(ref);
+    if (!row) return { ref, campaignId: "", error: `${ref} is free — no campaign holds this key` };
+    if (!row.campaign_id) return { ref, campaignId: "", error: `${ref} has no campaign yet — its launch is still running or failed before the campaign existed` };
+    return { ref, campaignId: row.campaign_id, ...(row.user ? { holder: row.user } : {}) };
+  });
+}
+
+/** A failed campaign read in the buyer's words. Snap answers a DELETED campaign with HTTP 400 "not
+ *  available" and an id it never issued with 404 "can not be found" or 400 "Request URL can not be
+ *  correctly processed" (probed 22.09 and 01.10). */
+export function snapSourceErrorText(status: number | undefined, message: string | undefined): string {
+  const msg = String(message ?? "").trim();
+  if (status === 400 && /not available/i.test(msg)) return "This campaign is gone from Snapchat (deleted in Ads Manager)";
+  if (status === 404 || (status === 400 && /correctly processed/i.test(msg))) return "No such campaign on Snapchat — check the id";
+  if (status === 401 || status === 403) return `Snapchat refused the read (${status}${msg ? `: ${msg}` : ""})`;
+  return msg || "Snapchat read failed";
+}
+
+/**
+ * The hard gate on a clone's creatives (the card's readiness, the same words the pump would end
+ * with): at least one picked, none unclonable, and one that has to MOVE to another ad account
+ * needs Snap's download link and must fit the 32 MB single upload — on its own account it is
+ * reused as is, whatever its size. Null = the creatives can ride.
+ */
+export function snapRemoteMediaIssue(remote: { n: number; on: boolean; issue: string; url: string; sizeBytes: number | null; accountId: string }[], adAccountId: string): string | null {
+  const on = remote.filter((r) => r.on);
+  if (on.length === 0) return "Pick at least one creative of the source";
+  for (const r of on) {
+    const at = `Creative #${r.n}`;
+    if (r.issue) return `${at}: ${r.issue}`;
+    if (adAccountId && r.accountId !== adAccountId) {
+      if (!r.url) return `${at} has no download link on Snapchat — it can only be cloned on its own ad account`;
+      if (r.sizeBytes != null && r.sizeBytes > SNAP_MEDIA_MAX_BYTES) return `${at} is ${Math.round(r.sizeBytes / 1024 / 1024)} MB — moving it to another ad account takes at most 32 MB; clone it on its own account`;
+    }
+  }
+  return null;
 }

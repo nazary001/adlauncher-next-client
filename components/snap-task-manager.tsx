@@ -541,6 +541,13 @@ function SnapTaskRow({ task: t, mine, stale, now }: { task: SnapTask; mine: bool
           {t.adSquadId ? <CopyId prefix="squad" id={t.adSquadId} /> : null}
           {t.adId ? <CopyId prefix="ad" id={t.adId} /> : null}
           {t.link ? <CopyId prefix="link" id={t.link} /> : null}
+          {/* A built campaign opens in the cloner (a full navigation: the drawer lives on every Snap page). */}
+          {done && t.campaignId ? (
+            <a href={`/snap/clone?ids=${encodeURIComponent(t.campaignId)}`} title="Clone this campaign — a new campaign on a new partner key" className="ml-auto flex shrink-0 items-center gap-1 rounded-md border border-[#FFFC00]/40 bg-[#FFFC00]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#f3f0a3] transition-colors hover:bg-[#FFFC00]/20">
+              <CopyIcon className="h-3 w-3" />
+              Clone
+            </a>
+          ) : null}
         </div>
       ) : null}
     </div>

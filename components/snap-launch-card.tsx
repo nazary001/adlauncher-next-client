@@ -52,7 +52,9 @@ import {
   snapNicheFromLanding,
   snapDeviceShort,
   snapLaunchWire,
+  snapRemoteMediaIssue,
   todaySaoPauloDotDDMM,
+  type SnapCloneCreative,
   type SnapDeviceOs,
   type SnapLaunchShotIn,
 } from "@/lib/snap-launch";
@@ -60,6 +62,11 @@ import type { SessionUser } from "./user-menu";
 
 export const FIRST_SNAP_CARD_ID = "sn-1";
 let cardSeq = 1;
+
+/** A creative that already lives on Snapchat — a clone's source ad (/snap/clone): no local file; the
+ *  pump reuses its media id on its own ad account and re-hosts it from Snap's download link on any
+ *  other. `on` = it rides with the clone. */
+export type SnapRemoteCreative = SnapCloneCreative & { on: boolean };
 
 export type SnapCard = {
   id: string;
@@ -90,6 +97,8 @@ export type SnapCard = {
   landingUrl: string;
   /** "1".."20" — N campaigns from this card, each with its own key. */
   copies: string;
+  /** The CLONER's creatives (instead of `files`): the source's ads, each on or off. */
+  remote?: SnapRemoteCreative[];
   state: "idle" | "uploading" | "sending" | "ok" | "error";
   msg?: string;
   progress?: string;
@@ -128,8 +137,21 @@ export function freshSnapCard(id?: string, defaults: { adAccount?: string; pixel
 }
 
 export function cloneSnapCard(src: SnapCard): SnapCard {
-  return { ...src, id: `sn-${++cardSeq}`, collapsed: false, geo: [...src.geo], files: src.files.map((f) => ({ ...f })), state: "idle", msg: undefined, progress: undefined };
+  return {
+    ...src,
+    id: `sn-${++cardSeq}`,
+    collapsed: false,
+    geo: [...src.geo],
+    files: src.files.map((f) => ({ ...f })),
+    ...(src.remote ? { remote: src.remote.map((r) => ({ ...r })) } : {}),
+    state: "idle",
+    msg: undefined,
+    progress: undefined,
+  };
 }
+
+/** The creatives that ride: the card's files, or a clone's source ads switched on. */
+export const snapCardMediaCount = (card: SnapCard): number => (card.remote ? card.remote.filter((r) => r.on).length : card.files.length);
 
 export function snapCardCopies(card: SnapCard): number {
   const n = Math.round(Number(card.copies) || 1);
@@ -137,8 +159,11 @@ export function snapCardCopies(card: SnapCard): number {
 }
 
 /** Hard creative gates: at least one file, every file a video/image ≤32 MB. (9:16 is a soft
- *  note — Snap has the last word.) */
+ *  note — Snap has the last word.) A clone's source creatives: at least one on, none of them
+ *  unclonable, and one that has to MOVE to another ad account needs Snap's download link and fits
+ *  the 32 MB single upload (on its own account it is reused as is, whatever its size). */
 export function snapMediaIssue(card: SnapCard): string | null {
+  if (card.remote) return snapRemoteMediaIssue(card.remote, card.adAccount);
   if (card.files.length === 0) return "Attach at least one vertical video (mp4/mov) or image (png/jpg)";
   for (let i = 0; i < card.files.length; i++) {
     const f = card.files[i];
@@ -159,10 +184,20 @@ export function snapDimsNote(dims: { w: number; h: number } | null): string | nu
 }
 
 /** The wire shot (real at launch with `mediaUrls` — the Blob URL of every file, in card order —
- *  otherwise the DRY-RUN with placeholders). */
-export function buildSnapShot(card: SnapCard, ctx: { currency?: string; mediaUrls?: string[]; desiredKey?: string; accountName?: string }): SnapLaunchShotIn {
+ *  otherwise the DRY-RUN with placeholders). A clone's card carries its source creatives instead
+ *  (media id + account + Snap's download link — nothing to upload) and names its source. */
+export function buildSnapShot(card: SnapCard, ctx: { currency?: string; mediaUrls?: string[]; desiredKey?: string; accountName?: string; clone?: { of: string; key?: string } }): SnapLaunchShotIn {
+  const media: SnapLaunchShotIn["media"] = card.remote
+    ? card.remote
+        .filter((r) => r.on)
+        .map((r) => ({ url: r.url, kind: r.kind, name: r.uploadName, ...(r.mediaId ? { snapMediaId: r.mediaId, snapAccountId: r.accountId } : {}) }))
+    : card.files.map((f, i) => ({
+        url: ctx.mediaUrls?.[i] ?? (f.kind === "image" ? "https://pending.local/creative.jpg" : "https://pending.local/creative.mp4"),
+        kind: f.kind === "image" ? ("image" as const) : ("video" as const),
+        ...(f.name ? { name: f.name } : {}),
+      }));
   return {
-    label: `Snap launch · ${ctx.accountName || "account"}`,
+    label: `Snap ${ctx.clone ? "clone" : "launch"} · ${ctx.accountName || "account"}`,
     adAccount: card.adAccount,
     ...(card.pixel ? { pixel: card.pixel } : {}),
     ...(card.profileId ? { profileId: card.profileId } : {}),
@@ -175,11 +210,7 @@ export function buildSnapShot(card: SnapCard, ctx: { currency?: string; mediaUrl
     headline: card.headline.trim(),
     brandName: card.brandName.trim(),
     cta: card.cta,
-    media: card.files.map((f, i) => ({
-      url: ctx.mediaUrls?.[i] ?? (f.kind === "image" ? "https://pending.local/creative.jpg" : "https://pending.local/creative.mp4"),
-      kind: f.kind === "image" ? ("image" as const) : ("video" as const),
-      ...(f.name ? { name: f.name } : {}),
-    })),
+    media,
     geo: card.geo,
     minAge: card.minAge,
     deviceOs: card.deviceOs,
@@ -187,6 +218,7 @@ export function buildSnapShot(card: SnapCard, ctx: { currency?: string; mediaUrl
     ...(ctx.desiredKey ? { desiredKey: ctx.desiredKey } : {}),
     suffix: card.suffix.trim(),
     ...(ctx.currency ? { currency: ctx.currency } : {}),
+    ...(ctx.clone?.of ? { cloneOf: ctx.clone.of, ...(ctx.clone.key ? { cloneKey: ctx.clone.key } : {}) } : {}),
   };
 }
 
@@ -200,7 +232,7 @@ export function snapCardRefusal(card: SnapCard, ctx: { pixelId?: string; profile
     profileId: ctx.profileId,
     name: "preview",
     key: "glo-snp_001",
-    mediaIds: card.files.map(() => "pending"),
+    mediaIds: Array.from({ length: snapCardMediaCount(card) }, () => "pending"),
     startTimeIso: new Date(0).toISOString(),
   });
   return "refusal" in built ? built.refusal : null;
@@ -221,6 +253,7 @@ export function snapCardSignature(card: SnapCard): string {
     br: card.brandName,
     c: card.cta,
     f: card.files.map((x) => x.id),
+    r: card.remote?.filter((x) => x.on).map((x) => x.adId),
     geo: card.geo,
     age: card.minAge,
     os: card.deviceOs,
@@ -260,20 +293,21 @@ export function readMediaDims(f: FileItem): Promise<{ w: number; h: number } | n
 
 // ---------- shared classes ----------
 
-const inp =
+// Shared with the clone board (components/snap-clone-board.tsx) — one look for both Snap boards.
+export const inp =
   "h-9 w-full rounded-lg border border-line bg-surface2 px-3 text-[13px] text-ink placeholder:text-faint " +
   "outline-none transition-colors duration-150 hover:border-line2 focus:border-accent/60 focus:ring-2 focus:ring-accent/15";
-const micro = "text-[10px] font-semibold uppercase tracking-[0.16em] text-faint select-none";
+export const micro = "text-[10px] font-semibold uppercase tracking-[0.16em] text-faint select-none";
 
-const COUNTRY_OPTIONS = COUNTRIES.filter((c) => c.code !== "WW").map((c) => ({ value: c.code, label: c.name }));
-const OBJECTIVE_OPTIONS = SNAP_OBJECTIVES.map((o) => ({ value: o.value, label: o.label }));
-const GOAL_OPTIONS = SNAP_OPTIMIZATION_GOALS.map((g) => ({ value: g.value, label: g.label }));
-const STRATEGY_OPTIONS = SNAP_BID_STRATEGIES.map((s) => ({ value: s.value, label: s.label }));
-const CTA_OPTIONS = SNAP_CTAS.map((c) => ({ value: c.value, label: c.label }));
-const AGE_OPTIONS = SNAP_MIN_AGES.map((a) => ({ value: a, label: `${a}+` }));
-const DEVICE_OPTIONS: { key: SnapDeviceOs; label: string }[] = SNAP_DEVICE_OPTIONS.map((o) => ({ key: o.value, label: o.label }));
+export const COUNTRY_OPTIONS = COUNTRIES.filter((c) => c.code !== "WW").map((c) => ({ value: c.code, label: c.name }));
+export const OBJECTIVE_OPTIONS = SNAP_OBJECTIVES.map((o) => ({ value: o.value, label: o.label }));
+export const GOAL_OPTIONS = SNAP_OPTIMIZATION_GOALS.map((g) => ({ value: g.value, label: g.label }));
+export const STRATEGY_OPTIONS = SNAP_BID_STRATEGIES.map((s) => ({ value: s.value, label: s.label }));
+export const CTA_OPTIONS = SNAP_CTAS.map((c) => ({ value: c.value, label: c.label }));
+export const AGE_OPTIONS = SNAP_MIN_AGES.map((a) => ({ value: a, label: `${a}+` }));
+export const DEVICE_OPTIONS: { key: SnapDeviceOs; label: string }[] = SNAP_DEVICE_OPTIONS.map((o) => ({ key: o.value, label: o.label }));
 
-function Seg<T extends string>({ options, value, onChange }: { options: { key: T; label: string }[]; value: T; onChange: (k: T) => void }) {
+export function Seg<T extends string>({ options, value, onChange }: { options: { key: T; label: string }[]; value: T; onChange: (k: T) => void }) {
   return (
     <div className="inline-grid grid-flow-col overflow-hidden rounded-lg border border-line bg-surface2/50 p-0.5">
       {options.map((o) => {
@@ -288,7 +322,7 @@ function Seg<T extends string>({ options, value, onChange }: { options: { key: T
   );
 }
 
-function Counted({ label, value, onChange, max, placeholder }: { label: string; value: string; onChange: (v: string) => void; max: number; placeholder: string }) {
+export function Counted({ label, value, onChange, max, placeholder }: { label: string; value: string; onChange: (v: string) => void; max: number; placeholder: string }) {
   const over = value.trim().length > max;
   return (
     <div className="flex flex-col gap-1.5">

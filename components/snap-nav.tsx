@@ -1,17 +1,19 @@
 "use client";
 
-// The slim strip under the Header on the Snapchat platform: two pill-links between the LAUNCH
-// board (/snap) and the KEYS · REPORT page (/snap/keys), with a one-line hint of the active side.
-// Same texture as google-nav, Snap-yellow accent. Sticky under the sticky header (h-16 / z-40).
+// The slim strip under the Header on the Snapchat platform: pill-links between the LAUNCH board
+// (/snap), the CLONE board (/snap/clone) and the KEYS · REPORT page (/snap/keys), with a one-line
+// hint of the active side. Same texture as google-nav, Snap-yellow accent. Sticky under the sticky
+// header (h-16 / z-40).
 
 import Link from "next/link";
 
 const PILLS = [
-  { key: "launch", href: "/snap", label: "Launch", hint: "Web campaigns on our Snapchat ad account — one partner key per campaign" },
-  { key: "keys", href: "/snap/keys", label: "Keys · report", hint: "The 100 partner keys, who holds them, what each campaign spent on Snapchat and earned through LION that day" },
+  { key: "launch", href: "/snap", label: "Launch", hint: "Web campaigns on our Snapchat ad accounts — one partner key per campaign" },
+  { key: "clone", href: "/snap/clone", label: "Clone", hint: "Copy a live Snapchat campaign — its creatives, landing and settings — onto a fresh partner key per copy" },
+  { key: "keys", href: "/snap/keys", label: "Keys · report", hint: "The 500 partner keys, who holds them, what each campaign spent on Snapchat and earned through LION" },
 ] as const;
 
-export function SnapNav({ active }: { active: "launch" | "keys" }) {
+export function SnapNav({ active }: { active: "launch" | "clone" | "keys" }) {
   const hint = PILLS.find((p) => p.key === active)?.hint ?? "";
   const base = "flex h-8 items-center rounded-full px-3.5 text-[12.5px] font-medium transition-all duration-150";
   const on = "border border-[#FFFC00]/40 bg-[#FFFC00]/10 text-[#f3f0a3]";

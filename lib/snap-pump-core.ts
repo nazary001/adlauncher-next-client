@@ -2,6 +2,9 @@
 // binds the real Snapchat client, the key registry and the task-store writer). Kept pure so
 // `node --test tests/snap-pump-core.test.ts` proves the dispositions without a network:
 //   key → media → campaign (PAUSED) → adsquad → (creative → ad) × every creative → activate → done
+// A CLONE rides the same chain: a creative that already lives on the target ad account is reused
+// by its Snap media id (no download, no upload, no READY wait); one on another account is re-hosted
+// from Snap's own download link like any other file.
 // A card carries ANY number of creatives: they all land in the campaign's ONE ad squad, on its ONE
 // key. One bad creative never sinks the campaign — a failed upload or a creative Snapchat refuses is
 // skipped and named on the row; the campaign fails only when NOTHING could be built. The ads loop
@@ -46,13 +49,17 @@ export type SnapPumpShot = {
   taskId: string;
   shot: SnapLaunchShotIn;
   /** What the route resolved and validated once for the whole shot. */
-  ctx: { adAccountId: string; pixelId?: string; profileId: string; currency: string; niche: string; geoLabel: string; tail: string; startPaused: boolean };
+  ctx: { adAccountId: string; pixelId?: string; profileId: string; currency: string; niche: string; geoLabel: string; tail: string; startPaused: boolean; cloneMark?: string };
 };
 
+/** What a claim hands back: the key and its registry row (`binding` = the cvalue just written) —
+ *  the backfill addresses that row directly instead of re-finding it by key. */
+export type SnapKeyClaim = { key: string; documentId: string; binding?: Record<string, unknown> };
+
 export type SnapPumpDeps = {
-  claimKey(desired: string | undefined, meta: Record<string, unknown>): Promise<{ key: string; documentId: string }>;
+  claimKey(desired: string | undefined, meta: Record<string, unknown>): Promise<SnapKeyClaim>;
   releaseKey(documentId: string): Promise<void>;
-  backfillKey(key: string, patch: Record<string, unknown>): Promise<void>;
+  backfillKey(key: string, patch: Record<string, unknown>, claim?: SnapKeyClaim): Promise<void>;
   fetchBytes(url: string): Promise<{ bytes: Uint8Array; mime: string; size: number }>;
   createMedia(adAccountId: string, name: string, type: "VIDEO" | "IMAGE"): Promise<{ id: string }>;
   uploadMedia(mediaId: string, bytes: Uint8Array, filename: string, mime: string): Promise<void>;
@@ -63,7 +70,7 @@ export type SnapPumpDeps = {
   createAd(adSquadId: string, body: SnapAdWire & { ad_squad_id: string; creative_id: string }): Promise<{ id: string }>;
   setCampaignStatus(campaignId: string, status: "ACTIVE" | "PAUSED"): Promise<void>;
   buildWire(shot: SnapLaunchShotIn, resolved: SnapResolved): { wire: SnapLaunchWire; label: string } | { refusal: string };
-  buildName(args: { key: string; niche: string; geoLabel: string; tail: string }): string;
+  buildName(args: { key: string; niche: string; geoLabel: string; tail: string; cloneOf?: string }): string;
   write(taskId: string, fields: Record<string, unknown>): void;
   flush(): Promise<void>;
   sleep(ms: number): Promise<void>;
@@ -89,6 +96,16 @@ const clamp = (text: string): string => (text.length > NOTE_MAX ? `${text.slice(
 const jitter = () => 1000 + Math.floor(Math.random() * 2000);
 /** Media cache key — the same creative on the same ad account is uploaded once per wave. */
 const cacheKeyOf = (adAccountId: string, m: SnapShotMedia): string => `${adAccountId}|${m.url}`;
+/** A clone's creative that already lives on THIS ad account: reused by its Snap media id as is. */
+const reusable = (adAccountId: string, m: SnapShotMedia): boolean => Boolean(m.snapMediaId && m.snapAccountId === adAccountId);
+/** The type the upload declares: the download's own when it names a video/image, else read from the
+ *  file name (Snap's storage answers `multipart/form-data` for the files it keeps). */
+const MIME_BY_EXT: Record<string, string> = { mp4: "video/mp4", mov: "video/quicktime", m4v: "video/mp4", webm: "video/webm", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
+export function snapUploadMime(declared: string, filename: string, type: "VIDEO" | "IMAGE"): string {
+  if (/^(video|image)\//i.test(declared.trim())) return declared.trim();
+  const ext = /\.([a-z0-9]{2,5})$/i.exec(filename)?.[1]?.toLowerCase() ?? "";
+  return MIME_BY_EXT[ext] ?? (type === "IMAGE" ? "image/jpeg" : "video/mp4");
+}
 /** How a row names one creative of the card: "#2 (clip.mp4)". */
 const creativeTag = (media: SnapShotMedia[], index: number): string => `#${index + 1}${media[index]?.name ? ` (${media[index].name})` : ""}`;
 /** Error/interrupted rows carry a registry failure as a suffix — Snap's sentence stays first. */
@@ -112,7 +129,7 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
     const type = m.kind === "image" ? "IMAGE" : "VIDEO";
     const filename = m.name || (type === "IMAGE" ? "creative.jpg" : "creative.mp4");
     const { id } = await deps.createMedia(adAccountId, filename, type);
-    await deps.uploadMedia(id, file.bytes, filename, file.mime);
+    await deps.uploadMedia(id, file.bytes, filename, snapUploadMime(file.mime, filename, type));
     // Bounded by BOTH the wall clock and an attempt count (a frozen test clock must still end).
     const until = deps.now() + deps.mediaWaitMs;
     const attempts = Math.max(1, Math.ceil(deps.mediaWaitMs / deps.mediaPollMs));
@@ -126,6 +143,8 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
   };
 
   const ensureMedia = (adAccountId: string, m: SnapShotMedia): Promise<string> => {
+    if (reusable(adAccountId, m)) return Promise.resolve(m.snapMediaId as string);
+    if (!m.url) return Promise.reject(Object.assign(new Error("Snapchat gave no download link for this creative — it can only be cloned on its own ad account"), { status: 400 }));
     const cacheKey = cacheKeyOf(adAccountId, m);
     const hit = mediaByKey.get(cacheKey);
     if (hit) return Promise.resolve(hit);
@@ -157,9 +176,9 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
       return messageOf(e);
     }
   };
-  const safeBackfill = async (key: string, patch: Record<string, unknown>): Promise<string> => {
+  const safeBackfill = async (key: string, patch: Record<string, unknown>, claim?: SnapKeyClaim): Promise<string> => {
     try {
-      await deps.backfillKey(key, patch);
+      await deps.backfillKey(key, patch, claim);
       return "";
     } catch (e) {
       return messageOf(e);
@@ -175,7 +194,9 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
       // refused earlier in the wave) needs only the chain (the margin). A refused copy costs nothing —
       // no key claimed, no Snap call.
       const media = Array.isArray(s.shot.media) ? s.shot.media : [];
-      const isCached = (m: SnapShotMedia) => mediaByKey.has(cacheKeyOf(s.ctx.adAccountId, m)) || mediaRefused.has(cacheKeyOf(s.ctx.adAccountId, m));
+      // Settled = nothing left to upload for it: reused on its own account, refused for want of a link,
+      // or already uploaded / refused earlier in the wave.
+      const isCached = (m: SnapShotMedia) => reusable(s.ctx.adAccountId, m) || !m.url || mediaByKey.has(cacheKeyOf(s.ctx.adAccountId, m)) || mediaRefused.has(cacheKeyOf(s.ctx.adAccountId, m));
       const reserve = media.every(isCached) ? DEADLINE_MARGIN_MS : deps.mediaWaitMs + DEADLINE_MARGIN_MS;
       if (deps.now() > deadline - reserve) {
         deps.write(s.taskId, { status: "error", stage: "failed", error: "Not built — the wave's time budget ran out before this copy; fire it again", finished_at: deps.now() });
@@ -186,7 +207,7 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
 
       // ---- key ----
       deps.write(s.taskId, { stage: "key", started_at: deps.now() });
-      let claimed: { key: string; documentId: string };
+      let claimed: SnapKeyClaim;
       try {
         claimed = await deps.claimKey(s.shot.desiredKey, {
           user,
@@ -194,6 +215,7 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
           niche: s.ctx.niche,
           landing: s.shot.landingUrl,
           task_id: s.taskId,
+          ...(s.shot.cloneOf ? { clone_of: s.shot.cloneOf } : {}),
         });
       } catch (e) {
         deps.write(s.taskId, { status: "error", stage: "key", error: messageOf(e).slice(0, 1000), finished_at: deps.now() });
@@ -208,7 +230,7 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
       };
       let name: string;
       try {
-        name = deps.buildName({ key, niche: s.ctx.niche, geoLabel: s.ctx.geoLabel, tail: s.ctx.tail });
+        name = deps.buildName({ key, niche: s.ctx.niche, geoLabel: s.ctx.geoLabel, tail: s.ctx.tail, ...(s.ctx.cloneMark ? { cloneOf: s.ctx.cloneMark } : {}) });
       } catch (e) {
         await releaseAndFail("failed", messageOf(e));
         continue;
@@ -295,7 +317,7 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
         if (isRefusal(e)) {
           await releaseAndFail("campaign", messageOf(e));
         } else {
-          const registry = await safeBackfill(key, { status: "retired", notes: `ambiguous campaign create: ${messageOf(e).slice(0, 200)}` });
+          const registry = await safeBackfill(key, { status: "retired", notes: `ambiguous campaign create: ${messageOf(e).slice(0, 200)}` }, claimed);
           deps.write(s.taskId, {
             status: "interrupted",
             stage: "campaign",
@@ -312,7 +334,7 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
       const ids: { adsquad_id?: string; ad_id?: string } = {};
       const failAfterCampaign = async (stage: SnapPumpStage, e: unknown) => {
         const ambiguous = !isRefusal(e);
-        const registry = await safeBackfill(key, { status: "retired", campaign_id: campaignId, ...ids, notes: `${ambiguous ? "ambiguous" : "refused"} at ${stage}: ${messageOf(e).slice(0, 200)}` });
+        const registry = await safeBackfill(key, { status: "retired", campaign_id: campaignId, ...ids, notes: `${ambiguous ? "ambiguous" : "refused"} at ${stage}: ${messageOf(e).slice(0, 200)}` }, claimed);
         deps.write(s.taskId, {
           status: ambiguous ? "interrupted" : "error",
           stage,
@@ -421,7 +443,7 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
       }
 
       // ---- done (the chain exists whatever the registry says: the row always lands here) ----
-      const registry = await safeBackfill(key, { status: "active", campaign_id: campaignId, adsquad_id: adSquadId, ad_id: adId, ad_count: adIds.length, name });
+      const registry = await safeBackfill(key, { status: "active", campaign_id: campaignId, adsquad_id: adSquadId, ad_id: adId, ad_count: adIds.length, name }, claimed);
       const registryError = registry ? `registry backfill failed: ${registry} — check the Keys page` : "";
       const live = !s.ctx.startPaused && !activationError;
       deps.write(s.taskId, {

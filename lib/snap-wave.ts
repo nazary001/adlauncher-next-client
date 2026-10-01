@@ -2,6 +2,9 @@
 // wave: session → parse → validate EVERY shot against the live catalogs (ad accounts, pixels) and
 // the shared validator (dry-run with placeholder key/media/name) → stamp rows into the shared
 // store → claim the wave (idempotency, fail CLOSED) → after(pump) → answer at once.
+// The CLONER (/snap/clone) fires the very same body: a clone shot is a launch shot whose creatives
+// name their source media (reused on their own account) and which carries `cloneOf` / `cloneKey`
+// — its rows are `snc-…`, tagged "clone", and its name ends in CLONE_FROM=<source>.
 
 import { NextResponse, after } from "next/server";
 import { sessionFromCookieHeader } from "./session";
@@ -13,6 +16,8 @@ import {
   isSnapKey,
   isSnapLaunchAccount,
   snapCampaignName,
+  snapCloneMark,
+  snapIdIn,
   snapDeviceOs,
   snapDeviceShort,
   snapGoalNeedsPixel,
@@ -74,6 +79,10 @@ function cleanShot(x: SnapLaunchShotIn): SnapLaunchShotIn {
     landingUrl: s(x.landingUrl),
     desiredKey: s(x.desiredKey),
     suffix: s(x.suffix).replace(/[\r\n]+/g, " "),
+    // A clone: its source campaign (a Snap id) and that source's partner key (both optional,
+    // anything else dropped — they only name and tag the clone, they never steer the build).
+    cloneOf: snapIdIn(x.cloneOf),
+    cloneKey: isSnapKey(s(x.cloneKey).toLowerCase()) ? s(x.cloneKey).toLowerCase() : "",
   };
 }
 
@@ -144,7 +153,8 @@ export async function handleSnapLaunch(req: Request): Promise<NextResponse> {
     // The pure validator admits a loopback http creative for the local mock; a production build takes
     // only a public https file (SNAP_ALLOW_LOOPBACK_MEDIA=1 re-admits loopback for a `next start`
     // smoke — never set on Vercel).
-    if (process.env.NODE_ENV === "production" && process.env.SNAP_ALLOW_LOOPBACK_MEDIA !== "1" && x.media.some((m) => !/^https:\/\//i.test(m.url))) return bad(`${at}: Every creative must be a public https:// file`);
+    // A clone's creative reused by its source media id may carry no file URL at all (nothing to download).
+    if (process.env.NODE_ENV === "production" && process.env.SNAP_ALLOW_LOOPBACK_MEDIA !== "1" && x.media.some((m) => (m.url ? !/^https:\/\//i.test(m.url) : !m.snapMediaId))) return bad(`${at}: Every creative must be a public https:// file`);
 
     // An empty brand takes SNAP_BRAND_NAME (the spec's default) — the same server-side fallback as
     // the profile and the pixel above, so a card that never touched the field still launches.
@@ -156,22 +166,24 @@ export async function handleSnapLaunch(req: Request): Promise<NextResponse> {
     const desiredKey = isSnapKey(x.desiredKey ?? "") ? (x.desiredKey as string) : undefined;
     const cents = dry.wire.adsquad.daily_budget_micro / 10_000;
     const budget = `${Math.floor(cents / 100)},${String(cents % 100).padStart(2, "0")}`;
-    const provisionalName = snapCampaignName({ ddmm, niche: dry.niche, geoLabel: dry.geoLabel, key: desiredKey ?? "glo-snp_???", user, tail: x.suffix });
-    const taskId = snapShotTaskId(waveId, i);
+    const cloneMark = x.cloneOf ? snapCloneMark(x.cloneKey ?? "", x.cloneOf) : "";
+    const provisionalName = snapCampaignName({ ddmm, niche: dry.niche, geoLabel: dry.geoLabel, key: desiredKey ?? "glo-snp_???", user, tail: x.suffix, cloneOf: cloneMark });
+    const taskId = snapShotTaskId(waveId, i, x.cloneOf ? "clone" : "launch");
     resolved.push({
       taskId,
       pump: {
         taskId,
         shot,
-        ctx: { adAccountId, pixelId: px.pixelId, profileId, currency: account.currency, niche: dry.niche, geoLabel: dry.geoLabel, tail: x.suffix, startPaused: Boolean(x.startPaused) },
+        ctx: { adAccountId, pixelId: px.pixelId, profileId, currency: account.currency, niche: dry.niche, geoLabel: dry.geoLabel, tail: x.suffix, startPaused: Boolean(x.startPaused), ...(cloneMark ? { cloneMark } : {}) },
       },
-      // The monitor tag names the device restriction, and how many ads the campaign carries when
-      // the card had several creatives: "auto · Android · 5 creatives".
+      // The monitor tag names the device restriction and how many ads the campaign carries when
+      // the card had several creatives: "auto · Android · 5 creatives"; a clone says so first and
+      // counts "ads" to stay inside the column's 40 characters: "clone · max $0,27 · Android · 5 ads".
       row: {
         name: provisionalName.slice(0, 250),
         geo: dry.geoLabel,
         budget,
-        bid: [dry.label, snapDeviceShort(dry.deviceOs), shot.media.length > 1 ? `${shot.media.length} creatives` : ""].filter(Boolean).join(" · "),
+        bid: [x.cloneOf ? "clone" : "", dry.label, snapDeviceShort(dry.deviceOs), shot.media.length > 1 ? `${shot.media.length} ${x.cloneOf ? "ads" : "creatives"}` : ""].filter(Boolean).join(" · "),
         key: desiredKey ?? "",
       },
     });

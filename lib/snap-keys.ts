@@ -53,8 +53,12 @@ export type SnapKeyBinding = {
   name?: string;
   notes?: string;
   task_id?: string;
+  /** A CLONE's source Snapchat campaign id (the cloner, /snap/clone). */
+  clone_of?: string;
 };
 export type SnapKeyRow = SnapKeyBinding & { documentId: string };
+/** A won claim: the key, its registry row and the binding written into it (what a backfill merges into). */
+export type SnapKeyClaimed = { key: string; documentId: string; binding: SnapKeyBinding };
 
 /** Bounded Strapi call (8 s): the registry must fail FAST, never hang a launch. */
 async function strapi(url: string, init: RequestInit = {}): Promise<Response> {
@@ -155,7 +159,7 @@ async function wonClaim(key: string, documentId: string): Promise<boolean> {
  * next candidate; a won POST is verified against a committed twin (older row wins → ours is
  * deleted and the walk continues). Throws when the pool is exhausted or Strapi fails otherwise.
  */
-export async function claimSnapKey(desired: string | undefined, meta: Partial<SnapKeyBinding> & { user: string }): Promise<{ key: string; documentId: string }> {
+export async function claimSnapKey(desired: string | undefined, meta: Partial<SnapKeyBinding> & { user: string }): Promise<SnapKeyClaimed> {
   let used: string[] = [];
   try {
     used = (await listSnapKeys()).map((r) => r.key);
@@ -173,7 +177,7 @@ export async function claimSnapKey(desired: string | undefined, meta: Partial<Sn
     if (res.ok) {
       const body = (await res.json().catch(() => ({}))) as { data?: { documentId?: string } };
       const documentId = body.data?.documentId ?? "";
-      if (!documentId || (await wonClaim(key, documentId))) return { key, documentId };
+      if (!documentId || (await wonClaim(key, documentId))) return { key, documentId, binding };
       // Lost a concurrent race → drop our younger twin and try the next candidate. This is the one
       // place a failed delete is deliberately tolerated: releaseSnapKey throws now, but a leftover
       // twin does not disturb the claim (the older row owns the key; the twin shows on the Keys
@@ -198,8 +202,18 @@ export async function claimSnapKey(desired: string | undefined, meta: Partial<Sn
 /** Merge `patch` into the key's binding (PUT carries NO ckey — re-sending the unique key trips
  *  Strapi's uniqueness check). Throws on a failed find, on a missing row (the campaign would be
  *  running on a key the registry considers free) and on a non-ok PUT (`snap key backfill failed
- *  (<status>)`) — the pump folds the message into the launch row. */
-export async function backfillSnapKey(key: string, patch: Partial<SnapKeyBinding>): Promise<void> {
+ *  (<status>)`) — the pump folds the message into the launch row.
+ *  Given the CLAIM of this same key (its row id + the binding it wrote — nothing else writes the row
+ *  between the claim and the pump's one backfill), the row is PUT by id with no find: a find by key
+ *  right after the claim can miss the fresh row (Strapi read lag — 22.09, glo-snp_099 "no registry
+ *  row" under a live campaign). */
+export async function backfillSnapKey(key: string, patch: Partial<SnapKeyBinding>, claim?: { key: string; documentId: string; binding?: Partial<SnapKeyBinding> }): Promise<void> {
+  if (claim && claim.key === key && claim.documentId && claim.binding) {
+    const merged = { ...claim.binding, ...patch, key } as SnapKeyBinding;
+    const res = await strapi(`${STRAPI}/api/app-caches/${claim.documentId}`, { method: "PUT", body: JSON.stringify({ data: { cvalue: merged, refreshed_at: Date.now() } }) });
+    if (!res.ok) throw new Error(`snap key backfill failed (${res.status})`);
+    return;
+  }
   const row = await findSnapKey(key);
   if (!row) throw new Error(`snap key backfill failed: no registry row for ${key}`);
   const { documentId, ...current } = row;

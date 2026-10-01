@@ -83,7 +83,7 @@ test("claim: unique-400 on the desired key walks to the next; the winner is veri
   });
   try {
     const r = await keys.claimSnapKey("glo-snp_002", { user: "nazar", niche: "Cars" });
-    assert.deepEqual(r, { key: "glo-snp_003", documentId: "mine-3" });
+    assert.deepEqual([r.key, r.documentId, r.binding.key, r.binding.niche], ["glo-snp_003", "mine-3", "glo-snp_003", "Cars"]);
     const posts = stub.calls.filter((c) => c.method === "POST");
     assert.deepEqual(posts.map((p) => (p.body?.data as Record<string, unknown>).ckey), ["snap-key:glo-snp_002", "snap-key:glo-snp_003"]);
     const value = (posts[1].body?.data as Record<string, unknown>).cvalue as Record<string, unknown>;
@@ -111,7 +111,7 @@ test("claim: a lost concurrent race (an older twin row) deletes ours and walks o
   });
   try {
     const r = await keys.claimSnapKey(undefined, { user: "nazar" });
-    assert.deepEqual(r, { key: "glo-snp_002", documentId: "mine-2" });
+    assert.deepEqual([r.key, r.documentId, r.binding.key], ["glo-snp_002", "mine-2", "glo-snp_002"]);
     assert.deepEqual(stub.calls.filter((c) => c.method === "DELETE").map((c) => c.url), ["https://strapi.test/api/app-caches/mine-1"]);
   } finally {
     stub.restore();
@@ -129,7 +129,8 @@ test("claim: a lost concurrent race (an older twin row) deletes ours and walks o
     return json({}, 404);
   });
   try {
-    assert.deepEqual(await keys.claimSnapKey(undefined, { user: "nazar" }), { key: "glo-snp_002", documentId: "mine-2" });
+    const r = await keys.claimSnapKey(undefined, { user: "nazar" });
+    assert.deepEqual([r.key, r.documentId], ["glo-snp_002", "mine-2"]);
     assert.equal(stuck.calls.filter((c) => c.method === "DELETE").length, 1, "the loser-delete was attempted exactly once");
   } finally {
     stuck.restore();
@@ -222,5 +223,50 @@ test("registry failures are never swallowed: release / find / backfill throw wit
     await assert.rejects(keys.releaseSnapKey("d5"), /fetch failed/);
   } finally {
     offline.restore();
+  }
+});
+
+test("a claim hands back the binding it wrote; a backfill given that claim PUTs the row by id — no re-find by key (the 22.09 glo-snp_099 read-lag)", async () => {
+  const stub = stubFetch((r) => {
+    if (r.method === "GET" && /\$startsWith\]/.test(r.url)) return json({ data: [] });
+    if (r.method === "POST") return json({ data: { documentId: "doc-9" } });
+    if (r.method === "GET") return json({ data: [{ documentId: "doc-9" }] }); // wonClaim: ours is the only row
+    if (r.method === "PUT") return json({ data: {} });
+    return json({}, 500);
+  });
+  try {
+    const claim = await keys.claimSnapKey("glo-snp_099", { user: "tima", task_id: "snc-w-01", clone_of: "cf459275-d6aa-48a2-bd91-26ad85d10750" });
+    assert.equal(claim.key, "glo-snp_099");
+    assert.equal(claim.documentId, "doc-9");
+    assert.equal(claim.binding.clone_of, "cf459275-d6aa-48a2-bd91-26ad85d10750");
+    assert.equal(claim.binding.status, "active");
+    const before = stub.calls.length;
+    await keys.backfillSnapKey("glo-snp_099", { campaign_id: "cmp-1", ad_count: 2 }, claim);
+    const after = stub.calls.slice(before);
+    assert.deepEqual(after.map((c) => c.method), ["PUT"], "one PUT, no find");
+    assert.match(after[0].url, /\/api\/app-caches\/doc-9$/);
+    const cvalue = (after[0].body as { data: { cvalue: Record<string, unknown>; ckey?: string } }).data;
+    assert.equal(cvalue.ckey, undefined);
+    assert.equal(cvalue.cvalue.campaign_id, "cmp-1");
+    assert.equal(cvalue.cvalue.user, "tima", "the claim's binding is kept");
+    assert.equal(cvalue.cvalue.clone_of, "cf459275-d6aa-48a2-bd91-26ad85d10750");
+    assert.equal(cvalue.cvalue.key, "glo-snp_099");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("a backfill with a claim for ANOTHER key ignores it and finds the row by key as before", async () => {
+  const stub = stubFetch((r) => {
+    if (r.method === "GET") return json({ data: [row("glo-snp_005", "d5")] });
+    if (r.method === "PUT") return json({ data: {} });
+    return json({}, 500);
+  });
+  try {
+    await keys.backfillSnapKey("glo-snp_005", { campaign_id: "cmp-5" }, { key: "glo-snp_006", documentId: "d6", binding: { key: "glo-snp_006" } });
+    assert.deepEqual(stub.calls.map((c) => c.method), ["GET", "PUT"]);
+    assert.match(stub.calls[1].url, /\/d5$/);
+  } finally {
+    stub.restore();
   }
 });

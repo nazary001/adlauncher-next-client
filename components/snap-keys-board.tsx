@@ -441,7 +441,12 @@ export function SnapKeysBoard({ user, initialSel, initialIncludeToday = true }: 
                       <td className="px-2 py-2 font-mono tabular-nums text-dim">{m ? int(m.visitors) : "—"}</td>
                       <td className="px-2 py-2 font-mono tabular-nums text-dim">{m ? `${int(m.triggered)}/${int(m.fired)}` : "—"}</td>
                       <td className="px-2 py-2 font-mono tabular-nums text-dim">{m ? int(m.conversions) : "—"}</td>
-                      <td className="px-3 py-2 text-right">
+                      <td className="whitespace-nowrap px-3 py-2 text-right">
+                        {b?.campaign_id ? (
+                          <a href={`/snap/clone?keys=${encodeURIComponent(r.key)}`} title="Clone the campaign on this key — a new campaign on a new key" className="mr-1.5 inline-block rounded-md border border-[#FFFC00]/40 bg-[#FFFC00]/10 px-2 py-1 text-[10.5px] font-semibold text-[#f3f0a3] transition-colors hover:bg-[#FFFC00]/20">
+                            Clone
+                          </a>
+                        ) : null}
                         {b && user?.owner ? (
                           <button type="button" onClick={() => void release(r.key)} disabled={releasing === r.key} className="rounded-md border border-danger/30 px-2 py-1 text-[10.5px] font-medium text-danger transition-colors hover:bg-danger/10 disabled:opacity-50">
                             {releasing === r.key ? "Releasing…" : "Release"}
