@@ -2,10 +2,9 @@ import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { AIF_POOL_MAX, aifBrandCode } from "@/lib/partners";
 import { fetchUsedBrands } from "@/lib/aif-claim";
+import { storeConfigured } from "@/lib/store";
 
-// Server-only: the Strapi token never reaches the browser.
-const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
-const TOKEN = process.env.STRAPI_TOKEN ?? "";
+// Server-only: the store is never reached from the browser.
 
 function nextFree(used: string[]): string | null {
   const set = new Set(used);
@@ -19,8 +18,8 @@ function nextFree(used: string[]): string | null {
 /**
  * GET → { used, next, poolMax } — the launcher board previews AIF brand assignment from this,
  * skipping taken brands (test01..test700). The actual claim is server-side in /api/aif/launch
- * (lib/aif-claim, race-safe) — this endpoint only feeds the optimistic card previews, exactly
- * like /api/gcm does for MO.
+ * (lib/aif-claim, atomic over the unique index) — this endpoint only feeds the optimistic card
+ * previews, exactly like /api/gcm does for MO.
  */
 export async function GET(req: Request) {
   // Belt-and-suspenders: proxy-gated, but self-checks the session so a matcher regression can't
@@ -28,7 +27,7 @@ export async function GET(req: Request) {
   if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
-  if (!STRAPI || !TOKEN) {
+  if (!storeConfigured()) {
     return NextResponse.json({ error: "strapi_not_configured" }, { status: 500 });
   }
   try {

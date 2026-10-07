@@ -1,15 +1,17 @@
 import { NextResponse } from "next/server";
 import { SESSION_COOKIE, SESSION_TTL_SEC, sessionCookieOptions, signSession } from "@/lib/session";
+import { authenticateUser } from "@/lib/auth-users";
+import { storeConfigured } from "@/lib/store";
 
 export const runtime = "nodejs";
 
-// Same users as amazon-tools: the "tools" Strapi (users-permissions /api/auth/local).
-const TOOLS = (process.env.STRAPI_TOOLS_URL ?? "").replace(/\/+$/, "");
+// Same users as amazon-tools: the `up_users` collection (migrated from the tools Strapi's
+// users-permissions). Passwords are verified locally (bcrypt); a user whose hash never left Strapi
+// is verified ONCE against the old `STRAPI_TOOLS_URL` and migrated — see lib/auth-users.
 
 // Best-effort in-memory brute-force throttle, counting FAILED attempts only (a shared office/VPN NAT
 // IP isn't locked out by successful logins). Keyed by BOTH the client IP and the identifier, so
-// rotating one can't dodge the other. Resets on restart / per serverless instance — Strapi's own
-// auth throttling is the durable backstop.
+// rotating one can't dodge the other. Resets on restart / per serverless instance.
 const hits = new Map<string, { n: number; resetAt: number }>();
 const WINDOW = 15 * 60 * 1000;
 const MAX = 10;
@@ -36,7 +38,7 @@ function clientIp(req: Request): string {
 }
 
 export async function POST(req: Request) {
-  if (!TOOLS) return NextResponse.json({ ok: false, error: "auth_not_configured" }, { status: 500 });
+  if (!storeConfigured()) return NextResponse.json({ ok: false, error: "auth_not_configured" }, { status: 500 });
 
   const ipKey = `ip:${clientIp(req)}`;
 
@@ -51,31 +53,24 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "Too many failed attempts — try again later." }, { status: 429 });
   }
 
-  try {
-    const res = await fetch(`${TOOLS}/api/auth/local`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ identifier, password }),
-      signal: AbortSignal.timeout(8000),
-    });
-    const data = (await res.json().catch(() => ({}))) as { user?: Record<string, unknown> };
-    if (!res.ok || !data?.user) {
-      recordFailure(ipKey);
-      recordFailure(idKey);
-      return NextResponse.json({ ok: false, error: "Invalid username or password." }, { status: 401 });
+  const res = await authenticateUser(identifier, password);
+  if (!res.ok) {
+    if (res.reason === "unavailable") {
+      return NextResponse.json({ ok: false, error: "Auth service is unavailable. Try again." }, { status: 502 });
     }
-    hits.delete(ipKey); // successful login clears both failure counters
-    hits.delete(idKey);
-
-    const u = data.user;
-    const username = String(u.username ?? identifier);
-    const role = (u.app_role as string | undefined) ?? null;
-    const token = signSession({ sub: (u.id as string | number) ?? username, username, email: u.email as string, role });
-
-    const out = NextResponse.json({ ok: true, user: { username, email: u.email ?? null, role } });
-    out.cookies.set(SESSION_COOKIE, token, sessionCookieOptions(SESSION_TTL_SEC));
-    return out;
-  } catch {
-    return NextResponse.json({ ok: false, error: "Auth service is unavailable. Try again." }, { status: 502 });
+    recordFailure(ipKey);
+    recordFailure(idKey);
+    return NextResponse.json({ ok: false, error: "Invalid username or password." }, { status: 401 });
   }
+  hits.delete(ipKey); // successful login clears both failure counters
+  hits.delete(idKey);
+
+  const u = res.user;
+  const username = String(u.username || identifier);
+  const role = u.app_role ?? null;
+  const token = signSession({ sub: u.id ?? username, username, email: u.email ?? undefined, role });
+
+  const out = NextResponse.json({ ok: true, user: { username, email: u.email ?? null, role } });
+  out.cookies.set(SESSION_COOKIE, token, sessionCookieOptions(SESSION_TTL_SEC));
+  return out;
 }

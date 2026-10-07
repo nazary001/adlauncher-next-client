@@ -1,27 +1,26 @@
-// AV rail — the KEY REGISTRY (av001…, one key per campaign — the AIF-brand twin) over the existing
-// Strapi `app-cache` collection: one row per claimed key, ckey "av-key:<key>" (UNIQUE → a POST on a
-// taken key is a 400 → the claim is atomic without a new Strapi collection), cvalue = the binding.
-// Same race-safe claim-then-verify contract as lib/snap-keys (Strapi's app-level uniqueness has a
-// TOCTOU window under concurrent POSTs — the OLDEST row wins). Server-only; no runtime imports (own
-// 8 s-bounded fetch) so `node --test` covers it with a stubbed fetch.
+// AV rail — the KEY REGISTRY (av001…, one key per campaign — the AIF-brand twin) over the shared
+// `app_caches` collection: one row per claimed key, ckey "av-key:<key>" (UNIQUE index → an insert on a
+// taken key fails with E11000 → the claim is atomic without a dedicated collection), cvalue = the
+// binding. Same claim contract as lib/snap-keys. Server-only; the store is reached through ./mongo.ts
+// (relative `.ts` imports so `node --test` loads this module straight from disk).
 //
 // The LAUNCHABLE range is the registered one: a key earns reportable revenue only once it is uploaded
 // to AV's "UTM Campaign Values" (UI only, no API) — so every claim walks av001…av<registered> and
 // nothing else. registered = 0 (the default until the owner uploads the pool) = no key can be claimed.
 // Nothing here fails quietly: a registry write that did not happen is reported to the caller.
 
-const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
-const TOKEN = process.env.STRAPI_TOKEN ?? "";
-const H = () => ({ Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" });
+import type { Document } from "mongodb";
+import { coll } from "./mongo.ts";
+import { APP_CACHES, STORE_TIMEOUT_MS, bounded, dupKeyOn, insertFresh, prefixFilter } from "./store.ts";
 
 export const AV_KEY_CKEY_PREFIX = "av-key:";
 
 // Key codec — a deliberate LOCAL COPY of lib/av-link.ts (avKeyCode / avKeyIndex / AV_KEY_POOL_MAX are
 // the canonical twin; KEEP IN SYNC). A runtime import is not an option for a `node --test`-able module
-// here: node resolves a relative import only with an explicit `.ts` extension, which the app's tsconfig
-// does not allow — the same reason lib/snap-keys copies its codec.
+// here: node resolves a relative import only with an explicit `.ts` extension — the same reason
+// lib/snap-keys copies its codec.
 const POOL_MAX = 999;
-const LIST_PAGES = Math.ceil(POOL_MAX / 100) + 1;
+const LIST_LIMIT = (Math.ceil(POOL_MAX / 100) + 1) * 100;
 const KEY_RE = /^av(\d{3})$/;
 const keyCode = (n: number): string => `av${String(n).padStart(3, "0")}`;
 const keyIndex = (key: string): number | null => {
@@ -55,14 +54,12 @@ export type AvKeyBinding = {
 };
 export type AvKeyRow = AvKeyBinding & { documentId: string };
 
-/** Bounded Strapi call (8 s): the registry must fail FAST, never hang a launch. */
-async function strapi(url: string, init: RequestInit = {}): Promise<Response> {
-  return fetch(url, { ...init, headers: { ...H(), ...(init.headers ?? {}) }, cache: "no-store", signal: AbortSignal.timeout(8_000) });
-}
-
 const str = (v: unknown): string => (v == null ? "" : String(v));
+const errMsg = (e: unknown): string => (e as Error)?.message ?? String(e);
 
-function rowOf(raw: Record<string, unknown>): AvKeyRow | null {
+const PROJECTION = { _id: 0, documentId: 1, ckey: 1, cvalue: 1 } as const;
+
+function rowOf(raw: Document): AvKeyRow | null {
   const documentId = str(raw.documentId);
   const v = (raw.cvalue && typeof raw.cvalue === "object" ? raw.cvalue : {}) as Record<string, unknown>;
   const key = str(v.key) || str(raw.ckey).replace(AV_KEY_CKEY_PREFIX, "");
@@ -107,57 +104,45 @@ export function avNextKey(used: Iterable<string>, registered: number, desired?: 
 
 // ---------- reads ----------
 
-/** Every registry row (any status). Paged ×100 (Strapi Cloud clamps pageSize); throws on a failed
- *  page — a partial registry must never masquerade as the whole. */
+/** Every registry row (any status), key order. Throws on a failed read (`registry read failed …`) —
+ *  a partial registry must never masquerade as the whole. */
 export async function listAvKeys(): Promise<AvKeyRow[]> {
-  const out: AvKeyRow[] = [];
-  for (let page = 1; page <= LIST_PAGES; page++) {
-    const res = await strapi(
-      `${STRAPI}/api/app-caches?filters[ckey][$startsWith]=${encodeURIComponent(AV_KEY_CKEY_PREFIX)}&pagination[page]=${page}&pagination[pageSize]=100&sort[0]=ckey:asc`,
+  let docs: Document[];
+  try {
+    const c = await coll(APP_CACHES);
+    docs = await bounded(
+      c.find({ ckey: prefixFilter(AV_KEY_CKEY_PREFIX) }, { projection: PROJECTION, maxTimeMS: STORE_TIMEOUT_MS }).sort({ ckey: 1 }).limit(LIST_LIMIT).toArray(),
+      "av registry list",
     );
-    if (!res.ok) throw new Error(`strapi ${res.status}`);
-    const body = (await res.json().catch(() => ({}))) as { data?: Record<string, unknown>[] };
-    const rows = (body.data ?? []).map(rowOf).filter((r): r is AvKeyRow => Boolean(r));
-    out.push(...rows);
-    if ((body.data ?? []).length < 100) break;
+  } catch (e) {
+    throw new Error(`registry read failed: ${errMsg(e)}`);
   }
-  return out.sort((a, b) => a.key.localeCompare(b.key));
+  return docs
+    .map(rowOf)
+    .filter((r): r is AvKeyRow => Boolean(r))
+    .sort((a, b) => a.key.localeCompare(b.key));
 }
 
-/** The row bound to `key`, null ONLY when no row exists; a failed read throws (`strapi <status>`) so
- *  "unknown" is never reported as "free". */
+/** The row bound to `key`, null ONLY when no row exists; a failed read throws (`registry read failed …`)
+ *  so "unknown" is never reported as "free". */
 export async function findAvKey(key: string): Promise<AvKeyRow | null> {
-  const res = await strapi(`${STRAPI}/api/app-caches?filters[ckey][$eq]=${encodeURIComponent(AV_KEY_CKEY_PREFIX + key)}&pagination[pageSize]=1`);
-  if (!res.ok) throw new Error(`strapi ${res.status}`);
-  const body = (await res.json().catch(() => ({}))) as { data?: Record<string, unknown>[] };
-  return body.data?.[0] ? rowOf(body.data[0]) : null;
+  let doc: Document | null;
+  try {
+    const c = await coll(APP_CACHES);
+    doc = await bounded(c.findOne({ ckey: AV_KEY_CKEY_PREFIX + key }, { projection: PROJECTION, maxTimeMS: STORE_TIMEOUT_MS }), "av registry read");
+  } catch (e) {
+    throw new Error(`registry read failed: ${errMsg(e)}`);
+  }
+  return doc ? rowOf(doc) : null;
 }
 
 // ---------- claim ----------
 
-/** Did WE win this key? Re-read its rows oldest-first; ours must be the earliest. Read failure → keep
- *  the row (best-effort). */
-async function wonClaim(key: string, documentId: string): Promise<boolean> {
-  try {
-    const res = await strapi(
-      `${STRAPI}/api/app-caches?filters[ckey][$eq]=${encodeURIComponent(AV_KEY_CKEY_PREFIX + key)}&sort[0]=createdAt:asc&sort[1]=documentId:asc&fields[0]=ckey&pagination[pageSize]=10`,
-    );
-    if (!res.ok) return true;
-    const body = (await res.json().catch(() => ({}))) as { data?: Array<{ documentId?: string }> };
-    const rows = body.data ?? [];
-    if (rows.length <= 1) return true;
-    return rows[0]?.documentId === documentId;
-  } catch {
-    return true;
-  }
-}
-
 /**
- * Reserve one REGISTERED key: `desired` first, then the next free ones (wrap). A unique-ckey 400 =
- * taken → next candidate; a won POST is verified against a committed twin (older row wins → ours is
- * deleted and the walk continues). Throws `av_keys_not_registered` when the registered range is empty
- * (the stub), `av key pool exhausted` when every registered key is bound, or on any other Strapi
- * failure.
+ * Reserve one REGISTERED key: `desired` first, then the next free ones (wrap). A unique-ckey collision
+ * (E11000) = taken → next candidate; the index is atomic, so a successful insert IS the win. Throws
+ * `av_keys_not_registered` when the registered range is empty (the stub), `av key pool exhausted` when
+ * every registered key is bound, or on any other store failure.
  */
 export async function claimAvKey(
   desired: string | undefined,
@@ -172,32 +157,18 @@ export async function claimAvKey(
   try {
     used = (await listAvKeys()).map((r) => r.key);
   } catch {
-    used = []; // the POST's unique constraint is the real guard — a claim just walks through 400s
+    used = []; // the unique index is the real guard — a claim just walks through collisions
   }
   const candidates = avKeyCandidates(used, max, desired);
   if (candidates.length === 0) throw new Error(`av key pool exhausted — every registered key av001…${keyCode(max)} is bound (register more in ActiveView)`);
   for (const key of candidates) {
     const binding: AvKeyBinding = { ...meta, key, status: "active", user: meta.user, claimed_at: Date.now() };
-    const res = await strapi(`${STRAPI}/api/app-caches`, {
-      method: "POST",
-      body: JSON.stringify({ data: { ckey: AV_KEY_CKEY_PREFIX + key, cvalue: binding, refreshed_at: Date.now() } }),
-    });
-    if (res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { data?: { documentId?: string } };
-      const documentId = body.data?.documentId ?? "";
-      if (!documentId || (await wonClaim(key, documentId))) return { key, documentId };
-      // Lost a concurrent race → drop our younger twin and walk on (a failed delete is tolerated here:
-      // the older row owns the key; a leftover twin shows on the AV keys page and is released by hand).
-      try {
-        await releaseAvKey(documentId);
-      } catch {
-        /* walk on */
-      }
-      continue;
-    }
-    if (res.status !== 400) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`av key claim failed (${res.status}): ${text.slice(0, 200)}`);
+    try {
+      const doc = await insertFresh(APP_CACHES, { ckey: AV_KEY_CKEY_PREFIX + key, cvalue: binding, refreshed_at: Date.now() });
+      return { key, documentId: doc.documentId };
+    } catch (e) {
+      if (dupKeyOn(e, "ckey")) continue; // someone holds this key — walk on
+      throw new Error(`av key claim failed: ${errMsg(e).slice(0, 200)}`);
     }
   }
   throw new Error(`av key pool exhausted — every registered key av001…${keyCode(max)} is bound (register more in ActiveView)`);
@@ -205,22 +176,34 @@ export async function claimAvKey(
 
 // ---------- writes ----------
 
-/** Merge `patch` into the row's binding by documentId (PUT carries NO ckey — re-sending the unique key
- *  trips Strapi's uniqueness check). Throws on a failed find/PUT or a missing row. */
+/** Merge `patch` into the row's binding by documentId (the update never touches the unique ckey).
+ *  Throws on a failed find/update or a missing row. */
 export async function backfillAvKey(key: string, patch: Partial<AvKeyBinding>): Promise<void> {
   const row = await findAvKey(key);
   if (!row) throw new Error(`av key backfill failed: no registry row for ${key}`);
   const { documentId, ...current } = row;
   const merged: AvKeyBinding = { ...current, ...patch, key };
-  const res = await strapi(`${STRAPI}/api/app-caches/${documentId}`, { method: "PUT", body: JSON.stringify({ data: { cvalue: merged, refreshed_at: Date.now() } }) });
-  if (!res.ok) throw new Error(`av key backfill failed (${res.status})`);
+  let matched: boolean;
+  try {
+    const c = await coll(APP_CACHES);
+    matched = (await bounded(c.updateOne({ documentId }, { $set: { cvalue: merged, refreshed_at: Date.now(), updatedAt: new Date() } }), "av registry update")).matchedCount > 0;
+  } catch (e) {
+    throw new Error(`av key backfill failed (${errMsg(e)})`);
+  }
+  if (!matched) throw new Error(`av key backfill failed: no registry row for ${key}`);
 }
 
 /** Delete the row — the key returns to the pool (a key that never carried traffic is capacity, not
- *  history). Throws on a non-ok answer. */
+ *  history). Throws when no row went away or on a store error. */
 export async function releaseAvKey(documentId: string): Promise<void> {
-  const res = await strapi(`${STRAPI}/api/app-caches/${documentId}`, { method: "DELETE" });
-  if (!res.ok) throw new Error(`av key release failed (${res.status})`);
+  let deleted: number;
+  try {
+    const c = await coll(APP_CACHES);
+    deleted = (await bounded(c.deleteOne({ documentId }), "av registry delete")).deletedCount;
+  } catch (e) {
+    throw new Error(`av key release failed (${errMsg(e)})`);
+  }
+  if (deleted === 0) throw new Error("av key release failed (not found)");
 }
 
 /** Owner release from the AV keys page: false ONLY when no row exists, true after a SUCCESSFUL delete;

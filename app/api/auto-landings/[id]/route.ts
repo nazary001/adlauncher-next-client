@@ -38,7 +38,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     if (job.status !== "scheduled") {
       return NextResponse.json({ ok: false, error: "only_scheduled_cancels" }, { status: 409 });
     }
-    const ok = await patchJob(id, { status: "canceled", finished_at: String(Date.now()) });
+    const ok = await patchJob(id, { status: "canceled", finished_at: Date.now() });
     return ok
       ? NextResponse.json({ ok: true })
       : NextResponse.json({ ok: false, error: "store_unavailable" }, { status: 502 });
@@ -50,7 +50,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     }
     const ok = await patchJob(id, {
       status: "scheduled",
-      scheduled_at: String(Date.now()),
+      scheduled_at: Date.now(),
       error: "",
       started_at: null,
       finished_at: null,
@@ -68,7 +68,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     if (!Number.isFinite(at) || at < Date.now() - 60_000) {
       return NextResponse.json({ ok: false, error: "bad_time" }, { status: 400 });
     }
-    const ok = await patchJob(id, { status: "scheduled", scheduled_at: String(at) });
+    const ok = await patchJob(id, { status: "scheduled", scheduled_at: at });
     return ok
       ? NextResponse.json({ ok: true })
       : NextResponse.json({ ok: false, error: "store_unavailable" }, { status: 502 });

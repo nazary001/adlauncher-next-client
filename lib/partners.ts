@@ -1,6 +1,7 @@
 import type { ComponentType, SVGProps } from "react";
 import { AvFlag, BrazilFlag, IndiaFlag, UsaFlag } from "@/components/icons";
 import type { Campaign } from "./types";
+import { AIF_POOL_MAX, aifBrandCode, GCM_POOL_MAX, gcmCode } from "./pool-codes";
 import { bidKind } from "./types";
 import { type AifFlow, AIF_RW_BASE, aifFlowOf, aifLinkSegments } from "./aif-link";
 import { AV_KEY_POOL_MAX, avKeyCode, avLinkSegments } from "./av-link";
@@ -231,8 +232,7 @@ export function pickAifPixel(pixels: Bound[]): Bound | null {
 }
 /** Brand pool test01..test700 (partner-assigned): 1–9 keep the doc's 2-digit zero-padded shape
  *  ("test01"), 10+ are plain. One brand = one buy campaign — the registry enforces it. */
-export const AIF_POOL_MAX = 700;
-export const aifBrandCode = (n: number): string => `test${String(n).padStart(2, "0")}`;
+export { AIF_POOL_MAX, aifBrandCode } from "./pool-codes";
 /** Normalize a pasted article reference to the bare slug the RW `destination` param takes
  *  (doc example: `destination=best-family-pets`): a full path/URL like
  *  "https://content.honeyandhues.com/article/foo" or "/article/foo" reduces to "foo", then
@@ -574,12 +574,9 @@ export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[
   return changed ? next : rows;
 }
 
-/** The MagicAds gcm marker pool: codes 1..200 (widened from 99 per partner, 2026-08-10). */
-export const GCM_POOL_MAX = 200;
-
-/** Canonical form of a pool code: 1–99 stay 2-digit zero-padded ("01".."99" — every live link and
- *  registry row uses that shape), 100–200 are plain 3-digit. */
-export const gcmCode = (n: number): string => String(n).padStart(2, "0");
+/** The MagicAds gcm marker pool: codes 1..200 (widened from 99 per partner, 2026-08-10); the codec lives
+ *  in lib/pool-codes (import-free, shared with the claim modules and their tests). */
+export { GCM_POOL_MAX, gcmCode } from "./pool-codes";
 
 /** A partner's revenue-marker pool: the codes that segment partner revenue per campaign, claimed
  *  atomically from a Strapi registry. MO = gcm 01..200, AIF = brand test01..test700, AV = av001…

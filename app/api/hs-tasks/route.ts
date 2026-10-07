@@ -1,15 +1,12 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { findTaskRow, pickTaskFields, readTeamTasks, storeConfigured, strapiFetch, upsertTaskRow } from "@/lib/task-store";
+import { deleteTaskRow, findTaskRow, pickTaskFields, readTeamTasks, storeConfigured, taskScopeFilter, upsertTaskRow } from "@/lib/task-store";
 
-// HS tasks share the `launch-task` collection (no separate deploy), tagged partner="br" so they
+// HS tasks share the `launch_tasks` collection (no separate deploy), tagged partner="br" so they
 // live alongside MO rows without colliding — the MO reader excludes "br", this reader takes only
 // "br". Same shared-visibility + owner-authority model as /api/launch-tasks.
 export const maxDuration = 60;
 
-const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
-const TOKEN = process.env.STRAPI_TOKEN ?? "";
-const H = () => ({ Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" });
 const HS_PARTNER = "br";
 
 const WINDOW_MS = 7 * 24 * 3_600_000;
@@ -24,7 +21,7 @@ const num = (v: unknown): number | undefined => {
   return Number.isFinite(n) ? n : undefined;
 };
 
-/** Strapi row → HS client task. LION-specific fields ride in reused columns: the durable LION
+/** Stored row → HS client task. LION-specific fields ride in reused columns: the durable LION
  *  task id in `link`, the kind (launch|duplicate) in `gcm`, the ad count in `ad_id`. */
 function toClient(r: Row): Row {
   const updated = typeof r.updatedAt === "string" ? Date.parse(r.updatedAt) : NaN;
@@ -61,16 +58,12 @@ export async function GET(req: Request) {
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   if (!storeConfigured()) return NextResponse.json({ ok: false, tasks: [] });
   // Bounded + short-cached read (task-store) — see /api/launch-tasks; keeps the team's HS polling
-  // from hammering the shared Strapi and serves the last good list through a Strapi blip.
+  // from hammering the shared store and serves the last good list through a store blip.
   const cutoff = Date.now() - WINDOW_MS;
-  const pageUrl = (page: number) =>
-    `${STRAPI}/api/launch-tasks?filters[partner][$eq]=${HS_PARTNER}&filters[owner][$notNull]=true` +
-    `&filters[queued_at][$gte]=${cutoff}&sort[0]=queued_at:desc&pagination[page]=${page}&pagination[pageSize]=${PAGE_SIZE}`;
-  const { ok, tasks, status } = await readTeamTasks("hs", pageUrl, toClient, {
-    pageSize: PAGE_SIZE,
-    maxPages: MAX_PAGES,
+  const { ok, tasks } = await readTeamTasks("hs", taskScopeFilter({ partner: HS_PARTNER }, cutoff), toClient, {
+    limit: PAGE_SIZE * MAX_PAGES,
   });
-  if (!ok) return NextResponse.json({ ok: false, tasks: [], ...(status ? { status } : {}) });
+  if (!ok) return NextResponse.json({ ok: false, tasks: [] });
   return NextResponse.json({ ok: true, now: Date.now(), tasks });
 }
 
@@ -103,7 +96,7 @@ export async function POST(req: Request) {
         items.slice(i, i + 8).map(async (item) => {
           const fields = pickTaskFields(item);
           const incoming = String(fields.status ?? "");
-          // STRICT read: a Strapi blip must not read as "row absent" — the zombie-guard below
+          // STRICT read: a store blip must not read as "row absent" — the zombie-guard below
           // would swallow a terminal error-write while answering ok:true, and the client never
           // retries a claimed success. A store failure throws instead → the batch answers 502
           // below and the client's next save retries it.
@@ -156,9 +149,7 @@ export async function DELETE(req: Request) {
       await Promise.all(
         ids.slice(i, i + 8).map(async (id) => {
           const found = await findTaskRow(id);
-          if (found && found.owner === user) {
-            await strapiFetch(`${STRAPI}/api/launch-tasks/${found.documentId}`, { method: "DELETE", headers: H() });
-          }
+          if (found && found.owner === user) await deleteTaskRow(found.documentId);
         }),
       );
     }

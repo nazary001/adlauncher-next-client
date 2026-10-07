@@ -2,20 +2,15 @@ import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { isOwnerSession } from "@/lib/roles";
 import { readAssignments } from "@/lib/acct-assignments";
+import { listDirectoryUsers } from "@/lib/auth-users";
+import { coll } from "@/lib/mongo";
+import { LAUNCH_TASKS, STORE_TIMEOUT_MS, bounded, storeConfigured } from "@/lib/store";
 
 export const runtime = "nodejs";
 
-// Same tools Strapi the login authenticates against. The token is OPTIONAL: with it the roster
-// comes straight from the user directory (username + app_role, non-PII fields only); without it
-// the route falls back to usernames observed in team activity, so the feature needs no new
-// secret to function.
-const TOOLS = (process.env.STRAPI_TOOLS_URL ?? "").replace(/\/+$/, "");
-const TOOLS_TOKEN = process.env.STRAPI_TOOLS_TOKEN ?? "";
-
-// The shared vivid-triumph Strapi where launch-task rows live (their `owner` = usernames of
-// everyone who ever launched — MO/AIF and the HS rail all write into `launch-tasks`).
-const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
-const TOKEN = process.env.STRAPI_TOKEN ?? "";
+// The same user directory the login authenticates against (`up_users`): the roster comes straight
+// from it (username + app_role, non-PII fields only); when the store is unreachable the route falls
+// back to usernames observed in team activity, so the page still works.
 
 export type TeamUser = {
   username: string;
@@ -26,58 +21,31 @@ export type TeamUser = {
 };
 
 async function directoryUsers(): Promise<TeamUser[] | null> {
-  if (!TOOLS || !TOOLS_TOKEN) return null;
+  if (!storeConfigured()) return null;
   try {
-    // Paged (Strapi Cloud clamps pageSize to 100): a single-page read silently truncated the
-    // owner's assignable roster past 100 users. 3 pages = plenty of headroom for the team.
-    const rows: unknown[] = [];
-    for (let page = 1; page <= 3; page++) {
-      const res = await fetch(
-        `${TOOLS}/api/users?fields[0]=username&fields[1]=app_role&fields[2]=blocked` +
-          `&pagination[page]=${page}&pagination[pageSize]=100`,
-        { headers: { Authorization: `Bearer ${TOOLS_TOKEN}` }, cache: "no-store", signal: AbortSignal.timeout(8000) },
-      );
-      if (!res.ok) {
-        if (rows.length === 0) return null; // directory unreachable → the caller's fallback source
-        break; // keep the pages we got — a partial roster still beats the activity fallback
-      }
-      const body = (await res.json().catch(() => null)) as unknown;
-      const pageRows = Array.isArray(body) ? body : ((body as { data?: unknown })?.data ?? null);
-      if (!Array.isArray(pageRows)) return null;
-      rows.push(...pageRows);
-      if (pageRows.length < 100) break;
-    }
+    const rows = await listDirectoryUsers(300);
     return rows
-      .filter((u) => !(u as { blocked?: boolean }).blocked)
-      .map((u) => ({
-        username: String((u as { username?: unknown }).username ?? "").trim(),
-        role: ((u as { app_role?: unknown }).app_role ?? null) as string | null,
-        source: "directory" as const,
-      }))
+      .filter((u) => !u.blocked)
+      .map((u) => ({ username: u.username.trim(), role: u.app_role, source: "directory" as const }))
       .filter((u) => u.username);
   } catch {
     return null;
   }
 }
 
-/** Usernames seen on recent launch-task rows (newest-first, up to 3×100 — Strapi clamps
- *  pageSize to 100). This is the roster's mainstay when the directory token isn't configured,
- *  so it reaches deeper than one page: one busy wave day can fill 100 rows with 2-3 owners. */
+/** Usernames seen on recent launch-task rows (newest-first, up to 300 — the old 3 × 100 pages).
+ *  This is the roster's mainstay when the directory is unreachable, so it reaches deeper than one
+ *  page: one busy wave day can fill 100 rows with 2-3 owners. */
 async function activityUsers(): Promise<string[]> {
-  if (!STRAPI || !TOKEN) return [];
+  if (!storeConfigured()) return [];
   const out: string[] = [];
   try {
-    for (let page = 1; page <= 3; page++) {
-      const res = await fetch(
-        `${STRAPI}/api/launch-tasks?fields[0]=owner&sort[0]=updatedAt:desc&pagination[page]=${page}&pagination[pageSize]=100`,
-        { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store", signal: AbortSignal.timeout(8000) },
-      );
-      if (!res.ok) break;
-      const body = (await res.json().catch(() => ({}))) as { data?: Array<{ owner?: unknown }> };
-      const rows = body.data ?? [];
-      out.push(...rows.map((r) => String(r.owner ?? "").trim()).filter(Boolean));
-      if (rows.length < 100) break;
-    }
+    const c = await coll(LAUNCH_TASKS);
+    const rows = await bounded(
+      c.find({}, { projection: { _id: 0, owner: 1 }, maxTimeMS: STORE_TIMEOUT_MS }).sort({ updatedAt: -1 }).limit(300).toArray(),
+      "launch-tasks list",
+    );
+    out.push(...rows.map((r) => String(r.owner ?? "").trim()).filter(Boolean));
   } catch {
     /* partial list is fine — merged with directory + registry names */
   }
@@ -87,7 +55,7 @@ async function activityUsers(): Promise<string[]> {
 /**
  * GET /api/team — owner-only roster for the /accounts assignment page.
  * { ok, users: TeamUser[], directory: boolean } — `directory` tells the UI whether the list is
- * authoritative (tools Strapi) or best-effort (activity + registry), so it can offer manual add.
+ * authoritative (the user directory) or best-effort (activity + registry), so it can offer manual add.
  */
 export async function GET(req: Request) {
   const session = sessionFromCookieHeader(req.headers.get("cookie"));

@@ -1,18 +1,15 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { findTaskRow, readTeamTasks, storeConfigured, strapiFetch } from "@/lib/task-store";
+import { deleteTaskRow, findTaskRow, readTeamTasks, storeConfigured, taskScopeFilter } from "@/lib/task-store";
 import { tiktokRailEnabled } from "@/lib/tiktok-weapon";
 
-// TikTok (LION tiktok-weapon) rows share the `launch-task` collection (no separate deploy), tagged
+// TikTok (LION tiktok-weapon) rows share the `launch_tasks` collection (no separate deploy), tagged
 // partner="tt" so they live alongside MO/HS/AIF/Google/Snapchat rows without colliding — the MO
 // reader excludes "tt", this reader takes only "tt". Same shared-visibility + owner-authority model
 // as /api/google-tasks. Rows are written SERVER-side only (the wave route stamps them, the pump and
 // /api/tiktok/status advance them), so there is no client upsert here.
 export const maxDuration = 60;
 
-const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
-const TOKEN = process.env.STRAPI_TOKEN ?? "";
-const H = () => ({ Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" });
 const TIKTOK_PARTNER = "tt";
 
 const WINDOW_MS = 7 * 24 * 3_600_000;
@@ -27,7 +24,7 @@ const num = (v: unknown): number | undefined => {
   return Number.isFinite(n) ? n : undefined;
 };
 
-/** Strapi row → TikTok client task. TikTok-specific fields ride in reused columns: the durable
+/** Stored row → TikTok client task. TikTok-specific fields ride in reused columns: the durable
  *  tiktok-weapon task id in `link`, the kind (t-launch|t-clone|t-juro) in `gcm`, the target
  *  advertiser id in `adset_id`, the account currency code in `ad_id`. */
 function toClient(r: Row): Row {
@@ -66,13 +63,10 @@ export async function GET(req: Request) {
   if (!tiktokRailEnabled()) return NextResponse.json({ ok: false, error: "tiktok_rail_disabled" }, { status: 404 });
   if (!storeConfigured()) return NextResponse.json({ ok: false, tasks: [] });
   // Bounded + short-cached read (task-store) — see /api/launch-tasks; keeps the team's polling
-  // from hammering the shared Strapi and serves the last good list through a Strapi blip.
+  // from hammering the shared store and serves the last good list through a store blip.
   const cutoff = Date.now() - WINDOW_MS;
-  const pageUrl = (page: number) =>
-    `${STRAPI}/api/launch-tasks?filters[partner][$eq]=${TIKTOK_PARTNER}&filters[owner][$notNull]=true` +
-    `&filters[queued_at][$gte]=${cutoff}&sort[0]=queued_at:desc&pagination[page]=${page}&pagination[pageSize]=${PAGE_SIZE}`;
-  const { ok, tasks, status } = await readTeamTasks("tiktok", pageUrl, toClient, { pageSize: PAGE_SIZE, maxPages: MAX_PAGES });
-  if (!ok) return NextResponse.json({ ok: false, tasks: [], ...(status ? { status } : {}) });
+  const { ok, tasks } = await readTeamTasks("tiktok", taskScopeFilter({ partner: TIKTOK_PARTNER }, cutoff), toClient, { limit: PAGE_SIZE * MAX_PAGES });
+  if (!ok) return NextResponse.json({ ok: false, tasks: [] });
   return NextResponse.json({ ok: true, now: Date.now(), tasks });
 }
 
@@ -93,9 +87,7 @@ export async function DELETE(req: Request) {
       await Promise.all(
         ids.slice(i, i + 8).map(async (id) => {
           const found = await findTaskRow(id);
-          if (found && found.owner === user) {
-            await strapiFetch(`${STRAPI}/api/launch-tasks/${found.documentId}`, { method: "DELETE", headers: H() });
-          }
+          if (found && found.owner === user) await deleteTaskRow(found.documentId);
         }),
       );
     }

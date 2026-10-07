@@ -1,21 +1,21 @@
 // Per-account launch rate limit: at most ACCT_LIMIT campaigns may be created in one ad account
 // within ACCT_WINDOW_MS, the window ANCHORED at the first launch (owner pick 2026-08-18). Every
 // campaign-creating route claims a slot here right before it builds; the UI reads the snapshot to
-// badge account pickers and drive the header timer. State lives in the shared Strapi `app-cache`
-// collection (unique ckey — the same store the HS wave claim already uses), because Vercel
+// badge account pickers and drive the header timer. State lives in the shared `app_caches`
+// collection (UNIQUE ckey — the same store the HS wave claim already uses), because Vercel
 // serverless instances share nothing and several users launch at once:
 //   acct-window:<actId>            → { ws }                       — the window anchor
 //   acct-slot:<actId>:<ws>:<n>     → { user, partner, channel, name, accountName, ts }
-// Claims are race-safe the proven way (lib/gcm-claim / lib/aif-claim): POST against the unique
-// ckey, then re-read and yield if we weren't first — plus an anchor re-check, because two claims
-// racing across the window boundary could otherwise split onto two anchors. Server-only.
+// Claims are atomic: an insert against the unique ckey either lands (the slot is ours) or fails with
+// E11000 (someone holds it — walk on) — plus an anchor re-check, because two claims racing across the
+// window boundary could otherwise split onto two anchors. Server-only.
+//
+// Bounded store calls (8 s): FAIL CLOSED must also mean fail FAST — a hung registry refuses the
+// launch in seconds instead of pinning the function to its maxDuration.
 
-// Bounded Strapi client (8s abort): FAIL CLOSED must also mean fail FAST — a hung registry
-// refuses the launch in seconds instead of pinning the function to its maxDuration.
-import { strapiFetch } from "@/lib/task-store";
-
-const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
-const TOKEN = process.env.STRAPI_TOKEN ?? "";
+import type { Document } from "mongodb";
+import { coll } from "./mongo.ts";
+import { APP_CACHES, STORE_TIMEOUT_MS, bounded, dupKeyOn, insertFresh, prefixFilter, storeConfigured } from "./store.ts";
 
 export const ACCT_LIMIT = 5;
 export const ACCT_WINDOW_MS = 30 * 60_000;
@@ -25,6 +25,8 @@ const SWEEP_GRACE_MS = 5 * 60_000;
 /** At most this many row deletions per snapshot call — the sweep piggybacks on a UI poll and
  *  must never turn it into a bulk-delete stall. */
 const SWEEP_MAX_DELETES = 20;
+/** Rows a prefix scan reads at most (the old 5 pages × 100). */
+const LIST_LIMIT = 500;
 
 const W_PREFIX = "acct-window:";
 const S_PREFIX = "acct-slot:";
@@ -109,7 +111,7 @@ export function deriveSnapshot(
 }
 
 // ---------------------------------------------------------------------------
-// Strapi I/O — own helpers, NOT lib/app-cache's: a claim must distinguish "unique violation"
+// Store I/O — own helpers, NOT lib/app-cache's: a claim must distinguish "unique violation"
 // (someone holds the slot → walk on) from "store down" (FAIL CLOSED → the launch refuses),
 // and app-cache's best-effort writer collapses both into one null.
 // ---------------------------------------------------------------------------
@@ -121,137 +123,84 @@ function storeDown(detail: string): Error {
 }
 
 function assertConfigured(): void {
-  if (!STRAPI || !TOKEN) throw storeDown("no STRAPI env");
+  if (!storeConfigured()) throw storeDown("no MONGODB_URI env");
 }
 
-const HEADERS = () => ({ Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" });
+const errMsg = (e: unknown): string => (e as Error)?.message ?? String(e);
+const PROJECTION = { _id: 0, documentId: 1, ckey: 1, cvalue: 1 } as const;
 
-function shapeRow(r: { documentId?: unknown; ckey?: unknown; cvalue?: unknown }): Row | null {
+function shapeRow(r: Document | null | undefined): Row | null {
   if (!r?.documentId || typeof r.ckey !== "string") return null;
   return { documentId: String(r.documentId), ckey: r.ckey, value: r.cvalue ?? null };
 }
 
-/** All rows whose ckey starts with `prefix` (paged — Strapi Cloud clamps pageSize to 100). */
+/** All rows whose ckey starts with `prefix` (bounded; throws `acct_limit_unavailable` on a failure). */
 async function listRows(prefix: string): Promise<Row[]> {
-  const out: Row[] = [];
-  for (let page = 1; page <= 5; page++) {
-    const res = await strapiFetch(
-      `${STRAPI}/api/app-caches?filters[ckey][$startsWith]=${encodeURIComponent(prefix)}` +
-        `&fields[0]=ckey&fields[1]=cvalue&pagination[page]=${page}&pagination[pageSize]=100`,
-      { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
-    ).catch((e) => {
-      throw storeDown(String(e));
-    });
-    if (!res.ok) throw storeDown(`list ${res.status}`);
-    const body = (await res.json().catch(() => ({}))) as { data?: unknown[] };
-    const rows = (body.data ?? [])
-      .map((r) => shapeRow(r as { documentId?: unknown; ckey?: unknown; cvalue?: unknown }))
-      .filter((r): r is Row => r !== null);
-    out.push(...rows);
-    if ((body.data ?? []).length < 100) break;
+  try {
+    const c = await coll(APP_CACHES);
+    const docs = await bounded(
+      c.find({ ckey: prefixFilter(prefix) }, { projection: PROJECTION, maxTimeMS: STORE_TIMEOUT_MS }).limit(LIST_LIMIT).toArray(),
+      "acct-limit list",
+    );
+    return docs.map(shapeRow).filter((r): r is Row => r !== null);
+  } catch (e) {
+    throw storeDown(`list: ${errMsg(e)}`);
   }
-  return out;
 }
 
 async function readRow(ckey: string): Promise<Row | null> {
-  const res = await strapiFetch(
-    `${STRAPI}/api/app-caches?filters[ckey][$eq]=${encodeURIComponent(ckey)}&pagination[pageSize]=1`,
-    { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
-  ).catch((e) => {
-    throw storeDown(String(e));
-  });
-  if (!res.ok) throw storeDown(`read ${res.status}`);
-  const body = (await res.json().catch(() => ({}))) as { data?: unknown[] };
-  return shapeRow((body.data?.[0] ?? {}) as { documentId?: unknown; ckey?: unknown; cvalue?: unknown });
+  try {
+    const c = await coll(APP_CACHES);
+    return shapeRow(await bounded(c.findOne({ ckey }, { projection: PROJECTION, maxTimeMS: STORE_TIMEOUT_MS }), "acct-limit read"));
+  } catch (e) {
+    throw storeDown(`read: ${errMsg(e)}`);
+  }
 }
 
-/**
- * Read the window anchor for a ckey, HEALING any duplicate rows a past race left behind. Strapi's
- * unique ckey has a proven TOCTOU hole (two concurrent POSTs can both 2xx — see wonRow), and the
- * window POST has no wonRow dedup like the slot claim does, so two anchors can coexist. A duplicate
- * is doubly harmful: it splits slot counting (deriveSnapshot keys slots off ONE anchor's ws), and
- * it makes the expiry anchor-move PUT collide on the unique ckey — the "put 400" that fails the
- * whole launch closed. Keep the earliest row (createdAt asc, the same "earliest wins" rule wonRow
- * uses), delete the rest best-effort, return the survivor. */
-async function readWindow(ckey: string): Promise<Row | null> {
-  const res = await strapiFetch(
-    `${STRAPI}/api/app-caches?filters[ckey][$eq]=${encodeURIComponent(ckey)}` +
-      `&sort[0]=createdAt:asc&sort[1]=documentId:asc&fields[0]=ckey&fields[1]=cvalue&pagination[pageSize]=10`,
-    { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
-  ).catch((e) => {
-    throw storeDown(String(e));
-  });
-  if (!res.ok) throw storeDown(`read ${res.status}`);
-  const body = (await res.json().catch(() => ({}))) as { data?: unknown[] };
-  const rows = (body.data ?? [])
-    .map((r) => shapeRow(r as { documentId?: unknown; ckey?: unknown; cvalue?: unknown }))
-    .filter((r): r is Row => r !== null);
-  if (rows.length === 0) return null;
-  const [keep, ...extra] = rows;
-  for (const dup of extra) await deleteRow(dup.documentId); // best-effort heal
-  return keep;
-}
-
-/** POST a row. `{unique:true}` on a 400 (ckey taken — the atomic signal); throws when the store
- *  itself fails. */
+/** Insert a row. `{unique:true}` when the ckey is taken (E11000 — the atomic signal); throws when
+ *  the store itself fails. */
 async function postRow(
   ckey: string,
   cvalue: unknown,
 ): Promise<{ documentId: string; unique?: never } | { unique: true }> {
-  const res = await strapiFetch(`${STRAPI}/api/app-caches`, {
-    method: "POST",
-    headers: HEADERS(),
-    body: JSON.stringify({ data: { ckey, cvalue, refreshed_at: Date.now() } }),
-  }).catch((e) => {
-    throw storeDown(String(e));
-  });
-  if (res.status === 400) return { unique: true };
-  if (!res.ok) throw storeDown(`post ${res.status}`);
-  const body = (await res.json().catch(() => ({}))) as { data?: { documentId?: unknown } };
-  const documentId = body.data?.documentId ? String(body.data.documentId) : "";
-  if (!documentId) throw storeDown("post: no documentId");
-  return { documentId };
+  try {
+    const doc = await insertFresh(APP_CACHES, { ckey, cvalue, refreshed_at: Date.now() });
+    return { documentId: doc.documentId };
+  } catch (e) {
+    if (dupKeyOn(e, "ckey")) return { unique: true };
+    throw storeDown(`post: ${errMsg(e)}`);
+  }
 }
 
 async function putRow(documentId: string, cvalue: unknown): Promise<void> {
-  // Deliberately WITHOUT ckey: it is immutable, so an update never needs it, and re-sending it
-  // re-runs Strapi's unique check — which 400s if a duplicate anchor exists (the exact "put 400"
-  // fail-closed that killed launches). Omitting ckey leaves it untouched (partial update).
-  const res = await strapiFetch(`${STRAPI}/api/app-caches/${documentId}`, {
-    method: "PUT",
-    headers: HEADERS(),
-    body: JSON.stringify({ data: { cvalue, refreshed_at: Date.now() } }),
-  }).catch((e) => {
-    throw storeDown(String(e));
-  });
-  if (!res.ok) throw storeDown(`put ${res.status}`);
+  // Deliberately WITHOUT ckey: it is immutable, so an update never needs it (partial update).
+  let matched = 0;
+  try {
+    const c = await coll(APP_CACHES);
+    matched = (await bounded(c.updateOne({ documentId }, { $set: { cvalue, refreshed_at: Date.now(), updatedAt: new Date() } }), "acct-limit update")).matchedCount;
+  } catch (e) {
+    throw storeDown(`put: ${errMsg(e)}`);
+  }
+  if (matched === 0) throw storeDown("put: row missing");
 }
 
 /** Best-effort delete — releasing/sweeping must never fail a launch. */
 async function deleteRow(documentId: string): Promise<void> {
-  await strapiFetch(`${STRAPI}/api/app-caches/${documentId}`, {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${TOKEN}` },
-  }).catch(() => {});
+  try {
+    const c = await coll(APP_CACHES);
+    await bounded(c.deleteOne({ documentId }), "acct-limit delete");
+  } catch {
+    /* best-effort */
+  }
 }
 
-/** Did WE win this unique ckey? Strapi's app-level uniqueness has a TOCTOU window letting two
- *  concurrent POSTs both 2xx (proven live on the gcm registry) — earliest row wins, we yield
- *  otherwise. Optimistic true on a read failure (mirror of aif-claim). */
-async function wonRow(ckey: string, documentId: string): Promise<boolean> {
+async function deleteRows(documentIds: string[]): Promise<void> {
+  if (documentIds.length === 0) return;
   try {
-    const res = await strapiFetch(
-      `${STRAPI}/api/app-caches?filters[ckey][$eq]=${encodeURIComponent(ckey)}` +
-        `&sort[0]=createdAt:asc&sort[1]=documentId:asc&fields[0]=ckey&pagination[pageSize]=10`,
-      { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
-    );
-    if (!res.ok) return true;
-    const body = (await res.json().catch(() => ({}))) as { data?: Array<{ documentId?: unknown }> };
-    const rows = body.data ?? [];
-    if (rows.length <= 1) return true;
-    return String(rows[0]?.documentId ?? "") === documentId;
+    const c = await coll(APP_CACHES);
+    await bounded(c.deleteMany({ documentId: { $in: documentIds } }), "acct-limit sweep");
   } catch {
-    return true;
+    /* best-effort */
   }
 }
 
@@ -286,7 +235,7 @@ export async function claimAcctSlot(
 
   for (let attempt = 0; attempt < 3; attempt++) {
     const now = Date.now();
-    let wrow = await readWindow(wkey);
+    let wrow = await readRow(wkey);
     if (!wrow) {
       const res = await postRow(wkey, { ws: now });
       wrow = "documentId" in res ? { documentId: res.documentId, ckey: wkey, value: { ws: now } } : await readRow(wkey);
@@ -316,10 +265,6 @@ export async function claimAcctSlot(
       const skey = `${sPrefix}${slot}`;
       const res = await postRow(skey, { ...meta, ts: Date.now() });
       if ("unique" in res) continue; // someone else holds n — walk on
-      if (!(await wonRow(skey, res.documentId))) {
-        await deleteRow(res.documentId); // concurrent double-2xx — earliest row wins, we yield
-        continue;
-      }
       // Anchor re-check: a claim racing the window boundary may have moved the anchor between our
       // read and this win — a slot keyed on the dead anchor would not count against the new
       // window, quietly widening the limit. Orphan it and retry on the fresh anchor.
@@ -352,7 +297,7 @@ export async function acctLimitSnapshot(): Promise<AcctLimitSnapshot> {
   const snap = deriveSnapshot(wins, slots, now);
 
   // Sweep: window rows past anchor+window+grace, and slot rows whose ckey anchor is past the same
-  // cutoff. Bounded and awaited (a handful of parallel DELETEs) — only runs when there IS garbage.
+  // cutoff. Bounded and awaited (one deleteMany) — only runs when there IS garbage.
   // NOTE the direction: grace is measured PAST the window's end (a garbage/zero anchor is dead
   // immediately) — never by shifting `now`, which would extend the window instead.
   const deadStamp = (ws: number): boolean =>
@@ -367,6 +312,6 @@ export async function acctLimitSnapshot(): Promise<AcctLimitSnapshot> {
     if (dead.length >= SWEEP_MAX_DELETES) break;
     if (deadStamp(Number(s.ckey.slice(S_PREFIX.length).split(":")[1]))) dead.push(s.documentId);
   }
-  if (dead.length > 0) await Promise.all(dead.map((d) => deleteRow(d)));
+  await deleteRows(dead);
   return snap;
 }

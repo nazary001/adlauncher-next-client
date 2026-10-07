@@ -1,18 +1,12 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { findTaskRow, pickTaskFields, readTeamTasks, storeConfigured, strapiFetch, upsertTaskRow } from "@/lib/task-store";
+import { deleteTaskRow, findTaskRow, pickTaskFields, readTeamTasks, storeConfigured, taskScopeFilter, upsertTaskRow } from "@/lib/task-store";
 
-// A pagehide-beacon batch (25 rows) or a bulk clear is ~2 Strapi round-trips per row — the
+// A pagehide-beacon batch (25 rows) or a bulk clear is ~2 store round-trips per row — the
 // platform default duration (~15s) could cut the tail off mid-write, leaving half a wave unmarked.
 export const maxDuration = 60;
 
-// Server-only: the Strapi token never reaches the browser.
-const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
-const TOKEN = process.env.STRAPI_TOKEN ?? "";
-const H = () => ({ Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" });
-
-// Shared-view window: the drawer shows the team's last 7 days. Strapi clamps pageSize to 100
-// (probe-verified), so restore pages through up to 3 pages instead of silently truncating.
+// Shared-view window: the drawer shows the team's last 7 days, at most the old 3 pages × 100 rows.
 const WINDOW_MS = 7 * 24 * 3_600_000;
 const PAGE_SIZE = 100;
 const MAX_PAGES = 3;
@@ -25,8 +19,8 @@ const num = (v: unknown): number | undefined => {
   return Number.isFinite(n) ? n : undefined;
 };
 
-/** Strapi row → client-facing task (biginteger timestamps come back as strings → numbers).
- *  `updated_ms` (Strapi updatedAt) is the liveness signal behind the client's stale detection. */
+/** Stored row → client-facing task (biginteger timestamps → numbers).
+ *  `updated_ms` (the row's updatedAt) is the liveness signal behind the client's stale detection. */
 function toClient(r: Row): Row {
   const updated = typeof r.updatedAt === "string" ? Date.parse(r.updatedAt) : NaN;
   return {
@@ -70,37 +64,21 @@ export async function GET(req: Request) {
   if (!storeConfigured()) return NextResponse.json({ ok: false, tasks: [] });
   // Every partner runs its OWN task manager over this one collection (owner call 08-17):
   // ?scope=aif → only AIF rows (partner="us"); ?scope=av → only AV rows (partner="av"); default →
-  // the MO drawer, which excludes both HS ("br", see /api/hs-tasks) and AIF rows. Explicit $and —
-  // repeating filters[partner][$ne] as two bare query keys would collapse into one in parsing.
+  // the MO drawer, which excludes every other partner's rows (HS "br", AIF "us", Google "gg",
+  // Snapchat "sn", TikTok "tt", AV "av") and KEEPS partner-null rows (historic server-writer/beacon
+  // creates — null = MO by definition, lib/task-view.ts). See taskScopeFilter for the null semantics.
   const scope = new URL(req.url).searchParams.get("scope");
-  // The MO scope also claims partner-NULL rows: Strapi's $ne doesn't match NULL, so without the
-  // $or a row created without a partner stamp (historic server-writer/beacon creates) would be
-  // invisible in EVERY drawer. Null = MO by definition (lib/task-view.ts). The $and excludes every
-  // other partner's rows: HS ("br", see /api/hs-tasks), AIF ("us"), Google ("gg", see
-  // /api/google-tasks), Snapchat ("sn", see /api/snap-tasks), TikTok ("tt", see /api/tiktok-tasks)
-  // and AV ("av", this route ?scope=av) each run their OWN task manager over this one collection.
-  const partnerFilter =
-    scope === "aif"
-      ? `&filters[partner][$eq]=us`
-      : scope === "av"
-        ? `&filters[partner][$eq]=av`
-        : `&filters[$or][0][partner][$null]=true` +
-          `&filters[$or][1][$and][0][partner][$ne]=br&filters[$or][1][$and][1][partner][$ne]=us` +
-          `&filters[$or][1][$and][2][partner][$ne]=gg&filters[$or][1][$and][3][partner][$ne]=sn` +
-          `&filters[$or][1][$and][4][partner][$ne]=tt&filters[$or][1][$and][5][partner][$ne]=av`;
-  // Bounded + short-cached read (task-store): the team's polling collapses to ~one Strapi read per
-  // scope per few seconds, and a slow/failing Strapi serves the last good list instead of hanging.
+  // Bounded + short-cached read (task-store): the team's polling collapses to ~one store read per
+  // scope per few seconds, and a slow/failing store serves the last good list instead of hanging.
   const cutoff = Date.now() - WINDOW_MS;
-  const pageUrl = (page: number) =>
-    `${STRAPI}/api/launch-tasks?filters[owner][$notNull]=true${partnerFilter}&filters[queued_at][$gte]=${cutoff}` +
-    `&sort[0]=queued_at:desc&pagination[page]=${page}&pagination[pageSize]=${PAGE_SIZE}`;
-  const { ok, tasks, status } = await readTeamTasks(
+  const filter = taskScopeFilter(scope === "aif" ? { partner: "us" } : scope === "av" ? { partner: "av" } : "mo", cutoff);
+  const { ok, tasks } = await readTeamTasks(
     scope === "aif" ? "launch:aif" : scope === "av" ? "launch:av" : "launch:mo",
-    pageUrl,
+    filter,
     toClient,
-    { pageSize: PAGE_SIZE, maxPages: MAX_PAGES },
+    { limit: PAGE_SIZE * MAX_PAGES },
   );
-  if (!ok) return NextResponse.json({ ok: false, tasks: [], ...(status ? { status } : {}) });
+  if (!ok) return NextResponse.json({ ok: false, tasks: [] });
   return NextResponse.json({ ok: true, now: Date.now(), tasks });
 }
 
@@ -163,9 +141,7 @@ export async function DELETE(req: Request) {
       await Promise.all(
         ids.slice(i, i + 8).map(async (id) => {
           const found = await findTaskRow(id);
-          if (found && found.owner === user) {
-            await strapiFetch(`${STRAPI}/api/launch-tasks/${found.documentId}`, { method: "DELETE", headers: H() });
-          }
+          if (found && found.owner === user) await deleteTaskRow(found.documentId);
         }),
       );
     }

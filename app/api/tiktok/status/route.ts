@@ -3,7 +3,9 @@ import { sessionFromCookieHeader } from "@/lib/session";
 import { tiktokTaskOutcome } from "@/lib/tiktok-launch";
 import { tiktokRailEnabled, tiktokWeaponConfigured, twTasks } from "@/lib/tiktok-weapon";
 import { TIKTOK_PARTNER } from "@/lib/tiktok-pump";
-import { storeConfigured, strapiFetch, upsertTaskRow } from "@/lib/task-store";
+import { coll } from "@/lib/mongo";
+import { LAUNCH_TASKS, STORE_TIMEOUT_MS, bounded } from "@/lib/store";
+import { storeConfigured, upsertTaskRow } from "@/lib/task-store";
 
 export const runtime = "nodejs";
 // Bounded read of tiktok-weapon task records (≤5 in flight) + at most one store write per id.
@@ -11,19 +13,15 @@ export const maxDuration = 60;
 
 const MAX_IDS = 60;
 
-const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
-const TOKEN = process.env.STRAPI_TOKEN ?? "";
-
 /** The three facts that decide whether a row may be finished here: whose it is, where it stands,
  *  and WHICH partner task it was sent as. null = absent or unreadable (either way: don't write). */
 async function readSentRow(taskId: string): Promise<{ owner: string; stage: string; link: string } | null> {
   try {
-    const res = await strapiFetch(
-      `${STRAPI}/api/launch-tasks?filters[task_id][$eq]=${encodeURIComponent(taskId)}&fields[0]=owner&fields[1]=stage&fields[2]=link&pagination[pageSize]=1`,
-      { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
+    const c = await coll(LAUNCH_TASKS);
+    const row = await bounded(
+      c.findOne({ task_id: taskId }, { projection: { _id: 0, owner: 1, stage: 1, link: 1 }, maxTimeMS: STORE_TIMEOUT_MS }),
+      "launch-task read",
     );
-    if (!res.ok) return null;
-    const row = ((await res.json().catch(() => ({}))) as { data?: Array<Record<string, unknown>> }).data?.[0];
     return row ? { owner: String(row.owner ?? ""), stage: String(row.stage ?? ""), link: String(row.link ?? "") } : null;
   } catch {
     return null;

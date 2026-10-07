@@ -1,78 +1,63 @@
-// Server-only persistence for launch-task rows (Strapi collection `launch-task`).
-// Shared by /api/launch-tasks (client upserts) AND the launch/clone runners, which write
-// status/stage progress server-side so the row stays truthful for the whole team even when the
-// launching browser dies mid-run. Rows belong to their owner: creates are stamped from the
-// session, foreign updates are refused — visibility is shared, authority is not.
+// Server-only persistence for launch-task rows (MongoDB collection `launch_tasks`, the former Strapi
+// `launch-task`). Shared by /api/launch-tasks (client upserts) AND the launch/clone runners, which
+// write status/stage progress server-side so the row stays truthful for the whole team even when the
+// launching browser dies mid-run. Rows belong to their owner: creates are stamped from the session,
+// foreign updates are refused — visibility is shared, authority is not.
 
-const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
-const TOKEN = process.env.STRAPI_TOKEN ?? "";
+import type { Document, Filter } from "mongodb";
+import { coll } from "./mongo.ts";
+import { LAUNCH_TASKS, STORE_TIMEOUT_MS, bounded, dupKeyOn, insertFresh, storeConfigured, strapiRow, toBigint } from "./store.ts";
 
-const H = () => ({ Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" });
-
-export const storeConfigured = () => Boolean(STRAPI && TOKEN);
-
-// Every Strapi call is bounded: the shared Strapi Cloud instance flakes under the team's polling
-// load (repeated 503/timeout incidents), and an unbounded fetch would hang the function to the
-// 60s runtime limit → "Vercel Runtime Timeout Error" (504) and 50× the GB-hours. A bounded call
-// fails fast so the route can serve stale/empty instead of piling up hung invocations.
-export const STRAPI_TIMEOUT_MS = 8_000;
-export async function strapiFetch(url: string, init: RequestInit = {}, timeoutMs = STRAPI_TIMEOUT_MS): Promise<Response> {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal: ac.signal });
-  } finally {
-    clearTimeout(timer);
-  }
-}
+export { storeConfigured, STORE_TIMEOUT_MS };
 
 // Short shared cache for the team-wide task list. The list is IDENTICAL for every user in a scope,
-// so the whole team's polling (dozens of buyers, every few seconds) collapses to ~one Strapi read
-// per scope per TTL on each warm instance — the difference between Strapi coasting and Strapi
-// falling over. Per-instance (serverless has no shared memory), which is plenty: N warm instances
-// read Strapi at most N×(1/TTL). Owners still see their OWN tasks live — the client overlays local
-// state (mergeShared); only other buyers' rows can lag by up to the TTL.
+// so the whole team's polling (dozens of buyers, every few seconds) collapses to ~one store read per
+// scope per TTL on each warm instance. Per-instance (serverless has no shared memory), which is
+// plenty: N warm instances read the store at most N×(1/TTL). Owners still see their OWN tasks live —
+// the client overlays local state (mergeShared); only other buyers' rows can lag by up to the TTL.
 const TEAM_CACHE_TTL_MS = 4_000;
 const teamCache = new Map<string, { at: number; tasks: unknown[] }>();
 
+/** Every partner that runs its OWN task manager over this one collection: HS ("br", /api/hs-tasks),
+ *  AIF ("us"), Google ("gg"), Snapchat ("sn"), TikTok ("tt") and AV ("av", /api/launch-tasks?scope=av). */
+export const DRAWER_PARTNERS = ["br", "us", "gg", "sn", "tt", "av"] as const;
+
 /**
- * Read the team task list for one scope: served from the short cache when warm, otherwise fetched
- * from Strapi page-by-page (each page bounded by strapiFetch). On an upstream failure it serves the
- * last good list if there is one (a Strapi blip must not blank the whole team's drawer). Returns
- * `ok:false` only when there is nothing cached AND the fetch failed.
+ * The shared-view filter of one drawer: rows with an owner, queued inside the window, and the scope's
+ * partner. The MO drawer (scope "mo") takes every row that is NOT another drawer's — INCLUDING rows
+ * whose partner is null/missing (historic server-writer/beacon creates; null = MO by definition,
+ * lib/task-view.ts). Under Strapi this needed `$or[partner $null][$and partner $ne …]` because SQL's
+ * `<>` drops NULLs; Mongo's `$nin` keeps null AND missing values while excluding the listed partners,
+ * which is exactly the SQL `IS NULL OR (<> … AND <> …)` set (CONVENTIONS §3.2 — re-derived, not
+ * transliterated; tests/mongo-semantics.test.ts proves it on a live collection). `owner: {$ne: null}`
+ * is `IS NOT NULL` (a missing owner is excluded too).
  */
-export async function readTeamTasks<T>(
+export function taskScopeFilter(scope: "mo" | { partner: string }, cutoff: number): Filter<Document> {
+  return {
+    owner: { $ne: null },
+    partner: scope === "mo" ? { $nin: [...DRAWER_PARTNERS] } : scope.partner,
+    queued_at: { $gte: cutoff },
+  };
+}
+
+/**
+ * Read the team task list for one scope: served from the short cache when warm, otherwise loaded by
+ * `load` (bounded). On a store failure it serves the last good list if there is one (a store blip must
+ * not blank the whole team's drawer). Returns `ok:false` only when there is nothing cached AND the
+ * load failed. The loader is injected so the cache contract is testable without a database.
+ */
+export async function readTeamTasksWith<T>(
   scopeKey: string,
-  pageUrl: (page: number) => string,
+  load: () => Promise<Record<string, unknown>[]>,
   mapRow: (row: Record<string, unknown>) => T,
-  opts: { pageSize: number; maxPages: number },
-): Promise<{ ok: boolean; tasks: T[]; status?: number }> {
+): Promise<{ ok: boolean; tasks: T[] }> {
   const now = Date.now();
   const hit = teamCache.get(scopeKey);
   if (hit && now - hit.at < TEAM_CACHE_TTL_MS) return { ok: true, tasks: hit.tasks as T[] };
   try {
-    const rows: Record<string, unknown>[] = [];
-    let complete = true;
-    for (let page = 1; page <= opts.maxPages; page++) {
-      const res = await strapiFetch(pageUrl(page), { headers: H(), cache: "no-store" });
-      if (!res.ok) {
-        if (rows.length > 0) {
-          complete = false; // keep the pages we got, but they are NOT the whole list
-          break;
-        }
-        if (hit) return { ok: true, tasks: hit.tasks as T[] }; // serve stale rather than blank
-        return { ok: false, tasks: [], status: res.status };
-      }
-      const body = (await res.json().catch(() => ({}))) as { data?: Record<string, unknown>[] };
-      const data = body.data ?? [];
-      rows.push(...data);
-      if (data.length < opts.pageSize) break;
-    }
+    const rows = await load();
     const tasks = rows.map(mapRow);
-    // Only a COMPLETE read becomes the cached team list: caching a truncated one would serve
-    // rows-beyond-page-1 as silently missing to the whole team for the TTL — a partial answer
-    // is returned once and the next poll re-reads Strapi.
-    if (complete) teamCache.set(scopeKey, { at: now, tasks });
+    teamCache.set(scopeKey, { at: now, tasks });
     return { ok: true, tasks };
   } catch {
     if (hit) return { ok: true, tasks: hit.tasks as T[] }; // timeout/network → last good list
@@ -80,7 +65,33 @@ export async function readTeamTasks<T>(
   }
 }
 
-// Fields persisted per task (Strapi attribute names). Wire format matches this 1:1.
+/**
+ * The team list of one drawer scope from the store: newest queued first (the old `sort[0]=queued_at:desc`,
+ * no tiebreak — `{partner, queued_at}` serves filter AND sort straight from the index; a compound sort would
+ * pull the whole 7-day set into an in-memory sort), at most `limit` rows — the old 3 pages × 100 window. One
+ * bounded query; a complete answer or none.
+ */
+export async function readTeamTasks<T>(
+  scopeKey: string,
+  filter: Filter<Document>,
+  mapRow: (row: Record<string, unknown>) => T,
+  opts: { limit: number },
+): Promise<{ ok: boolean; tasks: T[] }> {
+  return readTeamTasksWith(
+    scopeKey,
+    async () => {
+      const c = await coll(LAUNCH_TASKS);
+      const docs = await bounded(
+        c.find(filter, { maxTimeMS: STORE_TIMEOUT_MS }).sort({ queued_at: -1 }).limit(opts.limit).toArray(),
+        "launch-tasks list",
+      );
+      return docs.map(strapiRow);
+    },
+    mapRow,
+  );
+}
+
+// Fields persisted per task (schema attribute names). Wire format matches this 1:1.
 // `owner` is intentionally NOT here — it is always stamped server-side from the session,
 // never taken from a request body.
 export const TASK_FIELDS = [
@@ -101,12 +112,38 @@ export const TASK_FIELDS = [
   "started_at",
   "finished_at",
   // Display-only "what it bids on" tag (bidTag: "ROAS 0,3" / "bid $0,5" / "auto") shown on the
-  // monitor cards — the `bid` string column (maxLength 40) exists on the shared `launch-task`
-  // Strapi collection since 2026-09-11. ⚠️ General rule: any NEW attribute needs its Strapi column
-  // FIRST — Strapi 400s a write carrying an undeclared attribute (the ad_id gotcha), which would
-  // wedge EVERY task save.
+  // monitor cards — the `bid` string column (maxLength 40) exists on the shared collection since
+  // 2026-09-11. Unknown keys are dropped here (Strapi used to 400 the whole write on them).
   "bid",
 ] as const;
+
+/** biginteger columns — stored as Numbers (CONVENTIONS §2 typing) so the window `$gte` and the sort
+ *  compare numbers with numbers; a numeric string from an older client is coerced, never kept. */
+const TASK_BIGINT = ["queued_at", "started_at", "finished_at"] as const;
+
+/** Every schema attribute a fresh row carries (nulls for the unset ones, the enum default for status)
+ *  — other readers of this collection index the keys directly, so a new row has the same shape as a
+ *  migrated one. */
+const TASK_ROW_DEFAULTS: Record<string, unknown> = {
+  task_id: null,
+  owner: null,
+  name: null,
+  partner: null,
+  gcm: null,
+  geo: null,
+  budget: null,
+  status: "queued",
+  stage: null,
+  campaign_id: null,
+  adset_id: null,
+  ad_id: null,
+  bid: null,
+  link: null,
+  error: null,
+  queued_at: null,
+  started_at: null,
+  finished_at: null,
+};
 
 export type TaskRowData = Record<string, unknown>;
 
@@ -114,7 +151,7 @@ export function pickTaskFields(body: Record<string, unknown>): TaskRowData {
   const out: TaskRowData = {};
   for (const k of TASK_FIELDS) if (body[k] !== undefined) out[k] = body[k];
   // `bid` is a display tag bounded by the column (maxLength 40): clamp it here so a stale/buggy
-  // client can never 400 the whole upsert; empty/non-string → omitted (the stored value stays).
+  // client can never break the whole upsert; empty/non-string → omitted (the stored value stays).
   if ("bid" in out) {
     const b = typeof out.bid === "string" ? out.bid.trim().slice(0, 40) : "";
     if (b) out.bid = b;
@@ -123,13 +160,20 @@ export function pickTaskFields(body: Record<string, unknown>): TaskRowData {
   return out;
 }
 
+/** Column typing on the way in (biginteger → Number). */
+function typeTaskFields(data: TaskRowData): TaskRowData {
+  const out: TaskRowData = { ...data };
+  for (const k of TASK_BIGINT) if (k in out) out[k] = toBigint(out[k]);
+  return out;
+}
+
 type FoundTaskRow = { documentId: string; owner: string | null; status: string | null; stage: string | null };
 
 /**
  * Find one row by task_id. `strict` distinguishes "confirmed absent" (null) from "store failed"
- * (throws) — for guards where a Strapi blip must not read as absence (the hs-tasks zombie-guard
- * would otherwise swallow a terminal write while answering ok:true). A network/timeout rejection
- * from strapiFetch propagates in both modes.
+ * (throws) — for guards where a store blip must not read as absence (the hs-tasks zombie-guard
+ * would otherwise swallow a terminal write while answering ok:true). Non-strict callers get null
+ * on a failure, as they did on a non-2xx read.
  *
  * ⚠️ ONE function with the full nullable body ON PURPOSE — no thin async wrapper. The 08-24
  * `findTaskRow → findTaskRowImpl` wrapper made Turbopack's const-eval mark the awaited result
@@ -138,19 +182,20 @@ type FoundTaskRow = { documentId: string; owner: string | null; status: string |
  * on prod for ~16h while updates kept working. Verified in the compiled chunk; keep this shape.
  */
 export async function findTaskRow(taskId: string, strict = false): Promise<FoundTaskRow | null> {
-  const res = await strapiFetch(
-    `${STRAPI}/api/launch-tasks?filters[task_id][$eq]=${encodeURIComponent(taskId)}&fields[0]=task_id&fields[1]=owner&fields[2]=status&fields[3]=stage&pagination[pageSize]=1`,
-    { headers: H(), cache: "no-store" },
-  );
-  if (!res.ok) {
-    if (strict) throw new Error(`launch-task read ${res.status}`);
+  let row: Document | null = null;
+  try {
+    const c = await coll(LAUNCH_TASKS);
+    row = await bounded(
+      c.findOne({ task_id: taskId }, { projection: { documentId: 1, owner: 1, status: 1, stage: 1 }, maxTimeMS: STORE_TIMEOUT_MS }),
+      "launch-task read",
+    );
+  } catch (e) {
+    if (strict) throw new Error(`launch-task read failed: ${(e as Error).message ?? String(e)}`);
     return null;
   }
-  const body = await res.json().catch(() => ({}));
-  const row = body?.data?.[0];
   return row?.documentId
     ? {
-        documentId: row.documentId,
+        documentId: String(row.documentId),
         owner: row.owner ? String(row.owner) : null,
         status: row.status ? String(row.status) : null,
         stage: row.stage ? String(row.stage) : null,
@@ -161,86 +206,49 @@ export async function findTaskRow(taskId: string, strict = false): Promise<Found
 export type UpsertResult = { ok: true } | { ok: false; reason: "forbidden" | "store" | "not_configured"; detail?: string };
 
 /**
- * Post-create verify: Strapi's app-level unique constraint has a TOCTOU window (proven live for
- * gcm-map on 08-09, observed for launch-task on 08-10 — task c1b148e8… committed TWICE from a
- * concurrent client save + server beat), so two simultaneous creates of one task_id can BOTH
- * succeed. After winning a create, re-read the code's rows; if a twin exists, the OLDEST row
- * (createdAt, then documentId — same total order every writer computes) is canonical: delete the
- * caller-owned extras and fold this write's fields into the survivor. Best-effort — a failure
- * here leaves at worst the pre-existing duplicate, never lost data.
- */
-async function dedupeTaskRows(user: string, taskId: string, data: TaskRowData): Promise<void> {
-  try {
-    const res = await strapiFetch(
-      `${STRAPI}/api/launch-tasks?filters[task_id][$eq]=${encodeURIComponent(taskId)}` +
-        `&fields[0]=task_id&fields[1]=owner&fields[2]=createdAt&sort[0]=createdAt:asc&sort[1]=documentId:asc&pagination[pageSize]=5`,
-      { headers: H(), cache: "no-store" },
-    );
-    if (!res.ok) return;
-    const body = (await res.json().catch(() => ({}))) as { data?: Array<Record<string, unknown>> };
-    const rows = body.data ?? [];
-    if (rows.length <= 1) return;
-    const [keep, ...extras] = rows;
-    for (const r of extras) {
-      const owner = r.owner ? String(r.owner) : null;
-      if (owner === user && r.documentId) {
-        await strapiFetch(`${STRAPI}/api/launch-tasks/${r.documentId}`, { method: "DELETE", headers: H() });
-      }
-    }
-    const keepOwner = keep.owner ? String(keep.owner) : null;
-    if (keepOwner === user && keep.documentId) {
-      await strapiFetch(`${STRAPI}/api/launch-tasks/${keep.documentId}`, {
-        method: "PUT",
-        headers: H(),
-        body: JSON.stringify({ data }),
-      });
-    }
-  } catch {
-    /* best-effort — the duplicate stays visible until the next write's verify */
-  }
-}
-
-/**
  * Upsert one task row by task_id on behalf of `user`.
  * Fail CLOSED: an existing row is writable only when its owner is readable AND it is the caller's.
- * A create that loses the unique-task_id race (two writers creating at once) re-finds and updates;
- * a create that "wins" is verified for a committed twin (see dedupeTaskRows).
+ * A create that loses the unique-task_id race (two writers creating at once — the unique index makes
+ * the loser's insert fail with E11000, the former Strapi 400) re-finds and updates. The index is
+ * atomic, so no post-create twin check is needed any more.
  */
 export async function upsertTaskRow(user: string, taskId: string, fields: TaskRowData): Promise<UpsertResult> {
   if (!storeConfigured()) return { ok: false, reason: "not_configured" };
-  const data: TaskRowData = { ...pickTaskFields(fields), task_id: taskId, owner: user };
+  const data: TaskRowData = { ...typeTaskFields(pickTaskFields(fields)), task_id: taskId, owner: user };
   try {
+    const c = await coll(LAUNCH_TASKS);
     for (let attempt = 0; attempt < 2; attempt++) {
       const existing = await findTaskRow(taskId);
       if (existing && existing.owner !== user) return { ok: false, reason: "forbidden" };
-      const res = existing
-        ? await strapiFetch(`${STRAPI}/api/launch-tasks/${existing.documentId}`, {
-            method: "PUT",
-            headers: H(),
-            body: JSON.stringify({ data }),
-          })
-        : await strapiFetch(`${STRAPI}/api/launch-tasks`, {
-            method: "POST",
-            headers: H(),
-            // Creates default queued_at (the runners' server-side writes don't carry it, and the
-            // shared GET windows on it — a row without it would be invisible to the team until the
-            // client's own save backfills it). Updates never touch it.
-            body: JSON.stringify({ data: { queued_at: Date.now(), ...data } }),
-          });
-      if (res.ok) {
-        // Unique-constraint TOCTOU: a concurrent create may have committed a twin row — verify.
-        if (!existing) await dedupeTaskRows(user, taskId, data);
+      if (existing) {
+        const r = await bounded(c.updateOne({ documentId: existing.documentId }, { $set: { ...data, updatedAt: new Date() } }), "launch-task update");
+        if (r.matchedCount === 0) return { ok: false, reason: "store", detail: "row vanished before the update" };
         return { ok: true };
       }
-      // Lost the create race (unique task_id → 400): the row now exists — retry as an update.
-      if (!existing && res.status === 400 && attempt === 0) continue;
-      const err = await res.text().catch(() => "");
-      return { ok: false, reason: "store", detail: `${res.status} ${err.slice(0, 300)}` };
+      try {
+        // Creates default queued_at (the runners' server-side writes don't carry it, and the
+        // shared GET windows on it — a row without it would be invisible to the team until the
+        // client's own save backfills it). Updates never touch it.
+        await insertFresh(LAUNCH_TASKS, { ...TASK_ROW_DEFAULTS, queued_at: Date.now(), ...data });
+        return { ok: true };
+      } catch (e) {
+        // Lost the create race (unique task_id → E11000): the row now exists — retry as an update.
+        if (dupKeyOn(e, "task_id") && attempt === 0) continue;
+        throw e;
+      }
     }
     return { ok: false, reason: "store", detail: "create raced twice" };
   } catch (e) {
     return { ok: false, reason: "store", detail: String(e) };
   }
+}
+
+/** Delete one row by its documentId (the routes' owner-checked DELETE). True when a row went away;
+ *  throws on a store failure (the route answers 502). */
+export async function deleteTaskRow(documentId: string): Promise<boolean> {
+  const c = await coll(LAUNCH_TASKS);
+  const r = await bounded(c.deleteOne({ documentId }), "launch-task delete");
+  return r.deletedCount > 0;
 }
 
 /**

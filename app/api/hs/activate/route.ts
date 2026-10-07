@@ -1,14 +1,12 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { lionConfigured, lionSetCampaignStatus } from "@/lib/lion";
-import { strapiFetch } from "@/lib/task-store";
+import { coll } from "@/lib/mongo";
+import { LAUNCH_TASKS, STORE_TIMEOUT_MS, bounded, storeConfigured } from "@/lib/store";
 
 export const runtime = "nodejs";
-// One LION status flip (60s-bounded, retried once) + one bounded Strapi row read.
+// One LION status flip (60s-bounded, retried once) + one bounded store row read.
 export const maxDuration = 60;
-
-const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
-const STRAPI_TOKEN = process.env.STRAPI_TOKEN ?? "";
 
 const bad = (error: string, status = 400) => NextResponse.json({ ok: false, error }, { status });
 
@@ -21,16 +19,14 @@ const bad = (error: string, status = 400) => NextResponse.json({ ok: false, erro
  * belts keep gated clones paused regardless.
  */
 async function overrideGated(campaignId: string): Promise<"" | "geo-gate" | "bid-gate"> {
-  if (!STRAPI || !STRAPI_TOKEN) return "";
+  if (!storeConfigured()) return "";
   try {
-    const res = await strapiFetch(
-      `${STRAPI}/api/launch-tasks?filters[campaign_id][$eq]=${encodeURIComponent(campaignId)}` +
-        `&filters[partner][$eq]=br&sort[0]=updatedAt:desc&fields[0]=stage&pagination[pageSize]=1`,
-      { headers: { Authorization: `Bearer ${STRAPI_TOKEN}` }, cache: "no-store" },
+    const c = await coll(LAUNCH_TASKS);
+    const row = await bounded(
+      c.findOne({ campaign_id: campaignId, partner: "br" }, { sort: { updatedAt: -1 }, projection: { _id: 0, stage: 1 }, maxTimeMS: STORE_TIMEOUT_MS }),
+      "launch-task read",
     );
-    if (!res.ok) return "";
-    const body = (await res.json().catch(() => null)) as { data?: Array<{ stage?: unknown }> } | null;
-    const stage = String(body?.data?.[0]?.stage ?? "");
+    const stage = String(row?.stage ?? "");
     // geo-gate: the override patch hasn't landed; bid-gate: LION resolved other bidding than
     // requested (duplicate v2 read-back) — both keep the clone PAUSED until a human looks.
     return stage === "geo-gate" || stage === "bid-gate" ? stage : "";

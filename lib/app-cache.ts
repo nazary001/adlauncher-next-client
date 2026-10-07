@@ -1,17 +1,22 @@
-// Shared cross-instance KV cache backed by the Strapi `app-cache` collection (one row per key:
-// ckey unique, cvalue json, refreshed_at). Serverless module caches die on every cold start and
+// Shared cross-instance KV cache backed by the MongoDB `app_caches` collection (one row per key:
+// ckey UNIQUE, cvalue json, refreshed_at). Serverless module caches die on every cold start and
 // aren't shared between instances; this row survives and is shared, so all instances see one
-// swept result and one refresh claim. Every helper degrades to null/no-op when Strapi (or the
-// collection, pre-rebuild) is unavailable — callers must treat this layer as best-effort.
+// swept result and one refresh claim. Every helper degrades to null/no-op when the store is
+// unavailable — callers must treat this layer as best-effort. Bounded (8 s): best-effort must also
+// mean fail-FAST — a hung store otherwise pins the calling route to its maxDuration.
 
-// Bounded Strapi client (8s abort): best-effort must also mean fail-FAST — a hung upstream
-// otherwise pins the calling route to its maxDuration (the task-route 504 class).
-import { strapiFetch } from "@/lib/task-store";
-
-const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
-const TOKEN = process.env.STRAPI_TOKEN ?? "";
+import type { Document } from "mongodb";
+import { coll } from "./mongo.ts";
+import { APP_CACHES, STORE_TIMEOUT_MS, bounded, insertFresh, storeConfigured, strapiRow } from "./store.ts";
 
 export type AppCacheRow<T> = { documentId: string; value: T | null; refreshedAt: number };
+
+const PROJECTION = { _id: 0, documentId: 1, cvalue: 1, refreshed_at: 1 } as const;
+
+function rowOf<T>(r: Document | null): AppCacheRow<T> | null {
+  if (!r?.documentId) return null;
+  return { documentId: String(r.documentId), value: (r.cvalue ?? null) as T | null, refreshedAt: Number(r.refreshed_at) || 0 };
+}
 
 export async function readAppCache<T>(key: string): Promise<AppCacheRow<T> | null> {
   const r = await readAppCacheDetailed<T>(key);
@@ -20,61 +25,42 @@ export async function readAppCache<T>(key: string): Promise<AppCacheRow<T> | nul
 
 /** Like readAppCache, but DISTINGUISHES "no row yet" (ok:true, row:null) from "store
  *  unavailable" (ok:false) — read-modify-write callers must refuse to write over a row they
- *  could not read, or a Strapi blip would silently wipe it. */
+ *  could not read, or a store blip would silently wipe it. */
 export async function readAppCacheDetailed<T>(
   key: string,
 ): Promise<{ ok: boolean; row: AppCacheRow<T> | null }> {
-  if (!STRAPI || !TOKEN) return { ok: false, row: null };
+  if (!storeConfigured()) return { ok: false, row: null };
   try {
-    const res = await strapiFetch(
-      `${STRAPI}/api/app-caches?filters[ckey][$eq]=${encodeURIComponent(key)}&pagination[pageSize]=1`,
-      { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
-    );
-    if (!res.ok) return { ok: false, row: null };
-    const body = (await res.json().catch(() => ({}))) as {
-      data?: Array<{ documentId?: string; cvalue?: unknown; refreshed_at?: unknown }>;
-    };
-    const row = body.data?.[0];
-    if (!row?.documentId) return { ok: true, row: null };
-    return {
-      ok: true,
-      row: {
-        documentId: String(row.documentId),
-        value: (row.cvalue ?? null) as T | null,
-        refreshedAt: Number(row.refreshed_at) || 0,
-      },
-    };
+    const c = await coll(APP_CACHES);
+    const doc = await bounded(c.findOne({ ckey: key }, { projection: PROJECTION, maxTimeMS: STORE_TIMEOUT_MS }), "app-cache read");
+    return { ok: true, row: rowOf<T>(doc) };
   } catch {
     return { ok: false, row: null };
   }
 }
 
-/** Upsert the row (PUT by documentId, else POST). Returns the documentId, null when unavailable.
- *  A POST losing the unique-ckey race just returns null — the next read picks the winner's row. */
+/** Upsert the row (update by documentId, else insert). Returns the documentId, null when unavailable.
+ *  An insert losing the unique-ckey race (E11000 — the former POST 400) just returns null — the next
+ *  read picks the winner's row. */
 export async function writeAppCache<T>(
   key: string,
   value: T,
   documentId?: string | null,
 ): Promise<string | null> {
-  if (!STRAPI || !TOKEN) return null;
-  const headers = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
+  if (!storeConfigured()) return null;
   try {
+    const c = await coll(APP_CACHES);
     if (documentId) {
-      // PUT carries NO ckey: re-sending the unique key on an update trips Strapi's uniqueness
-      // check whenever a duplicate row exists ("put 400", the class e7ef117 fixed for acct-limit)
-      // — and a failed PUT must NOT fall through to a POST of the same ckey (one more duplicate).
-      const res = await strapiFetch(`${STRAPI}/api/app-caches/${documentId}`, {
-        method: "PUT",
-        headers,
-        body: JSON.stringify({ data: { cvalue: value, refreshed_at: Date.now() } }),
-      });
-      return res.ok ? documentId : null;
+      // The update never touches ckey (immutable) — and a failed update must NOT fall through to an
+      // insert of the same ckey.
+      const r = await bounded(
+        c.updateOne({ documentId }, { $set: { cvalue: value as unknown, refreshed_at: Date.now(), updatedAt: new Date() } }),
+        "app-cache update",
+      );
+      return r.matchedCount > 0 ? documentId : null;
     }
-    const payload = JSON.stringify({ data: { ckey: key, cvalue: value, refreshed_at: Date.now() } });
-    const res = await strapiFetch(`${STRAPI}/api/app-caches`, { method: "POST", headers, body: payload });
-    if (!res.ok) return null;
-    const body = (await res.json().catch(() => ({}))) as { data?: { documentId?: string } };
-    return body.data?.documentId ?? null;
+    const doc = await insertFresh(APP_CACHES, { ckey: key, cvalue: value as unknown, refreshed_at: Date.now() });
+    return doc.documentId;
   } catch {
     return null;
   }
@@ -82,25 +68,19 @@ export async function writeAppCache<T>(
 
 /**
  * EVERY row stored under one key, OLDEST first (createdAt, then documentId — the same total order
- * every reader computes). Strapi's unique constraint has a TOCTOU window (lib/task-store.ts
- * dedupeTaskRows: two concurrent creates of one unique key were both committed live), so a caller
- * that uses a key as a CLAIM verifies it here: the oldest row is the one winner. `ok:false` = the
- * store could not be read (never "no rows").
+ * every reader computes). With the unique index on ckey there is at most one row per key; callers
+ * that verify a claim keep working unchanged (the one row is the one winner). `ok:false` = the store
+ * could not be read (never "no rows").
  */
 export async function readAppCacheAll<T>(key: string): Promise<{ ok: boolean; rows: AppCacheRow<T>[] }> {
-  if (!STRAPI || !TOKEN) return { ok: false, rows: [] };
+  if (!storeConfigured()) return { ok: false, rows: [] };
   try {
-    const res = await strapiFetch(
-      `${STRAPI}/api/app-caches?filters[ckey][$eq]=${encodeURIComponent(key)}&sort[0]=createdAt:asc&sort[1]=documentId:asc&pagination[pageSize]=10`,
-      { headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store" },
+    const c = await coll(APP_CACHES);
+    const docs = await bounded(
+      c.find({ ckey: key }, { projection: PROJECTION, maxTimeMS: STORE_TIMEOUT_MS }).sort({ createdAt: 1, documentId: 1 }).limit(10).toArray(),
+      "app-cache read",
     );
-    if (!res.ok) return { ok: false, rows: [] };
-    const body = (await res.json().catch(() => ({}))) as {
-      data?: Array<{ documentId?: string; cvalue?: unknown; refreshed_at?: unknown }>;
-    };
-    const rows = (body.data ?? [])
-      .filter((r) => r?.documentId)
-      .map((r) => ({ documentId: String(r.documentId), value: (r.cvalue ?? null) as T | null, refreshedAt: Number(r.refreshed_at) || 0 }));
+    const rows = docs.map((d) => rowOf<T>(strapiRow(d))).filter((r): r is AppCacheRow<T> => r !== null);
     return { ok: true, rows };
   } catch {
     return { ok: false, rows: [] };

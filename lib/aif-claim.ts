@@ -1,46 +1,59 @@
-// Atomic AIF brand claim against the shared Strapi registry (`aif-maps`, unique `brand` field →
-// no two campaigns ever share a brand — the brand IS the partner's revenue key). Same race-safe
-// claim-then-verify contract as lib/gcm-claim (proven live there under concurrent waves), minus
-// the MO-only binding ledger: AIF has no per-day revenue attribution yet, and the gcm ledger
-// feeds MO money tooling that must never see foreign rows. Server-only.
+// Atomic AIF brand claim against the shared registry (`aif_maps`, UNIQUE index on `brand` → no two
+// campaigns ever share a brand — the brand IS the partner's revenue key; a second insert of a brand
+// fails with E11000, the former Strapi 400). Same claim contract as lib/gcm-claim, minus the MO-only
+// binding ledger: AIF has no per-day revenue attribution yet, and the gcm ledger feeds MO money
+// tooling that must never see foreign rows. Server-only.
 
-import { AIF_POOL_MAX, aifBrandCode } from "@/lib/partners";
-// Bounded Strapi client (8s abort) — see lib/gcm-claim: claims fail fast, never hang a launch.
-import { strapiFetch } from "@/lib/task-store";
-
-const STRAPI = (process.env.STRAPI_API_URL ?? "").replace(/\/+$/, "");
-const STRAPI_TOKEN = process.env.STRAPI_TOKEN ?? "";
+import type { Document } from "mongodb";
+import { AIF_POOL_MAX, aifBrandCode } from "./pool-codes.ts";
+import { coll } from "./mongo.ts";
+// Bounded store calls (8 s) — see lib/gcm-claim: claims fail fast, never hang a launch.
+import { AIF_MAPS, STORE_TIMEOUT_MS, bounded, dupKeyOn, insertFresh, pickSchema } from "./store.ts";
 
 type Json = Record<string, unknown>;
 
+const errMsg = (e: unknown): string => (e as Error)?.message ?? String(e);
+
+/** The registry row's attributes (schema.json of `aif-map`) and their column typing. */
+const AIF_MAP_FIELDS = ["brand", "platform", "campaign_id", "adset_id", "ad_id", "ad_ids", "campaign_name", "destination", "status", "bound_at", "history", "notes"] as const;
+const AIF_MAP_TYPING = { datetime: ["bound_at"] } as const;
+const AIF_MAP_DEFAULTS: Json = {
+  brand: null,
+  platform: "facebook",
+  campaign_id: null,
+  adset_id: null,
+  ad_id: null,
+  ad_ids: null,
+  campaign_name: null,
+  destination: null,
+  status: "active",
+  bound_at: null,
+  history: null,
+  notes: null,
+};
+
 /**
  * Every brand currently in the registry (any status — the unique constraint spans them all).
- * Paged: Strapi Cloud CLAMPS pageSize to 100, so a single fetch would silently drop rows once
- * the pool grows past 100 (the 700-brand pool guarantees it will). Throws on any failed page —
+ * One bounded read capped at the pool size plus slack (the 700-brand pool). Throws on a failed read —
  * a partial list must never masquerade as the whole registry.
  */
 export async function fetchUsedBrands(): Promise<string[]> {
-  const out: string[] = [];
-  // brand is unique → row count ≤ pool size; +1 page of slack, hard-bounded against runaway loops.
-  const maxPages = Math.ceil(AIF_POOL_MAX / 100) + 1;
-  for (let page = 1; page <= maxPages; page++) {
-    const res = await strapiFetch(
-      `${STRAPI}/api/aif-maps?fields[0]=brand&pagination[page]=${page}&pagination[pageSize]=100`,
-      { headers: { Authorization: `Bearer ${STRAPI_TOKEN}` }, cache: "no-store" },
-    );
-    if (!res.ok) throw new Error(`strapi ${res.status}`);
-    const body = await res.json().catch(() => ({}));
-    const rows = (body.data ?? []) as Array<{ brand?: string }>;
-    out.push(...rows.map((r) => String(r.brand ?? "")).filter(Boolean));
-    if (rows.length < 100) break;
+  // brand is unique → row count ≤ pool size; +1 page of slack (the old 100-per-page walk), hard-bounded.
+  const limit = (Math.ceil(AIF_POOL_MAX / 100) + 1) * 100;
+  let rows: Document[];
+  try {
+    const c = await coll(AIF_MAPS);
+    rows = await bounded(c.find({}, { projection: { _id: 0, brand: 1 }, maxTimeMS: STORE_TIMEOUT_MS }).limit(limit).toArray(), "aif registry list");
+  } catch (e) {
+    throw new Error(`aif registry read failed: ${errMsg(e)}`);
   }
-  return out;
+  return rows.map((r) => String(r.brand ?? "")).filter(Boolean);
 }
 
 async function usedBrands(): Promise<Set<string>> {
-  // Degrade to empty on failure: the POST's unique constraint is the real guard — a claim just
-  // walks forward through 400s. The strict variant above is for callers that must not show a
-  // partial registry (the /api/aif/brand preview).
+  // Degrade to empty on failure: the unique index is the real guard — a claim just walks forward
+  // through collisions. The strict variant above is for callers that must not show a partial
+  // registry (the /api/aif/brand preview).
   try {
     return new Set(await fetchUsedBrands());
   } catch {
@@ -49,32 +62,9 @@ async function usedBrands(): Promise<Set<string>> {
 }
 
 /**
- * Did WE win this brand? After a POST "succeeds", re-read every row for the brand (oldest first,
- * documentId as the tiebreak) — Strapi's app-level uniqueness has a TOCTOU window that lets two
- * CONCURRENT POSTs of the same value both return 2xx (proven live on the gcm registry). The row
- * that committed first is the sole winner; every later claimant sees the collision and yields.
- * On a read failure we optimistically keep the row (degrade to best-effort).
- */
-async function wonClaim(brand: string, documentId: string): Promise<boolean> {
-  try {
-    const res = await strapiFetch(
-      `${STRAPI}/api/aif-maps?filters[brand][$eq]=${brand}&sort[0]=createdAt:asc&sort[1]=documentId:asc&fields[0]=brand&pagination[pageSize]=10`,
-      { headers: { Authorization: `Bearer ${STRAPI_TOKEN}` }, cache: "no-store" },
-    );
-    if (!res.ok) return true;
-    const body = await res.json().catch(() => ({}));
-    const rows = (body.data ?? []) as Array<{ documentId?: string }>;
-    if (rows.length <= 1) return true;
-    return rows[0]?.documentId === documentId; // we win only if ours is the earliest row
-  } catch {
-    return true;
-  }
-}
-
-/**
  * Reserve a brand (test01..test700 — 2-digit zero-padded below 10, per the partner's doc). Tries
- * `desired`, then walks to the next free brand on a unique-violation OR a lost concurrent race.
- * Returns the brand claimed + the Strapi documentId (for later id back-fill / release).
+ * `desired`, then walks to the next free brand on a unique-index collision. Returns the brand
+ * claimed + the registry documentId (for later id back-fill / release). Atomic (the unique index).
  */
 export async function claimBrand(
   desired: string,
@@ -88,54 +78,46 @@ export async function claimBrand(
   for (let n = 1; n < start; n++) if (!used.has(aifBrandCode(n))) candidates.push(aifBrandCode(n));
 
   for (const brand of candidates) {
-    const res = await strapiFetch(`${STRAPI}/api/aif-maps`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${STRAPI_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        data: {
-          brand,
-          platform: "facebook",
-          status: "active",
-          bound_at: new Date().toISOString(),
-          ...meta,
-        },
-      }),
-    });
-    if (res.ok) {
-      const body = await res.json().catch(() => ({}));
-      const documentId: string | null = body?.data?.documentId ?? null;
-      // Can't verify without a documentId → keep it (best-effort).
-      if (!documentId || (await wonClaim(brand, documentId))) {
-        return { brand, documentId };
-      }
-      // Lost a concurrent race for this brand → release our loser row and try the next candidate.
-      await deleteBrand(documentId);
-      continue;
-    }
-    if (res.status !== 400) {
-      // 400 = unique violation (someone took it) → next candidate; anything else aborts.
-      const body = await res.json().catch(() => ({}));
-      throw new Error(`brand claim failed (${res.status}): ${JSON.stringify(body).slice(0, 200)}`);
+    try {
+      const doc = await insertFresh(AIF_MAPS, {
+        ...AIF_MAP_DEFAULTS,
+        ...pickSchema(meta, AIF_MAP_FIELDS, AIF_MAP_TYPING),
+        brand,
+        platform: "facebook",
+        status: "active",
+        bound_at: new Date(),
+      });
+      return { brand, documentId: doc.documentId };
+    } catch (e) {
+      // E11000 on brand = unique violation (someone took it) → next candidate; anything else aborts.
+      if (dupKeyOn(e, "brand")) continue;
+      throw new Error(`brand claim failed: ${errMsg(e).slice(0, 200)}`);
     }
   }
   throw new Error(`brand pool exhausted — no free brand test01–test${AIF_POOL_MAX}`);
 }
 
-/** Patch the registry row (FB ids after a create, failure notes on a kept-retired row). */
+/** Patch the registry row (FB ids after a create, failure notes on a kept-retired row). Best-effort. */
 export async function backfillBrand(documentId: string | null, patch: Json): Promise<void> {
   if (!documentId) return;
-  await strapiFetch(`${STRAPI}/api/aif-maps/${documentId}`, {
-    method: "PUT",
-    headers: { Authorization: `Bearer ${STRAPI_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ data: patch }),
-  }).catch(() => {});
+  const data = pickSchema(patch, AIF_MAP_FIELDS, AIF_MAP_TYPING);
+  delete data.brand; // the unique key is immutable
+  if (Object.keys(data).length === 0) return;
+  try {
+    const c = await coll(AIF_MAPS);
+    await bounded(c.updateOne({ documentId }, { $set: { ...data, updatedAt: new Date() } }), "aif registry update");
+  } catch {
+    /* best-effort */
+  }
 }
 
 /** Release a claimed brand (delete the row) when a launch fails before any FB resource exists —
- *  a brand that never carried traffic is pool capacity, not history. */
+ *  a brand that never carried traffic is pool capacity, not history. Best-effort. */
 export async function deleteBrand(documentId: string): Promise<void> {
-  await strapiFetch(`${STRAPI}/api/aif-maps/${documentId}`, {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${STRAPI_TOKEN}` },
-  }).catch(() => {});
+  try {
+    const c = await coll(AIF_MAPS);
+    await bounded(c.deleteOne({ documentId }), "aif registry delete");
+  } catch {
+    /* best-effort */
+  }
 }
