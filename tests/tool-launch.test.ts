@@ -546,6 +546,65 @@ test("runToolPublish: partial / unknown with no ids → pending (ambiguous), wit
   assert.ok(!r.ok && !r.pending && r.created?.campaignId === "120200000000009");
 });
 
+// The live 08.10 events of TOOL job #687 (shortened): the ad was refused because the page is
+// restricted from advertising, while the job itself carried no `error` → the row read "TOOL job partial".
+const PARTIAL_EVENTS = [
+  { step: "queued", level: "info", message: "publish: OUTCOME_SALES", meta: {} },
+  { step: "publish", level: "info", message: "publish принят", meta: { async_request_set_ids: ["1"] } },
+  {
+    step: "publish",
+    level: "error",
+    message: "частичный publish",
+    meta: {
+      failed: [
+        {
+          id: "52628994980531",
+          type: "ad",
+          status: "ERROR",
+          error_code: "1404155",
+          error_message:
+            'Ad Can\'t Be Published: You can&#039;t create ads for this Page because it&#039;s restricted from advertising.<br />See <a href="https://l.facebook.com/l.php?u=https%3A%2F%2Ffb.me%2FPageAdRestricted&amp;h=AUD" target="_blank">https://fb.me/PageAdRestricted</a> for details',
+        },
+      ],
+    },
+  },
+];
+
+test("toolFailedReason: Facebook's reason out of the events — no HTML, no tracking link, the code kept", () => {
+  assert.equal(
+    tl.toolFailedReason(PARTIAL_EVENTS),
+    "Facebook refused the ad: Ad Can't Be Published: You can't create ads for this Page because it's restricted from advertising (code 1404155)",
+  );
+  const two = [{ meta: { failed: [{ type: "adset", error_message: "Budget too low &amp; bid missing." }, { type: "ad", error_message: "x" }] } }];
+  assert.equal(tl.toolFailedReason(two), "Facebook refused the adset: Budget too low & bid missing (+1 more)");
+  for (const nothing of [null, [], [{ step: "close", meta: {} }], [{ meta: { failed: [] } }], [{ meta: { failed: [{ type: "ad" }] } }], "x"]) {
+    assert.equal(tl.toolFailedReason(nothing), "");
+  }
+});
+
+test("runToolPublish: a partial job with no error of its own reports Facebook's reason from the events", async () => {
+  const { deps, calls } = fakeDeps({
+    createCampaign: () => ok({ id: 687, status: "queued" }, 202),
+    getJob: () => ok({ id: 687, status: "partial", error: null, result: { created: { campaign_id: "52628994980731", adset_ids: ["52628994980331"], ad_ids: [] } } }),
+    jobEvents: () => ok(PARTIAL_EVENTS),
+  });
+  const r = await tl.runToolPublish(deps, "acct", publishBody, { deadlineAt: Date.now() + 60_000 });
+  assert.ok(!r.ok && !r.pending && r.created?.campaignId === "52628994980731");
+  assert.match(r.error, /^Facebook refused the ad: .*restricted from advertising \(code 1404155\)$/);
+  assert.equal(calls.jobEvents.length, 1);
+
+  // Events unreadable / silent → the old generic sentence, never a throw.
+  for (const jobEvents of [() => fail(502, "tool_unreachable"), () => ok([{ step: "close", meta: {} }])]) {
+    const quiet = fakeDeps({
+      createCampaign: () => ok({ id: 688, status: "queued" }, 202),
+      getJob: () => ok({ id: 688, status: "partial", error: null, result: { created: { campaign_id: "c688", adset_ids: [], ad_ids: [] } } }),
+      jobEvents,
+    });
+    const q = await tl.runToolPublish(quiet.deps, "acct", publishBody, { deadlineAt: Date.now() + 60_000 });
+    assert.ok(!q.ok && q.error === "TOOL job partial");
+  }
+});
+
 test("runToolPublish: done without a campaign id → pending, never a success with an empty id", async () => {
   const { deps } = fakeDeps({
     createCampaign: () => ok({ id: 10, status: "queued" }, 202),

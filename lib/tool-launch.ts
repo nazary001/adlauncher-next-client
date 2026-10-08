@@ -760,6 +760,46 @@ export function toolJobOutcome(job: unknown): ToolJobOutcome {
   return out;
 }
 
+/** Meta's error_message is HTML: tags, entities and a "See <a …>link</a> for details" tail whose
+ *  URL is a tracking redirect — none of it belongs in a task row. */
+function plainFbText(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, " ")
+    .replace(/\s*See\s*<a\b[\s\S]*$/i, "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&#0?39;|&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.\s]+$/, "")
+    .slice(0, 300);
+}
+
+/**
+ * Facebook's own reason behind a failed / partial TOOL job, read from the job's events. A partial
+ * publish names every object Meta refused in its error event (`meta.failed[]`: type, error_code,
+ * error_message), while the job itself usually carries no `error` at all — which surfaced as a bare
+ * "TOOL job partial" (owner, live 08.10: "а что тут за ошибка?" — the page was restricted from
+ * advertising). Newest event first; "" when the events name nothing.
+ */
+export function toolFailedReason(events: unknown): string {
+  if (!Array.isArray(events)) return "";
+  for (let i = events.length - 1; i >= 0; i--) {
+    const failed = rec(rec(events[i]).meta).failed;
+    if (!Array.isArray(failed) || failed.length === 0) continue;
+    const first = rec(failed[0]);
+    const text = plainFbText(str(first.error_message) || str(first.message) || str(first.error));
+    if (!text) continue;
+    const code = str(first.error_code);
+    const more = failed.length > 1 ? ` (+${failed.length - 1} more)` : "";
+    return `Facebook refused the ${str(first.type) || "object"}: ${text}${code ? ` (code ${code})` : ""}${more}`;
+  }
+  return "";
+}
+
 /** Our NDJSON stage vocabulary (spec §2.4) — reused so task managers render a TOOL run unchanged. */
 export type ToolNdjsonStage = "gcm" | "video" | "processing" | "campaign" | "adset" | "creative" | "ad" | "done" | "error";
 
@@ -1013,7 +1053,18 @@ async function pollJob(
         // failed (or, defensively, an outcome that never reached done)
         const failedError = outcome.state === "failed" ? outcome.error : "TOOL job ended without a campaign";
         const created = outcome.state === "failed" ? outcome.created : undefined;
-        const error = toolFailureText(str(rec(job).error) || failedError, accountId);
+        // A partial publish usually leaves the job's own `error` empty — Facebook's reason (which
+        // object it refused, and why) lives in the events. One extra read, only on a failure.
+        let reason = str(rec(job).error);
+        if (!reason) {
+          try {
+            const ev = await deps.jobEvents(jobId);
+            if (ev.ok) reason = toolFailedReason(ev.data);
+          } catch {
+            /* the generic sentence below stands */
+          }
+        }
+        const error = toolFailureText(reason || failedError, accountId);
         // review find 28.09: only error / canceled WITHOUT created ids prove nothing landed (the
         // caller then frees slot + marker). partial / unknown without ids are ambiguous — TOOL may
         // have built part of the tree — so they settle as PENDING, never as a freed marker.
