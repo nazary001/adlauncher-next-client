@@ -18,6 +18,7 @@ import { Header } from "./header";
 import { SnapNav } from "./snap-nav";
 import { useSnapCatalog, useSnapKeys, type SnapCatalogAccount } from "./use-snap";
 import { useSnapTaskManager } from "./snap-task-manager";
+import { snapCloneSend, snapCloneSettle, snapCloneTouch, snapCloneTouchRows } from "./snap-clone-core";
 import { Select } from "./ui";
 import { SearchSelect } from "./search-select";
 import { MultiSelect } from "./multi-select";
@@ -95,6 +96,8 @@ type CloneRow = {
   result: SnapCloneSourceResult | null;
   draft: SnapCloneDraft | null;
   card: SnapCard;
+  /** The buyer changed the row while its wave was still being accepted (snap-clone-core). */
+  touched?: boolean;
   /** The full field set is open (objective, texts, targeting, landing). */
   more: boolean;
 };
@@ -245,10 +248,21 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
   const patchRow = (id: string, p: Partial<CloneRow>) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p } : r)));
   /** An edit re-opens a row that already went out (its next Launch is a NEW wave, on purpose). */
   const patchCard = (id: string, p: Partial<SnapCard>) => {
-    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, card: { ...r.card, ...p, ...(r.card.state === "ok" || r.card.state === "error" ? { state: "idle" as const, msg: undefined } : {}) } } : r)));
+    setRows((rs) => rs.map((r) => (r.id === id ? snapCloneTouch({ ...r, card: { ...r.card, ...p } }) : r)));
     setPreviewed(false);
   };
-  const setCardState = (id: string, p: Partial<SnapCard>) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, card: { ...r.card, ...p } } : r)));
+  /** A Settings change is the same edit for every row that RIDES that default: cloned into one
+   *  account, then another Destination picked here — the source must be ready again, no reload. */
+  const touchRows = (rides?: (r: CloneRow) => boolean) => setRows((rs) => snapCloneTouchRows(rs, rides));
+  const changeDest = (v: string) => {
+    setDest(v);
+    setPreviewed(false);
+    touchRows((r) => !r.card.adAccount);
+  };
+  const settleRows = (ids: Iterable<string>, outcome: (id: string) => { state: "ok" | "error"; msg: string }) => {
+    const set = new Set(ids);
+    setRows((rs) => rs.map((r) => (set.has(r.id) ? snapCloneSettle(r, outcome(r.id)) : r)));
+  };
   const addRefs = () => {
     const refs = snapCloneRefs(draftRefs);
     if (refs.length === 0) return;
@@ -327,7 +341,7 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
                     : refusal
                       ? refusal
                       : row.card.state === "ok"
-                        ? "queued — edit the row to clone it again"
+                        ? "queued — change the destination or any setting to clone it again"
                         : "";
     const rowKeys = ready ? freeKeys.slice(keyCursor, keyCursor + n) : [];
     if (ready) keyCursor += n;
@@ -387,15 +401,16 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
         shots.push(buildSnapShot(v.eff, { currency: v.currency, desiredKey: v.keys[j], accountName: v.account?.name, clone: { of: src.campaignId, key: v.row.draft?.key } }));
         shotRow.push(v.row.id);
       }
-      setCardState(v.row.id, { state: "sending", msg: "queuing on server…" });
     }
+    const sent = new Set(shotRow);
+    setRows((rs) => rs.map((r) => (sent.has(r.id) ? snapCloneSend(r, "queuing on server…") : r)));
     try {
       const res = await fetch("/api/snap/launch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ waveId, shots }) });
       const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; availablePixels?: string[] };
       if (d?.ok) {
         waveRef.current = null;
         setPreviewed(false);
-        for (const id of new Set(shotRow)) setCardState(id, { state: "ok", msg: "queued — safe to close the tab (the server builds it)" });
+        settleRows(sent, () => ({ state: "ok", msg: "queued — safe to close the tab (the server builds it) · change the destination or any setting to clone it again" }));
         refresh();
         refreshKeys();
         setOpen(true);
@@ -405,7 +420,7 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
         setFireNote(msg);
         const m = /^shot (\d+):/.exec(String(d?.error ?? ""));
         const culprit = m ? shotRow[Number(m[1]) - 1] : null;
-        for (const id of new Set(shotRow)) setCardState(id, culprit ? (id === culprit ? { state: "error", msg } : { state: "error", msg: "wave refused — fix the flagged row" }) : { state: "error", msg });
+        settleRows(sent, (id) => ({ state: "error", msg: culprit && id !== culprit ? "wave refused — fix the flagged row" : msg }));
         if (culprit) jumpTo(culprit);
       }
     } catch (e) {
@@ -413,7 +428,7 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
       // the server if it was. The drawer tells which.
       const msg = `no answer from the server (${String((e as Error).message ?? e)}) — check Snap tasks before firing again; a retry of the same wave is safe`;
       setFireNote(msg);
-      for (const id of new Set(shotRow)) setCardState(id, { state: "error", msg });
+      settleRows(sent, () => ({ state: "error", msg }));
       setOpen(true);
     } finally {
       setFiring(false);
@@ -446,10 +461,7 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
                 <span className={micro}>Destination</span>
                 <SearchSelect
                   value={dest}
-                  onChange={(v) => {
-                    setDest(v);
-                    setPreviewed(false);
-                  }}
+                  onChange={changeDest}
                   options={accountOptions}
                   placeholder="Each source's own account"
                   metaWhenClosed
@@ -460,7 +472,7 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
                   {destAccount ? (
                     <>
                       Every clone lands on <span className="text-ink">{destAccount.name}</span> — its creatives are copied there from Snapchat.{" "}
-                      <button type="button" onClick={() => setDest("")} className="font-semibold text-[#9db8ff] hover:underline">
+                      <button type="button" onClick={() => changeDest("")} className="font-semibold text-[#9db8ff] hover:underline">
                         Use the sources&apos; own accounts
                       </button>
                     </>
@@ -478,6 +490,7 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
                     const raw = e.target.value.replace(/\D/g, "").slice(0, 2);
                     setCopies(raw !== "" && Number(raw) > SNAP_MAX_COPIES ? String(SNAP_MAX_COPIES) : raw);
                     setPreviewed(false);
+                    touchRows((r) => !r.card.copies);
                   }}
                   onBlur={() => {
                     if (copies === "" || Number(copies) < 1) setCopies("1");
@@ -496,6 +509,7 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
                   onChange={(e) => {
                     setStartPaused(e.target.checked);
                     setPreviewed(false);
+                    touchRows();
                   }}
                   className="h-3.5 w-3.5 accent-[#FFFC00]"
                 />
