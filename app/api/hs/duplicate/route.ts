@@ -23,15 +23,17 @@ import {
   lionAccountPixels,
   lionActivateWithRetry,
   lionCampaignAds,
+  lionCampaignRefusal,
   lionConfigured,
   lionCreationStatus,
   lionDuplicate,
   lionProfileData,
   lionSetCampaignStatus,
   lionSourceBidFacts,
+  lionSourceTeam,
 } from "@/lib/lion";
 import { hsRenameCampaign } from "@/lib/hs-token-launch";
-import { teamHas } from "@/lib/team";
+import { teamHas, teamMayUseCampaign } from "@/lib/team";
 import { isTransientGraphError } from "@/lib/graph-retry";
 import { type ShotBinds, acctLimitRefusal, bindsKey, demandByAccount, distinctBy, resolveShotBinds } from "@/lib/hs-shot-binds";
 import { type GeoOverride, lionDuplicateTargeting, parseGeoOverride } from "@/lib/targeting-override";
@@ -612,6 +614,16 @@ async function pumpBatch(user: string, shots: BatchShot[], deadline: number): Pr
         if (facts === undefined) {
           facts = await lionSourceBidFacts(s.campaignId);
           factsCache.set(s.campaignId, facts);
+        }
+        // LION would duplicate ANY campaign of the company (lib/lion "whose campaign is it") — a
+        // source that is not this team's to work on kills its whole family here: no slot, no call.
+        const sourceTeam = await lionSourceTeam(s.campaignId);
+        if (!teamMayUseCampaign(sourceTeam)) {
+          const reason = lionCampaignRefusal(s.campaignId, sourceTeam);
+          if (sourceTeam === "foreign") familyFailed.set(s.campaignId, reason);
+          s.settled = true;
+          await rowWrite(user, s.taskId, { status: "error", error: reason, finished_at: Date.now() });
+          continue;
         }
         const plan = dupBidPlan({
           sourceStrategy: facts.bidStrategy || s.bidStrategy,

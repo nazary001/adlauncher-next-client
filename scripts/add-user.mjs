@@ -13,6 +13,7 @@
 // Reads MONGODB_URI / MONGODB_DB / NEXT_PUBLIC_ADL_TEAM from the environment or .env.local — run it
 // from the launcher's own folder so it lands in that team's database (lib/mongo.ts refuses the wrong
 // one). Prints no secrets. The hash is bcrypt cost 10, the same as every other stored password.
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline/promises";
@@ -109,10 +110,14 @@ async function main() {
 
   // The directory's own claim indexes (idempotent — ensure-indexes creates the same ones): without
   // them two users could share a name. E-mail is UNIQUE and not sparse, so every user carries one;
-  // a login nobody types an e-mail for gets a placeholder that can never collide with a real address.
+  // a login nobody types an e-mail for gets a placeholder that can never collide with a real address
+  // — nor with another user's: usernames are exact ("Alex" and "alex" are two people), so the
+  // placeholder carries a short hash of the username as it was typed.
   await c.createIndex({ username: 1 }, { unique: true });
   await c.createIndex({ email: 1 }, { unique: true });
-  const email = (value("email") ?? `${username.toLowerCase().replace(/[^a-z0-9._-]+/g, ".")}@${TEAM.id}.adlauncher.local`).trim().toLowerCase();
+  const slug = username.toLowerCase().replace(/[^a-z0-9._-]+/g, ".").replace(/^\.+|\.+$/g, "") || "user";
+  const tag = createHash("sha256").update(username).digest("hex").slice(0, 6);
+  const email = (value("email") ?? `${slug}.${tag}@${TEAM.id}.adlauncher.local`).trim().toLowerCase();
   const doc = await insertFresh(UP_USERS, {
     username,
     email,

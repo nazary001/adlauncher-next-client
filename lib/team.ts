@@ -51,6 +51,12 @@ export type TeamConfig = {
   /** An API route this file does not classify: allowed (the first team — nothing may break there
    *  because a route was forgotten here) or refused (a restricted team fails closed). */
   openApi: boolean;
+  /** How a campaign met by ID (a clone / JURO source, an activation) is judged — see judgeCampaign.
+   *  false — the first team, as it always was: every campaign is workable EXCEPT one whose name
+   *  carries another launcher team's acronym. true — a team that came later: a campaign is workable
+   *  only when it is provably the team's own (its name carries the team's acronym, or it lives in one
+   *  of the team's ad accounts); one LION cannot show right now waits until it can. */
+  strictCampaigns: boolean;
 };
 
 const TEAMS: Record<TeamId, TeamConfig> = {
@@ -66,6 +72,7 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     sharedPools: true,
     toolsDirectory: true,
     openApi: true,
+    strictCampaigns: false,
   },
   // The second team (08.10): only the HS partner, only through LION, Facebook only. Its fanpages are
   // not in the hs-tools registry (probed 08.10: 0 of 10), so the fanka gate cannot judge them.
@@ -81,6 +88,7 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     sharedPools: false,
     toolsDirectory: false,
     openApi: false,
+    strictCampaigns: true,
   },
 };
 
@@ -248,6 +256,45 @@ export function teamAcrProblem(acr: string | null | undefined, team: TeamConfig 
   if (!/^glo-\d+$/.test(a) || a === team.id) return null;
   return `lion_team_mismatch — this launcher is built for ${team.label} but LION_ACR is ${a.toUpperCase()}; fix NEXT_PUBLIC_ADL_TEAM or the LION key`;
 }
+
+// ---- LION campaigns ----------------------------------------------------------------------------
+
+// LION's campaign reads are company-wide too (probed 08.10: the GLO-02 key read details/ and
+// targeting/ of live GLO-01 campaigns), so a campaign id typed into the clone board — or sent by
+// hand — may be another team's. LION stamps the creator's acronym at the head of every name it
+// builds, clones and JURO included: "[06/10] (GLO-01) API - …" (all 28 457 GLO-01 rows of 08.10 do).
+const NAME_ACR = /^\s*\[\d{2}\/\d{2}\]\s*\(([A-Za-z]+-\d+)\)/;
+
+/** The acronym at the head of a LION-built campaign name, upper-cased; null when the name carries
+ *  none (a campaign made by hand in Ads Manager, a renamed one). */
+export function campaignNameAcr(name: string | null | undefined): string | null {
+  const m = NAME_ACR.exec(String(name ?? ""));
+  return m ? m[1].toUpperCase() : null;
+}
+
+export type CampaignTeam = "own" | "foreign" | "unknown";
+
+/**
+ * Whose campaign is it, from the two facts LION's details/ gives: its name and its ad account.
+ * `ownAcr` = the acronym bound to this launcher's LION key; `inOwnAccount` = the account is one of
+ * the team's own (null = not checked / not knowable right now).
+ *   • the name carries OUR acronym → own;
+ *   • it carries another LAUNCHER TEAM's acronym → foreign, for every team;
+ *   • anything else (no acronym, or one of somebody who is not a launcher team) → the first team
+ *     keeps working on it exactly as before; a strict team needs the account to be its own.
+ */
+export function judgeCampaign(name: string | null | undefined, ownAcr: string, inOwnAccount: boolean | null, team: TeamConfig = TEAM): CampaignTeam {
+  const acr = campaignNameAcr(name);
+  if (acr && acr === String(ownAcr ?? "").trim().toUpperCase()) return "own";
+  if (acr && TEAM_IDS.some((id) => id !== team.id && TEAMS[id].label === acr)) return "foreign";
+  if (!team.strictCampaigns) return "own";
+  return inOwnAccount === null ? "unknown" : inOwnAccount ? "own" : "foreign";
+}
+
+/** May the team work on a campaign with this verdict? The first team: anything but a foreign one.
+ *  A strict team: only its own. */
+export const teamMayUseCampaign = (verdict: CampaignTeam, team: TeamConfig = TEAM): boolean =>
+  team.strictCampaigns ? verdict === "own" : verdict !== "foreign";
 
 // ---- the store ---------------------------------------------------------------------------------
 

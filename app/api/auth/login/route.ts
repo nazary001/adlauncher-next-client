@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { SESSION_COOKIE, SESSION_TTL_SEC, sessionCookieOptions, signSession } from "@/lib/session";
 import { authenticateUser } from "@/lib/auth-users";
 import { storeConfigured } from "@/lib/store";
+import { TEAM, teamAllowsDb } from "@/lib/team";
 
 export const runtime = "nodejs";
 
@@ -39,6 +40,11 @@ function clientIp(req: Request): string {
 
 export async function POST(req: Request) {
   if (!storeConfigured()) return NextResponse.json({ ok: false, error: "auth_not_configured" }, { status: 500 });
+  // A build pointed at another team's database (lib/mongo refuses every store call there) is a
+  // deployment mistake, not an outage — say so, instead of the "try again" a failed read becomes.
+  if (!teamAllowsDb(process.env.MONGODB_DB || "gc")) {
+    return NextResponse.json({ ok: false, error: `This ${TEAM.label} launcher is not connected to its own database (MONGODB_DB) — tell the owner.` }, { status: 500 });
+  }
 
   const ipKey = `ip:${clientIp(req)}`;
 

@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { activateRetryDelay } from "@/lib/activate-retry";
-import { lionConfigured, lionSetCampaignStatus } from "@/lib/lion";
+import { lionCampaignRefusal, lionCampaignTeam, lionConfigured, lionSetCampaignStatus } from "@/lib/lion";
 import { coll } from "@/lib/mongo";
 import { LAUNCH_TASKS, STORE_TIMEOUT_MS, bounded, storeConfigured } from "@/lib/store";
+import { teamMayUseCampaign } from "@/lib/team";
 
 export const runtime = "nodejs";
 // One bounded store row read + the status flip, each repeated while LION answers "Campaign not
@@ -21,9 +22,13 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  * find 08-24: the client poller used to flip any COMPLETED duplicate with no patch awareness).
  * Fail-open on a store blip: ordinary duplicates must still activate, and the pump + client
  * belts keep gated clones paused regardless.
+ *
+ * `ours` = the team's own registry holds a row for this campaign (the pump writes the clone's id
+ * the moment it exists) — the cheapest proof a campaign is this team's; false = no such row, or the
+ * store could not be asked.
  */
-async function overrideGated(campaignId: string): Promise<"" | "geo-gate" | "bid-gate"> {
-  if (!storeConfigured()) return "";
+async function ownRow(campaignId: string): Promise<{ gate: "" | "geo-gate" | "bid-gate"; ours: boolean }> {
+  if (!storeConfigured()) return { gate: "", ours: false };
   try {
     const c = await coll(LAUNCH_TASKS);
     const row = await bounded(
@@ -33,9 +38,9 @@ async function overrideGated(campaignId: string): Promise<"" | "geo-gate" | "bid
     const stage = String(row?.stage ?? "");
     // geo-gate: the override patch hasn't landed; bid-gate: LION resolved other bidding than
     // requested (duplicate v2 read-back) — both keep the clone PAUSED until a human looks.
-    return stage === "geo-gate" || stage === "bid-gate" ? stage : "";
+    return { gate: stage === "geo-gate" || stage === "bid-gate" ? stage : "", ours: row !== null };
   } catch {
-    return "";
+    return { gate: "", ours: false };
   }
 }
 
@@ -68,7 +73,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   if (!/^\d{5,}$/.test(campaignId)) return bad("campaign_id_invalid");
 
   for (let attempt = 1; ; attempt++) {
-    const gate = await overrideGated(campaignId);
+    const { gate, ours } = await ownRow(campaignId);
     if (gate === "geo-gate") {
       return bad(
         "override_not_patched — this clone's geo override has not landed yet; it stays PAUSED (the pump activates it after the patch, or set the targeting in Ads Manager and activate there)",
@@ -80,6 +85,23 @@ export async function POST(req: Request): Promise<NextResponse> {
         "bid_gate — LION resolved other bidding than requested for this clone; it stays PAUSED until its bid strategy / goal is verified in LION or Ads Manager and activated there",
         409,
       );
+    }
+
+    // LION flips ANY campaign of the company whatever key asks (its campaign reads are company-wide,
+    // probed 08.10 — lib/lion "whose campaign is it"), and the id here comes from the browser. A
+    // campaign the team's own registry does not know is therefore judged by LION's read of it before
+    // it is touched: another team's is refused. One LION cannot show yet is a newborn — the first
+    // team flips it as it always did; a team that must prove ownership waits for it, like for the
+    // "not found" below.
+    if (!ours) {
+      const team = await lionCampaignTeam(campaignId);
+      if (team === "foreign") return bad(lionCampaignRefusal(campaignId, team), 403);
+      if (!teamMayUseCampaign(team)) {
+        const wait = activateRetryDelay({ ok: false, message: "not found" }, attempt);
+        if (wait == null) return bad(lionCampaignRefusal(campaignId, team), 403);
+        await sleep(wait);
+        continue;
+      }
     }
 
     const r = await lionSetCampaignStatus(campaignId, "ACTIVE");

@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
   DEFAULT_TEAM,
+  campaignNameAcr,
+  judgeCampaign,
   routeNeed,
   teamAcrProblem,
   teamAllowsDb,
@@ -14,6 +16,7 @@ import {
   teamAllowsPath,
   teamConfig,
   teamHas,
+  teamMayUseCampaign,
   teamNamespace,
   teamOwnsProfile,
 } from "../lib/team.ts";
@@ -235,6 +238,42 @@ test("LION profiles: each team owns its own prefix, the un-prefixed pools stay w
   assert.equal(teamOwnsProfile("glo-020-1", GLO2), false);
   assert.equal(teamOwnsProfile("", GLO1), false);
   assert.equal(teamOwnsProfile("", GLO2), false);
+});
+
+test("campaign names: the acronym LION stamps at the head, and only there", () => {
+  assert.equal(campaignNameAcr("[06/10] (GLO-01) API - (#ADX [HIGH]) - [US] - tima"), "GLO-01");
+  assert.equal(campaignNameAcr("[20/08] (glo-02) API (CLONE) - (#ADX [HIGH]) - [MX] - x"), "GLO-02");
+  assert.equal(campaignNameAcr("  [01/01] (GLO-01) API - JURO - (META ADX) - [BR] - y"), "GLO-01");
+  assert.equal(campaignNameAcr("[06/10] (ABC-3) API - z"), "ABC-3");
+  assert.equal(campaignNameAcr("Summer sale 2026"), null);
+  assert.equal(campaignNameAcr("my copy of (GLO-01) winner"), null);
+  assert.equal(campaignNameAcr(""), null);
+  assert.equal(campaignNameAcr(null), null);
+});
+
+test("whose campaign: glo-02 must prove a campaign is its own, glo-01 only loses the other launcher team's", () => {
+  const G1 = "[06/10] (GLO-01) API - (#ADX [HIGH]) - [US] - a";
+  const G2 = "[06/10] (GLO-02) API - (#ADX [HIGH]) - [US] - b";
+  const THIRD = "[06/10] (ABC-03) API - c";
+  const HAND = "made by hand in Ads Manager";
+  // glo-02 — strict
+  assert.equal(judgeCampaign(G2, "GLO-02", null, GLO2), "own");
+  assert.equal(judgeCampaign(G1, "GLO-02", null, GLO2), "foreign");
+  assert.equal(judgeCampaign(G1, "GLO-02", true, GLO2), "foreign"); // the name speaks first
+  assert.equal(judgeCampaign(HAND, "GLO-02", true, GLO2), "own");
+  assert.equal(judgeCampaign(HAND, "GLO-02", false, GLO2), "foreign");
+  assert.equal(judgeCampaign(HAND, "GLO-02", null, GLO2), "unknown");
+  assert.equal(judgeCampaign(THIRD, "GLO-02", false, GLO2), "foreign");
+  assert.equal(judgeCampaign(THIRD, "GLO-02", true, GLO2), "own");
+  // glo-01 — exactly as before, minus the other launcher team's campaigns
+  assert.equal(judgeCampaign(G1, "GLO-01", null, GLO1), "own");
+  assert.equal(judgeCampaign(G2, "GLO-01", null, GLO1), "foreign");
+  assert.equal(judgeCampaign(HAND, "GLO-01", null, GLO1), "own");
+  assert.equal(judgeCampaign(THIRD, "GLO-01", null, GLO1), "own");
+  assert.equal(judgeCampaign(HAND, "GLO-01", false, GLO1), "own");
+  // who may use what
+  assert.deepEqual((["own", "foreign", "unknown"] as const).map((v) => teamMayUseCampaign(v, GLO2)), [true, false, false]);
+  assert.deepEqual((["own", "foreign", "unknown"] as const).map((v) => teamMayUseCampaign(v, GLO1)), [true, false, true]);
 });
 
 test("a LION key of the other team is refused; an ACR that names no team is not judged", () => {
