@@ -365,7 +365,7 @@ function CloneInner({
   // AV keys registry status. Clones claim a fresh AV key server-side per copy (never here), but
   // the whole batch is pointless until the owner has uploaded a pool to ActiveView (UTM Campaign
   // Values) — the preview endpoint answers `poolMax` = the registered count. poolMax 0 = the stub:
-  // /api/clone/run refuses every AV clone with av_keys_not_registered before any FB write, so we
+  // the clone run route refuses every AV clone with av_keys_not_registered before any FB write, so we
   // block Duplicate up front with the reason (mirrors the launcher board's poolMax-0 banner).
   // null = not yet known; only a definite 0 blocks. Non-AV boards never touch the endpoint.
   const [avPoolMax, setAvPoolMax] = useState<number | null>(null);
@@ -660,9 +660,11 @@ function CloneInner({
 
   const preview = flattenPreview(rows, settings.copies);
 
-  /** Queue each clone (rows × the row's copies) into the Task Manager, which builds them one at
-   *  a time (ACTIVE since 08-11) with live stages / errors / retry — the same queue and pipeline
-   *  as launches. Each clone carries ITS row's destination (own or the batch defaults). */
+  /** Hand each clone (rows × the row's copies) to the SERVER queue via enqueueClone, which drops an
+   *  optimistic row into the Task Manager at once; the server pump builds them one at a time with
+   *  live stages / errors / retry — the same queue and pipeline as launches. Clones carry no media
+   *  (the source is reused by id), so the hand-off is instant and the tab can be closed right after.
+   *  Each clone carries ITS row's destination (own or the batch defaults). */
   const duplicate = () => {
     if (destinationMissing || acctBlocked || fankaOver || bidMissingCount > 0 || signerMissing || limits.staleBuild || avKeysUnregistered)
       return; // the button is disabled too — belt and suspenders
@@ -717,9 +719,8 @@ function CloneInner({
           // Card tag: the row's picked strategy + its Bid value (cap/ROAS rows can't fire without
           // one — rowBidMissing gates the button; lowest-cost reads "auto").
           bid: bidTag(r.bidStrategy, edit.roasGoal) || undefined,
-          // TOOL rail (owner ask 28.09): the queue runner POSTs to the TOOL clone path. `via` is
-          // owned by the task-manager unit (CloneEnqueueArgs.via?: "tool"); a conditional SPREAD
-          // keeps this type-clean whether or not that field has landed yet in the shared tree.
+          // TOOL rail (owner ask 28.09): `via:"tool"` rides the queued job's body so the server pump
+          // POSTs the clone through the TOOL clone path (CloneEnqueueArgs.via, forwarded verbatim).
           ...(onTool ? { via: "tool" as const } : {}),
         });
         queued++;
@@ -1151,8 +1152,9 @@ function CloneInner({
                   {justQueued} {justQueued === 1 ? "clone" : "clones"} queued — building in the Task Manager.
                 </p>
               ) : null}
-              {/* Clones build FROM THIS TAB (Graph rail) — the warning stays by the button while any
-                  are in flight (owner ask 09-09). */}
+              {/* Clones are handed to the server from this tab (no media to upload — the source is
+                  reused by id), so the hand-off is a brief beat; the notice shows only while it is in
+                  flight (inFlight = useHandoffPending) and clears the moment the server accepts them. */}
               <UploadingNotice n={cloneTm.counts.inFlight} compact />
             </div>
           </section>

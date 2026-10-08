@@ -9,8 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { readCreative, safeBlobName, uploadCreativeFile } from "./blob-uploader";
-import { UploadingNotice, uploadingLabel, useUnloadGuard } from "./upload-guard";
+import { UploadingNotice } from "./upload-guard";
 import { type Campaign, bidTag, moneyLabel } from "@/lib/types";
 import { type PartnerId, partnerConfig } from "@/lib/partners";
 import type { CloneEdit } from "@/lib/clone";
@@ -20,13 +19,17 @@ import {
   type TaskKind,
   type TaskStatus,
   type ViewTask,
-  STALE_MS,
   effStatusOf,
   fromRemote,
+  isCanceled,
   mergeShared,
   ownerHue,
   ownerLastWrite,
 } from "@/lib/task-view";
+import type { QueueKind, QueueScope } from "@/lib/launch-queue-types";
+import { cancelQueued, retryQueued, sendToQueue } from "./launch-queue-client";
+import { ensureCreativeUploaded } from "./creative-uploads";
+import { handoffBegin, handoffPatch, useHandoffPending } from "./launch-handoff";
 import type { SessionUser } from "./user-menu";
 import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, XIcon } from "./icons";
 
@@ -36,10 +39,12 @@ export type { LaunchTask } from "@/lib/task-view";
 
 type StageDef = { key: string; label: string };
 
-// Launch pipeline ("upload" is client→Blob; the rest mirror /api/launch events). Media-neutral
-// labels: the "video" stage registers either kind (image launches skip "processing").
+// Launch pipeline. The wave no longer uploads from this tab (creatives go to S3 at attach time and
+// the server pump runs the job): the first segment is now "Queued on the server" — lit while the
+// row is queued — and the rest mirror the launch route's NDJSON stages the server pump reads.
+// Media-neutral labels: the "video" stage registers either kind (image launches skip "processing").
 const LAUNCH_STAGES: readonly StageDef[] = [
-  { key: "upload", label: "Uploading creative" },
+  { key: "queued", label: "Queued on the server" },
   { key: "gcm", label: "Reserving code" },
   { key: "video", label: "Registering media" },
   { key: "processing", label: "Processing video" },
@@ -49,9 +54,9 @@ const LAUNCH_STAGES: readonly StageDef[] = [
   { key: "ad", label: "Publishing ad" },
 ];
 
-// Clone pipeline — mirrors /api/clone/run events; the source media is reused by id, so no upload.
-// "media" fires only for cross-account clones (the source video/image is re-homed in the target
-// account first); same-account clones skip straight from source to gcm.
+// Clone pipeline — mirrors the clone run route's stage events; the source media is reused by id, so
+// no upload. "media" fires only for cross-account clones (the source video/image is re-homed in the
+// target account first); same-account clones skip straight from source to gcm.
 const CLONE_STAGES: readonly StageDef[] = [
   { key: "source", label: "Reading source" },
   { key: "media", label: "Migrating media" },
@@ -62,35 +67,24 @@ const CLONE_STAGES: readonly StageDef[] = [
   { key: "ad", label: "Publishing ad" },
 ];
 
-// Blob-upload bounds/retries/diagnostics live in blob-uploader.ts (shared with the HS manager).
-// Breather between consecutive FB-writing tasks — RANDOM 1–3s per gap (owner call 2026-08-11,
-// was a fixed 8s): jittered spacing looks less bot-like to Meta and keeps waves fast; the
-// server-side throttle/budget-retries absorb whatever the shorter gaps cost in (#4)/(#17).
-const TASK_GAP_MIN_MS = 1_000;
-const TASK_GAP_MAX_MS = 3_000;
-const taskGapMs = () => TASK_GAP_MIN_MS + Math.random() * (TASK_GAP_MAX_MS - TASK_GAP_MIN_MS);
-// Client-side deadline on the /api/launch|clone request+stream. The server caps itself at
-// maxDuration=300s; this fires just past that so a socket held open by infra after the function
-// dies can't wedge the single-threaded queue. Aborting after the server is already dead means no
-// FB object is created mid-abort.
-const STREAM_TIMEOUT_MS = 330_000;
-
 // ---- shared-view cadence ----
 // The whole team's queue refreshes continuously — the header badge and drawer must be truthful at
 // any moment, not only while the drawer is open (drawer open polls faster for live stage motion).
 // Raised 2026-08-24 (4s/12s → 8s/24s): dozens of buyers polling every 4s overloaded the shared
-// Strapi (503→504 incident); the server route now also short-caches the team list, so a slightly
+// store (503→504 incident); the server route now also short-caches the team list, so a slightly
 // slower poll costs no freshness the cache wouldn't have eaten anyway.
 const POLL_OPEN_MS = 8_000;
 const POLL_CLOSED_MS = 24_000;
-// Re-upsert my running task every 25s: the identical PUT bumps the row's updatedAt (verified), so
-// teammates can tell a live-but-slow stage (video processing) from a dead session. Hidden tabs
-// throttle timers to ~60s — still comfortably inside STALE_MS (180s).
-const HEARTBEAT_MS = 25_000;
-// Coarse re-render tick so stale detection advances with time even with the drawer closed.
+// Coarse re-render tick so stale detection advances with time even with the drawer closed. (srv
+// rows are never stale, but teammates' legacy/offline rows and the optimistic-row sweep still key
+// on the clock.)
 const TICK_MS = 10_000;
 // Ids deleted here are ignored in merges briefly, so an in-flight fetch can't resurrect them.
 const TOMBSTONE_MS = 60_000;
+// An accepted job's optimistic row survives this long without appearing in the polled list before
+// it is dropped: the team list is short-cached ~4s server-side, so a poll taken just before the
+// hand-off's row write landed must not make the just-queued row blink out.
+const OPTIMISTIC_TTL_MS = 30_000;
 
 function stagesFor(kind: TaskKind): readonly StageDef[] {
   return kind === "clone" ? CLONE_STAGES : LAUNCH_STAGES;
@@ -100,6 +94,12 @@ function stageIndexFor(kind: TaskKind, stage: string | null): number {
   const i = stagesFor(kind).findIndex((s) => s.key === stage);
   return i < 0 ? 0 : i;
 }
+
+/** Account id as the launch-limit meters it (strip act_, trim). */
+const stripAct = (raw: string | null | undefined): string => String(raw ?? "").trim().replace(/^act_/, "");
+const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+const mintId = (): string =>
+  (globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)) + Date.now().toString(36);
 
 // ---------- task model ----------
 
@@ -112,44 +112,6 @@ export type QueuedMedia = {
   cover?: { url: string; name: string };
 };
 
-type LaunchInput = {
-  kind: "launch";
-  partnerId: PartnerId;
-  campaign: Campaign;
-  /** MO launch signer: absent = the system-user token, "soc:<name>" = that personal token
-   *  (the board's channel switch) — forwarded to /api/launch verbatim. */
-  channel?: string;
-  /** TOOL launch channel (owner ask 28.09): "tool" routes the MO/AIF launch through the HS TOOL
-   *  sessions service instead of building on the Graph. Forwarded to /api/launch|/api/aif/launch
-   *  as `via` — a NEW, distinct field: the retired `channel` above is the soc-signer switch and
-   *  is ignored server-side, so the two must never be conflated. */
-  via?: "tool";
-  /** All creatives of this launch (1..partner.maxCreatives). The single-media fields below stay
-   *  filled with the FIRST one — legacy shape for anything still reading them. */
-  medias?: QueuedMedia[];
-  mediaUrl: string;
-  mediaName: string;
-  mediaKind: "video" | "image";
-  /** Custom cover for a VIDEO creative (session-local object URL) — uploaded next to the
-   *  creative and pinned as the ad's thumbnail by the launch route. */
-  cover?: { url: string; name: string };
-};
-
-type CloneInput = {
-  kind: "clone";
-  partnerId: PartnerId;
-  edit: CloneEdit;
-  /** MO clone signer: "soc:<name>" — forwarded to /api/clone/run verbatim (the system token is
-   *  retired there; MO clones without a signer are rejected server-side). AIF sends none. */
-  channel?: string;
-  /** TOOL clone channel (owner ask 28.09): "tool" routes the MO/AIF clone through the HS TOOL
-   *  sessions service. Forwarded to /api/clone/run as `via` — a NEW field distinct from the
-   *  soc-signer `channel` above (see LaunchInput.via). */
-  via?: "tool";
-};
-
-type TaskInput = LaunchInput | CloneInput;
-
 // Per-account key: several people share machines/browsers, and the fallback snapshot must not
 // leak one account's queue into another. The bare legacy key predates scoping and gets dropped.
 const LS_BASE = "adlauncher.tasks";
@@ -159,17 +121,18 @@ const lsKeyFor = (user: SessionUser | undefined, base: string) =>
 export type EnqueueArgs = {
   partnerId: PartnerId;
   campaign: Campaign;
-  /** MO launch signer (see LaunchInput.channel) — set only for soc-channel waves. */
+  /** Retired MO soc-signer switch — NOT forwarded to the queue any more (the server resolves the
+   *  rail's signer from /tokens). Kept on the type so older callers type-check; ignored here. */
   channel?: string;
-  /** TOOL launch channel (see LaunchInput.via) — set only when the board's TOOL rail is the
-   *  effective channel for this MO/AIF wave. */
+  /** TOOL launch channel (see spec §5.1 / owner ask 28.09) — forwarded to the handler body as
+   *  `via` when the board's TOOL rail is the effective channel for this MO/AIF/AV wave. */
   via?: "tool";
   /** All creatives (1..partner.maxCreatives); when absent the single-media fields drive alone. */
   medias?: QueuedMedia[];
   mediaUrl: string;
   mediaName: string;
   mediaKind: "video" | "image";
-  /** Custom cover image for a video creative (see LaunchInput.cover). */
+  /** Custom cover image for a video creative. */
   cover?: { url: string; name: string };
   name: string;
   gcm: string;
@@ -180,16 +143,17 @@ export type EnqueueArgs = {
 export type CloneEnqueueArgs = {
   partnerId: PartnerId;
   edit: CloneEdit;
-  /** MO clone signer (see CloneInput.channel) — required for MO batches, absent for AIF. */
+  /** MO clone signer: "soc:<name>" — forwarded in the queued job body to the clone handler verbatim
+   *  (the system token is retired there; MO clones without a signer are rejected server-side). AIF/AV
+   *  send none. */
   channel?: string;
-  /** TOOL clone channel (see CloneInput.via) — set only when the clone board's TOOL rail is the
-   *  effective channel. */
+  /** TOOL clone channel (see CloneEnqueueArgs usage) — forwarded to the handler body as `via`. */
   via?: "tool";
   name: string;
   geo: string;
   budget: string;
   /** Display-only bid/ROAS tag for the card (bidTag of the row's picked strategy + Bid value,
-   *  computed on the board); persisted with every save of the row. */
+   *  computed on the board). */
   bid?: string;
 };
 
@@ -203,7 +167,9 @@ type TaskManagerValue = {
     error: number;
     active: number;
     total: number;
-    /** THIS tab's own launches still client-side (queued / running) — they die with the page. */
+    /** What still depends on THIS tab: campaigns of this scope still uploading their creatives or
+     *  being handed over (useHandoffPending). Once the server accepts a job, nothing here holds the
+     *  page — the server runs it. 0 the rest of the time. */
     inFlight: number;
   };
   /** The current user — used to label task owners and gate own-only actions in the shared view. */
@@ -212,8 +178,15 @@ type TaskManagerValue = {
   setOpen: (v: boolean) => void;
   enqueue: (args: EnqueueArgs) => void;
   enqueueClone: (args: CloneEnqueueArgs) => void;
+  /** Re-queue one own failed/canceled row the server flagged `retry` (a row without the flag has
+   *  no Retry affordance — the server decided it is not safe to re-run). */
   retry: (id: string) => void;
+  /** Re-queue every own row the server flagged `retry`. */
   retryAll: () => void;
+  /** Cancel one own QUEUED server row before it starts. */
+  cancel: (id: string) => void;
+  /** Cancel every own queued server row of this scope. */
+  cancelAllQueued: () => void;
 };
 
 const Ctx = createContext<TaskManagerValue | null>(null);
@@ -224,7 +197,7 @@ export function useTaskManager(): TaskManagerValue {
   return v;
 }
 
-// AIF runs an IDENTICAL queue/drawer as a fully SEPARATE instance (own context, own Strapi scope
+// AIF runs an IDENTICAL queue/drawer as a fully SEPARATE instance (own context, own store scope
 // partner="us", own localStorage) — owner call 08-17: every partner gets its own task manager;
 // the team "Tasks" drawer stays MO-only, "HS Tasks" stays LION's.
 const AifCtx = createContext<TaskManagerValue | null>(null);
@@ -235,7 +208,7 @@ export function useAifTaskManager(): TaskManagerValue {
   return v;
 }
 
-// AV runs the SAME queue/drawer as a fully SEPARATE instance (own context, own Strapi scope
+// AV runs the SAME queue/drawer as a fully SEPARATE instance (own context, own store scope
 // partner="av", own localStorage) — the AIF twin pattern again (owner call 28.09: every partner
 // gets its own task manager). use-acct-limit folds this instance's queued demand into the shared
 // per-account launch limit, so it is mounted ABOVE AcctLimitProvider in the (app) layout.
@@ -247,56 +220,55 @@ export function useAvTaskManager(): TaskManagerValue {
   return v;
 }
 
-/** Everything scope-specific about one task-manager instance. `api` also serves POST and the
- *  pagehide beacon — the query param only matters on GET (the server scopes the list by it). */
+/** Everything scope-specific about one task-manager instance. `api` serves the GET list only — the
+ *  client never POSTs task rows any more (the server queue owns every row); the query param scopes
+ *  the list on GET. `queueScope` is the drawer's lane in the server queue and the hand-off screen. */
 type TmScope = {
   api: string;
   lsBase: string;
+  /** mo | aif | av — the server launch-queue scope AND the hand-off screen scope. */
+  queueScope: QueueScope;
   /** Header button caption. */
   label: string;
   title: string;
   subtitle: string;
-  /** Bottom offset of the still-launching pill — the two instances must never overlap when both
-   *  queues are mid-wave (MO wave running while an AIF wave fires, or vice versa). */
-  bannerBottom: string;
   /** A dormant rail's instance never talks to the server (no restore fetch, no poll) — the same
-   *  rule the Snap rail follows: a build without the rail's flag must not generate Strapi traffic
+   *  rule the Snap rail follows: a build without the rail's flag must not generate store traffic
    *  for a queue nobody can fill (AV while NEXT_PUBLIC_AV_ENABLED is unset). */
   dormant?: boolean;
 };
 const MO_SCOPE: TmScope = {
   api: "/api/launch-tasks",
   lsBase: LS_BASE,
+  queueScope: "mo",
   label: "Tasks",
   title: "Task Manager",
   subtitle: "Team launch & clone queue",
-  bannerBottom: "bottom-5",
 };
 const AIF_SCOPE: TmScope = {
   api: "/api/launch-tasks?scope=aif",
   lsBase: "adlauncher.aiftasks",
+  queueScope: "aif",
   label: "AIF Tasks",
   title: "AIF Task Manager",
   subtitle: "AIF launch queue · team view",
-  bannerBottom: "bottom-[4.75rem]",
 };
 const AV_SCOPE: TmScope = {
   api: "/api/launch-tasks?scope=av",
   lsBase: "adlauncher.avtasks",
+  queueScope: "av",
   label: "AV Tasks",
   title: "AV Task Manager",
   subtitle: "AV launch queue · team view",
-  // Stacks above the MO (bottom-5) and AIF (bottom-[4.75rem]) pills so three mid-wave queues never overlap.
-  bannerBottom: "bottom-[8.5rem]",
-  // Build-time flag (NEXT_PUBLIC_AV_ENABLED inlined): a dormant AV rail never polls Strapi.
+  // Build-time flag (NEXT_PUBLIC_AV_ENABLED inlined): a dormant AV rail never polls the store.
   dormant: partnerConfig("av").inDevelopment === true,
 };
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-
-// ---------- provider (single-concurrency worker) ----------
-// Mounted ONCE in the (app) layout, above both boards — the queue, worker and drawer survive
-// navigating between the launcher and the clone board.
+// ---------- provider ----------
+// Mounted ONCE in the (app) layout, above both boards — the drawer and the team poll survive
+// navigating between the launcher and the clone board. Launches/clones are no longer RUN here: the
+// boards call enqueue/enqueueClone, which upload the creatives (if not already done), hand the job
+// to the server queue and drop an optimistic row; the server pump builds every campaign.
 
 export function TaskManagerProvider({ children, user }: { children: React.ReactNode; user?: SessionUser }) {
   return (
@@ -337,94 +309,40 @@ function TaskManagerCore({
 }) {
   const lsKey = lsKeyFor(user, scope.lsBase);
   const me = user?.username ?? null;
+  // The fetched team list (server-owned rows). No "local" rows live here any more — a tab's own
+  // just-handed-over launches live in `optimistic` until the poll catches up.
   const [tasks, setTasks] = useState<LaunchTask[]>([]);
   const [open, setOpen] = useState(false);
-  // Coarse clock for staleness re-evaluation (stale is derived, so it must advance with time).
+  // Coarse clock for staleness re-evaluation (stale is derived, so it must advance with time) and
+  // for the optimistic-row sweep.
   const [nowTick, setNowTick] = useState(() => Date.now());
-  const inputs = useRef(new Map<string, TaskInput>());
-  const queue = useRef<string[]>([]);
-  const working = useRef(false);
-  const tasksRef = useRef<LaunchTask[]>([]);
   const openRef = useRef(false);
-  useEffect(() => {
-    tasksRef.current = tasks;
-  }, [tasks]);
-
-  const patch = useCallback((id: string, p: Partial<LaunchTask>) => {
-    setTasks((ts) => ts.map((t) => (t.id === id ? { ...t, ...p } : t)));
-  }, []);
-
-  // ---- persistence: Strapi (source of truth) + localStorage (offline fallback) ----
-  const meta = useRef(new Map<string, Record<string, unknown>>()); // static fields per task
-  const saveChains = useRef(new Map<string, Promise<unknown>>()); // serialize saves per task
-  // Tasks whose terminal state was already chained — the heartbeat must never write "running"
-  // after it (the interval reads tasksRef, which lags one render behind the done/error patch).
-  const terminalSaved = useRef(new Set<string>());
   const loadedRef = useRef(false);
   // Server-clock skew measured at fetch time (server `now` − client now): owner liveness is judged
-  // on the server clock so wrong local clocks can't fake or mask a dead session. State (not a ref)
-  // because the render-time `view` memo needs it; the guarded setter only fires on a real shift,
-  // so routine polls don't re-render anything.
+  // on the server clock so wrong local clocks can't fake or mask a dead session.
   const [skew, setSkew] = useState(0);
   const noteSkew = useCallback((serverNow: number) => {
     const s = serverNow - Date.now();
     setSkew((prev) => (Math.abs(prev - s) > 3000 ? s : prev));
   }, []);
   const tombstones = useRef(new Map<string, number>());
-  const interruptsPersisted = useRef(new Set<string>());
   const authDeadRef = useRef(false);
   const lastPollRef = useRef(0);
-  // Last SUCCESSFUL fetch — gates any terminal write derived from staleness: a session whose view
-  // is frozen (hidden tab, network loss) must never "settle" rows off stale data.
-  const lastPollOkRef = useRef(0);
 
-  // Long-lived tabs: the per-task bookkeeping (save chains, static meta, terminal/interrupt
-  // marks) grew one entry per task EVER seen and was never pruned — a days-long power-user tab
-  // leaks monotonically (review find 08-24). Drop entries whose task left the drawer entirely.
-  useEffect(() => {
-    const ids = new Set(tasks.map((t) => t.id));
-    for (const k of [...meta.current.keys()]) if (!ids.has(k)) meta.current.delete(k);
-    for (const k of [...saveChains.current.keys()]) if (!ids.has(k)) saveChains.current.delete(k);
-    for (const k of [...terminalSaved.current]) if (!ids.has(k)) terminalSaved.current.delete(k);
-    for (const k of [...interruptsPersisted.current]) if (!ids.has(k)) interruptsPersisted.current.delete(k);
-  }, [tasks]);
+  // Optimistic rows: added the moment a hand-off is ACCEPTED, so the drawer shows the just-queued
+  // campaign at once instead of waiting for the ~4s-cached team list. Display-only — the server
+  // owns the real row. Each is dropped once the polled list carries its id, or after
+  // OPTIMISTIC_TTL_MS. State (not a ref) so the render can read it — the React-Compiler lint forbids
+  // reading a ref during render, and a stale optimistic row could otherwise mask a real one.
+  const [optimistic, setOptimistic] = useState<LaunchTask[]>([]);
+  const addOptimistic = useCallback((row: LaunchTask) => {
+    setOptimistic((rows) => (rows.some((r) => r.id === row.id) ? rows : [...rows, row]));
+  }, []);
 
-  /** Upsert one task's state to Strapi. Non-blocking for the caller, but chained PER TASK so
-   *  queued→running→done apply in order (no racing creates that would drop fields). One retry on
-   *  failure — a dropped terminal save would leave the team a forever-"running" ghost. */
-  const saveRemote = useCallback((id: string, dyn: Record<string, unknown>) => {
-    if (dyn.status === "done" || dyn.status === "error") terminalSaved.current.add(id);
-    const payload = { task_id: id, ...(meta.current.get(id) ?? {}), ...dyn };
-    const post = () =>
-      fetch(scope.api, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-    const prev = saveChains.current.get(id) ?? Promise.resolve();
-    const next = prev
-      .catch(() => {})
-      .then(async () => {
-        try {
-          const res = await post();
-          if (res.ok || res.status === 400 || res.status === 401 || res.status === 403) return;
-        } catch {
-          /* network — retry below */
-        }
-        await sleep(4000);
-        await post().catch(() => {});
-      });
-    saveChains.current.set(id, next);
-  }, [scope.api]);
-
-  // deleteRemote is gone with UI deletion (owner call 08-11): tasks leave Strapi only via
-  // admin cleanup, never from a buyer's drawer. The tombstone map stays — it still suppresses
-  // just-transitioned rows against a racing poll.
-
-  /** Pull the whole team's tasks and merge them in. My in-session tasks stay authoritative; every
-   *  other row mirrors the fetch (so a teammate's dismiss disappears here too). */
+  /** Pull the whole team's tasks and merge them in. Every row mirrors the fetch (so a teammate's
+   *  dismiss disappears here too); nothing is authoritative on the client — the server owns the rows. */
   const loadRemote = useCallback(() => {
-    // Bounded like the HS drawer's poll (20s): a hung Strapi read must not pile up open polls.
+    // Bounded like the HS drawer's poll (20s): a hung store read must not pile up open polls.
     fetch(scope.api, { signal: AbortSignal.timeout(20_000) })
       .then(async (r) => {
         if (r.status === 401) {
@@ -436,26 +354,24 @@ function TaskManagerCore({
           | { ok?: boolean; now?: number; tasks?: Record<string, unknown>[] }
           | null;
         if (!d?.ok || !Array.isArray(d.tasks)) return;
-        lastPollOkRef.current = Date.now();
         if (typeof d.now === "number") noteSkew(d.now);
         const cutoff = Date.now() - TOMBSTONE_MS;
         for (const [id, ts] of tombstones.current) if (ts < cutoff) tombstones.current.delete(id);
         const fetched = d.tasks.map(fromRemote);
         const tomb = new Set(tombstones.current.keys());
-        // A tombstoned id still coming back means the DELETE hasn't landed — keep it buried
-        // (deleteRemote retries) instead of letting the tombstone lapse and resurrect it.
+        // A tombstoned id still coming back means the delete hasn't landed — keep it buried.
         for (const f of fetched) if (f.id && tomb.has(f.id)) tombstones.current.set(f.id, Date.now());
         setTasks((cur) => mergeShared(cur, fetched, tomb));
       })
       .catch(() => {});
   }, [noteSkew, scope.api]);
 
-  // Restore once on mount: the team's Strapi list wins; localStorage is the offline fallback.
+  // Restore once on mount: the team's server list wins; localStorage is the offline fallback.
   useEffect(() => {
     let localSnap: LaunchTask[] = [];
     try {
       const raw = localStorage.getItem(lsKey);
-      // A snapshot task can never be `local` again — its input (video blob) died with the session.
+      // A restored snapshot row is display-only (it can never be the authoritative live row again).
       if (raw) localSnap = (JSON.parse(raw) as LaunchTask[]).map((t) => ({ ...t, local: false }));
       // Pre-scoping snapshot was account-agnostic — drop it so it can't surface for the wrong user.
       if (lsKey !== scope.lsBase) localStorage.removeItem(scope.lsBase);
@@ -472,7 +388,6 @@ function TaskManagerCore({
       .then((d) => {
         if (!alive) return;
         if (d?.ok && Array.isArray(d.tasks)) {
-          lastPollOkRef.current = Date.now();
           if (typeof d.now === "number") noteSkew(d.now);
           const fetched = (d.tasks as Record<string, unknown>[]).map(fromRemote);
           setTasks((cur) => mergeShared(cur, fetched));
@@ -529,680 +444,261 @@ function TaskManagerCore({
     }
   }, [open, loadRemote]);
 
-  // Staleness advances with time even when nothing refetches.
+  // Staleness (and the optimistic sweep) advance with time even when nothing refetches.
   useEffect(() => {
     const iv = window.setInterval(() => setNowTick(Date.now()), TICK_MS);
     return () => window.clearInterval(iv);
   }, []);
 
-  // Heartbeat: keep my running task's row fresh through long silent stages (upload, video
-  // processing, rate-limit backoff) so the team never mistakes a live run for a dead one.
+  // Drop an optimistic row once the polled list carries its id (the server wrote the real row) or
+  // after OPTIMISTIC_TTL_MS (a hand-off whose row never showed — the sweep keeps a dead stub from
+  // lingering). Runs on every poll and on the coarse tick. Safe setState-in-effect: the functional
+  // updater returns the SAME array when nothing is dropped (no re-render, no cascade), and
+  // `optimistic` is not a dependency of this effect, so a drop can't re-trigger it.
   useEffect(() => {
-    const iv = window.setInterval(() => {
-      const t = tasksRef.current.find((x) => x.local && x.status === "running");
-      if (t && !terminalSaved.current.has(t.id)) saveRemote(t.id, { status: "running", stage: t.stage });
-    }, HEARTBEAT_MS);
-    return () => window.clearInterval(iv);
-  }, [saveRemote]);
-
-  // Leaving the page kills this session's worker: batch-mark my in-flight rows interrupted right
-  // now (beacon survives unload). If the server is in fact still finishing the run, its own writer
-  // overwrites this moments later — either way the row converges to the truth.
-  useEffect(() => {
-    const onPageHide = () => {
-      // terminalSaved is the synchronous truth — tasksRef lags one commit behind the done/error
-      // patch, and a beacon fired in that window would clobber a just-completed task with "error"
-      // (the beacon survives unload while the client's own done-save fetch may be cancelled).
-      const mine = tasksRef.current.filter(
-        (t) => t.local && (t.status === "queued" || t.status === "running") && !terminalSaved.current.has(t.id),
-      );
-      if (mine.length === 0) return;
-      const rows = mine.map((t) => ({
-        task_id: t.id,
-        // If this beacon CREATES the row (the queued-save never landed), a missing partner would
-        // drop it out of every drawer scope — local tasks always know theirs.
-        ...(t.partner ? { partner: t.partner } : {}),
-        status: "error",
-        stage: t.stage,
-        error: "Interrupted — page closed mid-run",
-        finished_at: Date.now(),
-      }));
-      // Chunked to the API's batch cap — a big wave can leave 100+ queued tasks behind.
-      for (let i = 0; i < rows.length; i += 25) {
-        try {
-          navigator.sendBeacon?.(
-            scope.api,
-            new Blob([JSON.stringify({ tasks: rows.slice(i, i + 25) })], { type: "application/json" }),
-          );
-        } catch {
-          /* best-effort */
-        }
-      }
-    };
-    window.addEventListener("pagehide", onPageHide);
-    return () => window.removeEventListener("pagehide", onPageHide);
-  }, [scope.api]);
-
-  // Convergence: persist the interrupt for MY OWN stale rows (a crashed session can't beacon).
-  // Owner-scoped writes mean only my sessions can settle my rows; others' dead rows stay derived-
-  // stale for everyone until their owner's next session settles them.
-  useEffect(() => {
-    if (!loadedRef.current || !me) return;
-    // NEVER settle rows off a frozen view: a hidden tab pauses polling, so its `tasks` stop
-    // refreshing while the clock advances — judging staleness there would let a background second
-    // tab of the SAME user falsely bury (even done→error overwrite) rows another tab is running.
-    // Only a visible session that fetched successfully within the stale window may write.
-    if (document.hidden || Date.now() - lastPollOkRef.current > STALE_MS) return;
-    const estNow = nowTick + skew; // same render-safe clock as `view` — lags ≤10s, only ever delays
-    const lastWrite = ownerLastWrite(tasks);
-    for (const t of tasks) {
-      if (t.local || t.owner !== me) continue;
-      if (t.status !== "queued" && t.status !== "running") continue;
-      if (effStatusOf(t, lastWrite, estNow) !== "stale") continue;
-      if (interruptsPersisted.current.has(t.id)) continue;
-      interruptsPersisted.current.add(t.id);
-      saveRemote(t.id, {
-        status: "error",
-        stage: t.stage,
-        error: "Interrupted — session went offline",
-        finished_at: t.finishedAt ?? t.startedAt ?? t.queuedAt,
-      });
-    }
-  }, [tasks, nowTick, me, skew, saveRemote]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setOptimistic((rows) => {
+      if (rows.length === 0) return rows;
+      const have = new Set(tasks.map((t) => t.id));
+      const cutoff = Date.now() - OPTIMISTIC_TTL_MS;
+      const next = rows.filter((r) => !have.has(r.id) && r.queuedAt >= cutoff);
+      return next.length === rows.length ? rows : next;
+    });
+  }, [tasks, nowTick]);
 
   // Mirror to localStorage after the initial load (guard prevents the empty first render from
-  // wiping the stored snapshot before restore reads it).
+  // wiping the stored snapshot before restore reads it). The snapshot is an offline fallback only.
   useEffect(() => {
     if (!loadedRef.current) return;
     try {
       localStorage.setItem(lsKey, JSON.stringify(tasks));
     } catch {
-      /* quota / disabled — Strapi still holds the durable copy */
+      /* quota / disabled — the server still holds the durable copy */
     }
   }, [tasks, lsKey]);
 
-  const runLaunchTask = useCallback(
-    async (id: string, input: LaunchInput) => {
-      const startedAt = Date.now();
-      patch(id, { status: "running", stage: "upload", startedAt, error: undefined });
-      saveRemote(id, { status: "running", stage: "upload", started_at: startedAt });
-      // Track the furthest stage actually reached so an error is recorded against the stage that
-      // failed (previously Strapi kept the initial "upload" even for FB-side failures).
-      let lastStage = "upload";
-      try {
-        // Everything this launch ships (1..maxCreatives): the multi shape when present, else the
-        // legacy single-media fields (restored tasks / older enqueues).
-        const queued: QueuedMedia[] =
-          input.medias && input.medias.length > 0
-            ? input.medias
-            : [{ url: input.mediaUrl, name: input.mediaName, kind: input.mediaKind, cover: input.cover }];
-
-        // 1) Read + PROBE every creative (and cover) up front — a dead file handle (moved/edited
-        // on disk, cloud-sync offload, attach from before a reload) fails here in seconds with
-        // its NAME and the re-attach remedy, before a single byte is uploaded or anything
-        // happens server-side. Previously this class surfaced minutes in as a bare
-        // "TypeError: Failed to fetch" (live 08-21). Probes read 64KB — cheap even for 5×500MB.
-        const preparedAll: { file: File; kind: "video" | "image"; tag: string; cover?: File }[] = [];
-        for (let i = 0; i < queued.length; i++) {
-          const m = queued[i];
-          const tag = queued.length > 1 ? `${i + 1}-` : "";
-          const file = await readCreative(m.url, m.name, m.kind, `creative "${m.name || i + 1}"`);
-          const cover =
-            m.cover && m.kind === "video"
-              ? await readCreative(m.cover.url, m.cover.name || "cover.jpg", "image", `cover "${m.cover.name || i + 1}"`)
-              : undefined;
-          preparedAll.push({ file, kind: m.kind, tag, ...(cover ? { cover } : {}) });
-        }
-
-        // 2) Upload every creative (+ its video cover) in order — sequential on purpose: parallel
-        // multi-hundred-MB uploads would fight for the same uplink and all crawl into the
-        // timeout. uploadCreativeFile bounds each attempt, retries the transient network class,
-        // rides multipart for big videos and names the creative in every failure (blob-uploader).
-        const medias: { url: string; kind: "video" | "image"; coverUrl?: string }[] = [];
-        for (const p of preparedAll) {
-          const url = await uploadCreativeFile(
-            `creatives/${id}-${p.tag}${safeBlobName(p.file.name, p.kind === "image" ? "creative.jpg" : "creative.mp4")}`,
-            p.file,
-            `creative "${p.file.name}"`,
-          );
-          let coverUrl: string | undefined;
-          if (p.cover) {
-            coverUrl = await uploadCreativeFile(
-              `creatives/${id}-${p.tag}cover-${safeBlobName(p.cover.name, "cover.jpg")}`,
-              p.cover,
-              `cover "${p.cover.name}"`,
-            );
-          }
-          medias.push({ url, kind: p.kind, ...(coverUrl ? { coverUrl } : {}) });
-        }
-        const first = medias[0];
-
-        const streamAbort = new AbortController();
-        const streamTimer = window.setTimeout(() => streamAbort.abort(), STREAM_TIMEOUT_MS);
-        let final: Record<string, unknown> | null = null;
-        let resStatus = 0;
-        try {
-          // taskId lets the server mirror progress + the terminal state into the shared row —
-          // the team keeps seeing the truth even if this browser dies mid-run. AIF and AV each
-          // ride their own route (own token, own registry/link) with the same stages/NDJSON contract.
-          const cfg = partnerConfig(input.partnerId);
-          const launchApi = cfg.avLaunch ? "/api/av/launch" : cfg.aifLaunch ? "/api/aif/launch" : "/api/launch";
-          const res = await fetch(launchApi, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              partnerId: input.partnerId,
-              campaign: input.campaign,
-              ...(input.channel ? { channel: input.channel } : {}),
-              // TOOL launch channel (owner ask 28.09): a distinct `via` field, never the retired
-              // soc `channel` above — /api/launch|/api/aif/launch branch on this to route the wave
-              // through the HS TOOL sessions service instead of the Graph.
-              ...(input.via ? { via: input.via } : {}),
-              // Multi-creative shape + the legacy single-media fields (first creative) so a
-              // mid-deploy server on either side of the wire keeps working.
-              medias,
-              mediaUrl: first.url,
-              mediaKind: first.kind,
-              ...(first.coverUrl ? { coverUrl: first.coverUrl } : {}),
-              taskId: id,
-            }),
-            signal: streamAbort.signal,
-          });
-          resStatus = res.status;
-
-          const handle = (line: string) => {
-            let ev: Record<string, unknown>;
-            try {
-              ev = JSON.parse(line);
-            } catch {
-              return;
-            }
-            if (ev.ok === true || ev.ok === false) {
-              final = ev;
-              return;
-            }
-            if (typeof ev.stage === "string") {
-              lastStage = ev.stage;
-              patch(id, { stage: ev.stage });
-            }
-          };
-
-          if (res.body) {
-            const reader = res.body.getReader();
-            const dec = new TextDecoder();
-            let buf = "";
-            for (;;) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              buf += dec.decode(value, { stream: true });
-              let nl: number;
-              while ((nl = buf.indexOf("\n")) >= 0) {
-                const line = buf.slice(0, nl).trim();
-                buf = buf.slice(nl + 1);
-                if (line) handle(line);
-              }
-            }
-            if (buf.trim()) handle(buf.trim());
-          } else {
-            final = await res.json().catch(() => null);
-          }
-        } finally {
-          window.clearTimeout(streamTimer);
-        }
-
-        const f = final as Record<string, unknown> | null;
-        if (f && f.ok === true) {
-          const finishedAt = Date.now();
-          patch(id, {
-            status: "done",
-            stage: "ad",
-            finishedAt,
-            // The server may have claimed a different code than the optimistic preview (it walks
-            // forward on conflict — routine when several users launch at once): show the real one.
-            ...(typeof f.gcm === "string" && f.gcm ? { gcm: f.gcm } : {}),
-            result: {
-              campaignId: f.campaign_id as string,
-              adsetId: f.adset_id as string,
-              adId: f.ad_id as string,
-              gcm: f.gcm as string,
-              link: f.link as string,
-            },
-          });
-          saveRemote(id, {
-            status: "done",
-            stage: "ad",
-            finished_at: finishedAt,
-            campaign_id: f.campaign_id,
-            adset_id: f.adset_id,
-            ad_id: f.ad_id,
-            link: f.link,
-            gcm: f.gcm,
-            error: null,
-          });
-          inputs.current.delete(id); // done → never re-run; free the captured Campaign/video url
-        } else if (f && f.pending === true) {
-          // TOOL is still finishing this launch past our server window (owner ask 28.09): AMBIGUOUS
-          // like a lost connection — a campaign may already exist, so release local authority
-          // (local:false) and let the server-written row's eventual truth win on the next poll. NO
-          // Retry affordance (re-firing an in-flight launch can double-create once TOOL's
-          // idempotency window lapses) and NO remote write (it could demote the server's own row).
-          // Distinct from a hard `ok:false` error, which IS a clean per-launch verdict below.
-          const finishedAt = Date.now();
-          const msg =
-            (f.error as string) ||
-            "TOOL is still finishing this launch — this row updates from the server; check Ads Manager before re-firing";
-          patch(id, { status: "error", stage: lastStage, finishedAt, local: false, error: msg });
-          inputs.current.delete(id);
-        } else if (f) {
-          const finishedAt = Date.now();
-          const msg = (f.error as string) || (f.stage as string) || `HTTP ${resStatus}`;
-          // Record which stage failed + whatever FB objects were created before the failure. A
-          // created campaign means a blind retry would DUPLICATE it (fresh gcm, second full tree),
-          // so we surface the campaign id on the task (result.campaignId) → the UI hides Retry and
-          // we drop the input so it can never re-run.
-          const created = ((f.created ?? {}) as Record<string, unknown>) || {};
-          const createdCampaign = created.campaign_id ? String(created.campaign_id) : undefined;
-          const createdAdset = created.adset_id ? String(created.adset_id) : undefined;
-          patch(id, {
-            status: "error",
-            stage: lastStage,
-            finishedAt,
-            error: msg,
-            ...(createdCampaign ? { result: { campaignId: createdCampaign, adsetId: createdAdset } } : {}),
-          });
-          saveRemote(id, {
-            status: "error",
-            stage: lastStage,
-            finished_at: finishedAt,
-            error: msg,
-            ...(createdCampaign ? { campaign_id: createdCampaign } : {}),
-            ...(createdAdset ? { adset_id: createdAdset } : {}),
-          });
-          if (createdCampaign) inputs.current.delete(id); // partial success is not safely retryable
-        } else {
-          // NO final event: the stream was cut without a verdict (server timeout, dropped
-          // socket). The build may have FINISHED server-side — the server keeps writing the
-          // shared row to the end, so release local authority (local:false) and let mergeShared
-          // adopt the server's truth on the next poll. No remote write (it could demote the
-          // server's own done/error) and NO Retry affordance: re-firing an ambiguous outcome
-          // builds a second tree under a fresh gcm — same contract as the HS token rail.
-          patch(id, {
-            status: "error",
-            stage: lastStage,
-            finishedAt: Date.now(),
-            local: false,
-            error: `stream ended unexpectedly (HTTP ${resStatus}) — the launch may still have finished server-side; this row updates from the server, check Ads Manager before re-firing`,
-          });
-          inputs.current.delete(id); // never offer a one-click re-fire of an ambiguous outcome
-        }
-      } catch (e) {
-        const finishedAt = Date.now();
-        patch(id, { status: "error", stage: lastStage, finishedAt, error: String(e) });
-        saveRemote(id, { status: "error", stage: lastStage, finished_at: finishedAt, error: String(e) });
-      }
-    },
-    [patch, saveRemote],
-  );
-
-  const runCloneTask = useCallback(
-    async (id: string, input: CloneInput) => {
-      const startedAt = Date.now();
-      patch(id, { status: "running", stage: "source", startedAt, error: undefined });
-      saveRemote(id, { status: "running", stage: "source", started_at: startedAt });
-      let lastStage = "source";
-      try {
-        const streamAbort = new AbortController();
-        const streamTimer = window.setTimeout(() => streamAbort.abort(), STREAM_TIMEOUT_MS);
-        // Stream mirrors /api/clone/run: per-clone {idx,stage} progress, a per-clone {ok,...} final,
-        // then a {stage:"batch-done"} summary we ignore (this task carries a single clone).
-        let final: Record<string, unknown> | null = null;
-        let resStatus = 0;
-        try {
-          const res = await fetch("/api/clone/run", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              partnerId: input.partnerId,
-              edits: [input.edit],
-              taskIds: [id],
-              ...(input.channel ? { channel: input.channel } : {}),
-              // TOOL clone channel (owner ask 28.09): distinct `via` field (see runLaunchTask).
-              ...(input.via ? { via: input.via } : {}),
-            }),
-            signal: streamAbort.signal,
-          });
-          resStatus = res.status;
-
-          const handle = (line: string) => {
-            let ev: Record<string, unknown>;
-            try {
-              ev = JSON.parse(line);
-            } catch {
-              return;
-            }
-            if (ev.stage === "batch-done") return;
-            if (ev.ok === true || ev.ok === false) {
-              final = ev;
-              return;
-            }
-            if (typeof ev.stage === "string" && ev.stage !== "start") {
-              lastStage = ev.stage;
-              patch(id, { stage: ev.stage });
-            }
-          };
-
-          if (res.body) {
-            const reader = res.body.getReader();
-            const dec = new TextDecoder();
-            let buf = "";
-            for (;;) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              buf += dec.decode(value, { stream: true });
-              let nl: number;
-              while ((nl = buf.indexOf("\n")) >= 0) {
-                const line = buf.slice(0, nl).trim();
-                buf = buf.slice(nl + 1);
-                if (line) handle(line);
-              }
-            }
-            if (buf.trim()) handle(buf.trim());
-          } else {
-            final = await res.json().catch(() => null);
-          }
-        } finally {
-          window.clearTimeout(streamTimer);
-        }
-
-        const f = final as Record<string, unknown> | null;
-        if (f && f.ok === true) {
-          const finishedAt = Date.now();
-          patch(id, {
-            status: "done",
-            stage: "ad",
-            finishedAt,
-            ...(typeof f.gcm === "string" && f.gcm ? { gcm: f.gcm } : {}),
-            result: {
-              campaignId: f.campaign_id as string,
-              adsetId: f.adset_id as string,
-              adId: f.ad_id as string,
-              gcm: f.gcm as string,
-            },
-          });
-          saveRemote(id, {
-            status: "done",
-            stage: "ad",
-            finished_at: finishedAt,
-            campaign_id: f.campaign_id,
-            adset_id: f.adset_id,
-            ad_id: f.ad_id,
-            gcm: f.gcm,
-            error: null,
-          });
-          inputs.current.delete(id); // done → never re-run
-        } else if (f && f.pending === true) {
-          // TOOL clone still finishing past the server window (owner ask 28.09): AMBIGUOUS — the
-          // clone may already exist, so release local authority (local:false → no Retry, excluded
-          // from the retryable count) and let the server row settle it; a re-fire could double-create
-          // once TOOL's idempotency window lapses. Distinct from the hard `ok:false` error below.
-          const finishedAt = Date.now();
-          const msg =
-            (f.error as string) ||
-            "TOOL is still finishing this clone — this row updates from the server; check Ads Manager before re-firing";
-          patch(id, { status: "error", stage: lastStage, finishedAt, local: false, error: msg });
-          inputs.current.delete(id);
-        } else {
-          const finishedAt = Date.now();
-          const msg = f
-            ? (f.error as string) || (f.stage as string) || `HTTP ${resStatus}`
-            : `stream ended unexpectedly (HTTP ${resStatus}) — the server may have timed out mid-clone; check Ads Manager before retrying`;
-          // Same partial-success guard as launch: a created campaign means a blind retry duplicates it.
-          const created = ((f?.created ?? {}) as Record<string, unknown>) || {};
-          const createdCampaign = created.campaign_id ? String(created.campaign_id) : undefined;
-          const createdAdset = created.adset_id ? String(created.adset_id) : undefined;
-          patch(id, {
-            status: "error",
-            stage: lastStage,
-            finishedAt,
-            error: msg,
-            ...(createdCampaign ? { result: { campaignId: createdCampaign, adsetId: createdAdset } } : {}),
-          });
-          saveRemote(id, {
-            status: "error",
-            stage: lastStage,
-            finished_at: finishedAt,
-            error: msg,
-            ...(createdCampaign ? { campaign_id: createdCampaign } : {}),
-            ...(createdAdset ? { adset_id: createdAdset } : {}),
-          });
-          if (createdCampaign) inputs.current.delete(id);
-        }
-      } catch (e) {
-        const finishedAt = Date.now();
-        patch(id, { status: "error", stage: lastStage, finishedAt, error: String(e) });
-        saveRemote(id, { status: "error", stage: lastStage, finished_at: finishedAt, error: String(e) });
-      }
-    },
-    [patch, saveRemote],
-  );
-
-  const runTask = useCallback(
-    async (id: string) => {
-      const input = inputs.current.get(id);
-      if (!input) return;
-      if (input.kind === "clone") await runCloneTask(id, input);
-      else await runLaunchTask(id, input);
-    },
-    [runLaunchTask, runCloneTask],
-  );
-
-  const pump = useCallback(async () => {
-    if (working.current) return;
-    working.current = true;
-    try {
-      while (queue.current.length) {
-        const id = queue.current.shift() as string;
-        await runTask(id);
-        // Gap between tasks, not after the last one — `working` stays held through the sleep, so a
-        // concurrent enqueue()'s pump() no-ops and the queue stays strictly one-at-a-time. The
-        // duration re-rolls per gap (1–3s) so every next launch/clone lands on its own jitter.
-        if (queue.current.length) await new Promise((r) => setTimeout(r, taskGapMs()));
-      }
-    } finally {
-      working.current = false;
-    }
-  }, [runTask]);
+  // ---- hand-off: enqueue / enqueueClone no longer run anything (spec §5.1) ----
 
   const enqueue = useCallback(
     (args: EnqueueArgs) => {
-      const id =
-        (globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)) + Date.now().toString(36);
+      const id = mintId();
       const queuedAt = Date.now();
-      inputs.current.set(id, {
-        kind: "launch",
-        partnerId: args.partnerId,
-        campaign: args.campaign,
-        ...(args.channel ? { channel: args.channel } : {}),
-        ...(args.via ? { via: args.via } : {}),
-        ...(args.medias && args.medias.length > 0 ? { medias: args.medias } : {}),
-        mediaUrl: args.mediaUrl,
-        mediaName: args.mediaName,
-        mediaKind: args.mediaKind,
-        ...(args.cover ? { cover: args.cover } : {}),
-      });
-      // What this launch bids on — shown on the card and persisted with every save (meta) so it
-      // survives reload and reaches the team's restored rows too.
+      const cfg = partnerConfig(args.partnerId);
+      const kind: QueueKind = cfg.avLaunch ? "av.launch" : cfg.aifLaunch ? "aif.launch" : "mo.launch";
       const bid = bidTag(args.campaign.bidStrategy, args.campaign.bidCap) || undefined;
-      // static fields reused on every remote upsert for this task
-      meta.current.set(id, {
-        name: args.name,
-        partner: args.partnerId,
-        gcm: args.gcm,
-        geo: args.geo,
-        budget: args.budget,
-        ...(bid ? { bid } : {}),
-        queued_at: queuedAt,
-      });
-      setTasks((ts) => [
-        {
-          id,
-          kind: "launch" as const,
-          owner: me,
-          name: args.name,
-          partner: args.partnerId,
-          gcm: args.gcm,
-          geo: args.geo,
-          budget: args.budget,
-          ...(bid ? { bid } : {}),
-          status: "queued" as const,
-          stage: null,
-          // Client-only: the launch-limit's optimistic demand (never persisted).
-          account: args.campaign.account || undefined,
-          queuedAt,
-          local: true,
-        },
-        ...ts,
-      ]);
-      saveRemote(id, { status: "queued" });
-      queue.current.push(id);
-      void pump();
+      const account = stripAct(args.campaign.account) || undefined;
+      // Everything this launch ships (1..maxCreatives): the multi shape when present, else the
+      // legacy single-media fields (restored tasks / older enqueues).
+      const medias: QueuedMedia[] =
+        args.medias && args.medias.length > 0
+          ? args.medias
+          : [{ url: args.mediaUrl, name: args.mediaName, kind: args.mediaKind, cover: args.cover }];
+      // Every file this campaign waits on (creatives + their video covers), as creative-uploads
+      // sources (session object URLs) — the hand-off screen reads their live upload progress from
+      // these. A cover only ever rides a video (same guard the upload below uses), so the source
+      // list is exactly the set of files that get uploaded.
+      const sources: string[] = [];
+      for (const m of medias) {
+        sources.push(m.url);
+        if (m.cover && m.kind === "video") sources.push(m.cover.url);
+      }
+
+      const run = async () => {
+        try {
+          handoffBegin([{ id, scope: scope.queueScope, label: args.name, sub: `${args.geo} · $${moneyLabel(args.budget)}`, sources, account }]);
+          // Usually already done — the Dropzone started each upload at attach; this just takes the
+          // remote URL (or finishes a straggler). A dead handle / expired login / network failure
+          // rejects here with a complete, creative-named sentence (creative-uploads).
+          const remote = await Promise.all(
+            medias.map(async (m) => {
+              const url = await ensureCreativeUploaded(m.url, { name: m.name, kind: m.kind });
+              const coverUrl =
+                m.cover && m.kind === "video"
+                  ? await ensureCreativeUploaded(m.cover.url, { name: m.cover.name || "cover.jpg", kind: "image" })
+                  : undefined;
+              return { url, kind: m.kind, ...(coverUrl ? { coverUrl } : {}) };
+            }),
+          );
+          const first = remote[0];
+          // Exactly the body the browser used to POST for a launch, minus the task id (the server
+          // stamps it). The retired soc `channel` is NOT sent for launches; the multi shape + legacy
+          // single-media fields ride together so a mid-deploy server on either side keeps working.
+          const body: Record<string, unknown> = {
+            partnerId: args.partnerId,
+            campaign: args.campaign,
+            ...(args.via ? { via: args.via } : {}),
+            medias: remote,
+            mediaUrl: first.url,
+            mediaKind: first.kind,
+            ...(first.coverUrl ? { coverUrl: first.coverUrl } : {}),
+          };
+          handoffPatch(id, { phase: "sending" });
+          await sendToQueue(scope.queueScope, {
+            taskId: id,
+            kind,
+            body,
+            row: { name: args.name, gcm: args.gcm, geo: args.geo, budget: args.budget, bid: bid ?? "" },
+            account: account ?? null,
+          });
+          handoffPatch(id, { phase: "accepted" });
+          addOptimistic({
+            id,
+            kind: "launch",
+            owner: me,
+            name: args.name,
+            partner: args.partnerId,
+            gcm: args.gcm,
+            geo: args.geo,
+            budget: args.budget,
+            ...(bid ? { bid } : {}),
+            status: "queued",
+            stage: null,
+            srv: true,
+            account,
+            queuedAt,
+          });
+          loadRemote();
+        } catch (e) {
+          handoffPatch(id, { phase: "failed", error: errMsg(e), retry: run });
+        }
+      };
+      void run();
     },
-    [pump, saveRemote, me],
+    [me, scope.queueScope, loadRemote, addOptimistic],
   );
 
   const enqueueClone = useCallback(
     (args: CloneEnqueueArgs) => {
-      const id =
-        (globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)) + Date.now().toString(36);
+      const id = mintId();
       const queuedAt = Date.now();
-      // No video upload — the clone reuses the source's video by id (server-side). gcm is assigned
-      // by the run and filled in on completion.
-      inputs.current.set(id, {
-        kind: "clone",
+      const bid = args.bid || undefined;
+      const account = stripAct(args.edit.accountId) || undefined;
+      // The clone reuses the source's media by id (server-side) — no uploads, so the hand-off opens
+      // straight at "sending". The server adds taskIds to the body.
+      const body: Record<string, unknown> = {
         partnerId: args.partnerId,
-        edit: args.edit,
+        edits: [args.edit],
         ...(args.channel ? { channel: args.channel } : {}),
         ...(args.via ? { via: args.via } : {}),
-      });
-      const bid = args.bid || undefined;
-      meta.current.set(id, {
-        name: args.name,
-        partner: args.partnerId,
-        gcm: "",
-        geo: args.geo,
-        budget: args.budget,
-        ...(bid ? { bid } : {}),
-        queued_at: queuedAt,
-      });
-      setTasks((ts) => [
-        {
-          id,
-          kind: "clone" as const,
-          owner: me,
-          name: args.name,
-          partner: args.partnerId,
-          gcm: "",
-          geo: args.geo,
-          budget: args.budget,
-          ...(bid ? { bid } : {}),
-          status: "queued" as const,
-          stage: null,
-          // Client-only demand key: the TARGET account when picked; from-each-source clones have
-          // none (their accounts differ per source — the server claim meters those).
-          account: args.edit.accountId?.trim() ? args.edit.accountId : undefined,
-          queuedAt,
-          local: true,
-        },
-        ...ts,
-      ]);
-      saveRemote(id, { status: "queued" });
-      queue.current.push(id);
-      void pump();
+      };
+
+      const run = async () => {
+        try {
+          handoffBegin([{ id, scope: scope.queueScope, label: args.name, sub: `${args.geo} · $${moneyLabel(args.budget)}`, sources: [], account, phase: "sending" }]);
+          await sendToQueue(scope.queueScope, {
+            taskId: id,
+            kind: "fb.clone",
+            body,
+            row: { name: args.name, gcm: "", geo: args.geo, budget: args.budget, bid: bid ?? "" },
+            account: account ?? null,
+          });
+          handoffPatch(id, { phase: "accepted" });
+          addOptimistic({
+            id,
+            kind: "clone",
+            owner: me,
+            name: args.name,
+            partner: args.partnerId,
+            gcm: "",
+            geo: args.geo,
+            budget: args.budget,
+            ...(bid ? { bid } : {}),
+            status: "queued",
+            stage: null,
+            srv: true,
+            account,
+            queuedAt,
+          });
+          loadRemote();
+        } catch (e) {
+          handoffPatch(id, { phase: "failed", error: errMsg(e), retry: run });
+        }
+      };
+      void run();
     },
-    [pump, saveRemote, me],
+    [me, scope.queueScope, loadRemote, addOptimistic],
   );
 
-  const retry = useCallback(
-    (id: string) => {
-      const t = tasksRef.current.find((x) => x.id === id);
-      if (!t) return;
-      // A partial failure already created a campaign on FB — re-running would build a SECOND full
-      // tree under a fresh gcm. Never auto-retry those (the button is hidden too).
-      if (t.result?.campaignId) return;
-      // No input (restored task / already cleaned) → runTask would bail; and don't double-submit an
-      // id that is already queued or running.
-      if (!inputs.current.has(id) || queue.current.includes(id) || t.status === "queued" || t.status === "running") return;
-      terminalSaved.current.delete(id); // re-armed — the heartbeat may keep it fresh again
-      patch(id, {
-        status: "queued",
-        stage: null,
-        error: undefined,
-        result: undefined,
-        startedAt: undefined,
-        finishedAt: undefined,
-      });
-      saveRemote(id, {
-        status: "queued",
-        stage: null,
-        error: null,
-        campaign_id: null,
-        adset_id: null,
-        ad_id: null,
-        link: null,
-        started_at: null,
-        finished_at: null,
-      });
-      queue.current.push(id);
-      void pump();
-    },
-    [patch, pump, saveRemote],
-  );
-
-  // No user-facing deletion: neither done tasks NOR errors are removable from the UI (owner
-  // call 2026-08-11 — failures stay visible to the whole team; cleanup is an admin action in
-  // Strapi, not a buyer button).
-
-  const retryAll = useCallback(() => {
-    // Retry only local errored tasks (restored ones lost their video) that did NOT create a
-    // campaign — a partial success is not safely retryable (retry() also guards this).
-    for (const t of tasksRef.current) if (t.status === "error" && t.local && !t.result?.campaignId) retry(t.id);
-  }, [retry]);
-
-  // Display statuses resolved against owner liveness — a non-terminal row of a dead session shows
-  // as "stale"/interrupted instead of running forever. nowTick is the render-safe clock: it lags
-  // real time by ≤10s, which only ever DELAYS a stale verdict (never fakes one).
+  // Display statuses resolved against owner liveness (srv rows are never stale — the server owns
+  // them). nowTick is the render-safe clock: it lags real time by ≤10s, which only ever DELAYS a
+  // stale verdict (never fakes one). Optimistic rows whose id hasn't reached the polled list yet
+  // are folded in on top.
   const view = useMemo<ViewTask[]>(() => {
     const estNow = nowTick + skew;
     const lastWrite = ownerLastWrite(tasks);
-    return tasks.map((t) => ({ ...t, eff: effStatusOf(t, lastWrite, estNow) }));
-  }, [tasks, nowTick, skew]);
+    const have = new Set(tasks.map((t) => t.id));
+    const merged: LaunchTask[] = [...tasks];
+    for (const row of optimistic) if (!have.has(row.id)) merged.push(row);
+    merged.sort((a, b) => b.queuedAt - a.queuedAt || (a.id < b.id ? 1 : -1));
+    return merged.map((t) => ({ ...t, eff: effStatusOf(t, lastWrite, estNow) }));
+  }, [tasks, optimistic, nowTick, skew]);
+
+  const viewRef = useRef<ViewTask[]>([]);
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
+
+  // What still depends on this tab: creatives still uploading / hand-offs in flight for this scope.
+  const inFlight = useHandoffPending(scope.queueScope);
 
   const counts = useMemo(() => {
     let queued = 0,
       running = 0,
       done = 0,
-      error = 0,
-      inFlight = 0;
+      error = 0;
     for (const t of view) {
       if (t.eff === "queued") queued++;
       else if (t.eff === "running") running++;
       else if (t.eff === "done") done++;
-      else error++; // real errors + stale/interrupted
-      // Launches still CLIENT-side (queued behind this tab's worker, or running their
-      // upload/stream) die with the page — the leave guard below holds it open. THIS tab's own
-      // tasks only (raw status: our own live rows are never stale); teammates' rows and
-      // restored snapshots don't hold the page hostage.
-      if (t.local && (t.status === "queued" || t.status === "running")) inFlight++;
+      else error++; // real errors + stale/interrupted + canceled
     }
     return { queued, running, done, error, active: queued + running, total: view.length, inFlight };
-  }, [view]);
+  }, [view, inFlight]);
 
-  // Closing the page while launches are still client-side kills them (queued rows never fire;
-  // an upload dies mid-flight) — the native leave-confirm is the hard stop behind the floating
-  // pill. Registered only while something is actually in flight, so normal navigation stays
-  // silent the rest of the time. (Same guard the HS Task Manager ships — owner ask 08-18:
-  // every partner's queue holds the page.)
-  useUnloadGuard(counts.inFlight > 0);
+  // ---- owner actions: retry / cancel are server actions now (no client decides retry safety) ----
+
+  const isOwn = useCallback((t: LaunchTask): boolean => !!me && t.owner === me, [me]);
+
+  // A small, dismissible error line in the drawer for a failed queue action — never an alert().
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const retry = useCallback(
+    (id: string) => {
+      const t = viewRef.current.find((x) => x.id === id);
+      // Only an own, failed row the SERVER flagged retryable may be re-queued — the client never
+      // decides retry safety.
+      if (!t || t.status !== "error" || !t.retry || !isOwn(t)) return;
+      retryQueued([id])
+        .then(() => loadRemote())
+        .catch((e) => setActionError(errMsg(e)));
+    },
+    [isOwn, loadRemote],
+  );
+
+  const retryAll = useCallback(() => {
+    const ids = viewRef.current.filter((t) => t.status === "error" && t.retry && isOwn(t)).map((t) => t.id);
+    if (ids.length === 0) return;
+    retryQueued(ids)
+      .then(() => loadRemote())
+      .catch((e) => setActionError(errMsg(e)));
+  }, [isOwn, loadRemote]);
+
+  const cancel = useCallback(
+    (id: string) => {
+      const t = viewRef.current.find((x) => x.id === id);
+      if (!t || t.eff !== "queued" || !t.srv || !isOwn(t)) return;
+      cancelQueued({ taskIds: [id] })
+        .then(() => loadRemote())
+        .catch((e) => setActionError(errMsg(e)));
+    },
+    [isOwn, loadRemote],
+  );
+
+  const cancelAllQueued = useCallback(() => {
+    cancelQueued({ scope: scope.queueScope })
+      .then(() => loadRemote())
+      .catch((e) => setActionError(errMsg(e)));
+  }, [scope.queueScope, loadRemote]);
 
   const value: TaskManagerValue = {
     tasks: view,
@@ -1214,49 +710,24 @@ function TaskManagerCore({
     enqueueClone,
     retry,
     retryAll,
+    cancel,
+    cancelAllQueued,
   };
 
+  // No floating pill / leave-page confirm here any more: the hand-off host (LaunchHandoffHost,
+  // mounted once in the layout) owns the overlay, the "still handing over" pill and the unload
+  // guard for every scope — the tab is held open only while creatives upload / a hand-off is in
+  // flight, never after the server has the job.
   return (
     <ctx.Provider value={value}>
       {children}
-      {!open && counts.inFlight > 0 ? (
-        <LaunchingBanner n={counts.inFlight} bottom={scope.bannerBottom} onOpen={() => setOpen(true)} />
-      ) : null}
-      <TaskManagerPanel tm={value} scope={scope} />
+      <TaskManagerPanel
+        tm={value}
+        scope={scope}
+        actionError={actionError}
+        onDismissActionError={() => setActionError(null)}
+      />
     </ctx.Provider>
-  );
-}
-
-/** Floating guard for launches still CLIENT-side while the drawer is hidden: the page must stay
- *  open or queued/uploading campaigns die with it (the beforeunload confirm above is the hard
- *  stop; this is the visible one). Clicking re-opens the drawer. Disappears by itself the moment
- *  every launch reaches the server or a terminal state. Mirrors the HS pill. */
-function LaunchingBanner({ n, bottom, onOpen }: { n: number; bottom: string; onOpen: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      aria-live="polite"
-      className={
-        `animate-pop-in fixed ${bottom} left-1/2 z-[70] flex -translate-x-1/2 items-center gap-2.5 ` +
-        "rounded-full border border-warn/45 bg-surface/95 py-2 pl-3 pr-2 " +
-        "shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-md transition-all duration-150 " +
-        "hover:border-warn/70 hover:bg-surface2 active:scale-[0.98] " +
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warn/40"
-      }
-    >
-      <span className="relative flex h-3 w-3 shrink-0 items-center justify-center">
-        <span className="z-10 h-2 w-2 rounded-full bg-warn" />
-        <span className="absolute inset-0 animate-ping rounded-full bg-warn/50" />
-      </span>
-      <span className="whitespace-nowrap text-[12.5px] font-semibold text-warn">
-        Do not close this window
-        <span className="font-medium text-dim"> · {uploadingLabel(n)}</span>
-      </span>
-      <span className="ml-1 shrink-0 rounded-full border border-line bg-surface2 px-2 py-0.5 text-[10.5px] font-medium text-dim">
-        View
-      </span>
-    </button>
   );
 }
 
@@ -1337,8 +808,18 @@ const inBucket = (eff: EffStatus, f: Filter): boolean =>
         ? eff === "error" || eff === "stale"
         : eff === f;
 
-function TaskManagerPanel({ tm, scope }: { tm: TaskManagerValue; scope: TmScope }) {
-  const { tasks, counts, me, open, setOpen, retry, retryAll } = tm;
+function TaskManagerPanel({
+  tm,
+  scope,
+  actionError,
+  onDismissActionError,
+}: {
+  tm: TaskManagerValue;
+  scope: TmScope;
+  actionError: string | null;
+  onDismissActionError: () => void;
+}) {
+  const { tasks, counts, me, open, setOpen, retry, retryAll, cancel, cancelAllQueued } = tm;
   const [filter, setFilter] = useState<Filter>("all");
   const [kindFilter, setKindFilter] = useState<KindFilter>("all");
   const [mineOnly, setMineOnly] = useState(false);
@@ -1361,10 +842,12 @@ function TaskManagerPanel({ tm, scope }: { tm: TaskManagerValue; scope: TmScope 
 
   if (!open) return null;
 
-  const isMine = (t: ViewTask) => t.local || (!!me && t.owner === me);
+  const isMine = (t: ViewTask) => !!me && t.owner === me;
 
-  // Only local errors can actually retry (restored tasks lost their input); match retryAll.
-  const retryable = tasks.filter((t) => t.status === "error" && t.local && !t.result?.campaignId).length;
+  // Retry safety is the server's call: an own failed/canceled row it flagged `retry` is retryable.
+  const retryable = tasks.filter((t) => t.status === "error" && t.retry && isMine(t)).length;
+  // Own queued server rows can be canceled before they start.
+  const cancelable = tasks.filter((t) => t.eff === "queued" && t.srv && isMine(t)).length;
 
   // Mine toggle → kind split (New launches vs Duplicates) → status filter within that split.
   const scoped = mineOnly ? tasks.filter(isMine) : tasks;
@@ -1417,11 +900,28 @@ function TaskManagerPanel({ tm, scope }: { tm: TaskManagerValue; scope: TmScope 
           </button>
         </div>
 
-        {/* client-side uploads die with the page — say so INSIDE the drawer too (the floating
-            pill only shows while it is closed; owner ask 09-09) */}
+        {/* While THIS tab still has creatives uploading / a hand-off in flight it must stay open —
+            say so inside the drawer too (the hand-off overlay is the primary surface; this mirrors
+            its "keep the tab open" state). Once the server accepts every job, inFlight is 0. */}
         {counts.inFlight > 0 ? (
           <div className="border-b border-line px-3 py-2">
             <UploadingNotice n={counts.inFlight} />
+          </div>
+        ) : null}
+
+        {/* A queue action (retry / cancel) failed — inline + dismissible, never an alert(). */}
+        {actionError ? (
+          <div className="flex items-start gap-2 border-b border-danger/30 bg-danger/10 px-4 py-2 text-[11.5px] leading-relaxed text-danger">
+            <AlertIcon className="mt-[1px] h-3.5 w-3.5 shrink-0" />
+            <span className="flex-1">{actionError}</span>
+            <button
+              type="button"
+              onClick={onDismissActionError}
+              aria-label="Dismiss"
+              className="shrink-0 text-danger/70 transition-colors hover:text-danger"
+            >
+              <XIcon className="h-3.5 w-3.5" />
+            </button>
           </div>
         ) : null}
 
@@ -1495,14 +995,14 @@ function TaskManagerPanel({ tm, scope }: { tm: TaskManagerValue; scope: TmScope 
               </span>
               <p className="text-[13px] font-medium text-dim">Nothing here yet</p>
               <p className="max-w-[240px] text-[11.5px] leading-relaxed text-faint">
-                Launches and duplicates from every account land here live, building one at a time per
-                session. Keep working — the queue runs on its own.
+                Launches and duplicates from every account land here live. Press Launch and the
+                server builds them one at a time — you can close the tab.
               </p>
             </div>
           ) : (
             <div className="flex flex-col gap-2">
               {shown.map((t) => (
-                <TaskRow key={t.id} task={t} me={me} now={now} onRetry={() => retry(t.id)} />
+                <TaskRow key={t.id} task={t} me={me} now={now} onRetry={() => retry(t.id)} onCancel={() => cancel(t.id)} />
               ))}
             </div>
           )}
@@ -1511,9 +1011,19 @@ function TaskManagerPanel({ tm, scope }: { tm: TaskManagerValue; scope: TmScope 
         {/* footer — bulk actions */}
         <div className="flex items-center justify-between gap-2 border-t border-line px-4 py-2.5">
           <span className="text-[10.5px] text-faint">
-            {counts.running > 0 ? "Processing…" : counts.active > 0 ? "Waiting in queue" : "Idle"}
+            {counts.running > 0 ? "Building on the server…" : counts.active > 0 ? "Queued on the server" : "Idle"}
           </span>
           <div className="flex items-center gap-1.5">
+            {cancelable > 0 ? (
+              <button
+                type="button"
+                onClick={cancelAllQueued}
+                className="flex items-center gap-1.5 rounded-md border border-warn/30 px-2 py-1 text-[11.5px] font-medium text-warn transition-colors hover:bg-warn/10"
+              >
+                <XIcon className="h-3.5 w-3.5" />
+                Cancel queued ({cancelable})
+              </button>
+            ) : null}
             {retryable > 0 ? (
               <button
                 type="button"
@@ -1561,19 +1071,28 @@ function TaskRow({
   me,
   now,
   onRetry,
+  onCancel,
 }: {
   task: ViewTask;
   me: string | null;
   now: number;
   onRetry: () => void;
+  onCancel: () => void;
 }) {
-  const mine = task.local || (!!me && task.owner === me);
+  const mine = !!me && task.owner === me;
   const stages = stagesFor(task.kind);
   const idx = stageIndexFor(task.kind, task.stage);
   const done = task.eff === "done";
-  const error = task.eff === "error";
+  const canceled = isCanceled(task);
+  const error = task.eff === "error" && !canceled;
   const stale = task.eff === "stale";
   const running = task.eff === "running";
+  const queued = task.eff === "queued";
+  // A failed/canceled row the server flagged retryable shows Retry; a queued server row shows
+  // Cancel — both owner-only. A created-campaign partial (retry cleared) shows the non-retryable
+  // marker instead.
+  const canRetry = (error || canceled) && !!task.retry && mine;
+  const canCancel = queued && !!task.srv && mine;
   // A stale task's clock froze at its owner's last sign of life — never tick a dead run.
   const end = task.finishedAt ?? (stale ? task.updatedMs ?? task.startedAt : now);
   const elapsed = task.startedAt ? Math.max(0, (end ?? now) - task.startedAt) : 0;
@@ -1582,25 +1101,27 @@ function TaskRow({
     ? task.kind === "clone"
       ? "Duplicated · live"
       : "Launched · live"
-    : error
-      ? task.error || "Failed"
-      : stale
-        ? task.status === "queued"
-          ? "Interrupted — queued in a session that went offline"
-          : "Interrupted — session went offline"
-        : running
-          ? stages[idx]?.label ?? "Working…"
-          : "Queued";
+    : canceled
+      ? "Canceled"
+      : error
+        ? task.error || "Failed"
+        : stale
+          ? task.status === "queued"
+            ? "Interrupted — queued in a session that went offline"
+            : "Interrupted — session went offline"
+          : running
+            ? stages[idx]?.label ?? "Working…"
+            : "Queued on the server";
 
   return (
     <div
       className={
         "animate-row-in rounded-xl border bg-surface2/40 p-3 transition-colors " +
-        (error ? "border-danger/30" : stale ? "border-warn/30" : done ? "border-launch/25" : "border-line")
+        (canceled ? "border-line" : error ? "border-danger/30" : stale ? "border-warn/30" : done ? "border-launch/25" : "border-line")
       }
     >
       <div className="flex items-start gap-2.5">
-        <StatusDot eff={task.eff} />
+        <StatusDot eff={task.eff} canceled={canceled} />
         <div className="min-w-0 flex-1">
           <p className="truncate text-[12.5px] font-medium text-ink" title={task.name}>
             {task.name || "Untitled campaign"}
@@ -1613,7 +1134,7 @@ function TaskRow({
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <span className="font-mono text-[10.5px] tabular-nums text-faint">{fmtElapsed(elapsed)}</span>
-          {error && task.local && !task.result?.campaignId ? (
+          {canRetry ? (
             <button
               type="button"
               onClick={onRetry}
@@ -1623,9 +1144,19 @@ function TaskRow({
             >
               <RetryIcon className="h-3.5 w-3.5" />
             </button>
+          ) : canCancel ? (
+            <button
+              type="button"
+              onClick={onCancel}
+              data-tip="Cancel this queued launch"
+              aria-label="Cancel"
+              className="tip rounded-md border border-line px-1.5 py-0.5 text-[10.5px] font-medium text-faint transition-colors hover:border-warn/40 hover:text-warn focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              Cancel
+            </button>
           ) : error && task.result?.campaignId ? (
-            // Partial failure — a campaign was created. Retrying would duplicate it, so show a
-            // non-retryable marker pointing the buyer at Ads Manager instead of a Retry button.
+            // Partial failure — a campaign was created. Retrying would duplicate it, so the server
+            // cleared the retry flag; show a non-retryable marker pointing at Ads Manager instead.
             <span
               data-tip="Campaign was partially created — review/delete it in Ads Manager, don't retry"
               className="tip font-mono text-[9px] font-semibold uppercase tracking-wide text-warn"
@@ -1641,17 +1172,21 @@ function TaskRow({
       {/* segmented stage bar */}
       <div className="mt-2.5 flex gap-1">
         {stages.map((s, i) => {
-          const cls = done
-            ? "bg-launch"
-            : error && i === idx
-              ? "bg-danger"
-              : stale && i === idx
-                ? "bg-warn"
-                : i < idx
-                  ? "bg-accent"
-                  : running && i === idx
-                    ? "bg-accent/70 animate-pulse"
-                    : "bg-line2";
+          const cls = canceled
+            ? "bg-line2"
+            : done
+              ? "bg-launch"
+              : error && i === idx
+                ? "bg-danger"
+                : stale && i === idx
+                  ? "bg-warn"
+                  : i < idx
+                    ? "bg-accent"
+                    : running && i === idx
+                      ? "bg-accent/70 animate-pulse"
+                      : queued && i === idx
+                        ? "bg-accent/50 animate-pulse"
+                        : "bg-line2";
           return <span key={s.key} className={"h-1 flex-1 rounded-full transition-colors duration-300 " + cls} />;
         })}
       </div>
@@ -1660,7 +1195,7 @@ function TaskRow({
         <span
           className={
             "flex items-center gap-1.5 truncate text-[11px] " +
-            (done ? "text-launch2" : error ? "text-danger" : stale ? "text-warn" : "text-dim")
+            (done ? "text-launch2" : canceled ? "text-dim" : error ? "text-danger" : stale ? "text-warn" : "text-dim")
           }
         >
           {error || stale ? <AlertIcon className="h-3 w-3 shrink-0" /> : null}
@@ -1676,7 +1211,7 @@ function TaskRow({
   );
 }
 
-function StatusDot({ eff }: { eff: EffStatus }) {
+function StatusDot({ eff, canceled }: { eff: EffStatus; canceled: boolean }) {
   if (eff === "running")
     return (
       <span className="relative mt-1 flex h-3.5 w-3.5 shrink-0 items-center justify-center">
@@ -1684,8 +1219,13 @@ function StatusDot({ eff }: { eff: EffStatus }) {
         <span className="absolute inset-0 animate-ping rounded-full bg-accent/40" />
       </span>
     );
-  const color =
-    eff === "done" ? "bg-launch2" : eff === "error" ? "bg-danger" : "bg-warn"; // queued + stale → warn
+  const color = canceled
+    ? "bg-line2"
+    : eff === "done"
+      ? "bg-launch2"
+      : eff === "error"
+        ? "bg-danger"
+        : "bg-warn"; // queued + stale → warn
   return <span className={"mt-1.5 h-2 w-2 shrink-0 rounded-full " + color} />;
 }
 

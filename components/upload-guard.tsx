@@ -4,16 +4,18 @@ import { useEffect } from "react";
 import { AlertIcon } from "./icons";
 
 /**
- * One voice for "campaigns are still uploading — do not close this window" (owner ask 09-09):
- * the visible notice every launching surface shows, and the leave-page confirm behind it.
+ * One voice for "the hand-off isn't finished — do not close this window" (owner ask 09-09, updated
+ * for the server queue 08.10): the visible notice every launching surface shows, and the leave-page
+ * confirm behind it.
  *
- * A CLIENT-side launch (MO / AIF launches and clones, the HS FB-Token create) streams from this
- * tab: closing or reloading the page kills the upload mid-flight and never fires the queued
- * rows. Server-side pumps (LION duplicate / JURO waves) are NOT covered on purpose — those are
- * safe to close, and the boards say so.
+ * The tab is needed ONLY until the wave is handed over: creatives upload from here and the hand-off
+ * POST runs from here. The moment every campaign reaches the server ("accepted"), the launches
+ * continue on our server — the tab is safe to close. So the guard is live only while something is
+ * still uploading / sending; once the hand-off screen shows the emerald check, nothing holds the
+ * tab. (The hand-off host — components/launch-handoff.tsx — owns the one guard that remains.)
  */
 export const UPLOAD_GUARD_MESSAGE =
-  "Campaigns are still uploading — closing this window now will stop them. Wait until every row is sent.";
+  "The hand-off to our server isn't finished — closing this window now will stop it. Wait until every campaign reads “with the server”.";
 
 /** Registers the native leave-page confirm while `active`. Browsers show their own generic
  *  text (custom messages are ignored since Chrome 51 / Firefox 44), but the dialog itself is
@@ -32,7 +34,7 @@ export function useUnloadGuard(active: boolean): void {
 }
 
 export const uploadingLabel = (n: number): string =>
-  n === 1 ? "1 campaign is still uploading" : `${n} campaigns are still uploading`;
+  n === 1 ? "1 campaign is still being handed over" : `${n} campaigns are still being handed over`;
 
 /** The visible warning strip. Renders nothing when nothing is in flight, so callers can mount it
  *  unconditionally. `compact` = one line for tight rails. */
@@ -52,7 +54,9 @@ export function UploadingNotice({ n, compact = false, className = "" }: { n: num
       <AlertIcon className="mt-[1px] h-3.5 w-3.5 shrink-0" />
       <span>
         <span className="font-semibold">Do not close this window or tab.</span> {uploadingLabel(n)}
-        {compact ? "." : " — they upload from this page and die with it. Wait until every row reads Sent / Created before closing."}
+        {compact
+          ? "."
+          : " — the hand-off runs from this page. Once every campaign reads “with the server”, the launches continue on our server and you can close it."}
       </span>
     </div>
   );

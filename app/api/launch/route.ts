@@ -30,6 +30,7 @@ import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import { launchFailureDisposition, partialFailureNote } from "@/lib/launch-guards";
 import { fetchValidatedImage, uploadImage, uploadVideo, videoThumb, waitForVideo } from "@/lib/fb-media";
+import { isLegacyBlobUrl, isOwnCreativeUrl } from "@/lib/creative-url";
 import { backfillGcm, claimGcm, deleteGcm } from "@/lib/gcm-claim";
 import { isAutoLandingSlug } from "@/lib/auto-landings";
 import { reportPagesUsed } from "@/lib/hs-pages";
@@ -128,7 +129,7 @@ export async function POST(req: Request) {
 
   let campaign: Campaign;
   let partnerId: PartnerId;
-  /** Creatives of this launch (1..maxCreatives): own-Blob URLs; cover = video thumbnail image. */
+  /** Creatives of this launch (1..maxCreatives): own creative-store URLs; cover = video thumbnail image. */
   let medias: { url: string; kind: "video" | "image"; coverUrl: string }[] = [];
   let taskId: string | null = null;
   /** owner ask 28.09: `via:"tool"` routes this launch through TOOL; absent/anything else is the
@@ -328,11 +329,11 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  // The creative must be a Vercel Blob URL our OWN broker produced — never an arbitrary URL.
-  // Otherwise a logged-in user could make FB (or this function, for images) fetch any URL, or make
-  // `del()` target a blob outside our flow. Our broker always uploads to `creatives/<taskid>-<name>`
-  // on the *.blob.vercel-storage.com host over https, so we require both the host suffix AND that
-  // path prefix — narrowing the surface to blobs this app actually creates (rev-api #2).
+  // The creative must be a URL this app itself produced — our S3 creative store (either accepted
+  // origin, under creatives/ or keep/) or, for a tab opened before the S3 deploy, our own legacy
+  // Blob prefix (isOwnCreativeUrl). Never an arbitrary URL: the server fetches image bytes from it
+  // (image creatives + covers), hands it to Meta as an advideos download source, and del() must only
+  // ever target objects of our own flow — an arbitrary URL would be an SSRF hole (rev-api #2).
   {
     // Server-side creative cap — the partner's own limit, never the client's word (a stale tab
     // could still POST more; the tree would then blow the function window mid-wave).
@@ -343,20 +344,12 @@ export async function POST(req: Request) {
         { status: 400 },
       );
     }
-    const ownBlob = (raw: string): boolean => {
-      try {
-        const u = new URL(raw);
-        return u.protocol === "https:" && u.hostname.endsWith(".blob.vercel-storage.com") && u.pathname.startsWith("/creatives/");
-      } catch {
-        return false;
-      }
-    };
     for (const m of medias) {
-      if (!ownBlob(m.url)) {
+      if (!isOwnCreativeUrl(m.url)) {
         return NextResponse.json({ ok: false, stage: "media", error: "media_url_invalid" }, { status: 400 });
       }
-      // Covers are fetched server-side into adimages — same own-Blob fence as the creatives.
-      if (m.coverUrl && !ownBlob(m.coverUrl)) {
+      // Covers are fetched server-side into adimages — same fence as the creatives.
+      if (m.coverUrl && !isOwnCreativeUrl(m.coverUrl)) {
         return NextResponse.json({ ok: false, stage: "media", error: "cover_url_invalid" }, { status: 400 });
       }
     }
@@ -929,12 +922,14 @@ export async function POST(req: Request) {
         send({ ok: false, stage: "error", error: failMsg, detail: err.detail ?? null, created });
       } finally {
         clearInterval(beat);
-        // Drop EVERY temporary Blob (creatives + covers) whether the launch succeeded or failed —
-        // never orphan an upload. Awaited (not fire-and-forget) so it completes before the stream
+        // Creatives now live in content-addressed S3 objects shared by cards, retries and whole
+        // waves — nothing is deleted per launch any more; the bucket's 14-day lifecycle is the
+        // cleanup. del() stays ONLY for a legacy Blob URL, so a tab opened before the S3 deploy still
+        // cleans up after itself. Awaited (not fire-and-forget) so it completes before the stream
         // closes and Vercel can freeze the function; "done"/"error" was already sent, no visible wait.
         for (const m of medias) {
-          await del(m.url, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
-          if (m.coverUrl) await del(m.coverUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
+          if (isLegacyBlobUrl(m.url)) await del(m.url, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
+          if (m.coverUrl && isLegacyBlobUrl(m.coverUrl)) await del(m.coverUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
         }
         // Flush the task-row writer too — its last transition must land before Vercel freezes us.
         await tw.flush();

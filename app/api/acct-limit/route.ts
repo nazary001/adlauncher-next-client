@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { acctLimitSnapshot } from "@/lib/acct-limit";
+import { queuedDemandByAccount } from "@/lib/launch-queue-store";
 
 export const runtime = "nodejs";
 
@@ -15,10 +16,20 @@ export async function GET(req: Request): Promise<NextResponse> {
   if (!session) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   try {
     const snap = await acctLimitSnapshot();
+    // Jobs still QUEUED on the server per ad account (owner ask 08.10 hand-off queue): the client
+    // folds this — plus its own not-yet-accepted hand-off items — into countFor, so a second wave can't
+    // over-queue an account the first is still waiting to fill. Best effort: a failure leaves it {} and
+    // the route still answers ok (the server-side slot claim stays the only authority).
+    let queued: Record<string, number> = {};
+    try {
+      queued = await queuedDemandByAccount();
+    } catch {
+      queued = {};
+    }
     return NextResponse.json(
       // `build` = this deployment's build stamp: a client whose inlined stamp differs is a
       // stale tab and must reload before launching (its pre-flight gates are outdated).
-      { ok: true, build: process.env.NEXT_PUBLIC_BUILD_STAMP ?? "", ...snap },
+      { ok: true, build: process.env.NEXT_PUBLIC_BUILD_STAMP ?? "", ...snap, queued },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (e) {

@@ -471,6 +471,65 @@ body {
   }
 }
 
+/* ---------- launch hand-off (components/launch-handoff.tsx) ----------
+   The hand-off overlay reuses the house vocabulary (animate-fade-in backdrop, animate-pop-in panel,
+   animate-row-in list, animate-pulse-soft "Sending…"); these are the few motions unique to it. The
+   reduced-motion block below collapses them all to their end state — the emerald check and the
+   progress rings must read correctly with no animation. */
+
+/* header ring: a slow accent highlight sweeping over the determinate arc while pending */
+@keyframes handoff-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.handoff-spin {
+  animation: handoff-spin 2.4s linear infinite;
+  transform-origin: center;
+}
+
+/* finish: the check strokes itself in (larger + slower than the copy .animate-check), normalized
+   via pathLength=1 so it works for both the ring check and the row check */
+@keyframes handoff-check-stroke {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+.handoff-check-draw {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: handoff-check-stroke 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* finish: one expanding emerald ring pulse behind the disc */
+@keyframes handoff-ring-pulse {
+  from {
+    transform: scale(0.65);
+    opacity: 0.7;
+  }
+  to {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+.handoff-ring-pulse {
+  animation: handoff-ring-pulse 0.9s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  transform-origin: center;
+}
+
+/* auto-dismiss: a thin bar shrinks along the panel's bottom (purely visual — the JS timer dismisses) */
+@keyframes handoff-countdown {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+.handoff-countdown {
+  animation: handoff-countdown 4s linear forwards;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

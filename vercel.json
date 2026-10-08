@@ -6,6 +6,10 @@
     {
       "path": "/api/hs/token-cron",
       "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/launch-queue/cron",
+      "schedule": "* * * * *"
     }
   ]
 }

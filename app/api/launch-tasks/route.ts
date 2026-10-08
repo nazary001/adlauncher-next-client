@@ -39,6 +39,10 @@ function toClient(r: Row): Row {
     ad_id: r.ad_id ?? null,
     link: r.link ?? null,
     error: r.error ?? null,
+    // Server-launch-queue flags: srv=1 (the queue owns this row — the client never judges it stale
+    // or writes to it), retry=1 (the owner may re-queue this failed/canceled job with one click).
+    srv: r.srv === 1 || r.srv === true ? 1 : 0,
+    retry: r.retry === 1 || r.retry === true ? 1 : 0,
     queued_at: num(r.queued_at) ?? null,
     started_at: num(r.started_at) ?? null,
     finished_at: num(r.finished_at) ?? null,
@@ -109,7 +113,9 @@ export async function POST(req: Request) {
   // full beacon batch completes well inside the function budget.
   for (let i = 0; i < items.length; i += 8) {
     const results = await Promise.all(
-      items.slice(i, i + 8).map((item) => upsertTaskRow(user, String(item.task_id), pickTaskFields(item))),
+      // { client: true }: a buyer's tab can never set the server flags, and its write to a row the
+      // queue owns (srv set) is silently ignored (lib/task-store upsertTaskRow).
+      items.slice(i, i + 8).map((item) => upsertTaskRow(user, String(item.task_id), pickTaskFields(item), { client: true })),
     );
     for (const r of results) {
       if (!r.ok) {
@@ -141,7 +147,11 @@ export async function DELETE(req: Request) {
       await Promise.all(
         ids.slice(i, i + 8).map(async (id) => {
           const found = await findTaskRow(id);
-          if (found && found.owner === user) await deleteTaskRow(found.documentId);
+          // A row the launch queue still OWNS and has not settled (queued / running) is not the
+          // client's to delete: its job would run on without a row (and re-create a nameless one).
+          if (found && found.owner === user && !(found.srv && (found.status === "queued" || found.status === "running"))) {
+            await deleteTaskRow(found.documentId);
+          }
         }),
       );
     }

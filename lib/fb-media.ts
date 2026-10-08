@@ -5,17 +5,73 @@
 // token — omitted = MO's FB_LAUNCH_TOKEN, the HS rail passes its partner-side token.
 
 import { FbError, fbGet, fbPost } from "./fb-graph";
+import { creativeKeyOf, isContentKey } from "./creative-url.ts";
+import {
+  type VideoCacheDeps,
+  type VideoProbeStatus,
+  dropMediaCache,
+  dropMediaCacheByVideo,
+  readMediaCache,
+  resolveCachedVideo,
+  writeMediaCache,
+} from "./fb-media-cache.ts";
 
 type Json = Record<string, unknown>;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Register the creative with FB by URL — FB fetches the bytes from the (public) Blob URL itself,
- *  so the video never passes through this function. */
+// In-process in-flight map keyed "<account>|<key>": two concurrent callers (a launch job and the
+// pump's head start) that register the SAME content-addressed creative into the SAME account share
+// ONE advideos upload instead of racing two (spec §4.6).
+const videoInflight = new Map<string, Promise<string>>();
+
+/** Reuse window in hours (FB_VIDEO_REUSE_HOURS, default 12); 0 switches reuse off entirely. */
+function reuseHours(): number {
+  const raw = Number(process.env.FB_VIDEO_REUSE_HOURS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 12;
+}
+
+/** One GET <video_id>?fields=status → a trust verdict; throws on a Graph error (the cache layer
+ *  treats a throw as a stale entry). */
+async function probeVideoStatus(videoId: string, token?: string): Promise<VideoProbeStatus> {
+  const body = await fbGet(`${videoId}?fields=status`, token);
+  const status = (body?.status as Json | undefined)?.video_status;
+  if (status === "ready") return "ready";
+  if (status === "processing") return "processing";
+  return "stale"; // "error" / missing / anything unexpected → drop + re-upload
+}
+
+/**
+ * Register the creative with FB by URL — FB fetches the bytes from the (public) creative-store URL
+ * itself, so the video never passes through this function. Signature unchanged.
+ *
+ * For a content-addressed creative of ours (`creativeKeyOf` + `isContentKey`) and a non-zero
+ * FB_VIDEO_REUSE_HOURS the registration is CACHE-AWARE (spec §4.6): the same bytes already registered
+ * in this ad account within the window are reused once a status probe confirms the video is still
+ * real (ready/processing). Any other URL, or reuse switched off, behaves exactly as before — a fresh
+ * advideos registration, every time.
+ */
 export async function uploadVideo(accountId: string, fileUrl: string, name: string, token?: string): Promise<string> {
-  const body = await fbPost(`act_${accountId}/advideos`, { name, file_url: fileUrl }, token);
-  if (!body?.id) throw new FbError("video upload failed", body);
-  return String(body.id);
+  const uploadFresh = async (): Promise<string> => {
+    const body = await fbPost(`act_${accountId}/advideos`, { name, file_url: fileUrl }, token);
+    if (!body?.id) throw new FbError("video upload failed", body);
+    return String(body.id);
+  };
+  const hours = reuseHours();
+  const rawKey = creativeKeyOf(fileUrl);
+  // Only a content-addressed creative of OURS is safe to reuse (same bytes ⇒ same key); a random /
+  // foreign URL and a zero reuse window bypass the cache entirely (ckey null).
+  const key = hours > 0 && rawKey && isContentKey(rawKey) ? rawKey : null;
+  if (!key) return uploadFresh();
+  const ckey = `${accountId}|${key}`;
+  const deps: VideoCacheDeps = {
+    readCache: (k) => readMediaCache(k),
+    writeCache: (k, videoId) => writeMediaCache(k, videoId, accountId, key, hours),
+    dropCache: (k) => dropMediaCache(k),
+    probe: (videoId) => probeVideoStatus(videoId, token),
+    uploadFresh,
+  };
+  return resolveCachedVideo(ckey, deps, videoInflight);
 }
 
 // Empirical adimages ceilings (probed live 2026-08-11 on the MO token): any side above ~9000px is
@@ -130,9 +186,17 @@ export async function waitForVideo(videoId: string, timeoutMs = 180_000, token?:
     const body = await fbGet(`${videoId}?fields=status`, token);
     const status = (body?.status as Json | undefined)?.video_status;
     if (status === "ready") return;
-    if (status === "error") throw new FbError("video processing failed", body);
+    if (status === "error") {
+      // The reuse cache may hold this id (it was registered — or reused — for a content-addressed
+      // creative): a video that failed processing must not be handed to the next launches too.
+      await dropMediaCacheByVideo(videoId).catch(() => {});
+      throw new FbError("video processing failed", body);
+    }
     await sleep(6000);
   }
+  // Same for one that never left "processing": without this a stuck id would be reused — and time
+  // every launch of that creative into that account out — until its cache window ran out.
+  await dropMediaCacheByVideo(videoId).catch(() => {});
   throw new FbError("video processing timed out", { videoId });
 }
 

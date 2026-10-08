@@ -41,6 +41,9 @@ export async function ensureTestIndexes(): Promise<void> {
     ["aif_maps", { brand: 1 }],
     ["up_users", { username: 1 }],
     ["up_users", { email: 1 }],
+    // The launch-queue job collection: job_id is the hand-off idempotency key AND the claim/finish
+    // precondition, so the live queue tests need its unique index (+ the Strapi envelope).
+    ["launch_jobs", { job_id: 1 }],
   ];
   for (const [name, key] of plan) {
     await db.collection(name).createIndex(key, { unique: true });
@@ -51,6 +54,16 @@ export async function ensureTestIndexes(): Promise<void> {
     await db.collection(name).createIndex({ id: 1 }, { unique: true });
     await db.collection(name).createIndex({ documentId: 1 }, { unique: true });
   }
+  // launch_jobs TTL + query indexes (the unique job_id + envelope were created in the loop above).
+  await db.collection("launch_jobs").createIndex({ expire_at: 1 }, { expireAfterSeconds: 0 });
+  await db.collection("launch_jobs").createIndex({ lane: 1, status: 1, seq: 1 });
+  await db.collection("launch_jobs").createIndex({ status: 1, lease_until: 1 });
+  await db.collection("launch_jobs").createIndex({ status: 1, account: 1 });
+  // Lane locks + the Meta-video cache: NO envelope (no id / documentId) — only their own unique keys,
+  // or a unique index on a missing field would collide on the second document.
+  await db.collection("launch_lanes").createIndex({ lane: 1 }, { unique: true });
+  await db.collection("fb_media_cache").createIndex({ ckey: 1 }, { unique: true });
+  await db.collection("fb_media_cache").createIndex({ expire_at: 1 }, { expireAfterSeconds: 0 });
 }
 
 export async function col(name: string) {

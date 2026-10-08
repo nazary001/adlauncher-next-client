@@ -32,8 +32,15 @@ export type LaunchTask = {
   finishedAt?: number;
   /** Server-side updatedAt (ms) of the Strapi row — the liveness signal behind `stale`. */
   updatedMs?: number;
-  /** Created this session (has its input → can be retried). Restored rows are false. */
+  /** Created this session (has its input → can be retried). Restored rows are false. Legacy field
+   *  from the client-worker era; the launch queue stamps `srv` instead (rows run on the server). */
   local?: boolean;
+  /** The server launch queue owns this row (`srv:1`): the pump runs the job, writes every stage
+   *  and reaps its own dead runs — so the client NEVER judges it stale and never writes it. */
+  srv?: boolean;
+  /** The server marked this failed/canceled row safe to re-queue with one click (`retry:1`).
+   *  Retry safety is the server's call alone — the client never decides it. */
+  retry?: boolean;
   /** Target ad account id (client-only, set at enqueue — NOT persisted to Strapi): feeds the
    *  launch-limit's optimistic demand, so a board can't over-queue its own wave into one
    *  account. Restored/foreign rows have none — their claims live in the server registry. */
@@ -58,6 +65,8 @@ export function fromRemote(r: Record<string, unknown>): LaunchTask {
     return Number.isFinite(x) ? x : undefined;
   };
   const s = (v: unknown) => (v == null ? undefined : String(v));
+  // The store writes srv / retry as 1 (number); JSON may carry 1, "1" or true — all mean "on".
+  const flag = (v: unknown) => v === 1 || v === "1" || v === true;
   const name = s(r.name) ?? "";
   const rawStatus = s(r.status) ?? "queued";
   // Legacy rows may carry the Strapi enum's "interrupted"; the client models that as an error.
@@ -88,6 +97,8 @@ export function fromRemote(r: Record<string, unknown>): LaunchTask {
     startedAt: n(r.started_at),
     finishedAt: n(r.finished_at),
     updatedMs: n(r.updated_ms),
+    srv: flag(r.srv) || undefined,
+    retry: flag(r.retry) || undefined,
   };
 }
 
@@ -141,10 +152,24 @@ export function effStatusOf(
   lastWriteByOwner: ReadonlyMap<string, number>,
   estServerNow: number,
 ): EffStatus {
-  if (t.local || terminal(t.status)) return t.status;
+  // A server-queue row (srv) is NEVER judged stale: the pump writes every stage and the sweeper
+  // reaps a run whose lease ran out (reapedRow) — so a quiet srv row is "the server has it", not a
+  // dead session. Calling it stale would show a false "interrupted" over a job about to run. Local
+  // rows (legacy client-worker era) and terminal rows resolve to their raw status for the same reason.
+  if (t.local || t.srv || terminal(t.status)) return t.status;
   const last = t.owner ? lastWriteByOwner.get(t.owner) : undefined;
   if (!last) return "stale"; // no liveness signal at all (e.g. offline localStorage fallback)
   return estServerNow - last > STALE_MS ? "stale" : t.status;
+}
+
+/** Mirrors CANCELED_STAGE in lib/launch-queue-types.ts — the stage the queue stamps on a job
+ *  canceled before it started (`canceledRow`). Inlined to keep this pure view module dependency-free. */
+export const CANCELED_STAGE = "canceled";
+
+/** A canceled queue job: the server wrote `status:"error"` with `stage:"canceled"`. The drawer
+ *  shows it neutrally ("Canceled") rather than as a failure, with Retry when the row allows it. */
+export function isCanceled(t: Pick<LaunchTask, "status" | "stage">): boolean {
+  return t.status === "error" && t.stage === CANCELED_STAGE;
 }
 
 /** Deterministic hue for an owner chip (stable across sessions/users). */

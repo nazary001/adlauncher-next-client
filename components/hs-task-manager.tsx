@@ -2,18 +2,20 @@
 
 // Independent task manager for the HS (LION) partner. Deliberately NOT the MO task manager:
 // an HS launch is a single submit — LION's weapon builds campaign/adset/ads on ITS side. For
-// LAUNCHES the lifecycle ENDS at LION acceptance (owner call 08-14): upload → submit → done
-// ("Sent to LION"), nobody polls the weapon's answer — results are checked in LION itself, and
-// the tab can close the moment the row turns green. DUPLICATES keep the full submitted → poll →
-// auto-activate lifecycle (their wave pump runs it server-side; the poll here finishes what the
-// pump's budget didn't). TOKEN launches (kind="token", the FB Token channel, 08-17) skip LION
-// entirely: /api/hs/token-launch streams NDJSON while OUR partner-side token builds the same
-// tree directly on the Graph — the row finishes with the real campaign/adset/ad ids in-request,
-// nothing to poll. TEAM-SHARED (2026-08-12): every row is persisted to Strapi (the shared
-// launch-task collection tagged partner="br", via /api/hs-tasks + server-side stamps in
-// /api/hs/{launch,duplicate} and the token-launch stream) so the whole team sees every HS launch
-// and clone. Only the owner's session polls LION + auto-activates + can retry; teammates mirror
-// the store. localStorage stays as an offline fallback for my own rows.
+// LAUNCHES this tab no longer runs anything (owner ask 08.10): pressing Launch HANDS the wave to
+// the server queue (sendToQueue → /api/launch-queue), the creatives already uploaded to our S3
+// bucket at attach time. A server pump then calls the very launch routes this manager used to
+// call, signed as the owner, and writes the shared row itself — every such row carries srv:1 and
+// is NEVER judged stale, aged out or written by this client; it is only mirrored. The hand-off
+// screen (components/launch-handoff) shows uploading → sending → with the server ✓, and the tab
+// may close the moment the wave is accepted. The three launch rails the queue runs for HS are the
+// same ones as before — LION create (kind hs.lion), FB Token (hs.token) and TOOL (hs.tool) — only
+// the server, not this tab, now calls their routes. DUPLICATES are untouched: they keep the full
+// submitted → poll → auto-activate lifecycle (their wave pump runs it server-side; the poll here
+// finishes what the pump's budget didn't). TEAM-SHARED (2026-08-12): every row is persisted to the
+// shared launch-task collection tagged partner="br" so the whole team sees every HS launch and
+// clone; only the owner's session polls LION + auto-activates + can retry/cancel its own rows;
+// teammates mirror the store. localStorage stays as an offline fallback for my own rows.
 
 import {
   createContext,
@@ -24,9 +26,12 @@ import {
   useRef,
   useState,
 } from "react";
-import { readCreative, safeBlobName, uploadCreativeFile } from "./blob-uploader";
-import { UploadingNotice, uploadingLabel, useUnloadGuard } from "./upload-guard";
+import { ensureCreativeUploaded } from "./creative-uploads";
+import { handoffBegin, handoffPatch, useHandoffPending } from "./launch-handoff";
+import { cancelQueued, retryQueued, sendToQueue } from "./launch-queue-client";
+import { UploadingNotice } from "./upload-guard";
 import { type Campaign, type FileItem, bidTag, moneyLabel } from "@/lib/types";
+import { CANCELED_STAGE, type QueueKind } from "@/lib/launch-queue-types";
 import type { SessionUser } from "./user-menu";
 import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, XIcon } from "./icons";
 
@@ -51,9 +56,9 @@ export type HsTask = {
   updatedMs?: number;
   /** "launch" (create weapon, default for restored rows), "duplicate" (clone weapon — enters at
    *  "submitted" and auto-activates after COMPLETED, clones are born PAUSED), "token" (FB Token
-   *  channel — the tree is built in-request by /api/hs/token-launch, no LION lifecycle) or "tool"
-   *  (HS TOOL sessions service — same in-request NDJSON contract as token via /api/hs/tool-launch,
-   *  owner ask 28.09). */
+   *  channel — the server builds the tree in-request on the Graph, no LION lifecycle) or "tool"
+   *  (HS TOOL sessions service — same in-request contract as token, owner ask 28.09). The queue maps
+   *  these to kinds hs.lion / hs.token / hs.tool. */
   kind?: "launch" | "duplicate" | "token" | "tool";
   status: HsTaskStatus;
   /** Furthest stage key reached (drives the segmented bar). */
@@ -73,13 +78,27 @@ export type HsTask = {
    *  column so it survives reload and shows on the team's restored rows too. */
   bid?: string;
   error?: string;
-  /** Target ad account id (client-only, set at enqueue — not persisted): launch-limit demand. */
+  /** Target ad account id (client-only). No longer set by the launch flow — the hand-off store
+   *  (useHandoffDemand) and the server's /api/acct-limit queued map carry a queued launch's demand
+   *  now; kept for the shared launch-limit fold's structural type. */
   account?: string;
+  /** 1 = this row belongs to the server launch queue (spec §4.4): never judged stale, never aged
+   *  out, never written by this client — only mirrored. Set on the optimistic row and read from
+   *  the store row. */
+  srv?: boolean;
+  /** 1 = the owner may re-queue this row with one click (an error/canceled job the server still
+   *  considers safe to run again). Only meaningful on srv rows. */
+  retry?: boolean;
+  /** Set on the optimistic row inserted the instant the server accepts a hand-off: keeps the row
+   *  visible for OPTIMISTIC_ROW_MS even if a just-before poll (the team list is ~4 s cached) hasn't
+   *  returned the server's own row yet. Cleared the moment that row arrives. */
+  optimisticAt?: number;
   queuedAt: number;
   startedAt?: number;
   submittedAt?: number;
   finishedAt?: number;
-  /** Created in THIS session (its creative inputs are still alive → retryable before submit). */
+  /** Created in THIS session. Duplicates born here stay `local` (authoritative over the fetch
+   *  until the store catches up); server-queued launch rows are NOT local — the queue owns them. */
   local: boolean;
 };
 
@@ -102,9 +121,9 @@ const TOKEN_STAGE_LABELS: Record<string, string> = {
   ads: "Creating ads",
 };
 
-// TOOL launches (owner ask 28.09) ride the SAME segmented bar. The /api/hs/tool-launch route
-// reuses token-launch's stage keys where they overlap (submit/campaign/adset/ads) and adds the
-// shared NDJSON keys of spec §2.4 (gcm/video/processing/creative/ad); label every one it can emit.
+// TOOL launches (owner ask 28.09) ride the SAME segmented bar. The TOOL launch route reuses the
+// token rail's stage keys where they overlap (submit/campaign/adset/ads) and adds the shared NDJSON
+// keys of spec §2.4 (gcm/video/processing/creative/ad); label every one it can emit.
 const TOOL_STAGE_LABELS: Record<string, string> = {
   upload: "Uploading creatives",
   gcm: "Preparing launch",
@@ -171,16 +190,8 @@ const LION_STAGE: Record<string, { key: string; label: string }> = {
   CREATING_ADS: { key: "ads", label: "Creating ads" },
 };
 
-// Blob-upload bounds/retries/diagnostics live in blob-uploader.ts (shared with the MO manager).
-// Token-launch NDJSON stream cap — a hair over the route's maxDuration (300s) so the server
-// always finishes (or cleanly errors) first; mirrors the MO manager's STREAM_TIMEOUT_MS.
-const STREAM_TIMEOUT_MS = 330_000;
-// Gap between consecutive LION submits — RANDOM 1–3s per gap (owner call 2026-08-12): a jittered
-// cadence looks less bot-like and, more importantly, spacing the shots is the front-line defence
-// against Facebook temporarily blocking the executor PROFILE when a whole wave fires at once.
-const TASK_GAP_MIN_MS = 1_000;
-const TASK_GAP_MAX_MS = 3_000;
-const taskGapMs = () => TASK_GAP_MIN_MS + Math.random() * (TASK_GAP_MAX_MS - TASK_GAP_MIN_MS);
+// Submits now run on the server (one lane, jittered 1–3 s between shots — the owner-08-12 pacing
+// moved into lib/launch-queue; no client pump, gap or NDJSON stream here any more).
 // Status polling cadence (drawer open / closed). One batched call covers every pending task.
 // Eased 2026-08-24 (8s/20s → 12s/30s) alongside the server-side short-cache + bounded fetches:
 // the shared Strapi was 503→504-ing under the team's combined MO+HS polling.
@@ -213,8 +224,13 @@ const SHARED_POLL_CLOSED_MS = 20_000;
 const TOMBSTONE_MS = 60_000;
 const STALE_MS = 180_000;
 // Re-upsert my in-flight tasks every 25s so the row's updatedAt keeps bumping — that's how
-// teammates tell a live-but-stuck task (LION still "creating") from a dead session.
+// teammates tell a live-but-stuck task (LION still "creating") from a dead session. DUPLICATE rows
+// only now (server-queued launch rows are srv and the client never writes them).
 const HEARTBEAT_MS = 25_000;
+// An accepted hand-off's optimistic row survives this long absent from the polled list before the
+// normal "non-local rows absent from the fetch are dropped" rule applies. The team list is ~4 s
+// cached server-side; a poll taken the instant before the accept must not blink the row out.
+const OPTIMISTIC_ROW_MS = 30_000;
 
 const LS_BASE = "adlauncher.hstasks";
 const lsKeyFor = (user?: SessionUser) => (user?.username ? `${LS_BASE}.${user.username}` : LS_BASE);
@@ -242,6 +258,10 @@ type HsRemoteRow = {
   started_at: number | null;
   finished_at: number | null;
   updated_ms: number | null;
+  /** 1 when the server launch queue owns this row, 1 when the owner may re-queue it (package C adds
+   *  both to the HS list route; absent → 0/false, which is exactly the pre-queue behaviour). */
+  srv: number | null;
+  retry: number | null;
 };
 
 function statusToStore(s: HsTaskStatus): string {
@@ -279,6 +299,8 @@ function fromRemote(r: HsRemoteRow): HsTask {
     error:
       r.error ||
       (raw === "interrupted" ? "Interrupted — the submitting session went offline" : undefined),
+    srv: !!r.srv,
+    retry: !!r.retry,
     queuedAt: r.queued_at ?? Date.now(),
     startedAt: r.started_at ?? undefined,
     submittedAt: r.lionTaskId ? (r.started_at ?? r.queued_at ?? undefined) : undefined,
@@ -297,29 +319,19 @@ function mergeShared(cur: HsTask[], fetched: HsTask[], tombstones: ReadonlySet<s
   for (const f of fetched) {
     if (!f.id || tombstones.has(f.id)) continue;
     const prev = curById.get(f.id);
-    // A LOCAL error/unknown task with NO LION id whose remote row DOES carry one is a submit
-    // whose answer got lost after landing (the server stamps the row before responding): the
-    // store is the truth — adopting it resumes polling and retires any retry affordance, which
-    // would double-create.
-    const lostAnswer =
-      !!prev?.local && (prev.status === "error" || prev.status === "unknown") && !prev.lionTaskId && !!f.lionTaskId;
-    // Token/TOOL twin of lostAnswer: the stream got cut client-side but the server kept building
-    // and wrote its own verdict — that truth wins. An ambiguous local "unknown" adopts EITHER
-    // terminal (done upgrades it, the server's error names the real failure + created ids); a
-    // local clean error adopts only "done" (adopting a server error would retire a legitimate
-    // pre-campaign Retry for no gain). TOOL rides the same in-request stream, so it settles alike.
-    const tokenSettled =
-      !!prev?.local &&
-      (prev.kind === "token" || prev.kind === "tool") &&
-      ((prev.status === "unknown" && (f.status === "done" || f.status === "error")) ||
-        (prev.status === "error" && f.status === "done"));
-    byId.set(
-      f.id,
-      prev && prev.local && !lostAnswer && !tokenSettled ? prev : prev && prev.updatedMs === f.updatedMs ? prev : f,
-    );
+    // My in-session DUPLICATE rows stay authoritative over the fetch (they poll + auto-activate
+    // locally); server-queued launch rows are not local, so the fetched copy — the truth the queue
+    // wrote — is adopted the moment it changes. An optimistic launch row (prev with no updatedMs)
+    // is replaced here by the server's own row as soon as the poll carries it.
+    byId.set(f.id, prev && prev.local ? prev : prev && prev.updatedMs === f.updatedMs ? prev : f);
   }
-  // Local tasks absent from the fetch stay; ids already decided above keep that decision.
-  for (const c of cur) if (c.local && !byId.has(c.id)) byId.set(c.id, c);
+  // Rows absent from the fetch that must NOT blink out: my local duplicates (authoritative), and a
+  // freshly-accepted optimistic launch row whose server row hasn't surfaced in the ~4 s-cached list
+  // yet (kept only within OPTIMISTIC_ROW_MS of the accept — after that the fetch is the only truth).
+  for (const c of cur) {
+    if (byId.has(c.id)) continue;
+    if (c.local || (c.optimisticAt && Date.now() - c.optimisticAt < OPTIMISTIC_ROW_MS)) byId.set(c.id, c);
+  }
   const next = [...byId.values()].sort((a, b) => b.queuedAt - a.queuedAt || (a.id < b.id ? 1 : -1));
   return next.length === cur.length && next.every((t, i) => t === cur[i]) ? cur : next;
 }
@@ -360,10 +372,18 @@ type HsTaskManagerValue = {
   enqueue: (args: HsEnqueueArgs) => void;
   /** Enter duplicate tasks directly at "submitted" — polling + auto-activation take over. */
   enqueueSubmitted: (rows: HsSubmittedRow[]) => void;
+  /** Re-queue one of my failed/canceled server rows (status error && srv && retry). */
   retry: (id: string) => void;
+  /** Re-queue every one of my retryable server rows. */
   retryAll: () => void;
+  /** Cancel one of my still-queued server rows (status queued && srv). */
+  cancel: (id: string) => void;
+  /** Cancel every one of my queued server rows in the HS scope. */
+  cancelAll: () => void;
   /** Owner-only removal of a terminal error/unknown row (wedged-task cleanup). */
   dismiss: (id: string) => void;
+  /** Inline failures of a retry/cancel call, keyed by row id (or "hs:retry-all"/"hs:cancel-all"). */
+  actionErrors: Record<string, string>;
 };
 
 const Ctx = createContext<HsTaskManagerValue | null>(null);
@@ -373,8 +393,6 @@ export function useHsTaskManager(): HsTaskManagerValue {
   if (!v) throw new Error("useHsTaskManager must be used within HsTaskManagerProvider");
   return v;
 }
-
-type TaskInput = { campaign: Campaign; files: FileItem[]; channel: HsLaunchChannel };
 
 // ---------- provider ----------
 
@@ -386,9 +404,11 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
   const [skew, setSkew] = useState(0);
   const skewRef = useRef(0);
   const [nowTick, setNowTick] = useState(() => Date.now());
-  const inputs = useRef(new Map<string, TaskInput>());
-  const queue = useRef<string[]>([]);
-  const working = useRef(false);
+  // Inline errors for a retry/cancel call (keyed by row id, or "hs:retry-all"/"hs:cancel-all").
+  const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
+  // What still depends on THIS tab: campaigns the hand-off screen has not handed over yet
+  // (uploading | sending). Drives the drawer's "do not close" notice and counts.inFlight.
+  const handoffPending = useHandoffPending("hs");
   const tasksRef = useRef<HsTask[]>([]);
   // Duplicate tasks whose post-COMPLETED activation has already been fired (once per task).
   const activatedRef = useRef(new Set<string>());
@@ -524,29 +544,17 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       .catch(() => {});
   }, [noteSkew]);
 
-  // Restore once: the team's Strapi rows win; localStorage is the offline fallback for my own.
+  // Restore once: the team's shared rows win; localStorage is the offline fallback for my own.
   useEffect(() => {
     let localSnap: HsTask[] = [];
     try {
       const raw = localStorage.getItem(lsKey);
       if (raw) {
-        localSnap = (JSON.parse(raw) as HsTask[]).map((t): HsTask =>
-          t.status === "queued" || t.status === "running"
-            ? {
-                ...t,
-                local: false,
-                status: "error",
-                // Token runs continue SERVER-side after the page dies — the shared row (which the
-                // fetch below merges over this snapshot) is the truth; this text only survives for
-                // runs that died before reaching the server.
-                error:
-                  t.kind === "token" || t.kind === "tool"
-                    ? "Interrupted — page closed mid-launch; check this row / Ads Manager before re-firing"
-                    : "Interrupted — page closed before the submit reached LION",
-                finishedAt: t.finishedAt ?? Date.now(),
-              }
-            : { ...t, local: false },
-        );
+        // A reload no longer interrupts anything: launches run on the server queue (srv rows) and
+        // duplicates on their pump — both survive the page. Restore every row as-is (not `local`,
+        // so the fetch below is authoritative); the shared store is merged over this snapshot a
+        // moment later and carries the true, current state of each row.
+        localSnap = (JSON.parse(raw) as HsTask[]).map((t): HsTask => ({ ...t, local: false }));
       }
     } catch {
       /* ignore */
@@ -605,17 +613,18 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
   }, [tasks, lsKey, me]);
 
   // Heartbeat: bump my in-flight rows' updatedAt so a live-but-stuck task doesn't read as offline.
-  // SERVER-MANAGED rows are skipped: batch-duplicate rows are progressed by the /api/hs/duplicate
-  // pump, and ADOPTED token rows by their launch route's own beat — a heartbeat here would race
-  // those writers with this tab's stale copy, and worse, keep a DEAD server run looking alive
-  // (rowFresh) so the age-out cap never fires. Their liveness signal is the server's own writes;
-  // only rows BORN in this tab (local) heartbeat for the token kind.
+  // SERVER-MANAGED rows are skipped: every row the launch queue owns (srv — launches), batch-
+  // duplicate rows progressed by the /api/hs/duplicate pump, and ADOPTED token rows written by
+  // their launch route's own beat. A heartbeat here would race those writers with this tab's stale
+  // copy and, worse, keep a DEAD server run looking alive (rowFresh) so the age-out cap never fires.
+  // Their liveness signal is the server's own writes; only DUPLICATE rows born in this tab (local)
+  // still heartbeat.
   useEffect(() => {
     const iv = window.setInterval(() => {
       if (document.hidden) return;
       for (const t of tasksRef.current) {
         const mine = t.local || (!!me && t.owner === me);
-        const serverManaged = !t.local && (t.kind === "duplicate" || t.kind === "token" || t.kind === "tool");
+        const serverManaged = t.srv || (!t.local && (t.kind === "duplicate" || t.kind === "token" || t.kind === "tool"));
         if (mine && !serverManaged && (t.status === "queued" || t.status === "running" || t.status === "submitted")) {
           saveRemote(t.id, dynOf(t));
         }
@@ -623,303 +632,6 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     }, HEARTBEAT_MS);
     return () => window.clearInterval(iv);
   }, [me, saveRemote, dynOf]);
-
-  // ---- worker (single-flight) ----
-
-  const runTask = useCallback(
-    async (id: string) => {
-      const input = inputs.current.get(id);
-      if (!input) return;
-      const startedAt = Date.now();
-      patch(id, { status: "running", stage: "upload", startedAt, error: undefined });
-      try {
-        // 1) Turn every creative into a public URL. Files dropped locally live behind blob: URLs →
-        //    push them to Vercel Blob; URL-added creatives (https) pass straight through — LION
-        //    downloads them itself.
-        const media = input.files.filter((f) => f.kind === "video" || f.kind === "image");
-        if (media.length === 0) throw new Error("no creatives on the card");
-        // FB Token rail builds the whole tree inside one serverless window — cap creatives BEFORE
-        // uploading anything (the server enforces the same limit; failing here saves the uploads).
-        if (input.channel === "token" && media.length > 10) {
-          throw new Error("the FB Token rail builds at most 10 ads per campaign — trim the creatives or use the LION rail");
-        }
-        // Read + PROBE every blob-backed creative (and cover) FIRST — a dead file handle fails
-        // in seconds with its name and the re-attach remedy, before any bytes go out (the class
-        // that used to surface as a bare "TypeError: Failed to fetch", live 08-21). https URLs
-        // pass straight through — LION downloads them itself.
-        const preparedFiles = new Map<number, File>();
-        const preparedCovers = new Map<number, File>();
-        for (let i = 0; i < media.length; i++) {
-          const f = media[i];
-          if (!/^https?:\/\//i.test(f.url)) {
-            preparedFiles.set(i, await readCreative(f.url, f.name || `creative-${i}`, f.kind === "image" ? "image" : "video", `creative "${f.name || i + 1}"`));
-          }
-          const cov = media[i].cover;
-          if ((input.channel === "token" || input.channel === "tool") && cov && media[i].kind === "video") {
-            preparedCovers.set(i, await readCreative(cov.url, cov.name || `cover-${i}.jpg`, "image", `cover "${cov.name || i + 1}"`));
-          }
-        }
-
-        // Upload sequentially — bounded, network-retrying, creative-named errors (blob-uploader).
-        const urls: string[] = [];
-        for (let i = 0; i < media.length; i++) {
-          const file = preparedFiles.get(i);
-          if (!file) {
-            urls.push(media[i].url); // URL-added creative — passes through untouched
-            continue;
-          }
-          urls.push(
-            await uploadCreativeFile(
-              `creatives/hs-${id}-${i}-${safeBlobName(file.name, `creative-${i}`)}`,
-              file,
-              `creative "${file.name}"`,
-            ),
-          );
-        }
-
-        // Custom covers (video creatives, FB Token / TOOL rails only — LION's create contract
-        // takes bare URLs and picks its own frame): each cover rides to Blob like a creative and
-        // the server pins it as the ad's thumbnail (TOOL registers it via media/from-url).
-        const coverUrls = new Map<number, string>();
-        for (const [i, file] of preparedCovers) {
-          coverUrls.set(
-            i,
-            await uploadCreativeFile(
-              `creatives/hs-${id}-${i}-cover-${safeBlobName(file.name, `cover-${i}.jpg`)}`,
-              file,
-              `cover "${file.name}"`,
-            ),
-          );
-        }
-
-        // 2a) FB Token / TOOL rails: /api/hs/token-launch (or /api/hs/tool-launch, owner ask
-        // 28.09) builds the whole tree in-request and streams NDJSON stage events — consume them
-        // like the MO manager does, then settle on the final ok/error event. No LION lifecycle:
-        // done here means the campaign EXISTS on Facebook. The TOOL route accepts the exact same
-        // body the token branch sends (same creatives shape) — only the endpoint differs.
-        if (input.channel === "token" || input.channel === "tool") {
-          const launchApi = input.channel === "tool" ? "/api/hs/tool-launch" : "/api/hs/token-launch";
-          patch(id, { stage: "submit" });
-          const creatives = media.map((f, i) => ({
-            url: urls[i],
-            kind: f.kind === "image" ? "image" : "video",
-            name: f.name || "",
-            ...(coverUrls.has(i) ? { cover: coverUrls.get(i) } : {}),
-          }));
-          const streamAbort = new AbortController();
-          const streamTimer = window.setTimeout(() => streamAbort.abort(), STREAM_TIMEOUT_MS);
-          let final: Record<string, unknown> | null = null;
-          let resStatus = 0;
-          let lastStage = "submit";
-          // Transport-class failure (network cut / timeout mid-stream): AMBIGUOUS — the server
-          // keeps building and writes the shared row itself, so this must NOT become a retryable
-          // error (a re-fire could build a second tree). Captured separately from a clean
-          // `ok:false` final, which IS a real per-launch verdict.
-          let transportError: string | null = null;
-          try {
-            const res = await fetch(launchApi, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ campaign: input.campaign, creatives, taskId: id }),
-              signal: streamAbort.signal,
-            });
-            resStatus = res.status;
-            const handle = (line: string) => {
-              let ev: Record<string, unknown>;
-              try {
-                ev = JSON.parse(line);
-              } catch {
-                return;
-              }
-              if (ev.ok === true || ev.ok === false) {
-                final = ev;
-                return;
-              }
-              if (typeof ev.stage === "string") {
-                lastStage = ev.stage;
-                patch(id, { stage: ev.stage, ...(typeof ev.done === "number" ? { adCount: ev.done } : {}) });
-              }
-            };
-            if (res.body) {
-              const reader = res.body.getReader();
-              const dec = new TextDecoder();
-              let buf = "";
-              for (;;) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                buf += dec.decode(value, { stream: true });
-                let nl: number;
-                while ((nl = buf.indexOf("\n")) >= 0) {
-                  const line = buf.slice(0, nl).trim();
-                  buf = buf.slice(nl + 1);
-                  if (line) handle(line);
-                }
-              }
-              if (buf.trim()) handle(buf.trim());
-            } else {
-              final = await res.json().catch(() => null);
-            }
-          } catch (e) {
-            transportError = streamAbort.signal.aborted
-              ? `stream timed out after ${STREAM_TIMEOUT_MS / 60_000} min`
-              : ((e as Error).message ?? String(e));
-          } finally {
-            window.clearTimeout(streamTimer);
-          }
-
-          const f = final as Record<string, unknown> | null;
-          if (f && f.ok === true) {
-            const finishedAt = Date.now();
-            const adCount = Array.isArray(f.ad_ids) ? f.ad_ids.length : media.length;
-            const nm = typeof f.name === "string" ? f.name : undefined;
-            patch(id, {
-              status: "done",
-              stage: "ads",
-              finishedAt,
-              campaignId: f.campaign_id ? String(f.campaign_id) : undefined,
-              adsetId: f.adset_id ? String(f.adset_id) : undefined,
-              adCount,
-              ...(nm ? { name: nm } : {}),
-            });
-            if (nm) meta.current.set(id, { ...(meta.current.get(id) ?? {}), name: nm });
-            saveRemote(id, {
-              status: "done",
-              stage: "ads",
-              started_at: startedAt,
-              finished_at: finishedAt,
-              campaign_id: f.campaign_id ?? null,
-              adset_id: f.adset_id ?? null,
-              ad_id: String(adCount), // string column — see dynOf
-              error: null,
-            });
-            inputs.current.delete(id); // the tree exists — never re-run
-          } else if (f && f.pending === true) {
-            // TOOL is still finishing this launch past our window (owner ask 28.09): AMBIGUOUS like
-            // a lost connection — the campaign may exist, so settle terminal-unknown with NO
-            // one-click retry. The server wrote the pending row; mergeShared (tokenSettled) adopts
-            // its eventual done/error over this. No remote write (it could demote the server's row).
-            const msg =
-              (f.error as string) ||
-              "TOOL is still finishing this launch — check this row / Ads Manager before re-firing";
-            patch(id, { status: "unknown", stage: lastStage, finishedAt: Date.now(), error: msg });
-            inputs.current.delete(id);
-          } else if (f) {
-            // Clean per-launch rejection from the server — a real verdict, retryable only while
-            // nothing landed on Facebook.
-            const finishedAt = Date.now();
-            const msg = (f.error as string) || `HTTP ${resStatus}`;
-            const created = ((f.created ?? {}) as Record<string, unknown>) || {};
-            const createdCampaign = created.campaign_id ? String(created.campaign_id) : undefined;
-            patch(id, {
-              status: "error",
-              stage: lastStage,
-              finishedAt,
-              error: msg,
-              ...(createdCampaign ? { campaignId: createdCampaign } : {}),
-              ...(created.adset_id ? { adsetId: String(created.adset_id) } : {}),
-            });
-            saveRemote(id, {
-              status: "error",
-              stage: lastStage,
-              started_at: startedAt,
-              finished_at: finishedAt,
-              error: msg,
-              ...(createdCampaign ? { campaign_id: createdCampaign } : {}),
-              ...(created.adset_id ? { adset_id: created.adset_id } : {}),
-            });
-            // A created campaign makes a blind retry a DUPLICATE tree — drop the inputs so the
-            // Retry affordance disappears (same rule as the MO manager).
-            if (createdCampaign) inputs.current.delete(id);
-          } else {
-            // No final event: the connection was cut or the stream ended without a verdict
-            // (server timeout). The build may have finished server-side — the shared row is the
-            // truth (the server writes it to the end, and mergeShared adopts its done/error over
-            // this), so this settles as terminal-unknown with NO retry affordance. No remote
-            // write either: the row (whatever the server managed to write) is already more
-            // truthful than "unknown".
-            const msg = `Connection lost mid-build${transportError ? ` (${transportError})` : ` (HTTP ${resStatus})`} — check this row / Ads Manager before re-firing`;
-            patch(id, { status: "unknown", stage: lastStage, finishedAt: Date.now(), error: msg });
-            inputs.current.delete(id); // never offer a one-click re-fire of an ambiguous outcome
-          }
-          return;
-        }
-
-        // 2b) One submit — LION answers fast (it just enqueues a weapon task). taskId lets the
-        // server stamp the shared row the instant LION accepts it (durability).
-        patch(id, { stage: "submit" });
-        let res: Response;
-        try {
-          res = await fetch("/api/hs/launch", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ campaign: input.campaign, creatives: urls, taskId: id }),
-            signal: AbortSignal.timeout(90_000),
-          });
-        } catch (e) {
-          // NETWORK-class failure (cut / timeout): ambiguous — the server may have already landed
-          // this create on LION (where it is exactly-once and will NOT be re-sent). A one-click
-          // Retry here could build a SECOND campaign (review 08-14), so this is terminal-unknown,
-          // not a retryable error. If the submit DID land, the server-stamped shared row carries
-          // the LION id and mergeShared adopts it over this task within seconds — polling then
-          // finishes the story. No remote write: the row (if any) is already more truthful.
-          const msg = `Connection lost mid-submit — check this row in HS Tasks / LION before re-firing (${
-            (e as Error).message ?? e
-          })`;
-          patch(id, { status: "unknown", finishedAt: Date.now(), error: msg });
-          inputs.current.delete(id); // never offer a one-click resubmit of an ambiguous outcome
-          return;
-        }
-        const d = (await res.json().catch(() => null)) as
-          | { ok?: boolean; lionTaskId?: string; name?: string; error?: string }
-          | null;
-        if (!d?.ok || !d.lionTaskId) {
-          throw new Error(d?.error || `HTTP ${res.status}`);
-        }
-        // LION accepted = FINAL for launches (owner call 08-14): nobody babysits the weapon's
-        // answer — the row goes green here and the result is checked in LION itself. (Duplicates
-        // keep their submitted→poll lifecycle; their pump auto-activates born-PAUSED clones.)
-        const submittedAt = Date.now();
-        const nm = d.name ?? undefined;
-        patch(id, {
-          status: "done",
-          stage: "queue",
-          lionTaskId: d.lionTaskId,
-          ...(nm ? { name: nm } : {}),
-          submittedAt,
-          finishedAt: submittedAt,
-        });
-        if (nm) meta.current.set(id, { ...(meta.current.get(id) ?? {}), name: nm });
-        saveRemote(id, {
-          status: "done",
-          stage: "queue",
-          link: d.lionTaskId,
-          started_at: submittedAt,
-          finished_at: submittedAt,
-        });
-        inputs.current.delete(id); // LION owns it now — nothing left to retry locally
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        patch(id, { status: "error", finishedAt: Date.now(), error: msg });
-        saveRemote(id, { status: "error", error: msg, finished_at: Date.now() });
-      }
-    },
-    [patch, saveRemote],
-  );
-
-  const pump = useCallback(async () => {
-    if (working.current) return;
-    working.current = true;
-    try {
-      while (queue.current.length) {
-        const id = queue.current.shift() as string;
-        await runTask(id);
-        // Re-rolled 1–3s per gap so every next submit lands on its own jitter.
-        if (queue.current.length) await new Promise((r) => setTimeout(r, taskGapMs()));
-      }
-    } finally {
-      working.current = false;
-    }
-  }, [runTask]);
 
   // ---- LION status polling (one batched call for every pending task) ----
 
@@ -932,6 +644,9 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     // (live 08-12: a request hung overnight kept the latch closed, so a wedged task ticked for
     // 400+ minutes with the cap never firing).
     for (const t of tasksRef.current) {
+      // The launch queue owns srv rows — it reaps its own dead jobs; the client never ages out or
+      // writes them (spec §4.4). Only duplicate / adopted rows reach the caps below.
+      if (t.srv) continue;
       // Two stranded classes age out here (both caught ticking forever by reviews 08-14):
       // 1) submitted rows LION never finished — generous 3h cap (LION can be slow, not dead);
       // 2) ADOPTED "running" rows with NO LION id — a dead launch tab (closed before its submit)
@@ -959,7 +674,9 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       }
     }
     if (pollBusyRef.current) return;
-    const pending = tasksRef.current.filter((t) => mine(t) && t.status === "submitted" && t.lionTaskId);
+    // Only duplicates ever reach "submitted" + a LION id; srv launch rows settle done/error on the
+    // server and are never polled or written here (defensive !t.srv — it is a no-op for duplicates).
+    const pending = tasksRef.current.filter((t) => mine(t) && t.status === "submitted" && t.lionTaskId && !t.srv);
     if (pending.length === 0) return;
     const pendingById = new Map(pending.map((t) => [t.lionTaskId as string, t]));
     // Campaign-known tasks past the verify window get their campaign read directly this round
@@ -1172,6 +889,10 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
 
   // ---- actions ----
 
+  // Launch no longer runs here (owner ask 08.10): it HANDS the wave over. Register the campaign on
+  // the hand-off screen, await its already-started creative uploads, POST the job to the server
+  // queue, and leave an optimistic row — a server pump then runs the very launch route this manager
+  // used to call. The tab may close the instant the hand-off is accepted.
   const enqueue = useCallback(
     (args: HsEnqueueArgs) => {
       const id =
@@ -1179,38 +900,127 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       const now = Date.now();
       const channel: HsLaunchChannel =
         args.channel === "token" ? "token" : args.channel === "tool" ? "tool" : "lion";
-      const kind =
-        channel === "token" ? ("token" as const) : channel === "tool" ? ("tool" as const) : ("launch" as const);
-      // What this launch bids on — shown on the card and persisted (rides in `meta`, which is
-      // spread into every save) so it survives reload and reaches the team's restored rows too.
+      const kind: QueueKind = channel === "tool" ? "hs.tool" : channel === "token" ? "hs.token" : "hs.lion";
+      const taskKind = channel === "tool" ? ("tool" as const) : channel === "token" ? ("token" as const) : ("launch" as const);
+      // What this launch bids on — shown on the card and carried to the server row via the job `row`.
       const bid = bidTag(args.campaign.bidStrategy, args.campaign.bidCap) || undefined;
-      inputs.current.set(id, { campaign: args.campaign, files: args.files, channel });
-      meta.current.set(id, { name: args.name, geo: args.geo, budget: args.budget, gcm: kind, ...(bid ? { bid } : {}) });
-      setTasks((ts) => [
-        {
-          id,
-          name: args.name,
-          profile: args.profile,
-          geo: args.geo,
-          budget: args.budget,
-          owner: me,
+      const account = (args.campaign.account || "").replace(/^act_/, "") || undefined;
+      const sub = `${args.geo} · $${moneyLabel(args.budget)}`;
+      const media = args.files.filter((f) => f.kind === "video" || f.kind === "image");
+      // Custom video covers ride only the FB-Token / TOOL rails — LION's create contract takes bare
+      // URLs and picks its own frame.
+      const coverOf = (f: FileItem) =>
+        (channel === "token" || channel === "tool") && f.kind === "video" ? f.cover : undefined;
+
+      // Refuse, BEFORE anything is handed over, exactly what the old client runner refused before it
+      // uploaded: an empty card, and more than 10 creatives on the FB-Token rail (the rail builds at
+      // most 10 ads per window; the server enforces it again). A refusal is shown as a FAILED hand-off
+      // item — never thrown: the board fires this in a loop and must keep going.
+      const refuse = (msg: string) => {
+        handoffBegin([{ id, scope: "hs", label: args.name, sub, sources: [], account, phase: "failed" }]);
+        handoffPatch(id, { error: msg });
+      };
+      if (media.length === 0) {
+        refuse("no creatives on the card");
+        return;
+      }
+      if (channel === "token" && media.length > 10) {
+        refuse("the FB Token rail builds at most 10 ads per campaign — trim the creatives or use the LION rail");
+        return;
+      }
+
+      // Every file this campaign waits on — creatives and (token/tool) covers — so the hand-off
+      // screen shows each one's live upload progress.
+      const sources = [
+        ...media.map((f) => f.url),
+        ...media
+          .map(coverOf)
+          .filter((c): c is NonNullable<typeof c> => !!c)
+          .map((c) => c.url),
+      ];
+      handoffBegin([{ id, scope: "hs", label: args.name, sub, sources, account }]);
+
+      // One full-bodied async function (never a thin wrapper — Turbopack would const-fold a null
+      // return): resolve the uploads (usually already done), build the exact body the route takes
+      // minus the task id, hand it to the queue, then stamp the optimistic row.
+      const run = async (): Promise<void> => {
+        const urls = await Promise.all(
+          media.map((f) =>
+            ensureCreativeUploaded(f.url, { name: f.name || "", kind: f.kind === "image" ? "image" : "video" }),
+          ),
+        );
+        const coverUrls = new Map<number, string>();
+        for (let i = 0; i < media.length; i++) {
+          const cov = coverOf(media[i]);
+          if (cov) coverUrls.set(i, await ensureCreativeUploaded(cov.url, { name: cov.name || `cover-${i}.jpg`, kind: "image" }));
+        }
+        const body: Record<string, unknown> =
+          channel === "lion"
+            ? { campaign: args.campaign, creatives: urls }
+            : {
+                campaign: args.campaign,
+                creatives: media.map((f, i) => ({
+                  url: urls[i],
+                  kind: f.kind === "image" ? "image" : "video",
+                  name: f.name || "",
+                  ...(coverUrls.has(i) ? { cover: coverUrls.get(i) } : {}),
+                })),
+              };
+        handoffPatch(id, { phase: "sending" });
+        await sendToQueue("hs", {
+          taskId: id,
           kind,
-          status: "queued" as const,
-          stage: "upload",
-          account: args.campaign.account || undefined,
-          ...(bid ? { bid } : {}),
-          queuedAt: now,
-          local: true,
-        },
-        ...ts,
-      ]);
-      // Show the queued row to the team immediately; the runner's submit (LION) or the token
-      // stream fills in the rest.
-      saveRemote(id, { status: "queued", stage: "upload", gcm: kind, queued_at: now });
-      queue.current.push(id);
-      void pump();
+          body,
+          row: { name: args.name, geo: args.geo, budget: args.budget, ...(bid ? { bid } : {}) },
+          account,
+        });
+        handoffPatch(id, { phase: "accepted" });
+        // Optimistic row so the drawer shows the launch at once. The server stamped its own srv row
+        // before answering, so the next poll adopts it; until then this row survives (mergeShared,
+        // OPTIMISTIC_ROW_MS) so a just-before poll can't blink it. srv → never heartbeat/age/write it.
+        setTasks((ts) => {
+          const row: HsTask = {
+            id,
+            name: args.name,
+            profile: args.profile,
+            geo: args.geo,
+            budget: args.budget,
+            owner: me,
+            kind: taskKind,
+            status: "queued",
+            stage: "submit",
+            srv: true,
+            retry: false,
+            ...(bid ? { bid } : {}),
+            queuedAt: now,
+            optimisticAt: Date.now(),
+            local: false,
+          };
+          const i = ts.findIndex((t) => t.id === id);
+          if (i < 0) return [row, ...ts];
+          const next = ts.slice();
+          next[i] = { ...ts[i], ...row };
+          return next;
+        });
+        loadRemote();
+      };
+
+      const attempt = () => {
+        run().catch((e) => {
+          const error = e instanceof Error ? e.message : String(e);
+          handoffPatch(id, {
+            phase: "failed",
+            error,
+            retry: () => {
+              handoffPatch(id, { phase: "uploading", error: null, retry: null });
+              attempt();
+            },
+          });
+        });
+      };
+      attempt();
     },
-    [pump, me, saveRemote],
+    [me, loadRemote],
   );
 
   const enqueueSubmitted = useCallback(
@@ -1258,28 +1068,55 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     [me, saveRemote],
   );
 
+  const isMineTask = useCallback((t: HsTask) => t.local || (!!me && t.owner === me), [me]);
+
+  // Retry / Cancel are SERVER actions now — the job's body and creatives live on the server, so any
+  // of the owner's sessions can re-queue a failed/canceled job or cancel a still-queued one. A
+  // failure surfaces inline in the drawer (keyed by row id, or the bulk key); a success kicks one
+  // loadRemote so the mirrored row flips without waiting a poll.
+  const runQueueAction = useCallback(
+    (key: string, fn: () => Promise<string[]>) => {
+      setActionErrors((e) => {
+        if (!e[key]) return e;
+        const n = { ...e };
+        delete n[key];
+        return n;
+      });
+      fn()
+        .then(() => loadRemote())
+        .catch((err) => setActionErrors((e) => ({ ...e, [key]: err instanceof Error ? err.message : String(err) })));
+    },
+    [loadRemote],
+  );
+
   const retry = useCallback(
     (id: string) => {
       const t = tasksRef.current.find((x) => x.id === id);
-      if (!t || t.status !== "error") return;
-      // Only pre-submit failures are retryable: after a successful submit LION owns the task, and a
-      // re-submit would create a SECOND campaign task on their side. Same on the token rail once a
-      // campaign id exists — the tree (or part of it) is live on Facebook.
-      if (t.lionTaskId || t.campaignId || !inputs.current.has(id)) return;
-      if (queue.current.includes(id)) return;
-      patch(id, { status: "queued", stage: "upload", error: undefined, startedAt: undefined, finishedAt: undefined });
-      saveRemote(id, { status: "queued", stage: "upload", error: null, finished_at: null });
-      queue.current.push(id);
-      void pump();
+      if (!t || !isMineTask(t) || t.status !== "error" || !t.srv || !t.retry) return;
+      runQueueAction(id, () => retryQueued([id]));
     },
-    [patch, pump, saveRemote],
+    [isMineTask, runQueueAction],
   );
 
   const retryAll = useCallback(() => {
-    for (const t of tasksRef.current) {
-      if (t.status === "error" && !t.lionTaskId && !t.campaignId && t.local && inputs.current.has(t.id)) retry(t.id);
-    }
-  }, [retry]);
+    const ids = tasksRef.current
+      .filter((t) => isMineTask(t) && t.status === "error" && !!t.srv && !!t.retry)
+      .map((t) => t.id);
+    if (ids.length) runQueueAction("hs:retry-all", () => retryQueued(ids));
+  }, [isMineTask, runQueueAction]);
+
+  const cancel = useCallback(
+    (id: string) => {
+      const t = tasksRef.current.find((x) => x.id === id);
+      if (!t || !isMineTask(t) || t.status !== "queued" || !t.srv) return;
+      runQueueAction(id, () => cancelQueued({ taskIds: [id] }));
+    },
+    [isMineTask, runQueueAction],
+  );
+
+  const cancelAll = useCallback(() => {
+    runQueueAction("hs:cancel-all", () => cancelQueued({ scope: "hs" }));
+  }, [runQueueAction]);
 
   /** Owner-only removal of a TERMINAL row (error/unknown). Order matters: tombstone the id (an
    *  in-flight shared fetch can't re-add it), drop it from state (heartbeat/poll stop writing it
@@ -1288,7 +1125,12 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
   const dismiss = useCallback((id: string) => {
     tombstones.current.set(id, Date.now());
     setTasks((ts) => ts.filter((t) => t.id !== id));
-    inputs.current.delete(id);
+    setActionErrors((e) => {
+      if (!e[id]) return e;
+      const n = { ...e };
+      delete n[id];
+      return n;
+    });
     void fetch(`/api/hs-tasks?taskId=${encodeURIComponent(id)}`, {
       method: "DELETE",
       signal: AbortSignal.timeout(20_000),
@@ -1303,12 +1145,12 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       done = 0,
       failed = 0,
       running = 0,
-      inFlight = 0,
       onLion = 0;
     for (const t of tasks) {
       // A dead session's non-terminal row is INTERRUPTED, not live — the row already renders it
       // "session offline"; counting it by raw status kept the badge pulsing and Active/On-LION
-      // inflated forever (header contradicting the list, review find 08-17).
+      // inflated forever (header contradicting the list, review find 08-17). srv rows are never
+      // judged stale (the queue owns them), so they count by their real status.
       if (isStaleHsRow(t, me, estServerNow)) {
         failed++;
         continue;
@@ -1318,19 +1160,14 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       if (t.status === "submitted") onLion++;
       if (t.status === "done") done++;
       if (t.status === "error" || t.status === "unknown") failed++;
-      // Launches still CLIENT-side (queued behind the pump, or running their upload/stream) die
-      // with this page — unlike "submitted" (LION owns it) or terminal rows. THIS tab's own
-      // tasks only: teammates' rows and restored snapshots don't hold this page hostage.
-      if (t.local && (t.status === "queued" || t.status === "running")) inFlight++;
     }
-    return { active, done, failed, running, total: tasks.length, inFlight, onLion };
-  }, [tasks, me, estServerNow]);
+    // inFlight = what still depends on THIS tab: hand-off items not yet with the server (uploading |
+    // sending). A server-queued launch no longer holds the page hostage — it is not counted here.
+    return { active, done, failed, running, total: tasks.length, inFlight: handoffPending, onLion };
+  }, [tasks, me, estServerNow, handoffPending]);
 
-  // Closing the page while launches are still client-side kills them (queued rows never fire;
-  // an upload dies mid-flight) — the native leave-confirm is the hard stop behind the floating
-  // banner. Registered only while something is actually in flight, so normal navigation stays
-  // silent the rest of the time.
-  useUnloadGuard(counts.inFlight > 0);
+  // The leave-page confirm while a hand-off is pending is owned by <LaunchHandoffHost/> (the one
+  // surface that still needs the tab open); this manager no longer registers its own.
 
   const value: HsTaskManagerValue = {
     tasks,
@@ -1343,50 +1180,17 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     enqueueSubmitted,
     retry,
     retryAll,
+    cancel,
+    cancelAll,
     dismiss,
+    actionErrors,
   };
 
   return (
     <Ctx.Provider value={value}>
       {children}
-      {!open && counts.inFlight > 0 ? (
-        <HsLaunchingBanner n={counts.inFlight} onOpen={() => setOpen(true)} />
-      ) : null}
       <HsTaskManagerPanel />
     </Ctx.Provider>
-  );
-}
-
-/** Floating guard for launches still CLIENT-side while the drawer is hidden: the page must stay
- *  open or queued/uploading campaigns die with it (the beforeunload confirm above is the hard
- *  stop; this is the visible one). Clicking re-opens the Task Manager. Disappears by itself the
- *  moment every launch is handed off (submitted/done/error). */
-function HsLaunchingBanner({ n, onOpen }: { n: number; onOpen: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      aria-live="polite"
-      className={
-        "animate-pop-in fixed bottom-5 left-1/2 z-[70] flex -translate-x-1/2 items-center gap-2.5 " +
-        "rounded-full border border-warn/45 bg-surface/95 py-2 pl-3 pr-2 " +
-        "shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-md transition-all duration-150 " +
-        "hover:border-warn/70 hover:bg-surface2 active:scale-[0.98] " +
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warn/40"
-      }
-    >
-      <span className="relative flex h-3 w-3 shrink-0 items-center justify-center">
-        <span className="z-10 h-2 w-2 rounded-full bg-warn" />
-        <span className="absolute inset-0 animate-ping rounded-full bg-warn/50" />
-      </span>
-      <span className="whitespace-nowrap text-[12.5px] font-semibold text-warn">
-        Do not close this window
-        <span className="font-medium text-dim"> · {uploadingLabel(n)}</span>
-      </span>
-      <span className="ml-1 shrink-0 rounded-full border border-line bg-surface2 px-2 py-0.5 text-[10.5px] font-medium text-dim">
-        View
-      </span>
-    </button>
   );
 }
 
@@ -1453,13 +1257,17 @@ function fmtElapsed(ms: number): string {
  *  offline" state the row renders. ONE predicate for the row, the counts, the tabs and the
  *  summary strip, so the header can never contradict the list again. */
 function isStaleHsRow(t: HsTask, me: string | null, estServerNow: number): boolean {
+  // The launch queue owns srv rows and reaps its own dead jobs — they are never "session offline"
+  // however long between its writes (spec §4.4).
+  if (t.srv) return false;
   const mine = t.local || (!!me && t.owner === me);
   const terminal = t.status === "done" || t.status === "error" || t.status === "unknown";
   return !mine && !terminal && (!t.updatedMs || estServerNow - t.updatedMs > STALE_MS);
 }
 
 function HsTaskManagerPanel() {
-  const { tasks, counts, me, estServerNow, open, setOpen, retry, retryAll, dismiss } = useHsTaskManager();
+  const { tasks, counts, me, estServerNow, open, setOpen, retry, retryAll, cancel, cancelAll, dismiss, actionErrors } =
+    useHsTaskManager();
   const [filter, setFilter] = useState<Filter>("all");
   const [mineOnly, setMineOnly] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -1494,7 +1302,10 @@ function HsTaskManagerPanel() {
   const isMine = (t: HsTask) => t.local || (!!me && t.owner === me);
   const scoped = mineOnly ? tasks.filter(isMine) : tasks;
   const shown = scoped.filter(inBucket);
-  const retryable = tasks.filter((t) => t.status === "error" && !t.lionTaskId && !t.campaignId && t.local).length;
+  // Retry / Cancel are server actions on MY srv rows: retryable = failed/canceled jobs the server
+  // will take again; cancelable = jobs still queued on the server that I can pull.
+  const retryable = tasks.filter((t) => isMine(t) && t.status === "error" && !!t.srv && !!t.retry).length;
+  const cancelable = tasks.filter((t) => isMine(t) && t.status === "queued" && !!t.srv).length;
 
   const tabs: { key: Filter; label: string; n: number }[] = [
     { key: "all", label: "All", n: tasks.length },
@@ -1528,8 +1339,9 @@ function HsTaskManagerPanel() {
           </button>
         </div>
 
-        {/* FB-Token launches upload from this tab — say so INSIDE the drawer too (the floating
-            pill only shows while it is closed; owner ask 09-09). LION waves are server-side. */}
+        {/* While a wave is still handing over (creatives uploading / job being sent — useHandoffPending),
+            this tab must stay open; the hand-off overlay says so and this echoes it inside the drawer.
+            Once the server accepts, launches continue without this tab and the notice clears. */}
         {counts.inFlight > 0 ? (
           <div className="border-b border-line px-3 py-2">
             <UploadingNotice n={counts.inFlight} />
@@ -1582,9 +1394,10 @@ function HsTaskManagerPanel() {
               </span>
               <p className="text-[13px] font-medium text-dim">Nothing here yet</p>
               <p className="max-w-[250px] text-[11.5px] leading-relaxed text-faint">
-                HS launches land here. LION rail: a green row means LION accepted it — the build
-                finishes on LION&apos;s side. FB token &amp; TOOL rails: a green row means the
-                campaign is already live on Facebook (delivery starts 30 min after create).
+                HS launches land here. They hand over to our server — close this tab once a row is
+                queued. LION rail: a green row means LION accepted it — the build finishes on
+                LION&apos;s side. FB token &amp; TOOL rails: a green row means the campaign is already
+                live on Facebook (delivery starts 30 min after create).
               </p>
             </div>
           ) : (
@@ -1596,7 +1409,9 @@ function HsTaskManagerPanel() {
                   me={me}
                   estServerNow={estServerNow}
                   now={now}
+                  actionError={actionErrors[t.id]}
                   onRetry={() => retry(t.id)}
+                  onCancel={() => cancel(t.id)}
                   onDismiss={() => dismiss(t.id)}
                 />
               ))}
@@ -1605,20 +1420,40 @@ function HsTaskManagerPanel() {
         </div>
 
         {/* footer */}
-        <div className="flex items-center justify-between gap-2 border-t border-line px-4 py-2.5">
-          <span className="text-[10.5px] text-faint">
-            {counts.running > 0 ? "Processing…" : counts.active > 0 ? "Waiting in queue" : "Idle"}
-          </span>
-          {retryable > 0 ? (
-            <button
-              type="button"
-              onClick={retryAll}
-              className="flex items-center gap-1.5 rounded-md border border-danger/30 px-2 py-1 text-[11.5px] font-medium text-danger transition-colors hover:bg-danger/10"
-            >
-              <RetryIcon className="h-3.5 w-3.5" />
-              Retry failed ({retryable})
-            </button>
+        <div className="flex flex-col gap-1.5 border-t border-line px-4 py-2.5">
+          {actionErrors["hs:retry-all"] || actionErrors["hs:cancel-all"] ? (
+            <p className="flex items-start gap-1.5 text-[10.5px] leading-relaxed text-danger">
+              <AlertIcon className="mt-px h-3 w-3 shrink-0" />
+              <span className="min-w-0 break-words">{actionErrors["hs:retry-all"] || actionErrors["hs:cancel-all"]}</span>
+            </p>
           ) : null}
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10.5px] text-faint">
+              {counts.running > 0 ? "Processing…" : counts.active > 0 ? "Waiting in queue" : "Idle"}
+            </span>
+            <div className="flex items-center gap-1.5">
+              {cancelable > 0 ? (
+                <button
+                  type="button"
+                  onClick={cancelAll}
+                  className="flex items-center gap-1.5 rounded-md border border-warn/30 px-2 py-1 text-[11.5px] font-medium text-warn transition-colors hover:bg-warn/10"
+                >
+                  <XIcon className="h-3.5 w-3.5" />
+                  Cancel queued ({cancelable})
+                </button>
+              ) : null}
+              {retryable > 0 ? (
+                <button
+                  type="button"
+                  onClick={retryAll}
+                  className="flex items-center gap-1.5 rounded-md border border-danger/30 px-2 py-1 text-[11.5px] font-medium text-danger transition-colors hover:bg-danger/10"
+                >
+                  <RetryIcon className="h-3.5 w-3.5" />
+                  Retry failed ({retryable})
+                </button>
+              ) : null}
+            </div>
+          </div>
         </div>
       </aside>
     </div>
@@ -1656,20 +1491,30 @@ function HsTaskRow({
   me,
   estServerNow,
   now,
+  actionError,
   onRetry,
+  onCancel,
   onDismiss,
 }: {
   task: HsTask;
   me: string | null;
   estServerNow: number;
   now: number;
+  actionError?: string;
   onRetry: () => void;
+  onCancel: () => void;
   onDismiss: () => void;
 }) {
   const mine = t.local || (!!me && t.owner === me);
   const done = t.status === "done";
-  const error = t.status === "error";
+  // A canceled job rides back as status:"error", stage:"canceled" (spec §4.4) — show it as a neutral
+  // "Canceled", not a scary failure, and let its retry flag drive the Retry affordance.
+  const canceled = t.status === "error" && t.stage === CANCELED_STAGE;
+  const error = t.status === "error" && !canceled;
   const unknown = t.status === "unknown";
+  // Server-owned rows this user may act on.
+  const canRetry = mine && !!t.srv && !!t.retry && t.status === "error";
+  const canCancel = mine && !!t.srv && t.status === "queued";
   // A teammate's non-terminal task whose session stopped writing (> STALE_MS) reads as "stale" —
   // same predicate the counts/tabs use (isStaleHsRow), so header and list always agree.
   const stale = isStaleHsRow(t, me, estServerNow);
@@ -1690,25 +1535,31 @@ function HsTaskRow({
         : t.campaignId || t.adCount
           ? `Created on LION${adsSuffix}`
           : "Sent to LION"
-    : error
-      ? t.error || "Failed"
-      : unknown
-        ? t.error || "Check LION"
-        : t.status === "queued"
-          ? "Queued"
-          : t.status === "running"
-            ? (t.kind === "tool"
-                ? TOOL_STAGE_LABELS[t.stage]
-                : t.kind === "token"
-                  ? TOKEN_STAGE_LABELS[t.stage]
-                  : STAGES[idx]?.label) ?? "Working…"
-            : (t.lionStatus && LION_STAGE[t.lionStatus]?.label) || `On LION: ${t.lionStatus ?? "…"}`;
+    : canceled
+      ? "Canceled"
+      : error
+        ? t.error || "Failed"
+        : unknown
+          ? t.error || "Check LION"
+          : t.status === "queued"
+            ? // srv rows wait in the server lane; a plain (non-srv) queued row only exists on the
+              // transient optimistic path, so still read it as queued.
+              t.srv
+              ? "Queued on the server"
+              : "Queued"
+            : t.status === "running"
+              ? (t.kind === "tool"
+                  ? TOOL_STAGE_LABELS[t.stage]
+                  : t.kind === "token"
+                    ? TOKEN_STAGE_LABELS[t.stage]
+                    : STAGES[idx]?.label) ?? "Working…"
+              : (t.lionStatus && LION_STAGE[t.lionStatus]?.label) || `On LION: ${t.lionStatus ?? "…"}`;
 
   return (
     <div
       className={
         "animate-row-in rounded-xl border bg-surface2/40 p-3 transition-colors " +
-        (error ? "border-danger/30" : unknown ? "border-warn/30" : done ? "border-launch/25" : "border-line")
+        (error ? "border-danger/30" : unknown || canceled ? "border-warn/30" : done ? "border-launch/25" : "border-line")
       }
     >
       <div className="flex items-start gap-2.5">
@@ -1732,9 +1583,23 @@ function HsTaskRow({
             </span>
           ) : null}
           <span className="font-mono text-[10.5px] tabular-nums text-faint">{fmtElapsed(elapsed)}</span>
-          {/* Retry is own-only (needs the local creative inputs) and only while nothing landed
-              on the other side — no LION task, no token-rail campaign. */}
-          {error && t.local && !t.lionTaskId && !t.campaignId ? (
+          {/* Cancel is own-only and only for a job the server still has QUEUED — pull it before it
+              starts (cancelQueued; a started job is never touched). */}
+          {canCancel ? (
+            <button
+              type="button"
+              onClick={onCancel}
+              data-tip="Cancel queued launch"
+              aria-label="Cancel queued launch"
+              className="tip flex h-6 w-6 items-center justify-center rounded-md text-faint transition-colors hover:bg-raise hover:text-warn focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              <XIcon className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
+          {/* Retry is own-only and server-side: the job's body + creatives live on the server, so any
+              of the owner's sessions re-queues it — but only a job the server still marks retryable
+              (a clean error with nothing created, or a cancel). */}
+          {canRetry ? (
             <button
               type="button"
               onClick={onRetry}
@@ -1745,10 +1610,10 @@ function HsTaskRow({
               <RetryIcon className="h-3.5 w-3.5" />
             </button>
           ) : null}
-          {/* Dismiss is own-only and TERMINAL-failure-only (error/unknown): wedged-task cleanup.
+          {/* Dismiss is own-only and TERMINAL-only (error/unknown/canceled): wedged-task cleanup.
               It also breaks the delete→resurrect ping-pong — removing the row from state stops
               the heartbeat writing it (live 08-12). Done rows stay: results are the team record. */}
-          {(error || unknown) && mine ? (
+          {(error || unknown || canceled) && mine ? (
             <button
               type="button"
               onClick={onDismiss}
@@ -1767,10 +1632,10 @@ function HsTaskRow({
         {STAGES.map((s, i) => {
           const cls = done
             ? "bg-launch"
-            : (error || unknown) && i === idx
-              ? unknown
-                ? "bg-warn"
-                : "bg-danger"
+            : (error || unknown || canceled) && i === idx
+              ? error
+                ? "bg-danger"
+                : "bg-warn"
               : i < idx
                 ? "bg-accent"
                 : running && i === idx
@@ -1784,10 +1649,10 @@ function HsTaskRow({
         <span
           className={
             "flex items-center gap-1.5 truncate text-[11px] " +
-            (done ? "text-launch2" : error ? "text-danger" : unknown ? "text-warn" : "text-dim")
+            (done ? "text-launch2" : error ? "text-danger" : unknown || canceled ? "text-warn" : "text-dim")
           }
         >
-          {error || unknown ? <AlertIcon className="h-3 w-3 shrink-0" /> : null}
+          {error || unknown || canceled ? <AlertIcon className="h-3 w-3 shrink-0" /> : null}
           {done ? <CheckIcon className="h-3 w-3 shrink-0" /> : null}
           {running ? <RocketIcon className="h-3 w-3 shrink-0 text-[#9db8ff]" /> : null}
           <span className="truncate" title={statusLabel}>
@@ -1796,6 +1661,14 @@ function HsTaskRow({
         </span>
         {done && t.campaignId ? <CopyCampaignId id={t.campaignId} /> : null}
       </div>
+
+      {/* Inline failure of a Retry / Cancel call on this row (retryQueued / cancelQueued). */}
+      {actionError ? (
+        <p className="mt-1.5 flex items-start gap-1.5 rounded-md border border-danger/25 bg-danger/5 px-2 py-1 text-[10.5px] leading-relaxed text-danger">
+          <AlertIcon className="mt-px h-3 w-3 shrink-0" />
+          <span className="min-w-0 break-words">{actionError}</span>
+        </p>
+      ) : null}
 
       {/* non-terminal LION note — their tasker keeps trying; surface as a warning, not a failure.
           Humanised notes (profile block, beneficiary wait) already read as full sentences, so

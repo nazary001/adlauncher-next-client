@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { FilmIcon, PlayIcon, PlusIcon, UploadIcon, XIcon } from "./icons";
+import { CheckIcon, FilmIcon, PlayIcon, PlusIcon, RetryIcon, UploadIcon, XIcon } from "./icons";
+import { retryCreativeUpload, startCreativeUpload, useCreativeUpload } from "./creative-uploads";
 import type { FileItem } from "@/lib/types";
 
 function fmtSize(bytes: number): string {
@@ -16,6 +17,89 @@ function fmtDur(sec: number): string {
 }
 
 type VidMeta = { duration?: number; w?: number; h?: number };
+
+/** The attach-time S3 upload state on a creative tile: a thin progress bar along the bottom edge
+ *  and a mono percent chip while it uploads, an emerald "Uploaded" check on success (reused → the
+ *  bytes were already on the server), a red "Upload failed" + Retry carrying the full reason as its
+ *  title. Everything is absolutely positioned on `top-9` / `bottom-0` so it never covers the remove
+ *  button, the play affordance, the cover chip or the info footer, and never shifts the layout
+ *  (DESIGN.md: mono 9 px uppercase on bg-black/55 backdrop-blur; emerald only for success). */
+function TileUploadState({ src }: { src: string }) {
+  const u = useCreativeUpload(src);
+  if (!u) return null;
+  if (u.phase === "done") {
+    return (
+      <span
+        title={u.reused ? "Already on the server — nothing to upload" : "Uploaded"}
+        className="pointer-events-none absolute left-2 top-9 z-10 flex items-center gap-1 rounded-md bg-black/55 px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-launch2 backdrop-blur-sm"
+      >
+        <CheckIcon className="h-2.5 w-2.5" />
+        Uploaded
+      </span>
+    );
+  }
+  if (u.phase === "error") {
+    return (
+      <span
+        title={u.error}
+        className="absolute left-2 top-9 z-10 flex items-center gap-1 rounded-md bg-black/65 px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-danger ring-1 ring-danger/30 backdrop-blur-sm"
+      >
+        Upload failed
+        <button
+          type="button"
+          aria-label="Retry upload"
+          onClick={() => retryCreativeUpload(src)}
+          className="flex items-center text-danger/90 transition-colors hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        >
+          <RetryIcon className="h-3 w-3" />
+        </button>
+      </span>
+    );
+  }
+  const pct = Math.round((u.progress || 0) * 100);
+  return (
+    <>
+      <span className="pointer-events-none absolute left-2 top-9 z-10 rounded-md bg-black/55 px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-white/80 backdrop-blur-sm">
+        {u.phase === "uploading" ? `Uploading ${pct}%` : "Preparing…"}
+      </span>
+      <span className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-[3px] bg-black/40">
+        <span className="block h-full bg-gradient-to-r from-accent to-accent2 transition-[width] duration-200" style={{ width: `${pct}%` }} />
+      </span>
+    </>
+  );
+}
+
+/** The same three states in miniature, tucked into a video's cover chip. */
+function CoverUploadState({ src }: { src: string }) {
+  const u = useCreativeUpload(src);
+  if (!u) return null;
+  if (u.phase === "done") {
+    return (
+      <span title={u.reused ? "Cover already on the server" : "Cover uploaded"} className="flex items-center text-launch2">
+        <CheckIcon className="h-2.5 w-2.5" />
+      </span>
+    );
+  }
+  if (u.phase === "error") {
+    return (
+      <button
+        type="button"
+        aria-label="Retry cover upload"
+        title={u.error}
+        onClick={() => retryCreativeUpload(src)}
+        className="flex items-center text-danger transition-colors hover:text-danger/80 focus-visible:outline-none"
+      >
+        <RetryIcon className="h-2.5 w-2.5" />
+      </button>
+    );
+  }
+  const pct = Math.round((u.progress || 0) * 100);
+  return (
+    <span title={u.phase === "uploading" ? `Uploading ${pct}%` : "Preparing…"} className="font-mono text-[8px] font-semibold tabular-nums text-white/70">
+      {u.phase === "uploading" ? `${pct}%` : "…"}
+    </span>
+  );
+}
 
 /** One creative preview. Video shows its first frame, plays on hover, and reads its own
  *  duration/resolution. `large` = hero mode (fills height, letterboxed); else a grid thumb. */
@@ -56,7 +140,10 @@ function CreativeCard({
     const recoded = await recodeImage(raw);
     const f = recoded ?? raw;
     if (!recoded && raw.size > IMAGE_MAX_BYTES) return; // undecodable + over the server cap
-    onCover({ url: URL.createObjectURL(f), name: f.name });
+    // Start the cover's S3 upload the instant it is picked (owner ask 08.10) — by launch it is there.
+    const url = URL.createObjectURL(f);
+    startCreativeUpload(url, { name: f.name, kind: "image", label: `cover "${f.name}"` });
+    onCover({ url, name: f.name });
   }
 
   const dims = meta.w && meta.h ? `${meta.w}×${meta.h}` : "";
@@ -184,6 +271,7 @@ function CreativeCard({
               <span className="font-mono text-[8.5px] font-semibold uppercase tracking-wider text-white/80">
                 Cover
               </span>
+              <CoverUploadState src={file.cover.url} />
               <button
                 type="button"
                 aria-label="Remove cover"
@@ -220,6 +308,9 @@ function CreativeCard({
         <p className={"truncate font-medium text-white " + (large ? "text-[12px]" : "text-[10px]")}>{file.name}</p>
         <p className={"truncate font-mono text-white/60 " + (large ? "text-[10.5px]" : "text-[9px]")}>{bits}</p>
       </div>
+
+      {/* attach-time S3 upload state (launchable media only) */}
+      {isImage || isVideo ? <TileUploadState src={file.url} /> : null}
     </div>
   );
 }
@@ -365,7 +456,11 @@ export function Dropzone({
           continue;
         }
       }
-      ok.push({ id: `f${Date.now()}-${counter.current++}`, name: f.name, size: f.size, kind, url: URL.createObjectURL(f) });
+      const url = URL.createObjectURL(f);
+      // Content goes browser → our S3 bucket the moment it is attached (owner ask 08.10), so pressing
+      // Launch is a hand-off, not a transfer. Only launchable media is uploaded — "other" files are not.
+      if (kind === "image" || kind === "video") startCreativeUpload(url, { name: f.name, kind });
+      ok.push({ id: `f${Date.now()}-${counter.current++}`, name: f.name, size: f.size, kind, url });
     }
     if (ok.length) {
       const merged = [...latestFiles.current, ...ok];

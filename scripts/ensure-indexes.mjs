@@ -56,6 +56,23 @@ const PLAN = {
   mo_landing_jobs: [...envelope, { key: { status: 1, scheduled_at: 1 } }, { key: { status: 1, started_at: 1 } }],
   mo_landings: [...envelope, { key: { slug: 1 } }, { key: { lang: 1, createdAt: -1 } }, { key: { niche: 1, createdAt: -1 } }],
   up_users: [...envelope, { key: { username: 1 }, unique: true }, { key: { email: 1 }, unique: true }],
+  // The server-side launch queue (lib/launch-queue-store.ts). job_id is the hand-off idempotency key;
+  // {lane,status,seq} serves claimNextJob / peekQueued, {status,lease_until} the reaper, {owner,status}
+  // retry/cancel, {status,account} the launch-limit demand; expire_at is the 14-day TTL.
+  launch_jobs: [
+    ...envelope,
+    { key: { job_id: 1 }, unique: true },
+    { key: { lane: 1, status: 1, seq: 1 } },
+    { key: { status: 1, lease_until: 1 } },
+    { key: { owner: 1, status: 1 } },
+    { key: { status: 1, account: 1 } },
+    { key: { expire_at: 1 }, expireAfterSeconds: 0 },
+  ],
+  // Lane locks have NO Strapi envelope (no id / documentId) — a unique index on a missing field would
+  // collide on the second lock, so ONLY the unique lane key.
+  launch_lanes: [{ key: { lane: 1 }, unique: true }],
+  // Meta-video reuse cache (owned by package D) — no envelope; ckey "<account>|<key>" unique + TTL.
+  fb_media_cache: [{ key: { ckey: 1 }, unique: true }, { key: { expire_at: 1 }, expireAfterSeconds: 0 }],
 };
 
 const client = new MongoClient(uri, { serverSelectionTimeoutMS: 10_000, appName: "adlauncher-ensure-indexes" });
@@ -68,7 +85,10 @@ try {
     const coll = db.collection(name);
     for (const ix of indexes) {
       try {
-        await coll.createIndex(ix.key, ix.unique ? { unique: true } : {});
+        const opts = {};
+        if (ix.unique) opts.unique = true;
+        if (ix.expireAfterSeconds !== undefined) opts.expireAfterSeconds = ix.expireAfterSeconds;
+        await coll.createIndex(ix.key, opts);
         created++;
       } catch (e) {
         failed++;

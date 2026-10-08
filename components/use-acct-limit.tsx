@@ -12,6 +12,7 @@ import {
 import type { RichOption } from "@/lib/catalog";
 import { useAifTaskManager, useAvTaskManager, useTaskManager } from "./task-manager";
 import { useHsTaskManager } from "./hs-task-manager";
+import { useHandoffDemand, useHandoffItems } from "./launch-handoff";
 
 // Client mirror of the per-account launch limit (5 campaigns / 30 min, window anchored at the
 // first launch — owner rule 2026-08-18). One provider (app layout) polls /api/acct-limit and
@@ -28,16 +29,18 @@ export type AcctLimits = {
   accounts: Record<string, AcctLimitInfo>;
   /** serverNow − clientNow at the last poll — countdowns use Date.now()+skew as "server now". */
   skew: number;
-  /** Launches already recorded this window (0 when idle/expired — expiry unblocks instantly). */
+  /** Launches already recorded this window + jobs still QUEUED on the server + the user's own
+   *  not-yet-accepted hand-off demand (0 when idle/expired — expiry unblocks instantly). */
   countFor: (accountId: string) => number;
-  /** The user's OWN queued-but-not-started demand alone (subset of countFor). */
+  /** The user's OWN not-yet-accepted hand-off demand alone (subset of countFor). */
   pendingFor: (accountId: string) => number;
   resetAtFor: (accountId: string) => number | null;
   /** Immediate re-poll (throttled) — call after a task reaches a terminal state. */
   refresh: () => void;
   /** Un-throttled re-poll that RESOLVES with the fresh server picture (null on failure) — the
-   *  launch click awaits this so the wave partition never runs on a ≤30s-old cache. */
-  fetchFresh: () => Promise<{ accounts: Record<string, AcctLimitInfo>; skew: number } | null>;
+   *  launch click awaits this so the wave partition never runs on a ≤30s-old cache. `queued` is the
+   *  server's per-account count of jobs still QUEUED (spec §4.5), folded into the wave gate too. */
+  fetchFresh: () => Promise<{ accounts: Record<string, AcctLimitInfo>; skew: number; queued: Record<string, number> } | null>;
   /** This tab runs a bundle OLDER than the deployed server — its launch gates are outdated, so
    *  every launch surface hard-blocks until the tab reloads. */
   staleBuild: boolean;
@@ -103,6 +106,9 @@ type State = {
   windowMs: number;
   accounts: Record<string, AcctLimitInfo>;
   skew: number;
+  /** Jobs still QUEUED on the server, per ad account (spec §4.5) — accepted hand-offs the server
+   *  holds but hasn't started; folded into countFor so a second wave can't over-queue an account. */
+  queued: Record<string, number>;
 };
 
 const POLL_MS = 30_000;
@@ -110,7 +116,7 @@ const REFRESH_THROTTLE_MS = 2_000;
 const FOCUS_THROTTLE_MS = 5_000;
 
 export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<State>({ limit: 5, windowMs: 30 * 60_000, accounts: {}, skew: 0 });
+  const [state, setState] = useState<State>({ limit: 5, windowMs: 30 * 60_000, accounts: {}, skew: 0, queued: {} });
   const [staleBuild, setStaleBuild] = useState(false);
   const lastFetch = useRef(0);
   const stopped401 = useRef(false); // logged-out tab — quiet until a focus retries
@@ -118,6 +124,7 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
   const load = useCallback(async (): Promise<{
     accounts: Record<string, AcctLimitInfo>;
     skew: number;
+    queued: Record<string, number>;
   } | null> => {
     lastFetch.current = Date.now();
     try {
@@ -133,6 +140,7 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
         windowMs?: number;
         build?: string;
         accounts?: Record<string, AcctLimitInfo>;
+        queued?: Record<string, number>;
       } | null;
       if (!d?.ok || typeof d.accounts !== "object") return null; // 502/registry blip — next tick retries
       stopped401.current = false;
@@ -145,9 +153,12 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
         windowMs: Number(d.windowMs) || 30 * 60_000,
         accounts: d.accounts ?? {},
         skew: (Number(d.now) || Date.now()) - Date.now(),
+        // Jobs still queued on the server per account (spec §4.5) — the slot claim is still the
+        // only authority; this just keeps a fresh wave from over-queuing what the queue already holds.
+        queued: d.queued && typeof d.queued === "object" ? d.queued : {},
       };
       setState(next);
-      return { accounts: next.accounts, skew: next.skew };
+      return { accounts: next.accounts, skew: next.skew, queued: next.queued };
     } catch {
       /* transient — the interval retries */
       return null;
@@ -158,47 +169,36 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
     if (Date.now() - lastFetch.current > REFRESH_THROTTLE_MS) void load();
   }, [load]);
 
-  // Own queued-but-not-started launches per account (the client-only `account` on local task
-  // rows): folded into countFor below, so the pickers/cards/rails see capacity NET of the
-  // user's own queue. Running tasks are excluded — their server-side claim lands within seconds
-  // of starting, and the transition effect below re-polls the registry right then.
+  // Own not-yet-accepted hand-off demand per account: the launches/clones whose creatives are still
+  // uploading or are being handed to the server (useHandoffDemand) — accepted jobs leave the hand-off
+  // and reappear in the server's `queued` picture instead, so the two never double-count. Folded into
+  // countFor below so the pickers/cards/rails see capacity NET of the user's own in-flight wave.
   const team = useTaskManager();
   const aif = useAifTaskManager();
   const av = useAvTaskManager();
   const hsTm = useHsTaskManager();
-  const pending = useMemo(() => {
-    const m = new Map<string, number>();
-    const fold = (ts: ReadonlyArray<{ local?: boolean; status: string; account?: string }>) => {
-      for (const t of ts) {
-        if (!t.local || t.status !== "queued") continue;
-        const k = acctIdKey(t.account ?? "");
-        if (k) m.set(k, (m.get(k) ?? 0) + 1);
-      }
-    };
-    fold(team.tasks);
-    fold(aif.tasks);
-    fold(av.tasks);
-    fold(hsTm.tasks);
-    return m;
-  }, [team.tasks, aif.tasks, av.tasks, hsTm.tasks]);
+  const pending = useHandoffDemand();
+  const handoffItems = useHandoffItems();
 
-  // A local task starting or finishing means the server registry changed within seconds —
-  // re-poll (throttled) instead of letting counts sit up to 30 s stale mid-wave.
+  // A hand-off item moving phase (uploading → sending → accepted) or any task changing status means
+  // the server picture changed within seconds — re-poll (throttled) instead of letting counts sit up
+  // to 30 s stale mid-wave. (The client-only `local` flags that keyed this before are gone — the
+  // server owns every row now.)
   const transitionSig = useMemo(() => {
-    const sig = (ts: ReadonlyArray<{ local?: boolean; status: string }>) => {
+    const phases = handoffItems.map((i) => i.phase).join(",");
+    const sig = (ts: ReadonlyArray<{ status: string }>) => {
       let q = 0;
       let run = 0;
-      let done = 0;
+      let term = 0;
       for (const t of ts) {
-        if (!t.local) continue;
         if (t.status === "queued") q++;
         else if (t.status === "running" || t.status === "submitted") run++;
-        else done++;
+        else term++;
       }
-      return `${q}:${run}:${done}`;
+      return `${q}:${run}:${term}`;
     };
-    return `${sig(team.tasks)}|${sig(aif.tasks)}|${sig(av.tasks)}|${sig(hsTm.tasks)}`;
-  }, [team.tasks, aif.tasks, av.tasks, hsTm.tasks]);
+    return `${phases}|${sig(team.tasks)}|${sig(aif.tasks)}|${sig(av.tasks)}|${sig(hsTm.tasks)}`;
+  }, [handoffItems, team.tasks, aif.tasks, av.tasks, hsTm.tasks]);
   const skipFirstSig = useRef(true);
   useEffect(() => {
     if (skipFirstSig.current) {
@@ -241,8 +241,9 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
       windowMs: state.windowMs,
       accounts: state.accounts,
       skew: state.skew,
-      // Server truth + the user's own queued demand: what a NEW launch would actually face.
-      countFor: (id) => (live(id)?.count ?? 0) + (pending.get(acctIdKey(id)) ?? 0),
+      // What a NEW launch would actually face: the server's live window count + jobs it already has
+      // queued for this account + the user's own not-yet-accepted hand-off demand.
+      countFor: (id) => (live(id)?.count ?? 0) + (state.queued[acctIdKey(id)] ?? 0) + (pending.get(acctIdKey(id)) ?? 0),
       pendingFor: (id) => pending.get(acctIdKey(id)) ?? 0,
       resetAtFor: (id) => live(id)?.resetAt ?? null,
       refresh,

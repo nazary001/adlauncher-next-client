@@ -1,8 +1,9 @@
 // TikTok identity helpers for the launcher (client-only). Two jobs:
 //  1. The avatar. tiktok-weapon's own upload endpoint crops an identity image to a 256×256 PNG; we
-//     host files on Vercel Blob instead (owner decision 18.09), so the SAME normalisation happens
+//     host the avatar in our own S3 bucket instead (owner decision 18.09), under the non-expiring
+//     `keep/` prefix (a remembered identity is reused for weeks), so the SAME normalisation happens
 //     here, in the browser, before the upload — whatever the buyer drops, LION receives a square
-//     256×256 PNG.
+//     256×256 PNG. The board uploads this crop with uploadCreativeBlob(png, { purpose: "keep" }).
 //  2. Memory. A buyer reuses the same two or three identities for weeks; once an avatar is hosted
 //     its URL is remembered (this browser only) together with the name, so the next card is one
 //     click instead of another upload.

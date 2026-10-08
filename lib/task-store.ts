@@ -115,6 +115,13 @@ export const TASK_FIELDS = [
   // monitor cards — the `bid` string column (maxLength 40) exists on the shared collection since
   // 2026-09-11. Unknown keys are dropped here (Strapi used to 400 the whole write on them).
   "bid",
+  // Server-launch-queue flags (2026-10-08): `srv`=1 marks a row the queue OWNS (the client then
+  // never judges it stale, never settles it, and its own writes to it are ignored — see
+  // upsertTaskRow's `client` option), `retry`=1 marks a job the owner may re-queue with one click.
+  // Both are stamped ONLY by the server (lib/launch-queue-types row patches); a client write that
+  // carries them has them stripped in upsertTaskRow.
+  "srv",
+  "retry",
 ] as const;
 
 /** biginteger columns — stored as Numbers (CONVENTIONS §2 typing) so the window `$gte` and the sort
@@ -138,6 +145,8 @@ const TASK_ROW_DEFAULTS: Record<string, unknown> = {
   adset_id: null,
   ad_id: null,
   bid: null,
+  srv: null,
+  retry: null,
   link: null,
   error: null,
   queued_at: null,
@@ -167,7 +176,7 @@ function typeTaskFields(data: TaskRowData): TaskRowData {
   return out;
 }
 
-type FoundTaskRow = { documentId: string; owner: string | null; status: string | null; stage: string | null };
+type FoundTaskRow = { documentId: string; owner: string | null; status: string | null; stage: string | null; srv: boolean };
 
 /**
  * Find one row by task_id. `strict` distinguishes "confirmed absent" (null) from "store failed"
@@ -180,13 +189,16 @@ type FoundTaskRow = { documentId: string; owner: string | null; status: string |
  * "compile-time truthy": `existing ? PUT : POST` in upsertTaskRow compiled to ALWAYS-PUT with
  * `existing.documentId` on null — every task-row CREATE (team drawers, all partners) crashed
  * on prod for ~16h while updates kept working. Verified in the compiled chunk; keep this shape.
+ *
+ * `srv` rides the projection too: upsertTaskRow's client-write guard needs it (a client write to a
+ * row the server owns is ignored), and the launch-queue runner reads it when settling ambiguous rows.
  */
 export async function findTaskRow(taskId: string, strict = false): Promise<FoundTaskRow | null> {
   let row: Document | null = null;
   try {
     const c = await coll(LAUNCH_TASKS);
     row = await bounded(
-      c.findOne({ task_id: taskId }, { projection: { documentId: 1, owner: 1, status: 1, stage: 1 }, maxTimeMS: STORE_TIMEOUT_MS }),
+      c.findOne({ task_id: taskId }, { projection: { documentId: 1, owner: 1, status: 1, stage: 1, srv: 1 }, maxTimeMS: STORE_TIMEOUT_MS }),
       "launch-task read",
     );
   } catch (e) {
@@ -199,6 +211,7 @@ export async function findTaskRow(taskId: string, strict = false): Promise<Found
         owner: row.owner ? String(row.owner) : null,
         status: row.status ? String(row.status) : null,
         stage: row.stage ? String(row.stage) : null,
+        srv: row.srv === 1 || row.srv === true,
       }
     : null;
 }
@@ -211,15 +224,36 @@ export type UpsertResult = { ok: true } | { ok: false; reason: "forbidden" | "st
  * A create that loses the unique-task_id race (two writers creating at once — the unique index makes
  * the loser's insert fail with E11000, the former Strapi 400) re-finds and updates. The index is
  * atomic, so no post-create twin check is needed any more.
+ *
+ * `opts.client` (the POST routes pass it) marks a CLIENT write — a buyer's tab. Two things change:
+ * the server-owned flags (srv / retry) are stripped from the incoming fields (a client can never set
+ * them), and a write to an EXISTING row that the server OWNS (`srv` set) is silently ignored
+ * (`{ok:true}`) — an old tab's heartbeat / stale-settle / pagehide beacon must never bury a job the
+ * server is running (spec §4.2 #6). Server writers (the launch queue) omit opts and behave as before.
  */
-export async function upsertTaskRow(user: string, taskId: string, fields: TaskRowData): Promise<UpsertResult> {
+export async function upsertTaskRow(
+  user: string,
+  taskId: string,
+  fields: TaskRowData,
+  opts?: { client?: boolean },
+): Promise<UpsertResult> {
   if (!storeConfigured()) return { ok: false, reason: "not_configured" };
-  const data: TaskRowData = { ...typeTaskFields(pickTaskFields(fields)), task_id: taskId, owner: user };
+  const client = opts?.client === true;
+  const incoming: TaskRowData = { ...fields };
+  // The server-owned flags are never the client's to set, whatever the wire carries.
+  if (client) {
+    delete incoming.srv;
+    delete incoming.retry;
+  }
+  const data: TaskRowData = { ...typeTaskFields(pickTaskFields(incoming)), task_id: taskId, owner: user };
   try {
     const c = await coll(LAUNCH_TASKS);
     for (let attempt = 0; attempt < 2; attempt++) {
       const existing = await findTaskRow(taskId);
       if (existing && existing.owner !== user) return { ok: false, reason: "forbidden" };
+      // A client write to a row the SERVER owns is accepted-and-dropped: the queue is the single
+      // writer of a job's row, and a stale tab must not demote a live server run.
+      if (existing && client && existing.srv) return { ok: true };
       if (existing) {
         const r = await bounded(c.updateOne({ documentId: existing.documentId }, { $set: { ...data, updatedAt: new Date() } }), "launch-task update");
         if (r.matchedCount === 0) return { ok: false, reason: "store", detail: "row vanished before the update" };

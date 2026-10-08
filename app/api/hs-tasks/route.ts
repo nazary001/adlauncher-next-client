@@ -40,6 +40,10 @@ function toClient(r: Row): Row {
     adCount: num(r.ad_id) ?? null,
     bid: r.bid ?? null,
     error: r.error ?? null,
+    // Server-launch-queue flags (same meaning as /api/launch-tasks): srv=1 the queue owns the row,
+    // retry=1 the owner may re-queue it.
+    srv: r.srv === 1 || r.srv === true ? 1 : 0,
+    retry: r.retry === 1 || r.retry === true ? 1 : 0,
     queued_at: num(r.queued_at) ?? null,
     started_at: num(r.started_at) ?? null,
     finished_at: num(r.finished_at) ?? null,
@@ -113,7 +117,8 @@ export async function POST(req: Request) {
             if (existing?.status === "done") return { ok: true as const };
           }
           // partner:"br" is forced here — the wire never sets it, so an MO row can't masquerade as HS.
-          return upsertTaskRow(user, String(item.task_id), { ...fields, partner: HS_PARTNER });
+          // { client: true }: the server flags are stripped and a write to a queue-owned row is ignored.
+          return upsertTaskRow(user, String(item.task_id), { ...fields, partner: HS_PARTNER }, { client: true });
         }),
       );
       for (const r of results) {
@@ -149,7 +154,11 @@ export async function DELETE(req: Request) {
       await Promise.all(
         ids.slice(i, i + 8).map(async (id) => {
           const found = await findTaskRow(id);
-          if (found && found.owner === user) await deleteTaskRow(found.documentId);
+          // A row the launch queue still OWNS and has not settled (queued / running) is not the
+          // client's to delete: its job would run on without a row (and re-create a nameless one).
+          if (found && found.owner === user && !(found.srv && (found.status === "queued" || found.status === "running"))) {
+            await deleteTaskRow(found.documentId);
+          }
         }),
       );
     }

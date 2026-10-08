@@ -16,6 +16,7 @@
 // the registry changes nothing until an owner assigns.
 
 import { readAppCache, readAppCacheDetailed, writeAppCache } from "@/lib/app-cache";
+import { graphBase } from "@/lib/fb-graph";
 import { openToken, sealToken, tokenFingerprint, vaultKey } from "@/lib/fb-token-vault";
 import {
   type Outcome,
@@ -36,7 +37,8 @@ import {
 export const FB_TOKEN_REGISTRY_KEY = "fb-token-registry:v1";
 
 type Json = Record<string, unknown>;
-const GRAPH = "https://graph.facebook.com/v21.0";
+// Graph base: graph.facebook.com in production, a 127.0.0.1/localhost loopback for local
+// end-to-end runs (the ONE rule lives in lib/fb-graph graphBase; reused here).
 
 // ---- vault key ------------------------------------------------------------------------------
 
@@ -241,7 +243,7 @@ function fmtGraphError(err: { message?: string; code?: number; error_subcode?: n
 /** One raw Graph GET on a bearer, bounded; the body's own `error` rides through untouched. */
 async function graphGet(path: string, token: string, timeoutMs = 10_000): Promise<Json> {
   try {
-    const res = await fetch(`${GRAPH}/${path}`, {
+    const res = await fetch(`${graphBase()}/${path}`, {
       headers: { Authorization: `Bearer ${token}` },
       cache: "no-store",
       signal: AbortSignal.timeout(timeoutMs),

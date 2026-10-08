@@ -19,6 +19,14 @@ test("pickTaskFields keeps bid (clamped, trimmed) and drops junk keys / empty bi
   assert.deepEqual(pickTaskFields({ task_id: "t", owner: "mallory" }), { task_id: "t" }, "owner never comes from the wire");
 });
 
+// ---- the server-launch-queue flags ride the whitelist (the CLIENT-strip is upsertTaskRow's job,
+//      exercised live in tests/mongo-task-guard.test.ts) ----
+
+test("pickTaskFields passes srv/retry through for server writers (whitelisted, 0 kept)", () => {
+  assert.deepEqual(pickTaskFields({ task_id: "t", srv: 1, retry: 0 }), { task_id: "t", srv: 1, retry: 0 });
+  assert.deepEqual(pickTaskFields({ task_id: "t", srv: 1, retry: 1, junk: 9 }), { task_id: "t", srv: 1, retry: 1 });
+});
+
 // ---- taskScopeFilter: the MO scope keeps partner-null rows and excludes every other drawer ----
 
 test("the MO scope is `$nin` over the drawer partners (null/missing partner stays MO); a partner scope is an equality", () => {

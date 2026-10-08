@@ -4,8 +4,7 @@
 //   - a pre-stream rejection: ONE JSON object, `application/json`, NO trailing newline;
 //   - the run itself: `application/x-ndjson`, one event per line, the last one carrying `ok`.
 // A line splitter that only parses terminated lines drops the first shape whole — every 4xx
-// (e.g. "image fetch failed (HTTP 404)" on a retry whose creative the previous run already
-// dropped) surfaced as a bare "launch failed (stream ended)" (owner report 2026-09-11).
+// surfaced as a bare "launch failed (stream ended)" (owner report 2026-09-11).
 
 export type LaunchEvent = {
   stage?: string;
@@ -15,6 +14,10 @@ export type LaunchEvent = {
   gcm?: string;
   done?: number;
   total?: number;
+  /** TOOL is still finishing the launch past the route's window — the campaign may yet be born. */
+  pending?: boolean;
+  /** What a FAILED run had already created on Facebook (a campaign id here = money may be moving). */
+  created?: { campaign_id?: unknown } | null;
 };
 
 /** One event line → object, or null for a blank / unparsable line (never throws). */
@@ -45,10 +48,11 @@ export function drainNdjson(buf: string): { events: LaunchEvent[]; rest: string 
 export type LaunchOutcome = {
   ok: boolean;
   text: string;
-  /** The staged creative is gone (or its fate is unknown) — a retry needs a fresh one. The route
-   *  drops every temporary Blob whenever the RUN finishes (success or failure); a pre-stream
-   *  rejection never starts the run, so the creative survives it and the same one can fire again. */
-  creativeConsumed: boolean;
+  /** A failed launch that may be fired again with ONE click: only when it is CERTAIN nothing exists
+   *  on Facebook — a rejection before the run, or a run that ended with a clean error and no created
+   *  campaign. Anything else (a campaign was created, TOOL is still working, the reply ended without
+   *  a verdict) is not: a blind re-fire would build a SECOND live campaign under a fresh code. */
+  retrySafe: boolean;
 };
 
 /**
@@ -56,22 +60,39 @@ export type LaunchOutcome = {
  *  - `streamed`: the reply was the NDJSON run (content-type x-ndjson), not a plain JSON rejection;
  *  - `final`: the last event carrying `ok` — including the unterminated tail, so a pre-stream
  *    rejection counts as a verdict instead of "stream ended".
+ *
+ * Creatives now live in S3 objects the launch route never deletes per run (the bucket lifecycle is
+ * the cleanup), so a retry no longer needs a FRESH creative. What a retry still needs is certainty
+ * that the first attempt created nothing — that is `retrySafe` (review find 08.10: when the old
+ * "creative consumed" gate went away, every failure became a one-click re-fire, including the
+ * outcomes where the campaign may already be live).
  */
 export function launchOutcome(args: { status: number; streamed: boolean; final: LaunchEvent | null }): LaunchOutcome {
   const { status, streamed, final } = args;
-  if (final?.ok) return { ok: true, text: `Live · gcm ${final.gcm ?? "?"}`, creativeConsumed: true };
+  if (final?.ok) return { ok: true, text: `Live · gcm ${final.gcm ?? "?"}`, retrySafe: false };
   if (final) {
     const reason = final.error || (streamed ? "launch failed" : "launch rejected");
-    return { ok: false, text: streamed ? reason : `${reason} · HTTP ${status}`, creativeConsumed: streamed };
+    const createdCampaign = Boolean(final.created && typeof final.created === "object" && final.created.campaign_id);
+    return {
+      ok: false,
+      text: streamed ? reason : `${reason} · HTTP ${status}`,
+      retrySafe: !final.pending && !createdCampaign,
+    };
   }
   if (streamed) {
     return {
       ok: false,
       text: `stream ended without a verdict (HTTP ${status}) — the launch may still have finished server-side; check the Tasks drawer / Ads Manager before retrying`,
-      creativeConsumed: true,
+      retrySafe: false,
     };
   }
-  return { ok: false, text: `launch rejected (HTTP ${status}) — no readable reply from the server`, creativeConsumed: false };
+  // No readable reply at all (a platform error page — e.g. a 504 after the function ran its whole
+  // window): the run may well have happened.
+  return {
+    ok: false,
+    text: `no readable reply from the server (HTTP ${status}) — the launch may still have run; check the Tasks drawer / Ads Manager before retrying`,
+    retrySafe: false,
+  };
 }
 
 /** Is this reply the NDJSON run (vs a plain JSON rejection / a platform error page)? */

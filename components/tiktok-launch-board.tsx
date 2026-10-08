@@ -7,9 +7,13 @@
 // multiplier: one card = one campaign, LION's launcher texture. Like every LION rail
 // the create is SERVER-side: one POST /api/tiktok/launch stamps the rows and an after() pump sends
 // every campaign to LION and settles what LION built, so once the wave is accepted the tab is safe
-// to close. The one client-side phase is the creative UPLOAD (avatar → 256² PNG, videos → Vercel
-// Blob, three at a time) — while that runs the tab must stay open, so the unload guard + notice
-// mount exactly then. Gating is delegated to tiktokLaunchWire (the server's own validator) so the
+// to close. Videos upload to OUR S3 bucket through the shared manager the moment they are attached
+// (the Dropzone starts them); the identity avatar is cropped here to a 256² PNG and uploaded under
+// the non-expiring keep/ prefix (uploadCreativeBlob, purpose "keep" — remembered for weeks). At
+// Launch the board only joins those uploads (ensureCreativeUploaded) and hands the wave over; the
+// hand-off screen (handoffBegin / handoffPatch) shows each campaign uploading → sending → with the
+// server and owns the one leave-page guard — the tab is needed only until the wave is handed over.
+// Gating is delegated to tiktokLaunchWire (the server's own validator) so the
 // bay can never disagree with LION's refusal. Three rules keep a wave from building twice or from
 // lying about what it sent: a card that was queued is NOT ready again until it is edited; the cards
 // are LOCKED while a wave uploads and fires (what is on screen is what goes out); and a wave goes
@@ -24,8 +28,8 @@ import { useTiktokTaskManager } from "./tiktok-task-manager";
 import { makeGate } from "@/lib/launch-guards";
 import { moneyLabel, parseMoney } from "@/lib/types";
 import { tiktokBidPlan, tiktokResolvePixel, type TiktokLaunchShotIn } from "@/lib/tiktok-launch";
-import { readCreative, safeBlobName, uploadCreativeFile } from "./blob-uploader";
-import { UploadingNotice, useUnloadGuard } from "./upload-guard";
+import { ensureCreativeUploaded, uploadCreativeBlob } from "./creative-uploads";
+import { handoffBegin, handoffPatch } from "./launch-handoff";
 import { ChevronDownIcon, CopyIcon, EyeIcon, MinusIcon, PlusIcon, SparklesIcon } from "./icons";
 import {
   FIRST_TT_CARD_ID,
@@ -47,9 +51,6 @@ import type { SessionUser } from "./user-menu";
 /** One card = one campaign, so the board's card cap IS the server-side wave cap (lib/tiktok-wave
  *  TIKTOK_MAX_SHOTS) — an oversized wave can't be prepared in the first place. */
 const MAX_CARDS = 45;
-/** Files of one card uploaded to Blob at a time (the Snapchat board's number — a video upload is
- *  mostly waiting on the network, three keep a 20-video card to a third of the wall clock). */
-const UPLOAD_CONCURRENCY = 3;
 
 /** One card's derived, catalog-dependent view. */
 type CardView = {
@@ -79,9 +80,6 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
   // One waveId per prepared wave (same ready-card content): a retry after a lost answer re-sends
   // the same id, and the server's wave claim makes the re-POST a no-op instead of a second pump.
   const waveRef = useRef<{ sig: string; id: string } | null>(null);
-  // Files this tab has already hosted (file id → Blob URL): a wave that has to be fired again — an
-  // upload that died on another card, an answer that never came — re-uploads nothing.
-  const hostedRef = useRef(new Map<string, string>());
 
   // Remembered identities live in localStorage — unreadable during SSR, so they join after mount.
   useEffect(() => {
@@ -91,7 +89,6 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
 
   const { configs, retry: retryConfig } = useTiktokConfigs(cards.map((c) => c.advertiser));
 
-  const username = user?.username ?? "";
   const advertiserById = new Map((advertisers ?? []).map((a) => [a.advertiserId, a]));
   const advertisersLoading = advertisers === null && !advError;
   const advertisersFailed = Boolean(advError);
@@ -181,9 +178,6 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
   const totalShots = readyViews.length;
   const totalPerDay = readyViews.reduce((sum, v) => sum + parseMoney(v.card.budget), 0);
 
-  const uploadingN = cards.filter((c) => c.state === "uploading").length;
-  useUnloadGuard(uploadingN > 0);
-
   const fireBlocked = firing || readyViews.length === 0 || advertisersLoading || advertisersFailed || !liveLaunch;
 
   // ---- launch bay row jump -------------------------------------------------------------------
@@ -198,58 +192,31 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
     hlTimer.current = setTimeout(() => setHighlightId(null), 1800);
   };
 
-  /** Upload one card's files: the avatar (cropped to 256² PNG first), then the videos three at a
-   *  time. The card goes out with ALL of its files or not at all — a campaign missing a creative is
-   *  not what the buyer prepared. */
-  async function uploadCard(c: TiktokCard, waveId: string): Promise<TiktokCardUpload> {
+  /** Join one card's uploads on the shared manager: the avatar (cropped to a 256² PNG here, hosted
+   *  under the non-expiring keep/ prefix) and the videos (started by the Dropzone on attach). The
+   *  card goes out with ALL of its files or not at all — a campaign missing a creative is not what
+   *  the buyer prepared. The manager caps concurrency and dedupes identical bytes, so there is no
+   *  per-tab hosted map any more: re-firing the same card joins its earlier uploads / reuses the
+   *  already-stored object by content. */
+  async function uploadCard(c: TiktokCard): Promise<TiktokCardUpload> {
     const upload: TiktokCardUpload = {};
-    const base = `tiktok/${safeBlobName(username, "buyer")}/${waveId}/${c.id}`;
+    setCardState(c.id, { state: "uploading", progress: "Uploading the creatives…" });
+    const jobs: Promise<void>[] = [];
     if (c.identityFiles[0]) {
-      setCardState(c.id, { state: "uploading", progress: "Preparing the identity avatar…" });
-      const key = `identity:${c.identityFiles[0].id}`;
-      let url = hostedRef.current.get(key);
-      if (!url) {
-        const png = await identityAvatarPng(c.identityFiles[0].url);
-        url = await uploadCreativeFile(`${base}-identity.png`, png, "Identity avatar");
-        hostedRef.current.set(key, url);
-      }
-      upload.identityUrl = url;
+      jobs.push(
+        identityAvatarPng(c.identityFiles[0].url)
+          .then((png) => uploadCreativeBlob(png, { name: "identity.png", kind: "image", purpose: "keep" }))
+          .then((url) => void (upload.identityUrl = url)),
+      );
     }
     if (c.videoFiles.length > 0) {
-      const files = c.videoFiles;
-      const urls: string[] = files.map(() => "");
-      let next = 0;
-      let done = 0;
-      let failed = false;
-      setCardState(c.id, { state: "uploading", progress: `Uploading videos… 0/${files.length}` });
-      const worker = async () => {
-        while (!failed && next < files.length) {
-          const i = next++;
-          const f = files[i];
-          const label = files.length === 1 ? "Video" : `Video #${i + 1} (${f.name})`;
-          try {
-            let url = hostedRef.current.get(f.id);
-            if (!url) {
-              const file = await readCreative(f.url, f.name, "video", label);
-              url = await uploadCreativeFile(`${base}-v${i + 1}-${safeBlobName(f.name, "video.mp4")}`, file, label);
-              hostedRef.current.set(f.id, url);
-            }
-            urls[i] = url;
-          } catch (e) {
-            failed = true;
-            throw e;
-          }
-          done += 1;
-          if (!failed) setCardState(c.id, { state: "uploading", progress: `Uploading videos… ${done}/${files.length}` });
-        }
-      };
-      // allSettled: every worker has stopped before the board moves on (a rejected one must not
-      // leave its siblings uploading into a card that already reads "error").
-      const settled = await Promise.allSettled(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, files.length) }, worker));
-      const rejected = settled.find((r): r is PromiseRejectedResult => r.status === "rejected");
-      if (rejected) throw rejected.reason;
-      upload.videoUrls = urls;
+      const slots: string[] = c.videoFiles.map(() => "");
+      upload.videoUrls = slots;
+      c.videoFiles.forEach((f, i) => {
+        jobs.push(ensureCreativeUploaded(f.url, { name: f.name, kind: "video" }).then((url) => void (slots[i] = url)));
+      });
     }
+    await Promise.all(jobs);
     return upload;
   }
 
@@ -263,23 +230,38 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
     const sig = JSON.stringify(ready.map((v) => tiktokCardSignature(v.card)));
     if (!waveRef.current || waveRef.current.sig !== sig) waveRef.current = { sig, id: crypto.randomUUID() };
     const waveId = waveRef.current.id;
+    const hid = (id: string) => `${waveId}:${id}`;
+
+    // Register every campaign of this Launch click on the hand-off screen (it owns the leave-page
+    // guard now). Its sources are the card's avatar (local file or remembered https) and videos.
+    handoffBegin(
+      ready.map((v) => {
+        const c = v.card;
+        const sources = [...(c.identityFiles[0] ? [c.identityFiles[0].url] : c.identityUrl ? [c.identityUrl] : []), ...c.videoFiles.map((f) => f.url)];
+        return { id: hid(c.id), scope: "tt" as const, label: v.target?.name || "TikTok campaign", sub: `$${moneyLabel(c.budget)}/day · ${c.countries.join("+") || "—"}`, sources };
+      }),
+    );
 
     try {
       const shots: TiktokLaunchShotIn[] = [];
       const shotCard: string[] = []; // parallel to shots: the card id each shot came from
       const hosted: Array<{ card: TiktokCard; upload: TiktokCardUpload }> = [];
       let uploadFailed = false;
+      let failedId: string | null = null;
       for (const v of ready) {
         const c = v.card;
         let upload: TiktokCardUpload;
         try {
-          upload = await uploadCard(c, waveId);
+          upload = await uploadCard(c);
         } catch (e) {
           // This card's upload died → NOTHING is sent. A wave cut short would go out under the id of
           // the full ready set; if its answer were then lost, the retry (upload healed) would re-send
           // that id with MORE cards and be told "already accepted" for campaigns never launched.
-          setCardState(c.id, { state: "error", msg: String((e as Error).message ?? e) });
+          const msg = String((e as Error).message ?? e);
+          setCardState(c.id, { state: "error", msg });
+          handoffPatch(hid(c.id), { phase: "failed", error: msg });
           uploadFailed = true;
+          failedId = c.id;
           break;
         }
         hosted.push({ card: c, upload });
@@ -287,11 +269,18 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
         shots.push(shot);
         shotCard.push(c.id);
         setCardState(c.id, { state: "sending", msg: "queuing on server…" });
+        handoffPatch(hid(c.id), { phase: "sending" });
       }
 
       if (uploadFailed || shots.length === 0) {
         setFireNote("Nothing was launched — a card's files failed to upload (see the note on it). Fix or remove that card and press Launch again: the files that did upload are kept, nothing is uploaded twice.");
         for (const h of hosted) setCardState(h.card.id, { state: "idle", msg: undefined, progress: undefined });
+        // Nothing was sent: resolve every registered card. The one that failed keeps its reason; the
+        // rest say the wave was held because of it.
+        for (const v of ready) {
+          if (v.card.id === failedId) continue;
+          handoffPatch(hid(v.card.id), { phase: "failed", error: "the wave was not sent because another card's files failed to upload" });
+        }
         return;
       }
 
@@ -300,10 +289,11 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
       if (d?.ok) {
         waveRef.current = null; // accepted — the next wave is a new wave
         setPreviewed(false);
-        // The card keeps its files: launching it again (after an edit) finds them in hostedRef and
-        // uploads nothing a second time.
+        // The card keeps its files: launching it again (after an edit) joins the same uploads on the
+        // manager / reuses the stored object by content — nothing is uploaded a second time.
         for (const h of hosted) {
           setCardState(h.card.id, { state: "ok", msg: "queued — safe to close the tab (LION builds it server-side)", progress: undefined });
+          handoffPatch(hid(h.card.id), { phase: "accepted" });
           const imageUrl = h.upload.identityUrl ?? h.card.identityUrl;
           if (imageUrl) setIdentities(rememberIdentity({ name: h.card.identityName, imageUrl }));
         }
@@ -317,7 +307,9 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
         const m = /^shot (\d+):/.exec(String(d?.error ?? ""));
         const culprit = m ? shotCard[Number(m[1]) - 1] : null;
         for (const id of new Set(shotCard)) {
-          setCardState(id, culprit ? (id === culprit ? { state: "error", msg } : { state: "error", msg: "wave refused — fix the flagged card" }) : { state: "error", msg });
+          const cardMsg = culprit ? (id === culprit ? msg : "wave refused — fix the flagged card") : msg;
+          setCardState(id, { state: "error", msg: cardMsg });
+          handoffPatch(hid(id), { phase: "failed", error: cardMsg });
         }
       }
     } catch (e) {
@@ -325,7 +317,10 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
       // The same cards re-send the SAME wave id (the server answers "already accepted" instead of
       // pumping twice) — an edit would mint a new id, so the drawer is the thing to look at first.
       setFireNote(`No answer from the server (${String((e as Error).message ?? e)}) — the wave MAY have been accepted: check the Task Manager. Pressing Launch again WITHOUT edits is safe.`);
-      for (const v of ready) setCardState(v.card.id, { state: "error", msg: "no answer — check the Task Manager before editing this card", progress: undefined });
+      for (const v of ready) {
+        setCardState(v.card.id, { state: "error", msg: "no answer — check the Task Manager before editing this card", progress: undefined });
+        handoffPatch(hid(v.card.id), { phase: "failed", error: "no answer from the server — check the Task Manager before firing again" });
+      }
       refresh();
       setOpen(true);
     } finally {
@@ -452,7 +447,7 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
               </div>
 
               <p className="text-[10.5px] leading-snug text-faint">
-                Fresh TikTok campaigns — LION builds each one server-side (1–3 min). Avatar and video uploads run from this tab; keep it open until they finish.
+                Fresh TikTok campaigns — LION builds each one server-side (1–3 min). Avatar and videos upload as you attach them; keep this tab open only until the wave is handed over.
               </p>
 
               {/* per-card readiness rows */}
@@ -489,8 +484,6 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
                   <span className="font-mono tabular-nums">${moneyLabel(totalPerDay)}</span>
                 </div>
               </div>
-
-              <UploadingNotice n={uploadingN} compact />
 
               <button
                 type="button"

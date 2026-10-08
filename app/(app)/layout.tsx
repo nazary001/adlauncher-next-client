@@ -7,6 +7,7 @@ import { GoogleTaskManagerProvider } from "@/components/google-task-manager";
 import { SnapTaskManagerProvider } from "@/components/snap-task-manager";
 import { TiktokTaskManagerProvider } from "@/components/tiktok-task-manager";
 import { AcctLimitProvider } from "@/components/use-acct-limit";
+import { LaunchHandoffHost } from "@/components/launch-handoff";
 
 /**
  * Shared shell for the authenticated app (launcher + clone board). The Task Manager provider is
@@ -32,7 +33,12 @@ export default async function AppLayout({ children }: { children: React.ReactNod
               {/* Snapchat rail queue — innermost, same reason. */}
               <SnapTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
                 {/* TikTok rail queue — innermost, same reason. */}
-                <TiktokTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>{children}</TiktokTaskManagerProvider>
+                <TiktokTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
+                  {children}
+                  {/* The hand-off overlay / pill — mounted ONCE here, inside every task-manager
+                      provider, so it can open any drawer and survives navigating between boards. */}
+                  <LaunchHandoffHost />
+                </TiktokTaskManagerProvider>
               </SnapTaskManagerProvider>
             </GoogleTaskManagerProvider>
             </AcctLimitProvider>

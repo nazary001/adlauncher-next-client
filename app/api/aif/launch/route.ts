@@ -15,6 +15,7 @@ import {
 import { sessionFromCookieHeader } from "@/lib/session";
 import { FbError, withFbBudget, withParentRetry } from "@/lib/fb-graph";
 import { fetchValidatedImage } from "@/lib/fb-media";
+import { isLegacyBlobUrl, isOwnCreativeUrl } from "@/lib/creative-url";
 import { type AifRail, aifRail } from "@/lib/aif-launch";
 import { backfillBrand, claimBrand, deleteBrand } from "@/lib/aif-claim";
 import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
@@ -118,8 +119,8 @@ export async function POST(req: Request) {
   const startedAt = Date.now();
 
   let campaign: Campaign;
-  /** Creatives of this launch (1..maxCreatives, MO-parity 09-02): own-Blob URLs; cover = video
-   *  thumbnail image. */
+  /** Creatives of this launch (1..maxCreatives, MO-parity 09-02): own creative-store URLs; cover =
+   *  video thumbnail image. */
   let medias: { url: string; kind: "video" | "image"; coverUrl: string }[] = [];
   let taskId: string | null = null;
   /** owner ask 28.09: `via:"tool"` routes this launch through TOOL; absent/anything else is the
@@ -293,8 +294,10 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  // Every creative must be a Vercel Blob URL our OWN broker produced — same SSRF fence as
-  // /api/launch — and the count is capped by the partner's own limit (server-side truth: a
+  // Every creative must be a URL this app itself produced — our S3 creative store (either origin,
+  // under creatives/ or keep/) or, transition-only, our legacy Blob prefix (isOwnCreativeUrl) — same
+  // SSRF fence as /api/launch (the server fetches image bytes + covers from it and hands it to Meta
+  // as a download source). The count is capped by the partner's own limit (server-side truth: a
   // stale tab could still POST more; the tree would then blow the function window mid-wave).
   {
     const cap = Math.max(1, partner.maxCreatives ?? 1);
@@ -304,20 +307,12 @@ export async function POST(req: Request) {
         { status: 400 },
       );
     }
-    const ownBlob = (raw: string): boolean => {
-      try {
-        const u = new URL(raw);
-        return u.protocol === "https:" && u.hostname.endsWith(".blob.vercel-storage.com") && u.pathname.startsWith("/creatives/");
-      } catch {
-        return false;
-      }
-    };
     for (const m of medias) {
-      if (!ownBlob(m.url)) {
+      if (!isOwnCreativeUrl(m.url)) {
         return NextResponse.json({ ok: false, stage: "media", error: "media_url_invalid" }, { status: 400 });
       }
-      // Covers are fetched server-side into adimages — same own-Blob fence as the creatives.
-      if (m.coverUrl && !ownBlob(m.coverUrl)) {
+      // Covers are fetched server-side into adimages — same fence as the creatives.
+      if (m.coverUrl && !isOwnCreativeUrl(m.coverUrl)) {
         return NextResponse.json({ ok: false, stage: "media", error: "cover_url_invalid" }, { status: 400 });
       }
     }
@@ -816,11 +811,13 @@ export async function POST(req: Request) {
         send({ ok: false, stage: "error", error: err.message ?? String(e), detail: err.detail ?? null, created });
       } finally {
         clearInterval(beat);
-        // Drop EVERY temporary Blob (creatives + covers) whether the launch succeeded or
-        // failed — never orphan an upload.
+        // Creatives now live in content-addressed S3 objects shared by cards, retries and whole
+        // waves — nothing is deleted per launch any more; the bucket's lifecycle is the cleanup.
+        // del() stays ONLY for a legacy Blob URL, so a tab opened before the S3 deploy still cleans
+        // up after itself.
         for (const m of medias) {
-          await del(m.url, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
-          if (m.coverUrl) await del(m.coverUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
+          if (isLegacyBlobUrl(m.url)) await del(m.url, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
+          if (m.coverUrl && isLegacyBlobUrl(m.coverUrl)) await del(m.coverUrl, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(() => {});
         }
         await tw.flush();
         controller.close();

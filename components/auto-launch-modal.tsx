@@ -53,11 +53,11 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
   const [stage, setStage] = useState<string | null>(null);
   // The launch streams from this tab — closing the window mid-way kills it (owner ask 09-09).
   useUnloadGuard(firing);
-  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
-  // The staged creative is single-use: the launch route drops it when a RUN finishes, success or
-  // not. After such a failure the same URL would only 404 (a pre-stream 400) — so the modal asks
-  // for a fresh prepare instead of re-firing. A pre-stream rejection leaves it in place (retry as is).
-  const [creativeConsumed, setCreativeConsumed] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; text: string; retrySafe: boolean } | null>(null);
+  // The staged creative now lives in a content-addressed S3 object the launch route never deletes
+  // per run (the bucket lifecycle is the cleanup) — so a retry after a failed run reuses the SAME
+  // creative (just press Confirm again). "Regenerate" stays available when the buyer wants a fresh
+  // one, but it is no longer forced on them after a failure.
   const [prepNonce, setPrepNonce] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -147,7 +147,12 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
 
   // parseMoney reads the board's comma money ("12,50") — Number() would read it as NaN and a
   // stripped "1250" as $1250 (audit 09-09).
-  const canFire = Boolean(prep && signerReady && pageId && accountId && pixelId && parseMoney(budget) >= 1 && !firing && !result?.ok && !creativeConsumed);
+  // A failed attempt may be fired again with one click ONLY when it is certain it created nothing
+  // (result.retrySafe — lib/launch-stream). After an uncertain outcome the Confirm button stays
+  // disabled: the buyer checks Tasks / Ads Manager, and a deliberate Regenerate starts a new attempt.
+  const canFire = Boolean(
+    prep && signerReady && pageId && accountId && pixelId && parseMoney(budget) >= 1 && !firing && !result?.ok && (!result || result.retrySafe),
+  );
 
   const fire = useCallback(async () => {
     if (!prep || !canFire) return;
@@ -198,23 +203,25 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
       const tail = parseEvent(buf);
       if (tail) take(tail);
       const outcome = launchOutcome({ status: res.status, streamed, final: acc.final });
-      setCreativeConsumed(!outcome.ok && outcome.creativeConsumed);
-      setResult({ ok: outcome.ok, text: outcome.text });
+      setResult({ ok: outcome.ok, text: outcome.text, retrySafe: outcome.retrySafe });
     } catch (e) {
-      // Thrown = the reply never completed (network, abort). The run may still be going server-side
-      // and drops the creative when it ends → treat it as consumed (a fresh prepare is the safe path).
-      setCreativeConsumed(true);
-      setResult({ ok: false, text: String((e as Error).message ?? e) });
+      // Thrown = the reply never completed (network cut, abort). The request may have REACHED the
+      // server and the run may be building right now — never a one-click re-fire.
+      setResult({
+        ok: false,
+        text: `${String((e as Error).message ?? e)} — the connection dropped; the launch may still be running on the server. Check the Tasks drawer / Ads Manager before launching again`,
+        retrySafe: false,
+      });
     } finally {
       setFiring(false);
       setStage(null);
     }
   }, [prep, canFire, pageId, accountId, pixelId, budget, gcmNext]);
 
-  // Fresh copy + creative for another attempt (the previous run dropped the staged one).
+  // Fresh copy + creative for another attempt (optional now — a retry reuses the staged creative;
+  // this is for when the buyer wants a different one).
   const regenerate = useCallback(() => {
     setResult(null);
-    setCreativeConsumed(false);
     setPrep(null);
     setPrepErr(null);
     setGcmNext(null);
@@ -327,8 +334,12 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
             {result ? (
               <div className={`rounded-xl border px-3 py-2 text-[12px] ${result.ok ? "border-launch/40 bg-launch/10 text-launch2" : "border-danger/40 bg-danger/10 text-danger"}`}>
                 {result.ok ? "✅ Campaign is live. " : "❌ "}{result.text}
-                {!result.ok && creativeConsumed ? (
-                  <p className="mt-1 text-[11px] opacity-80">The staged creative was dropped with this attempt — regenerate it to launch again.</p>
+                {!result.ok ? (
+                  <p className="mt-1 text-[11px] opacity-80">
+                    {result.retrySafe
+                      ? "Nothing was created. The staged creative is kept — press Retry to launch it again, or Regenerate for a fresh one."
+                      : "This attempt may have created a campaign — check the Tasks drawer / Ads Manager first. To launch again anyway, press Regenerate: it prepares a new attempt."}
+                  </p>
                 ) : null}
               </div>
             ) : firing ? (
@@ -345,21 +356,24 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
               <button onClick={onClose} className="h-9 rounded-lg border border-line bg-surface2 px-3 text-[12px] text-dim hover:text-ink">
                 {result?.ok ? "Close" : "Cancel"}
               </button>
-              {result && !result.ok && creativeConsumed ? (
-                <button
-                  onClick={regenerate}
-                  className="h-9 rounded-lg border border-accent/50 bg-accent/15 px-4 text-[12px] font-semibold text-[#9db8ff] transition-colors hover:bg-accent/25"
-                >
-                  Regenerate creative & retry
-                </button>
-              ) : !result?.ok ? (
-                <button
-                  onClick={() => void fire()}
-                  disabled={!canFire}
-                  className="h-9 rounded-lg border border-launch/50 bg-launch/15 px-4 text-[12px] font-semibold text-launch2 transition-colors enabled:hover:bg-launch/25 disabled:opacity-40"
-                >
-                  {firing ? "Launching…" : "Confirm & launch"}
-                </button>
+              {!result?.ok ? (
+                <>
+                  {result && !firing ? (
+                    <button
+                      onClick={regenerate}
+                      className="h-9 rounded-lg border border-accent/50 bg-accent/15 px-4 text-[12px] font-semibold text-[#9db8ff] transition-colors hover:bg-accent/25"
+                    >
+                      Regenerate creative
+                    </button>
+                  ) : null}
+                  <button
+                    onClick={() => void fire()}
+                    disabled={!canFire}
+                    className="h-9 rounded-lg border border-launch/50 bg-launch/15 px-4 text-[12px] font-semibold text-launch2 transition-colors enabled:hover:bg-launch/25 disabled:opacity-40"
+                  >
+                    {firing ? "Launching…" : result ? "Retry launch" : "Confirm & launch"}
+                  </button>
+                </>
               ) : null}
             </div>
           </div>

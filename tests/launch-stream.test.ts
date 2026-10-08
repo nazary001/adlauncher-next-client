@@ -11,10 +11,9 @@ test("a pre-stream rejection (one JSON object, no newline) is a verdict, not a c
   const out = launchOutcome({ status: 400, streamed: false, final: parseEvent(rest) }); // …which still counts
   assert.equal(out.ok, false);
   assert.equal(out.text, "image fetch failed (HTTP 404) · HTTP 400");
-  assert.equal(out.creativeConsumed, false); // the run never started → the staged creative survives
 });
 
-test("a streamed failure names the stage error and consumes the creative", () => {
+test("a streamed failure names the stage error", () => {
   const raw = '{"stage":"gcm"}\n{"ok":false,"stage":"error","error":"gcm pool exhausted — no free code 01–200","created":{}}\n';
   const { events, rest } = drainNdjson(raw);
   assert.equal(rest, "");
@@ -22,7 +21,6 @@ test("a streamed failure names the stage error and consumes the creative", () =>
   const out = launchOutcome({ status: 200, streamed: true, final });
   assert.equal(out.ok, false);
   assert.equal(out.text, "gcm pool exhausted — no free code 01–200");
-  assert.equal(out.creativeConsumed, true);
 });
 
 test("a streamed success reports the claimed code", () => {
@@ -33,11 +31,10 @@ test("a streamed success reports the claimed code", () => {
   assert.equal(out.text, "Live · gcm 01");
 });
 
-test("a cut stream is ambiguous: no verdict, creative treated as consumed", () => {
+test("a cut stream is ambiguous: no verdict", () => {
   const out = launchOutcome({ status: 200, streamed: true, final: null });
   assert.equal(out.ok, false);
   assert.match(out.text, /stream ended without a verdict \(HTTP 200\)/);
-  assert.equal(out.creativeConsumed, true);
 });
 
 test("a platform error page (no JSON) is a rejection carrying the HTTP status", () => {
@@ -45,7 +42,6 @@ test("a platform error page (no JSON) is a rejection carrying the HTTP status", 
   const out = launchOutcome({ status: 504, streamed: false, final: null });
   assert.equal(out.ok, false);
   assert.match(out.text, /HTTP 504/);
-  assert.equal(out.creativeConsumed, false);
 });
 
 test("chunk boundaries: a line split across reads is parsed once complete", () => {
@@ -70,4 +66,26 @@ test("content-type sniffing", () => {
   assert.equal(isLaunchStream("application/x-ndjson; charset=utf-8"), true);
   assert.equal(isLaunchStream("application/json"), false);
   assert.equal(isLaunchStream(null), false);
+});
+
+// ---- retrySafe: a failed launch may be re-fired with one click ONLY when nothing can exist (08.10) ----
+
+test("retrySafe: a rejection before the run, or a clean failed run that created nothing, may be retried at once", () => {
+  assert.equal(launchOutcome({ status: 400, streamed: false, final: { ok: false, stage: "config", error: "landing_invalid" } }).retrySafe, true);
+  assert.equal(launchOutcome({ status: 200, streamed: true, final: { ok: false, stage: "error", error: "Account limit: 5 campaigns / 30 min", created: {} } }).retrySafe, true);
+  assert.equal(launchOutcome({ status: 200, streamed: true, final: { ok: false, error: "video processing failed" } }).retrySafe, true);
+});
+
+test("retrySafe: never when a campaign may already exist — created id, TOOL pending, no verdict, no readable reply", () => {
+  const partial = launchOutcome({ status: 200, streamed: true, final: { ok: false, error: "ad set rejected", created: { campaign_id: "123" } } });
+  assert.equal(partial.ok, false);
+  assert.equal(partial.retrySafe, false, "a created campaign makes a blind re-fire a second live tree");
+  assert.equal(launchOutcome({ status: 200, streamed: true, final: { ok: false, pending: true, error: "pending tool job #7" } }).retrySafe, false);
+  const cut = launchOutcome({ status: 200, streamed: true, final: null });
+  assert.equal(cut.retrySafe, false);
+  assert.match(cut.text, /may still have finished/);
+  const page = launchOutcome({ status: 504, streamed: false, final: null });
+  assert.equal(page.retrySafe, false, "a platform error page says nothing about what the function did");
+  assert.match(page.text, /may still have run/);
+  assert.equal(launchOutcome({ status: 200, streamed: true, final: { ok: true, gcm: "007" } }).retrySafe, false, "a success is not a retry");
 });

@@ -66,8 +66,10 @@ export function LaunchRail({
   previewed: boolean;
   /** Count just sent to the Task Manager — shows a brief confirmation; campaigns stay on the board. */
   justQueued: number;
-  /** Launches still uploading FROM THIS TAB (the partner's Task Manager `counts.inFlight`) — the
-   *  rail shows the "do not close this window" notice while any are (owner ask 09-09). */
+  /** Campaigns of this wave still depending on THIS TAB — creatives uploading / the hand-off to the
+   *  server in progress (the partner's Task Manager `counts.inFlight` = useHandoffPending). The rail
+   *  shows the "keep this tab open" notice only while that is true; once the server accepts every
+   *  job it runs them and the notice clears (owner ask 08-10). */
   inFlight?: number;
   /** Cards held on the board by the account launch limit during the last Launch click. */
   heldBack?: number;
@@ -430,8 +432,9 @@ export function LaunchRail({
             Generate preview
           </button>
 
-          {/* Client-side uploads die with the page — the warning sits right by the Launch button
-              for as long as any launch is still in flight (owner ask 09-09). */}
+          {/* Creatives upload from this tab and the wave is handed to the server from it — keep the
+              tab open until that's done (inFlight). After the hand-off the server builds everything,
+              so the notice clears itself the moment every job is accepted (owner ask 08-10). */}
           <UploadingNotice n={inFlight} compact />
 
           {previewed ? (

@@ -562,9 +562,11 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     }
   }
 
-  /** Non-blocking launch (guarded by launch()'s gate above): every launchable campaign is captured
-   *  + dropped into the Task Manager instantly, then flies off the board so you can keep building.
-   *  The queue creates them one by one (ACTIVE since 08-11) in the background. */
+  /** Non-blocking launch (guarded by launch()'s gate above): every launchable campaign is handed to
+   *  the SERVER queue (enqueue uploads its creatives if needed, then POSTs /api/launch-queue) and an
+   *  optimistic row drops into the Task Manager instantly. The cards stay on the board so you can
+   *  tweak and relaunch; the server pump builds every campaign one at a time — the tab can be closed
+   *  as soon as the hand-off screen shows everything accepted (owner ask 08-10). */
   async function launchWave() {
     // Pool exhausted → nothing may launch: stale card previews would only burn failed claims
     // (the rail button is disabled too; the server-side claim is the last-resort guard).
@@ -586,16 +588,20 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
 
     // Account launch limit (5 campaigns / 30 min, all users & channels): send only what fits each
     // account's remaining capacity, measured against a picture fetched AT THIS CLICK — never the
-    // ≤30s poll cache (another buyer may have filled the account seconds ago). Capacity =
-    // fresh server count + own queued tasks + what this very wave has just taken (sentNow —
-    // enqueued tasks only reach the pending fold on the next render). The overflow stays on the
-    // board with the amber rail note; the server-side claim stays the final authority for
-    // whatever still races past.
+    // ≤30s poll cache (another buyer may have filled the account seconds ago). Capacity = fresh
+    // server count (the live window + jobs already QUEUED on the server for the account, spec §4.5)
+    // + own not-yet-accepted hand-off demand + what this very wave has just taken (sentNow — a
+    // hand-off reaches the demand fold only on the next render). The overflow stays on the board
+    // with the amber rail note; the server-side slot claim stays the final authority for whatever
+    // still races past.
     const fresh = await limits.fetchFresh(); // null on a blip → the cached view gates instead
     const serverCountOf = (k: string): number => {
       if (!fresh) return Math.max(0, limits.countFor(k) - limits.pendingFor(k));
       const a = fresh.accounts[k];
-      return a && a.resetAt > Date.now() + fresh.skew ? a.count : 0;
+      const live = a && a.resetAt > Date.now() + fresh.skew ? a.count : 0;
+      // Add the jobs the server already holds queued for this account, so a second wave can't
+      // over-queue what the first one has handed over but not yet filled.
+      return live + (fresh.queued?.[k] ?? 0);
     };
     const sentNow = new Map<string, number>();
     const fitsAcct = (acct: string): boolean => {
@@ -663,7 +669,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       return;
     }
 
-    // Reserve every code we're launching right now (optimistic — the tasks fire in the background),
+    // Reserve every code we're launching right now (optimistic — the jobs are handed to the server),
     // so any card built next never re-previews a code that's already on its way into the registry.
     const nextReserved = reserved ? new Set(reserved) : null;
     const launched = new Set<string>();

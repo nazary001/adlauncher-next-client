@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { put } from "@vercel/blob";
+import { creativesConfigured, putCreativeBytes } from "@/lib/creative-store";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { isOwnerSession } from "@/lib/roles";
 import { fetchLandingForLaunch, readJob } from "@/lib/auto-landings";
@@ -24,10 +24,11 @@ export const maxDuration = 120;
  *
  * The "Launch campaign" button behind an Auto-landing row: generate everything a one-click MO launch
  * needs, WITHOUT firing. Gemini writes compliant ad copy + a fresh 16:9 creative scene; the image is
- * generated and staged into our Vercel Blob under `creatives/…` (the exact prefix /api/launch trusts),
- * and a ready MO Campaign is assembled with safe defaults. The board then shows a confirm dialog and,
- * on Confirm, POSTs the returned campaign + creative straight to /api/launch (the hardened rail:
- * gcm-claim, account limiter, soc-signer, ACTIVE tree, failure pause).
+ * generated and stored in our S3 creative store (putCreativeBytes — content-addressed, the exact
+ * surface /api/launch's isOwnCreativeUrl fence trusts), and a ready MO Campaign is assembled with
+ * safe defaults. The board then shows a confirm dialog and, on Confirm, POSTs the returned campaign +
+ * creative straight to /api/launch (the hardened rail: gcm-claim, account limiter, soc-signer, ACTIVE
+ * tree, failure pause). Nothing is deleted per launch now, so a retry reuses this same creative.
  */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const session = sessionFromCookieHeader(req.headers.get("cookie"));
@@ -36,8 +37,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   if (!geminiConfigured()) {
     return NextResponse.json({ ok: false, error: "gemini_not_configured — set GEMINI_API_KEY" }, { status: 503 });
   }
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
-    return NextResponse.json({ ok: false, error: "blob_not_configured" }, { status: 503 });
+  if (!creativesConfigured()) {
+    return NextResponse.json({ ok: false, error: "creatives_not_configured — set CREATIVES_S3_* (bucket + signer credentials)" }, { status: 503 });
   }
 
   const { id } = await ctx.params;
@@ -68,17 +69,14 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     return NextResponse.json({ ok: false, stage: "copy", error: String((e as Error).message ?? e) }, { status: 502 });
   }
 
-  let blobUrl: string;
+  // The generated image is stored in OUR S3 creative store (content-addressed), exactly where the
+  // launch routes' fence (isOwnCreativeUrl) expects a creative to live — no per-launch deletion, the
+  // bucket lifecycle is the cleanup. A buyer retrying a failed run reuses this same object.
+  let creativeUrl: string;
   try {
     const img = await geminiImage(buildImagePrompt(copy.imagePrompt, landing.title));
     const ext = img.mime.includes("png") ? "png" : "jpg";
-    const uploaded = await put(`creatives/auto-${job.slug}.${ext}`, img.buffer, {
-      access: "public",
-      addRandomSuffix: true,
-      contentType: img.mime,
-      token: process.env.BLOB_READ_WRITE_TOKEN,
-    });
-    blobUrl = uploaded.url;
+    creativeUrl = await putCreativeBytes(img.buffer, { type: img.mime, name: `auto-${job.slug}.${ext}` });
   } catch (e) {
     return NextResponse.json({ ok: false, stage: "image", error: String((e as Error).message ?? e) }, { status: 502 });
   }
@@ -112,7 +110,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   return NextResponse.json({
     ok: true,
     campaign,
-    media: { url: blobUrl, kind: "image" as const },
+    media: { url: creativeUrl, kind: "image" as const },
     linkPreview,
     suggested: {
       channel: suggestedChannel,

@@ -31,13 +31,21 @@ export function proxy(request: NextRequest) {
 
 export const config = {
   // Excluded from the proxy (they gate themselves):
-  //   • api/launch         — video is now a small JSON URL, but it still auth-checks inline.
-  //   • api/blob-upload    — Blob's server-to-server "upload completed" callback carries no cookie;
-  //                          the route enforces auth in onBeforeGenerateToken instead.
-  //   • api/hs/token-cron  — Vercel Cron's 30-min token-pool sweep authenticates with the
-  //                          CRON_SECRET bearer (no cookie on cron requests); sessions pass too.
-  // `api/launch(?!-)` keeps /api/launch-tasks proxied.
+  //   • api/launch             — video is now a small JSON URL, but it still auth-checks inline.
+  //   • api/launch-queue/pump  — the internal lane self-kick (and the cron's per-lane restart);
+  //                              authenticates with a Bearer (HMAC(AUTH_SECRET) internal token or
+  //                              CRON_SECRET), never a cookie, so the proxy's session gate would 401
+  //                              every kick. The route checks isInternalRequest itself.
+  //   • api/launch-queue/cron  — Vercel Cron's every-minute sweep: CRON_SECRET bearer (no cookie on
+  //                              cron requests); a session passes too (same as token-cron).
+  //   • api/blob-upload        — Blob's server-to-server "upload completed" callback carries no cookie;
+  //                              the route enforces auth in onBeforeGenerateToken instead.
+  //   • api/hs/token-cron      — Vercel Cron's 30-min token-pool sweep authenticates with the
+  //                              CRON_SECRET bearer (no cookie on cron requests); sessions pass too.
+  // `api/launch(?![\w-])` keeps /api/launch-tasks AND /api/launch-queue proxied (the `-` is excluded
+  // from the lookahead, so "launch-…" never matches that exclusion) — only the two sub-routes named
+  // explicitly above are let through; /api/launch-queue itself and /api/creatives stay behind the gate.
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|login|api/auth|api/launch(?![\\w-])|api/blob-upload|api/hs/token-cron).*)",
+    "/((?!_next/static|_next/image|favicon.ico|login|api/auth|api/launch(?![\\w-])|api/launch-queue/pump|api/launch-queue/cron|api/blob-upload|api/hs/token-cron).*)",
   ],
 };

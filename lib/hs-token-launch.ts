@@ -11,6 +11,7 @@
 import { FbError, createAdsetSelfHealing, fbGet, fbPost, withFbAppLimitFailFast } from "./fb-graph";
 import { type TokenHealthDelta, applyHealthDelta } from "./token-pool-guards";
 import { uploadImage, uploadVideo, videoThumb, waitForVideo } from "./fb-media";
+import { isOwnCreativeUrl } from "./creative-url.ts";
 import { readAppCache, writeAppCache } from "./app-cache";
 import { type ResolvedToken, resolveSlot } from "./fb-tokens";
 
@@ -602,16 +603,10 @@ export type HsTokenCreative = {
 
 const isHttpsUrl = (v: string): boolean => /^https:\/\/\S+$/i.test(v);
 
-/** Our own Blob-broker uploads only — the same SSRF fence as the MO launch route: this server
- *  fetches IMAGE bytes itself, so it must never be pointed at an arbitrary host. */
-export function isOwnBlobUrl(raw: string): boolean {
-  try {
-    const u = new URL(raw);
-    return u.protocol === "https:" && u.hostname.endsWith(".blob.vercel-storage.com") && u.pathname.startsWith("/creatives/");
-  } catch {
-    return false;
-  }
-}
+// A URL this app itself produced for a creative — the shared creative-store fence (isOwnCreativeUrl):
+// our S3 bucket (either accepted origin, under creatives/ or keep/) or, transition-only, our legacy
+// Blob prefix. The same SSRF fence as the MO launch route: this server fetches IMAGE bytes itself,
+// so it must never be pointed at an arbitrary host.
 
 // The LION create weapon takes up to 50 creative URLs and chews on them for as long as it needs;
 // this rail builds the whole tree inside one serverless window (maxDuration 300s, FB budget 240s),
@@ -622,14 +617,15 @@ export const HS_TOKEN_MAX_CREATIVES = 10;
 /**
  * Parse + validate the wire creatives array. Returns the clean list or a machine-friendly error
  * string (mirrors the launch guards' style). Videos may live on any https host — Meta fetches
- * those bytes itself, exactly as it does for LION's URLs. Images must be OUR Blob uploads: the
- * route downloads them server-side, and an arbitrary URL there would be an SSRF hole.
+ * those bytes itself, exactly as it does for LION's URLs. Images must be our own creative-store
+ * uploads (isOwnCreativeUrl): the route downloads them server-side, and an arbitrary URL there
+ * would be an SSRF hole.
  *
- * `remoteImages` (review find 28.09) lifts the own-Blob fence on IMAGE creatives for a rail that
+ * `remoteImages` (review find 28.09) lifts the own-creative fence on IMAGE creatives for a rail that
  * does NOT download image bytes on our server but hands the URL to the platform to fetch (the TOOL
  * rail: media/from-url). Default false = today's token-rail fence unchanged. https is still
  * required for every URL, and the video-cover fence is untouched (a cover, when present, is still
- * an own-Blob upload).
+ * an own creative-store upload).
  */
 export function parseTokenCreatives(
   raw: unknown,
@@ -646,7 +642,7 @@ export function parseTokenCreatives(
     const kind = o.kind === "image" ? "image" : o.kind === "video" ? "video" : null;
     if (!kind) return { error: "creative_kind_invalid" };
     if (!isHttpsUrl(url)) return { error: "creative_url_invalid" };
-    if (kind === "image" && !opts.remoteImages && !isOwnBlobUrl(url)) {
+    if (kind === "image" && !opts.remoteImages && !isOwnCreativeUrl(url)) {
       return { error: "image_url_not_allowed — paste-URL images can't ride the FB Token rail (drop the file instead, or use the LION rail)" };
     }
     const name = typeof o.name === "string" ? o.name.slice(0, 120) : "";
@@ -655,7 +651,7 @@ export function parseTokenCreatives(
     const cover = typeof o.cover === "string" ? o.cover.trim() : "";
     if (cover) {
       if (kind !== "video") return { error: "cover_on_image — covers apply to video creatives only" };
-      if (!isHttpsUrl(cover) || !isOwnBlobUrl(cover)) {
+      if (!isHttpsUrl(cover) || !isOwnCreativeUrl(cover)) {
         return { error: "cover_url_not_allowed — the cover must be uploaded through the launcher" };
       }
     }

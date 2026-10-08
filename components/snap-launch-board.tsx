@@ -5,8 +5,11 @@
 // Launch). One card = N copies = N campaigns = N partner keys; a card's creatives (any number) are
 // the ads of each of its campaigns. The create is SERVER-side: one POST /api/snap/launch stamps the
 // rows and an after() pump builds every campaign on Snapchat, so once the wave is accepted the tab
-// is safe to close. The one client-side phase is the creative UPLOAD (every file of a card → Vercel
-// Blob once, reused by every copy) — the unload guard + notice mount then.
+// is safe to close. Creatives upload to OUR S3 bucket through the shared manager the moment they are
+// attached (the Dropzone starts them; identical bytes upload once, reused by every copy); at Launch
+// the board only joins those uploads (ensureCreativeUploaded) and hands the wave over. The hand-off
+// screen (handoffBegin / handoffPatch) shows each campaign go uploading -> sending -> with the
+// server and owns the one leave-page guard — the tab is needed only until the wave is handed over.
 // Gating is delegated to snapLaunchWire (the server's own validator) so the bay can never disagree
 // with the route's refusal; the keys gate mirrors the registry (free keys ≥ shots).
 
@@ -18,8 +21,8 @@ import { useSnapTaskManager } from "./snap-task-manager";
 import { makeGate } from "@/lib/launch-guards";
 import { moneyLabel, parseMoney } from "@/lib/types";
 import { SNAP_MAX_SHOTS, snapCurrencySymbol, snapDeviceShort, snapGoalNeedsPixel, type SnapLaunchShotIn } from "@/lib/snap-launch";
-import { readCreative, safeBlobName, uploadCreativeFile } from "./blob-uploader";
-import { UploadingNotice, useUnloadGuard } from "./upload-guard";
+import { ensureCreativeUploaded } from "./creative-uploads";
+import { handoffBegin, handoffPatch } from "./launch-handoff";
 import { CopyIcon, EyeIcon, PlusIcon } from "./icons";
 import { FIRST_SNAP_CARD_ID, SnapLaunchCard, buildSnapShot, cloneSnapCard, freshSnapCard, snapCardCopies, snapCardRefusal, snapCardSignature, type SnapCard } from "./snap-launch-card";
 import type { RichOption } from "@/lib/catalog";
@@ -29,8 +32,6 @@ import type { SessionUser } from "./user-menu";
 const MAX_CARDS = 45;
 /** How often the key registry is re-read while the team's builds are in flight. */
 const KEYS_POLL_MS = 10_000;
-/** A card's creatives ride to Vercel Blob this many at a time. */
-const UPLOAD_CONCURRENCY = 3;
 
 type CardView = {
   card: SnapCard;
@@ -107,7 +108,6 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
   const fireGate = useRef(makeGate());
   const hlTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const waveRef = useRef<{ sig: string; id: string } | null>(null);
-  const username = user?.username ?? "";
 
   const accountById = new Map((catalog?.accounts ?? []).map((a) => [a.id, a]));
   const catalogLoading = catalog === null && !catError;
@@ -182,8 +182,6 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
   const totalsByCur = new Map<string, number>();
   for (const v of readyViews) totalsByCur.set(v.currency || "USD", (totalsByCur.get(v.currency || "USD") ?? 0) + parseMoney(v.card.budget) * v.copies);
 
-  const uploadingN = cards.filter((c) => c.state === "uploading").length;
-  useUnloadGuard(uploadingN > 0);
   const fireBlocked = firing || readyViews.length === 0 || catalogLoading || Boolean(catError) || overShotCap || keysShort || keys === null;
 
   const jumpTo = (id: string) => {
@@ -197,39 +195,16 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
     hlTimer.current = setTimeout(() => setHighlightId(null), 1800);
   };
 
-  /** Every creative of one card → Vercel Blob, UPLOAD_CONCURRENCY at a time; URLs in card order.
-   *  The first failure stops the workers from taking new files and rejects — a card launches with
-   *  ALL its files or not at all. The reject waits for the uploads already in flight to settle
-   *  (allSettled): the wave must not move on to the next card — nor the card show its error and the
-   *  unload guard drop — while this card's bytes are still moving. */
-  async function uploadCardCreatives(c: SnapCard, waveId: string): Promise<string[]> {
-    const urls: string[] = c.files.map(() => "");
-    let next = 0;
-    let done = 0;
-    let failed = false;
-    const worker = async () => {
-      while (!failed && next < c.files.length) {
-        const i = next++;
-        const f = c.files[i];
-        const label = c.files.length === 1 ? "Creative" : `Creative #${i + 1} (${f.name})`;
-        try {
-          const file = await readCreative(f.url, f.name, f.kind === "image" ? "image" : "video", label);
-          urls[i] = await uploadCreativeFile(`snap/${username}/${waveId}/${c.id}-${i + 1}-${safeBlobName(f.name, f.kind === "image" ? "creative.jpg" : "creative.mp4")}`, file, label);
-        } catch (e) {
-          failed = true;
-          throw e;
-        }
-        done += 1;
-        if (!failed) setCardState(c.id, { state: "uploading", progress: c.files.length === 1 ? "Uploading the creative…" : `Uploading creatives… ${done}/${c.files.length}` });
-      }
-    };
-    const settled = await Promise.allSettled(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, c.files.length) }, worker));
-    const rejected = settled.find((r): r is PromiseRejectedResult => r.status === "rejected");
-    if (rejected) throw rejected.reason;
-    return urls;
+  /** Every creative of one card joins its upload on the shared manager (started by the Dropzone on
+   *  attach; identical bytes upload once), URLs in card order. Promise.all rejects on the first
+   *  failure — a card launches with ALL its files or not at all; the manager caps concurrency and
+   *  keeps uploading other cards' files on its own. */
+  function uploadCardCreatives(c: SnapCard): Promise<string[]> {
+    setCardState(c.id, { state: "uploading", progress: c.files.length === 1 ? "Uploading the creative…" : `Uploading ${c.files.length} creatives…` });
+    return Promise.all(c.files.map((f) => ensureCreativeUploaded(f.url, { name: f.name, kind: f.kind === "image" ? "image" : "video" })));
   }
 
-  // ---- fire: upload each ready card's creatives once, fan the copies out, one POST ----
+  // ---- fire: join each ready card's creative uploads, fan the copies out, one POST ----
   async function fireWave() {
     if (fireBlocked) return;
     if (!fireGate.current.enter()) return;
@@ -239,6 +214,19 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
     const sig = JSON.stringify(ready.map((v) => snapCardSignature(v.card)));
     if (!waveRef.current || waveRef.current.sig !== sig) waveRef.current = { sig, id: crypto.randomUUID() };
     const waveId = waveRef.current.id;
+    const hid = (id: string) => `${waveId}:${id}`;
+    // Register every campaign of this Launch click on the hand-off screen (it owns the leave-page
+    // guard now); one item per card, though a card fans into `copies` campaigns.
+    handoffBegin(
+      ready.map((v) => ({
+        id: hid(v.card.id),
+        scope: "sn" as const,
+        label: v.account?.name || "Snapchat campaign",
+        sub: `×${v.copies} · ${snapCurrencySymbol(v.currency || "USD")}${moneyLabel(v.card.budget)}/day`,
+        sources: v.card.files.map((f) => f.url),
+      })),
+    );
+    const settled = new Set<string>(); // hand-off items already given a terminal phase
     try {
       const shots: SnapLaunchShotIn[] = [];
       const shotCard: string[] = [];
@@ -246,17 +234,21 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
         const c = v.card;
         if (c.files.length === 0) continue;
         let mediaUrls: string[] = [];
-        setCardState(c.id, { state: "uploading", progress: c.files.length === 1 ? "Uploading the creative…" : `Uploading creatives… 0/${c.files.length}` });
         try {
-          mediaUrls = await uploadCardCreatives(c, waveId);
+          mediaUrls = await uploadCardCreatives(c);
         } catch (e) {
-          setCardState(c.id, { state: "error", msg: String((e as Error).message ?? e) });
+          // A card with a failed file is dropped from the wave; the rest still launch (Snap semantics).
+          const msg = String((e as Error).message ?? e);
+          setCardState(c.id, { state: "error", msg });
+          handoffPatch(hid(c.id), { phase: "failed", error: msg });
+          settled.add(hid(c.id));
           continue;
         }
         for (let j = 0; j < v.copies; j++) {
           shots.push(buildSnapShot(c, { currency: v.currency, mediaUrls, desiredKey: v.keys[j], accountName: v.account?.name }));
           shotCard.push(c.id);
         }
+        handoffPatch(hid(c.id), { phase: "sending" });
         setCardState(c.id, { state: "sending", msg: "queuing on server…" });
       }
       if (shots.length === 0) {
@@ -268,7 +260,11 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
       if (d?.ok) {
         waveRef.current = null;
         setPreviewed(false);
-        for (const id of new Set(shotCard)) setCardState(id, { state: "ok", msg: "queued — safe to close the tab (the server builds it)" });
+        for (const id of new Set(shotCard)) {
+          setCardState(id, { state: "ok", msg: "queued — safe to close the tab (the server builds it)" });
+          handoffPatch(hid(id), { phase: "accepted" });
+          settled.add(hid(id));
+        }
         refresh();
         refreshKeys();
         setOpen(true);
@@ -278,10 +274,18 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
         setFireNote(msg);
         const m = /^shot (\d+):/.exec(String(d?.error ?? ""));
         const culprit = m ? shotCard[Number(m[1]) - 1] : null;
-        for (const id of new Set(shotCard)) setCardState(id, culprit ? (id === culprit ? { state: "error", msg } : { state: "error", msg: "wave refused — fix the flagged card" }) : { state: "error", msg });
+        for (const id of new Set(shotCard)) {
+          const cardMsg = culprit ? (id === culprit ? msg : "wave refused — fix the flagged card") : msg;
+          setCardState(id, { state: "error", msg: cardMsg });
+          handoffPatch(hid(id), { phase: "failed", error: cardMsg });
+          settled.add(hid(id));
+        }
       }
     } catch (e) {
-      setFireNote(String((e as Error).message ?? e));
+      const msg = String((e as Error).message ?? e);
+      setFireNote(msg);
+      // Resolve every still-pending hand-off item so the tab isn't held open on a thrown wave.
+      for (const v of ready) if (!settled.has(hid(v.card.id))) handoffPatch(hid(v.card.id), { phase: "failed", error: msg });
     } finally {
       setFiring(false);
       fireGate.current.exit();
@@ -353,7 +357,7 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
                   {readyViews.length}/{cards.length} ready
                 </span>
               </div>
-              <p className="text-[10.5px] leading-snug text-faint">Each copy takes one partner key and becomes its own campaign, born PAUSED and activated once its ads exist — one ad per creative on the card, any number. Creative uploads run from this tab; keep it open until they finish.</p>
+              <p className="text-[10.5px] leading-snug text-faint">Each copy takes one partner key and becomes its own campaign, born PAUSED and activated once its ads exist — one ad per creative on the card, any number. Creatives upload as you attach them; keep this tab open only until the wave is handed over.</p>
               <div className="-mx-2 flex flex-col">
                 {view.map((v, i) => (
                   <button key={v.card.id} type="button" onClick={() => jumpTo(v.card.id)} title="Jump to this campaign" className="group flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors duration-150 hover:bg-raise/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">
@@ -393,7 +397,6 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
                   </div>
                 ))}
               </div>
-              <UploadingNotice n={uploadingN} compact />
               <button type="button" onClick={() => { setPreviewed(true); setFireNote(null); }} disabled={readyViews.length === 0} className="mt-1 flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-accent/40 bg-accent/10 text-[13px] font-semibold text-[#9db8ff] transition-all duration-150 hover:border-accent/60 hover:bg-accent/20 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">
                 <EyeIcon className="h-4 w-4" />
                 Generate preview

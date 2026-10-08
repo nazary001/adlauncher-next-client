@@ -4,11 +4,24 @@
 // Server-only: FB_LAUNCH_TOKEN never reaches the browser.
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { isAppLevelLimitCode } from "./token-pool-guards";
-import { readAppCache, writeAppCache } from "./app-cache";
+import { isAppLevelLimitCode } from "./token-pool-guards.ts";
+import { readAppCache, writeAppCache } from "./app-cache.ts";
 
-const FB = "https://graph.facebook.com/v21.0";
+const FB_DEFAULT = "https://graph.facebook.com/v21.0";
 const TOKEN = process.env.FB_LAUNCH_TOKEN ?? "";
+
+// A loopback Graph for local end-to-end runs (no production effect). The base stays the real Graph
+// UNLESS FB_GRAPH_BASE is set AND we are not on Vercel production AND the value is a 127.0.0.1 /
+// localhost http origin — only then that base is used. The three guards together make it impossible
+// to point production (or a preview) at anything but graph.facebook.com, or at a non-loopback host.
+const GRAPH_LOOPBACK_RE = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/.*)?$/;
+export function graphBase(): string {
+  const base = (process.env.FB_GRAPH_BASE ?? "").trim();
+  if (base && process.env.VERCEL_ENV !== "production" && GRAPH_LOOPBACK_RE.test(base)) {
+    return base.replace(/\/+$/, "");
+  }
+  return FB_DEFAULT;
+}
 
 // ---------- per-request retry budget (write pipelines) ----------
 
@@ -146,7 +159,7 @@ function retryWaitMs(res: Response, attempt: number): number | null {
 export async function fbGet(path: string, token: string = TOKEN): Promise<Json> {
   if (!token) throw new FbError("no_fb_token", null, 500);
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(`${FB}/${path}`, {
+    const res = await fetch(`${graphBase()}/${path}`, {
       headers: { Authorization: `Bearer ${token}` },
       cache: "no-store",
       // A stalled Graph socket must not pin the function to its maxDuration (the 504 class) —
@@ -345,7 +358,7 @@ async function resolveAccounts(cat: TokenCatalog): Promise<TokenAdAccount[]> {
         if (i >= accounts.length) return;
         const acct = accounts[i];
         try {
-          const res = await fetch(`${FB}/act_${acct.id}/adspixels?fields=id,name&limit=50`, {
+          const res = await fetch(`${graphBase()}/act_${acct.id}/adspixels?fields=id,name&limit=50`, {
             headers: { Authorization: `Bearer ${cat.token}` },
             cache: "no-store",
             signal: AbortSignal.timeout(30_000),
@@ -497,7 +510,7 @@ async function sweepPageAdCounts(
       const id = pageIds[i];
       try {
         const res = await fetch(
-          `${FB}/act_${accountId}/ads_volume?page_id=${id}&fields=ads_running_or_in_review_count`,
+          `${graphBase()}/act_${accountId}/ads_volume?page_id=${id}&fields=ads_running_or_in_review_count`,
           { headers: { Authorization: `Bearer ${token}` }, cache: "no-store", signal: AbortSignal.timeout(30_000) },
         );
         const body = (await res.json().catch(() => ({}))) as Json;
@@ -560,7 +573,7 @@ async function tallyRunningAdsByPage(cat?: TokenCatalog): Promise<Map<string, nu
         let after = "";
         for (let hop = 0; hop < 10; hop++) {
           const res = await fetch(
-            `${FB}/act_${accounts[i].id}/ads?fields=effective_status,creative{object_story_spec{page_id},object_story_id}&limit=200${after ? `&after=${encodeURIComponent(after)}` : ""}`,
+            `${graphBase()}/act_${accounts[i].id}/ads?fields=effective_status,creative{object_story_spec{page_id},object_story_id}&limit=200${after ? `&after=${encodeURIComponent(after)}` : ""}`,
             { headers: { Authorization: `Bearer ${token}` }, cache: "no-store", signal: AbortSignal.timeout(30_000) },
           );
           const body = (await res.json().catch(() => ({}))) as Json;
@@ -776,7 +789,7 @@ export async function fbPost(path: string, params: Json, token: string = TOKEN):
     form.set(k, typeof v === "object" ? JSON.stringify(v) : String(v));
   }
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(`${FB}/${path}`, {
+    const res = await fetch(`${graphBase()}/${path}`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/x-www-form-urlencoded" },
       body: form,

@@ -6,10 +6,13 @@
 // Autofill modal (one shot = one card), not a per-card multiplier — LION's own launcher texture.
 // Like the clone board the create is SERVER-side: one POST /api/google/launch stamps the rows and
 // an after() pump builds every campaign on LION, so once the wave is accepted the tab is safe to
-// close. The one client-side phase is the creative UPLOAD (logo files / uploaded videos → Vercel
-// Blob, per ad group) — while that runs the tab must stay open, so the unload guard + notice mount
-// exactly then. Gating is delegated to googleLaunchWire (the server's own validator) so the bay can
-// never disagree with LION's refusal.
+// close. Creatives (logo files / uploaded videos) upload to OUR S3 bucket through the shared manager
+// the moment they are attached (the Dropzone starts them); at Launch the board only joins those
+// uploads (ensureCreativeUploaded) and hands the wave over. The hand-off screen (handoffBegin /
+// handoffPatch) shows each campaign going uploading → sending → with the server, and owns the one
+// leave-page guard — the tab is needed only until the wave is handed over, never after.
+// Gating is delegated to googleLaunchWire (the server's own validator) so the bay can never
+// disagree with LION's refusal.
 
 import { useRef, useState } from "react";
 import { Header } from "./header";
@@ -19,8 +22,8 @@ import { useGoogleTaskManager } from "./google-task-manager";
 import { makeGate } from "@/lib/launch-guards";
 import { moneyLabel, parseMoney } from "@/lib/types";
 import { googleBidPlan, type GoogleLaunchShotIn } from "@/lib/google-bid";
-import { readCreative, safeBlobName, uploadCreativeFile } from "./blob-uploader";
-import { UploadingNotice, useUnloadGuard } from "./upload-guard";
+import { ensureCreativeUploaded } from "./creative-uploads";
+import { handoffBegin, handoffPatch } from "./launch-handoff";
 import { CopyIcon, EyeIcon, PlusIcon, SparklesIcon } from "./icons";
 import {
   GoogleLaunchCard,
@@ -80,7 +83,6 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
   // the same id, and the server's wave claim makes the re-POST a no-op instead of a second pump.
   const waveRef = useRef<{ sig: string; id: string } | null>(null);
 
-  const username = user?.username ?? "";
   const customerById = new Map((customers ?? []).map((c) => [c.customerId, c]));
   const customersLoading = customers === null && !custError;
   const customersFailed = Boolean(custError);
@@ -171,9 +173,6 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
     totalsByCur.set(cur, (totalsByCur.get(cur) ?? 0) + parseMoney(v.card.budget));
   }
 
-  const uploadingN = cards.filter((c) => c.state === "uploading").length;
-  useUnloadGuard(uploadingN > 0);
-
   const fireBlocked = firing || readyViews.length === 0 || customersLoading || customersFailed || overShotCap;
 
   // ---- launch bay row jump -------------------------------------------------------------------
@@ -198,49 +197,62 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
     const sig = JSON.stringify(ready.map((v) => launchCardSignature(v.card)));
     if (!waveRef.current || waveRef.current.sig !== sig) waveRef.current = { sig, id: crypto.randomUUID() };
     const waveId = waveRef.current.id;
+    const hid = (id: string) => `${waveId}:${id}`;
+
+    // Register every campaign of this Launch click on the hand-off screen (it owns the leave-page
+    // guard now). Its sources are the card's local files that still need uploading — the Dropzone
+    // started them on attach; the loop below only joins those uploads.
+    handoffBegin(
+      ready.map((v) => {
+        const c = v.card;
+        const sources = c.adGroups
+          .flatMap((ag) => [...(ag.logoMode === "file" ? ag.logoFiles : []), ...(ag.videoMode === "files" ? ag.videoFiles : [])])
+          .map((f) => f.url);
+        return { id: hid(c.id), scope: "gg" as const, label: v.target?.name || "Google campaign", sub: `${curSymbol(v.currency)}${moneyLabel(c.budget)}/day`, sources };
+      }),
+    );
+    // Hand-off items already given a terminal phase, so the catch doesn't re-stamp them.
+    const settled = new Set<string>();
 
     try {
       const shots: GoogleLaunchShotIn[] = [];
       const shotCard: string[] = []; // parallel to shots: the card id each shot came from
       for (const v of ready) {
         const c = v.card;
-        // Upload every ad group's logo file + video files (per ad group so the wire's ads line up).
+        // Join every ad group's logo file + video upload (per ad group so the wire's ads line up).
+        // The manager caps concurrency itself, so a card's files ride together, not one by one.
         const needsUpload = c.adGroups.some((ag) => (ag.logoMode === "file" && ag.logoFiles.length > 0) || (ag.videoMode === "files" && ag.videoFiles.length > 0));
-        const uploaded: AdGroupUpload[] = [];
-        let failed = false;
+        const uploaded: AdGroupUpload[] = c.adGroups.map(() => ({}));
         if (needsUpload) {
-          setCardState(c.id, { state: "uploading", progress: "Preparing uploads…" });
+          setCardState(c.id, { state: "uploading", progress: "Uploading creatives…" });
           try {
-            for (let i = 0; i < c.adGroups.length; i++) {
-              const ag = c.adGroups[i];
-              const u: AdGroupUpload = {};
+            const jobs: Promise<void>[] = [];
+            c.adGroups.forEach((ag, i) => {
               if (ag.logoMode === "file" && ag.logoFiles.length > 0) {
                 const f = ag.logoFiles[0];
-                setCardState(c.id, { progress: `Ad group ${i + 1}: uploading logo…` });
-                const file = await readCreative(f.url, f.name, "image", "Logo");
-                u.logoUrl = await uploadCreativeFile(`google/${username}/${waveId}/${c.id}-ag${i}-logo-${safeBlobName(f.name, "logo.jpg")}`, file, "Logo");
+                jobs.push(ensureCreativeUploaded(f.url, { name: f.name, kind: "image" }).then((url) => void (uploaded[i].logoUrl = url)));
               }
               if (ag.videoMode === "files" && ag.videoFiles.length > 0) {
-                u.videoUrls = [];
-                for (let j = 0; j < ag.videoFiles.length; j++) {
-                  const f = ag.videoFiles[j];
-                  setCardState(c.id, { progress: `Ad group ${i + 1}: video ${j + 1}/${ag.videoFiles.length}…` });
-                  const file = await readCreative(f.url, f.name, "video", `Video ${j + 1}`);
-                  const url = await uploadCreativeFile(`google/${username}/${waveId}/${c.id}-ag${i}-v${j}-${safeBlobName(f.name, "video.mp4")}`, file, `Video ${j + 1}`);
-                  u.videoUrls.push(url);
-                }
+                const slots: string[] = ag.videoFiles.map(() => "");
+                uploaded[i].videoUrls = slots;
+                ag.videoFiles.forEach((f, j) => {
+                  jobs.push(ensureCreativeUploaded(f.url, { name: f.name, kind: "video" }).then((url) => void (slots[j] = url)));
+                });
               }
-              uploaded[i] = u;
-            }
+            });
+            await Promise.all(jobs);
           } catch (e) {
-            // This card's upload died — mark it and keep launching the others.
-            setCardState(c.id, { state: "error", msg: String((e as Error).message ?? e) });
-            failed = true;
+            // This card's upload died — mark it and keep launching the others (Google semantics).
+            const msg = String((e as Error).message ?? e);
+            setCardState(c.id, { state: "error", msg });
+            handoffPatch(hid(c.id), { phase: "failed", error: msg });
+            settled.add(hid(c.id));
+            continue;
           }
         }
-        if (failed) continue;
         shots.push(buildLaunchShot(c, { currency: v.currency, accountName: v.target?.name, uploaded }));
         shotCard.push(c.id);
+        handoffPatch(hid(c.id), { phase: "sending" });
         setCardState(c.id, { state: "sending", msg: "queuing on server…" });
       }
 
@@ -258,7 +270,11 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
       if (d?.ok) {
         waveRef.current = null; // accepted — the next wave is a new wave
         setPreviewed(false);
-        for (const id of shotCard) setCardState(id, { state: "ok", msg: "queued — safe to close the tab (LION builds it server-side)" });
+        for (const id of shotCard) {
+          setCardState(id, { state: "ok", msg: "queued — safe to close the tab (LION builds it server-side)" });
+          handoffPatch(hid(id), { phase: "accepted" });
+          settled.add(hid(id));
+        }
         refresh();
         setOpen(true);
       } else {
@@ -269,11 +285,17 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
         const m = /^shot (\d+):/.exec(String(d?.error ?? ""));
         const culprit = m ? shotCard[Number(m[1]) - 1] : null;
         for (const id of shotCard) {
-          setCardState(id, culprit ? (id === culprit ? { state: "error", msg } : { state: "error", msg: "wave refused — fix the flagged card" }) : { state: "error", msg });
+          const cardMsg = culprit ? (id === culprit ? msg : "wave refused — fix the flagged card") : msg;
+          setCardState(id, { state: "error", msg: cardMsg });
+          handoffPatch(hid(id), { phase: "failed", error: cardMsg });
+          settled.add(hid(id));
         }
       }
     } catch (e) {
-      setFireNote(String((e as Error).message ?? e));
+      const msg = String((e as Error).message ?? e);
+      setFireNote(msg);
+      // Resolve every still-pending hand-off item so the tab isn't held open on a thrown wave.
+      for (const v of ready) if (!settled.has(hid(v.card.id))) handoffPatch(hid(v.card.id), { phase: "failed", error: msg });
     } finally {
       setFiring(false);
       fireGate.current.exit();
@@ -378,7 +400,7 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
               </div>
 
               <p className="text-[10.5px] leading-snug text-faint">
-                Fresh Demand Gen campaigns — LION builds each one server-side. Logo/video uploads run from this tab; keep it open until they finish.
+                Fresh Demand Gen campaigns — LION builds each one server-side. Creatives upload as you attach them; keep this tab open only until the wave is handed to our server.
               </p>
 
               {/* per-card readiness rows */}
@@ -423,8 +445,6 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
                   </div>
                 ))}
               </div>
-
-              <UploadingNotice n={uploadingN} compact />
 
               <button
                 type="button"
