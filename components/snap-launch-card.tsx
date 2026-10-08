@@ -99,7 +99,9 @@ export type SnapCard = {
   copies: string;
   /** The CLONER's creatives (instead of `files`): the source's ads, each on or off. */
   remote?: SnapRemoteCreative[];
-  state: "idle" | "uploading" | "sending" | "ok" | "error";
+  /** "unsure" = the card's wave got no answer and the server is being asked whether it took it
+   *  (components/wave-hold-core.ts): the card is held — shown, editable, not launchable. */
+  state: "idle" | "uploading" | "sending" | "ok" | "error" | "unsure";
   msg?: string;
   progress?: string;
 };
@@ -443,7 +445,7 @@ export function SnapLaunchCard({
   const allRead = card.files.length > 0 && card.files.every((f) => dims[f.id]);
   const totalBytes = card.files.reduce((n, f) => n + f.size, 0);
   const totalSize = totalBytes < 1024 * 1024 ? `${Math.max(1, Math.round(totalBytes / 1024))} KB` : `${Math.round(totalBytes / 1024 / 1024)} MB`;
-  const stateTone = card.state === "error" ? "text-danger" : card.state === "ok" ? "text-launch2" : card.state === "uploading" || card.state === "sending" ? "text-[#9db8ff]" : "text-faint";
+  const stateTone = card.state === "error" ? "text-danger" : card.state === "unsure" ? "text-warn" : card.state === "ok" ? "text-launch2" : card.state === "uploading" || card.state === "sending" ? "text-[#9db8ff]" : "text-faint";
 
   return (
     <div id={`sncard-${card.id}`} className={"animate-row-in overflow-hidden rounded-2xl border bg-surface transition-shadow " + (highlight ? "border-[#FFFC00]/60 shadow-[0_0_0_2px_rgba(255,252,0,0.2)]" : "border-line")}>

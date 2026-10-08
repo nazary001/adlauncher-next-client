@@ -97,7 +97,9 @@ export type TiktokCard = {
   countries: string[];
   language: string;
   // launch lifecycle (per card)
-  state: "idle" | "uploading" | "sending" | "ok" | "error";
+  /** "unsure" = the card's wave got no answer and the server is being asked whether it took it
+   *  (components/wave-hold-core.ts): the card is held — shown, editable, not launchable. */
+  state: "idle" | "uploading" | "sending" | "ok" | "error" | "unsure";
   msg?: string;
   progress?: string;
 };
@@ -540,7 +542,7 @@ export function TiktokLaunchCard({
   // nothing is plainly missing) is read in the header strip.
   const bidRefusal = refusal && !bidMissing && /\b(bid|roas)\b/i.test(refusal) ? refusal : "";
 
-  const stateTone = card.state === "error" ? "border-danger/25 bg-danger/[0.06] text-danger" : card.state === "ok" ? "border-launch/25 bg-launch/[0.06] text-launch2" : "border-accent/25 bg-accent/[0.06] text-[#9db8ff]";
+  const stateTone = card.state === "error" ? "border-danger/25 bg-danger/[0.06] text-danger" : card.state === "unsure" ? "border-warn/25 bg-warn/[0.06] text-warn" : card.state === "ok" ? "border-launch/25 bg-launch/[0.06] text-launch2" : "border-accent/25 bg-accent/[0.06] text-[#9db8ff]";
   const modeDef = TIKTOK_LAUNCH_MODES.find((m) => m.value === card.mode);
   const geoLabel = card.countries.join("+");
   const summary = [advertiserName || "no advertiser", `${card.budget} ${unit}/day`, `${videoCount} video${videoCount === 1 ? "" : "s"}`, geoLabel].filter(Boolean).join(" · ");
@@ -573,7 +575,7 @@ export function TiktokLaunchCard({
               title={ready ? "Ready" : "Not ready"}
             >
               <span className={"h-1.5 w-1.5 rounded-full " + (ready || card.state === "ok" ? "bg-launch2" : "bg-warn")} />
-              {ready ? "Ready" : card.state === "ok" ? "Queued" : needs.length ? `${needs.length} to fill` : "Not ready"}
+              {ready ? "Ready" : card.state === "ok" ? "Queued" : card.state === "unsure" ? "Checking" : needs.length ? `${needs.length} to fill` : "Not ready"}
             </span>
           </div>
           <p className="mt-0.5 truncate font-mono text-[10.5px] text-faint" title={fullNamePreview}>

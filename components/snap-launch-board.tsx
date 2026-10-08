@@ -18,6 +18,8 @@ import { Header } from "./header";
 import { SnapNav } from "./snap-nav";
 import { useSnapCatalog, useSnapKeys, type SnapCatalogAccount } from "./use-snap";
 import { useSnapTaskManager } from "./snap-task-manager";
+import { useWaveHold } from "./wave-hold";
+import { WAVE_ACCEPTED_NOTE, WAVE_HELD_NOTE, WAVE_RELEASED_NOTE } from "./wave-hold-core";
 import { makeGate } from "@/lib/launch-guards";
 import { moneyLabel, parseMoney } from "@/lib/types";
 import { SNAP_MAX_SHOTS, snapCurrencySymbol, snapDeviceShort, snapGoalNeedsPixel, type SnapLaunchShotIn } from "@/lib/snap-launch";
@@ -48,6 +50,10 @@ type CardView = {
   keys: string[];
   pixelOptions: RichOption[];
 };
+
+/** One hand-off item per CARD, not per wave: a card that failed in one wave and is launched again
+ *  resets its own item instead of leaving a stale "NOT handed over" behind (review find 08.10). */
+const hid = (id: string) => `sn:${id}`;
 
 export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
   const { catalog, error: catError, retry: retryCatalog } = useSnapCatalog();
@@ -131,11 +137,38 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
   // the TikTok board keeps. Without it a card that was already launched stayed "ready", so adding
   // one more card and pressing Launch built every earlier campaign a SECOND time, on fresh partner
   // keys (review find 08.10).
+  // …except while the card's wave is HELD (its request got no answer and the server is being asked
+  // whether it took it — components/wave-hold-core.ts): an edit then changes the fields but does not
+  // make the card launchable. Launching it again is exactly what the hold prevents.
+  const rearm = (c: SnapCard) => (c.state === "unsure" ? {} : { state: "idle" as const, msg: undefined, progress: undefined });
   const patch = (id: string, p: Partial<SnapCard>) => {
-    setCards((cs) => cs.map((c) => (c.id === id ? { ...c, ...p, state: "idle", msg: undefined, progress: undefined } : c)));
+    setCards((cs) => cs.map((c) => (c.id === id ? { ...c, ...p, ...rearm(c) } : c)));
     setPreviewed(false);
   };
   const setCardState = (id: string, p: Partial<SnapCard>) => setCards((cs) => cs.map((c) => (c.id === id ? { ...c, ...p } : c)));
+
+  // A wave whose request got NO answer is held until the server says whether it took it.
+  const { hold } = useWaveHold({
+    rail: "snap",
+    onAccepted: (w) => {
+      for (const id of w.cardIds) {
+        setCardState(id, { state: "ok", msg: WAVE_ACCEPTED_NOTE, progress: undefined });
+        handoffPatch(hid(id), { phase: "accepted", error: null });
+      }
+      if (waveRef.current?.id === w.waveId) waveRef.current = null;
+      setFireNote("The wave whose answer was lost IS with the server — nothing needs to be launched again. See the Task Manager.");
+      refresh();
+      refreshKeys();
+      setOpen(true);
+    },
+    onReleased: (w) => {
+      for (const id of w.cardIds) {
+        setCardState(id, { state: "error", msg: WAVE_RELEASED_NOTE, progress: undefined });
+        handoffPatch(hid(id), { phase: "failed", uncertain: null, error: "the server never received it — launch it again from the board" });
+      }
+      setFireNote("The server never received that wave — its cards can be launched again.");
+    },
+  });
   const fresh = () => freshSnapCard(undefined, { adAccount: defaults?.adAccount, pixel: defaults?.pixel, profileId: defaults?.profile, brandName: defaults?.brandName });
   const add = () => {
     setCards((cs) => (cs.length >= MAX_CARDS ? cs : [...cs, fresh()]));
@@ -171,12 +204,14 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
     const profileId = card.profileId || defaults?.profile || "";
     const refusal = snapCardRefusal(card, { pixelId: effPixel || undefined, profileId });
     const copies = snapCardCopies(card);
-    // A card that is already with the server is not launchable again until it is edited.
+    // A card that is already with the server is not launchable again until it is edited — and a card
+    // whose wave got no answer is not launchable at all until the server says what became of it.
     const queued = card.state === "ok";
-    const ready = Boolean(card.adAccount && account && !pixelNeeded && !noPixel && !refusal) && !queued;
+    const held = card.state === "unsure";
+    const ready = Boolean(card.adAccount && account && !pixelNeeded && !noPixel && !refusal) && !queued && !held;
     const cardKeys = ready ? freeKeys.slice(keyCursor, keyCursor + copies) : [];
     if (ready) keyCursor += copies;
-    const why = !card.adAccount ? "pick an ad account" : !account ? "account not in our list" : noPixel ? "no pixel on this account — choose Landing page view" : pixelNeeded ? "pick a Snap Pixel" : refusal ? refusal : queued ? "already queued — edit the card to launch it again" : "";
+    const why = !card.adAccount ? "pick an ad account" : !account ? "account not in our list" : noPixel ? "no pixel on this account — choose Landing page view" : pixelNeeded ? "pick a Snap Pixel" : refusal ? refusal : held ? "no answer from the server — checking whether it took this wave" : queued ? "already queued — edit the card to launch it again" : "";
     view.push({ card, account, currency, effPixel, pixelNeeded, noPixel, profileId, refusal, ready, why, copies, keys: cardKeys, pixelOptions: pixelOptionsFor(account) });
   }
 
@@ -220,9 +255,6 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
     const sig = JSON.stringify(ready.map((v) => snapCardSignature(v.card)));
     if (!waveRef.current || waveRef.current.sig !== sig) waveRef.current = { sig, id: crypto.randomUUID() };
     const waveId = waveRef.current.id;
-    // One hand-off item per CARD, not per wave: a card that failed in one wave and is launched again
-    // resets its own item instead of leaving a stale "NOT handed over" behind (review find 08.10).
-    const hid = (id: string) => `sn:${id}`;
     // Register every campaign of this Launch click on the hand-off screen (it owns the leave-page
     // guard now); one item per card, though a card fans into `copies` campaigns.
     handoffBegin(
@@ -235,6 +267,9 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
       })),
     );
     const settled = new Set<string>(); // hand-off items already given a terminal phase
+    // The cards that actually went out in the request — known to the catch, so a wave whose answer
+    // is lost can be held (and nothing is held for a throw that came before anything was sent).
+    let sentCards: string[] = [];
     try {
       const shots: SnapLaunchShotIn[] = [];
       const shotCard: string[] = [];
@@ -263,8 +298,13 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
         setFireNote("Nothing was launched — every card failed to upload its creatives. Re-attach the files and try again.");
         return;
       }
+      sentCards = [...new Set(shotCard)];
       const res = await fetch("/api/snap/launch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ waveId, shots }) });
-      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; availablePixels?: string[] };
+      const d = (await res.json().catch(() => null)) as { ok?: boolean; error?: string; availablePixels?: string[] } | null;
+      // An answer WITHOUT a verdict (a gateway's 502 / 504 page: the function may still be running
+      // and may yet take the wave) is no answer — it is handled below exactly like a dropped connection.
+      if (!d || typeof d.ok !== "boolean") throw new Error(`HTTP ${res.status} without a verdict`);
+      sentCards = []; // a real answer arrived — whatever it says, this wave is not "unanswered"
       if (d?.ok) {
         waveRef.current = null;
         setPreviewed(false);
@@ -291,7 +331,23 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
       }
     } catch (e) {
       const msg = String((e as Error).message ?? e);
-      setFireNote(msg);
+      if (sentCards.length > 0) {
+        // No ANSWER is not a refusal: the server may have taken the wave before the connection
+        // dropped. Its cards are HELD — not launchable — while the server is asked whether it has
+        // the wave (components/wave-hold). They used to stay "ready": adding or editing a card and
+        // pressing Launch again sent them under a new wave id, and the same campaigns were built a
+        // second time (review find 08.10).
+        hold(waveId, sentCards);
+        for (const id of sentCards) {
+          setCardState(id, { state: "unsure", msg: WAVE_HELD_NOTE, progress: undefined });
+          handoffPatch(hid(id), { phase: "failed", uncertain: true, error: "no answer from the server — checking whether it took the wave; this clears by itself. Do not launch it again." });
+          settled.add(hid(id));
+        }
+        setFireNote(`No answer from the server (${msg}) — the wave MAY have been accepted. Its cards are held while the server is asked; nothing will be launched twice.`);
+        refresh();
+        refreshKeys(); // if the server did take the wave, it has claimed keys this board still shows as free
+        setOpen(true);
+      } else setFireNote(msg);
       // Resolve every still-pending hand-off item so the tab isn't held open on a thrown wave.
       for (const v of ready) if (!settled.has(hid(v.card.id))) handoffPatch(hid(v.card.id), { phase: "failed", error: msg });
     } finally {

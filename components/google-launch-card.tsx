@@ -108,7 +108,9 @@ export type LaunchCard = {
    *  logo ("1-5-5"). The card keeps its typed groups either way — the fan-out is on the wire. */
   adGroupPerVideo: boolean;
   // launch lifecycle (per card)
-  state: "idle" | "uploading" | "sending" | "ok" | "error";
+  /** "unsure" = the card's wave got no answer and the server is being asked whether it took it
+   *  (components/wave-hold-core.ts): the card is held — shown, editable, not launchable. */
+  state: "idle" | "uploading" | "sending" | "ok" | "error" | "unsure";
   msg?: string;
   progress?: string;
 };
@@ -483,7 +485,9 @@ export function GoogleLaunchCard({
   const stateTone =
     card.state === "error"
       ? "text-danger"
-      : card.state === "ok"
+      : card.state === "unsure"
+        ? "text-warn"
+        : card.state === "ok"
         ? "text-launch2"
         : card.state === "uploading" || card.state === "sending"
           ? "text-[#9db8ff]"

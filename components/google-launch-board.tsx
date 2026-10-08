@@ -19,6 +19,8 @@ import { Header } from "./header";
 import { GoogleNav } from "./google-nav";
 import { useGoogleCustomers, type GwCustomer } from "./use-google";
 import { useGoogleTaskManager } from "./google-task-manager";
+import { useWaveHold } from "./wave-hold";
+import { WAVE_ACCEPTED_NOTE, WAVE_HELD_NOTE, WAVE_RELEASED_NOTE } from "./wave-hold-core";
 import { makeGate } from "@/lib/launch-guards";
 import { moneyLabel, parseMoney } from "@/lib/types";
 import { googleBidPlan, type GoogleLaunchShotIn } from "@/lib/google-bid";
@@ -66,6 +68,10 @@ type CardView = {
   pixelOptions: RichOption[];
 };
 
+/** One hand-off item per CARD, not per wave: a card that failed in one wave and is launched again
+ *  resets its own item instead of leaving a stale "NOT handed over" behind (review find 08.10). */
+const hid = (id: string) => `gg:${id}`;
+
 export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
   const { customers, suspended, error: custError, retry: retryCustomers, acr } = useGoogleCustomers();
   const { setOpen, counts, refresh } = useGoogleTaskManager();
@@ -100,8 +106,12 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
   // Any edit makes a queued / failed card a fresh draft again (and drops the preview) — the same rule
   // the TikTok board keeps. Without it a card that was already launched stayed "ready", so adding
   // one more card and pressing Launch built every earlier campaign a SECOND time (review find 08.10).
+  // …except while the card's wave is HELD (its request got no answer and the server is being asked
+  // whether it took it — components/wave-hold-core.ts): an edit then changes the fields but does not
+  // make the card launchable. Launching it again is exactly what the hold prevents.
+  const rearm = (c: LaunchCard) => (c.state === "unsure" ? {} : { state: "idle" as const, msg: undefined, progress: undefined });
   const patch = (id: string, p: Partial<LaunchCard>) => {
-    setCards((cs) => cs.map((c) => (c.id === id ? { ...c, ...p, state: "idle", msg: undefined, progress: undefined } : c)));
+    setCards((cs) => cs.map((c) => (c.id === id ? { ...c, ...p, ...rearm(c) } : c)));
     setPreviewed(false);
   };
   // A per-ad-group edit merges at the board level (never through a stale card closure) so an async
@@ -109,13 +119,35 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
   const patchAdGroup = (cardId: string, agId: string, p: Partial<AdGroup>) => {
     setCards((cs) =>
       cs.map((c) =>
-        c.id === cardId ? { ...c, adGroups: c.adGroups.map((a) => (a.id === agId ? { ...a, ...p } : a)), state: "idle", msg: undefined, progress: undefined } : c,
+        c.id === cardId ? { ...c, adGroups: c.adGroups.map((a) => (a.id === agId ? { ...a, ...p } : a)), ...rearm(c) } : c,
       ),
     );
     setPreviewed(false);
   };
   // A launch-lifecycle patch (upload progress / result) must NOT reset the preview.
   const setCardState = (id: string, p: Partial<LaunchCard>) => setCards((cs) => cs.map((c) => (c.id === id ? { ...c, ...p } : c)));
+
+  // A wave whose request got NO answer is held until the server says whether it took it.
+  const { hold } = useWaveHold({
+    rail: "google",
+    onAccepted: (w) => {
+      for (const id of w.cardIds) {
+        setCardState(id, { state: "ok", msg: WAVE_ACCEPTED_NOTE, progress: undefined });
+        handoffPatch(hid(id), { phase: "accepted", error: null });
+      }
+      if (waveRef.current?.id === w.waveId) waveRef.current = null;
+      setFireNote("The wave whose answer was lost IS with the server — nothing needs to be launched again. See the Task Manager.");
+      refresh();
+      setOpen(true);
+    },
+    onReleased: (w) => {
+      for (const id of w.cardIds) {
+        setCardState(id, { state: "error", msg: WAVE_RELEASED_NOTE, progress: undefined });
+        handoffPatch(hid(id), { phase: "failed", uncertain: null, error: "the server never received it — launch it again from the board" });
+      }
+      setFireNote("The server never received that wave — its cards can be launched again.");
+    },
+  });
 
   const add = () => {
     setCards((cs) => (cs.length >= MAX_CARDS ? cs : [...cs, freshLaunchCard()]));
@@ -145,7 +177,7 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
   const applyBulk = (groups: AdGroup[], replace: boolean) => {
     if (!bulkCardId || groups.length === 0) return;
     setCards((cs) =>
-      cs.map((c) => (c.id === bulkCardId ? { ...c, adGroups: replace ? groups : [...c.adGroups, ...groups], state: "idle", msg: undefined, progress: undefined } : c)),
+      cs.map((c) => (c.id === bulkCardId ? { ...c, adGroups: replace ? groups : [...c.adGroups, ...groups], ...rearm(c) } : c)),
     );
     setBulkCardId(null);
     setPreviewed(false);
@@ -159,9 +191,11 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
     const pixelNeeded = Boolean(target && target.pixels.length > 1 && !effPixel);
     const noPixel = Boolean(target && target.pixels.length === 0);
     const refusal = launchCardRefusal(card);
-    // A card that is already with the server is not launchable again until it is edited.
+    // A card that is already with the server is not launchable again until it is edited — and a card
+    // whose wave got no answer is not launchable at all until the server says what became of it.
     const queued = card.state === "ok";
-    const ready = Boolean(card.customer && target && !pixelNeeded && !refusal) && !queued;
+    const held = card.state === "unsure";
+    const ready = Boolean(card.customer && target && !pixelNeeded && !refusal) && !queued && !held;
     const why = !card.customer
       ? "pick a customer"
       : !target
@@ -170,9 +204,11 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
           ? "pick a conversion pixel"
           : refusal
             ? refusal
-            : queued
-              ? "already queued — edit the card to launch it again"
-              : "";
+            : held
+              ? "no answer from the server — checking whether it took this wave"
+              : queued
+                ? "already queued — edit the card to launch it again"
+                : "";
     return { card, target, currency, effPixel, pixelNeeded, noPixel, refusal, ready, why, pixelOptions: pixelOptionsFor(target) };
   });
 
@@ -209,9 +245,7 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
     const ready = view.filter((v) => v.ready); // snapshot — the loop mutates card state below
     const sig = JSON.stringify(ready.map((v) => launchCardSignature(v.card)));
     if (!waveRef.current || waveRef.current.sig !== sig) waveRef.current = { sig, id: crypto.randomUUID() };
-    // One hand-off item per CARD, not per wave: a card that failed in one wave and is launched again
-    // resets its own item instead of leaving a stale "NOT handed over" behind (review find 08.10).
-    const hid = (id: string) => `gg:${id}`;
+    const waveId = waveRef.current.id;
 
     // Register every campaign of this Launch click on the hand-off screen (it owns the leave-page
     // guard now). Its sources are the card's local files that still need uploading — the Dropzone
@@ -227,6 +261,9 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
     );
     // Hand-off items already given a terminal phase, so the catch doesn't re-stamp them.
     const settled = new Set<string>();
+    // The cards that actually went out in the request — known to the catch, so a wave whose answer
+    // is lost can be held (and nothing is held for a throw that came before anything was sent).
+    let sentCards: string[] = [];
 
     try {
       const shots: GoogleLaunchShotIn[] = [];
@@ -275,12 +312,17 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
         return;
       }
 
+      sentCards = [...new Set(shotCard)];
       const res = await fetch("/api/google/launch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ waveId: waveRef.current.id, shots }),
+        body: JSON.stringify({ waveId, shots }),
       });
-      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; queued?: number; error?: string; availablePixels?: string[] };
+      const d = (await res.json().catch(() => null)) as { ok?: boolean; queued?: number; error?: string; availablePixels?: string[] } | null;
+      // An answer WITHOUT a verdict (a gateway's 502 / 504 page: the function may still be running
+      // and may yet take the wave) is no answer — it is handled below exactly like a dropped connection.
+      if (!d || typeof d.ok !== "boolean") throw new Error(`HTTP ${res.status} without a verdict`);
+      sentCards = []; // a real answer arrived — whatever it says, this wave is not "unanswered"
       if (d?.ok) {
         waveRef.current = null; // accepted — the next wave is a new wave
         setPreviewed(false);
@@ -307,7 +349,22 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
       }
     } catch (e) {
       const msg = String((e as Error).message ?? e);
-      setFireNote(msg);
+      if (sentCards.length > 0) {
+        // No ANSWER is not a refusal: the server may have taken the wave before the connection
+        // dropped. Its cards are HELD — not launchable — while the server is asked whether it has
+        // the wave (components/wave-hold). They used to stay "ready": adding or editing a card and
+        // pressing Launch again sent them under a new wave id, and the same campaigns were built a
+        // second time (review find 08.10).
+        hold(waveId, sentCards);
+        for (const id of sentCards) {
+          setCardState(id, { state: "unsure", msg: WAVE_HELD_NOTE, progress: undefined });
+          handoffPatch(hid(id), { phase: "failed", uncertain: true, error: "no answer from the server — checking whether it took the wave; this clears by itself. Do not launch it again." });
+          settled.add(hid(id));
+        }
+        setFireNote(`No answer from the server (${msg}) — the wave MAY have been accepted. Its cards are held while the server is asked; nothing will be launched twice.`);
+        refresh();
+        setOpen(true);
+      } else setFireNote(msg);
       // Resolve every still-pending hand-off item so the tab isn't held open on a thrown wave.
       for (const v of ready) if (!settled.has(hid(v.card.id))) handoffPatch(hid(v.card.id), { phase: "failed", error: msg });
     } finally {

@@ -25,6 +25,8 @@ import { Header } from "./header";
 import { TiktokNav } from "./tiktok-nav";
 import { useTiktokAdvertisers, useTiktokConfigs, useTiktokLandings, type TwAdvertiser } from "./use-tiktok";
 import { useTiktokTaskManager } from "./tiktok-task-manager";
+import { useWaveHold } from "./wave-hold";
+import { WAVE_ACCEPTED_NOTE, WAVE_HELD_NOTE, WAVE_RELEASED_NOTE } from "./wave-hold-core";
 import { makeGate } from "@/lib/launch-guards";
 import { moneyLabel, parseMoney } from "@/lib/types";
 import { tiktokBidPlan, tiktokResolvePixel, type TiktokLaunchShotIn } from "@/lib/tiktok-launch";
@@ -63,6 +65,9 @@ type CardView = {
   why: string;
 };
 
+/** One hand-off item per CARD, not per wave (see the Google / Snapchat boards). */
+const hid = (id: string) => `tt:${id}`;
+
 export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
   const { advertisers, acr, liveLaunch, error: advError, retry: retryAdvertisers } = useTiktokAdvertisers();
   const { setOpen, counts, refresh } = useTiktokTaskManager();
@@ -96,13 +101,39 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
   const advertiserOptions: RichOption[] = (advertisers ?? []).map((a) => ({ value: a.advertiserId, label: a.name, subLabel: a.advertiserId, meta: a.timezone }));
 
   // Any edit makes a queued / failed card a fresh draft again (and drops the preview).
+  // …except while the card's wave is HELD (its request got no answer and the server is being asked
+  // whether it took it — components/wave-hold-core.ts): an edit then changes the fields but does not
+  // make the card launchable. Launching it again is exactly what the hold prevents.
+  const rearm = (c: TiktokCard) => (c.state === "unsure" ? {} : { state: "idle" as const, msg: undefined, progress: undefined });
   const patch = (id: string, p: Partial<TiktokCard>) => {
     if (firing) return; // the wave on its way out was cut from what is on screen — see the header
-    setCards((cs) => cs.map((c) => (c.id === id ? { ...c, ...p, state: "idle", msg: undefined, progress: undefined } : c)));
+    setCards((cs) => cs.map((c) => (c.id === id ? { ...c, ...p, ...rearm(c) } : c)));
     setPreviewed(false);
   };
   // A launch-lifecycle patch (upload progress / result) must NOT reset the preview or the state.
   const setCardState = (id: string, p: Partial<TiktokCard>) => setCards((cs) => cs.map((c) => (c.id === id ? { ...c, ...p } : c)));
+
+  // A wave whose request got NO answer is held until the server says whether it took it.
+  const { hold } = useWaveHold({
+    rail: "tiktok",
+    onAccepted: (w) => {
+      for (const id of w.cardIds) {
+        setCardState(id, { state: "ok", msg: WAVE_ACCEPTED_NOTE, progress: undefined });
+        handoffPatch(hid(id), { phase: "accepted", error: null });
+      }
+      if (waveRef.current?.id === w.waveId) waveRef.current = null;
+      setFireNote("The wave whose answer was lost IS with the server — nothing needs to be launched again. See the Task Manager.");
+      refresh();
+      setOpen(true);
+    },
+    onReleased: (w) => {
+      for (const id of w.cardIds) {
+        setCardState(id, { state: "error", msg: WAVE_RELEASED_NOTE, progress: undefined });
+        handoffPatch(hid(id), { phase: "failed", uncertain: null, error: "the server never received it — launch it again from the board" });
+      }
+      setFireNote("The server never received that wave — its cards can be launched again.");
+    },
+  });
 
   const add = () => {
     if (firing) return;
@@ -168,9 +199,11 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
               ? px.refusal
               : refusal
                 ? refusal
-                : card.state === "ok"
-                  ? "already queued — edit the card to launch it again"
-                  : "";
+                : card.state === "unsure"
+                  ? "no answer from the server — checking whether it took this wave"
+                  : card.state === "ok"
+                    ? "already queued — edit the card to launch it again"
+                    : "";
     return { card, target, effPixel, pixelNeeded, refusal, ready: why === "", why };
   });
 
@@ -230,8 +263,6 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
     const sig = JSON.stringify(ready.map((v) => tiktokCardSignature(v.card)));
     if (!waveRef.current || waveRef.current.sig !== sig) waveRef.current = { sig, id: crypto.randomUUID() };
     const waveId = waveRef.current.id;
-    // One hand-off item per CARD, not per wave (see the Google / Snapchat boards).
-    const hid = (id: string) => `tt:${id}`;
 
     // Register every campaign of this Launch click on the hand-off screen (it owns the leave-page
     // guard now). Its sources are the card's avatar (local file or remembered https) and videos.
@@ -243,6 +274,9 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
       }),
     );
 
+    // The cards that actually went out in the request — known to the catch, so a wave whose answer
+    // is lost can be held (and nothing is held for a throw that came before anything was sent).
+    let sentCards: string[] = [];
     try {
       const shots: TiktokLaunchShotIn[] = [];
       const shotCard: string[] = []; // parallel to shots: the card id each shot came from
@@ -285,8 +319,13 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
         return;
       }
 
+      sentCards = [...new Set(shotCard)];
       const res = await fetch("/api/tiktok/launch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ waveId, shots }) });
-      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; queued?: number; error?: string; availablePixels?: string[] };
+      const d = (await res.json().catch(() => null)) as { ok?: boolean; queued?: number; error?: string; availablePixels?: string[] } | null;
+      // An answer WITHOUT a verdict (a gateway's 502 / 504 page: the function may still be running
+      // and may yet take the wave) is no answer — it is handled below exactly like a dropped connection.
+      if (!d || typeof d.ok !== "boolean") throw new Error(`HTTP ${res.status} without a verdict`);
+      sentCards = []; // a real answer arrived — whatever it says, this wave is not "unanswered"
       if (d?.ok) {
         waveRef.current = null; // accepted — the next wave is a new wave
         setPreviewed(false);
@@ -314,16 +353,29 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
         }
       }
     } catch (e) {
-      // No ANSWER is not a refusal: the wave may have been accepted before the connection dropped.
-      // The same cards re-send the SAME wave id (the server answers "already accepted" instead of
-      // pumping twice) — an edit would mint a new id, so the drawer is the thing to look at first.
-      setFireNote(`No answer from the server (${String((e as Error).message ?? e)}) — the wave MAY have been accepted: check the Task Manager. Pressing Launch again WITHOUT edits is safe.`);
-      for (const v of ready) {
-        setCardState(v.card.id, { state: "error", msg: "no answer — check the Task Manager before editing this card", progress: undefined });
-        handoffPatch(hid(v.card.id), { phase: "failed", error: "no answer from the server — check the Task Manager before firing again" });
+      const msg = String((e as Error).message ?? e);
+      if (sentCards.length > 0) {
+        // No ANSWER is not a refusal: the server may have taken the wave before the connection
+        // dropped. Its cards are HELD — not launchable — while the server is asked whether it has
+        // the wave (components/wave-hold). A warning alone was not enough: the cards stayed
+        // launchable, and adding or editing one minted a new wave id under which the same campaigns
+        // would be built a second time (review find 08.10).
+        hold(waveId, sentCards);
+        for (const id of sentCards) {
+          setCardState(id, { state: "unsure", msg: WAVE_HELD_NOTE, progress: undefined });
+          handoffPatch(hid(id), { phase: "failed", uncertain: true, error: "no answer from the server — checking whether it took the wave; this clears by itself. Do not launch it again." });
+        }
+        setFireNote(`No answer from the server (${msg}) — the wave MAY have been accepted. Its cards are held while the server is asked; nothing will be launched twice.`);
+        refresh();
+        setOpen(true);
+      } else {
+        // Thrown before anything was sent: nothing is with the server.
+        setFireNote(msg);
+        for (const v of ready) {
+          setCardState(v.card.id, { state: "error", msg, progress: undefined });
+          handoffPatch(hid(v.card.id), { phase: "failed", error: msg });
+        }
       }
-      refresh();
-      setOpen(true);
     } finally {
       setFiring(false);
       fireGate.current.exit();
