@@ -14,7 +14,8 @@ export const maxDuration = 800;
  * (a run that had begun is closed as interrupted and never re-run; a job that was only claimed goes
  * back to the queue) and kicks every lane that has queued work and no live lock, so a lost self-kick
  * is recovered within the minute. A lane whose kick is refused is pumped by THIS invocation instead —
- * the queue keeps moving even where the deployment cannot call itself over HTTP.
+ * the queue keeps moving even where the deployment cannot call itself over HTTP. Last, any row the
+ * queue owns that stayed open although its job has ended is closed from the job (`rowsClosed`).
  *
  * Auth: Vercel sends `Authorization: Bearer <CRON_SECRET>` on cron invocations; a valid adlauncher
  * session passes too (manual "sweep now"). Without CRON_SECRET set only sessions pass — the route

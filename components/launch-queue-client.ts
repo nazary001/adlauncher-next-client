@@ -148,7 +148,16 @@ export async function retryQueued(taskIds: string[]): Promise<string[]> {
   // The server takes at most RETRY_MAX ids per request — a "Retry failed" over a bad spell used to
   // answer 400 for the whole list once it grew past that (review find 08.10).
   const done: string[] = [];
-  for (let i = 0; i < taskIds.length; i += RETRY_MAX) done.push(...(await act({ action: "retry", taskIds: taskIds.slice(i, i + RETRY_MAX) })));
+  for (let i = 0; i < taskIds.length; i += RETRY_MAX) {
+    try {
+      done.push(...(await act({ action: "retry", taskIds: taskIds.slice(i, i + RETRY_MAX) })));
+    } catch (e) {
+      // A later chunk failing must not hide the ones that went through (they ARE re-queued): report
+      // what was done — the rest still shows its Retry — and only fail outright when nothing was.
+      if (done.length === 0) throw e;
+      break;
+    }
+  }
   return done;
 }
 

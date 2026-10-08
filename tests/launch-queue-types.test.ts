@@ -16,8 +16,10 @@ import {
   SCOPE_PARTNER,
   SWEEP_LATE_MS,
   canceledRow,
+  closingRowFor,
   firstStage,
   handlerBody,
+  isNewerBuild,
   isSuperseded,
   jobMediaUrls,
   laneOf,
@@ -262,7 +264,7 @@ test("outcomeOf: HS token / tool done — ad_id is the ad COUNT as a string", ()
     assert.equal(o.row.stage, "ads");
     assert.equal(o.row.ad_id, "3", "no ad_ids in the reply → the creative count, as a string");
     assert.equal(typeof o.row.ad_id, "string");
-    assert.deepEqual(o.result, { campaign_id: "c9", adset_id: "s9", name: "Nm" });
+    assert.deepEqual(o.result, { campaign_id: "c9", adset_id: "s9", ad_id: "3", name: "Nm" }, "the job records the ad count too — the row check restores a row from it");
     // with an explicit ad_ids array that count wins
     const o2 = outcomeOf(jb(kind, { creatives: [{ url: "a" }] }), reply({ final: { ok: true, campaign_id: "c9", adset_id: "s9", ad_ids: ["x", "y"] } }), NOW);
     assert.equal(o2.row.ad_id, "2");
@@ -446,4 +448,64 @@ test("the lane lease outlives a job's lease plus the reap grace — a lane can o
   // while its job was still validly running, and a second pump started the next job beside it.
   assert.ok(LANE_LEASE_MS >= JOB_LEASE_MS + REAP_GRACE_MS, "lane ≥ job + grace");
   assert.ok(JOB_LEASE_MS >= 4 * HEARTBEAT_MS, "a job survives several missed heartbeats");
+});
+
+test("isNewerBuild: only two ISO build stamps are comparable — a foreign value in the shared document is never 'newer'", () => {
+  const a = "2026-10-08T06:36:00.000Z";
+  const b = "2026-10-08T07:21:00.000Z";
+  assert.equal(isNewerBuild(b, a), true);
+  assert.equal(isNewerBuild(a, b), false);
+  assert.equal(isNewerBuild(a, a), false);
+  for (const junk of ["", "build-xyz-b", "zzz", "2026-10-08", "9999", "2026-10-08T07:21:00"]) {
+    assert.equal(isNewerBuild(junk, a), false, junk);
+    assert.equal(isNewerBuild(b, junk), false, junk);
+  }
+  // …so a beacon written by anything that is not a real build can never make a pump step aside.
+  assert.equal(isSuperseded({ build: "build-muz-b", at: 1000 }, a, 2000), false);
+});
+
+test("closingRowFor: what a row that stayed open becomes once its job is not open any more", () => {
+  const base = { kind: "mo.launch" as QueueKind, partner: "in", retryable: false, error: null, result: null, finished_at: 5000 };
+  // still queued / running → the row is right to be open
+  assert.equal(closingRowFor({ ...base, status: "queued" }, "in", 9000), null);
+  assert.equal(closingRowFor({ ...base, status: "running" }, "in", 9000), null);
+  // done → done at the rail's final stage, with the ids the job recorded
+  assert.deepEqual(closingRowFor({ ...base, status: "done", result: { campaign_id: "c1", adset_id: "s1", ad_id: "a1", link: "https://l", gcm: "07" } }, "in", 9000), {
+    srv: 1, retry: 0, partner: "in", status: "done", stage: "ad", error: null, finished_at: 5000, campaign_id: "c1", adset_id: "s1", ad_id: "a1", link: "https://l", gcm: "07",
+  });
+  // error, not retryable → the interrupted message when the job has none; HS rows read "interrupted"
+  const dead = closingRowFor({ ...base, status: "error" }, "in", 9000);
+  assert.deepEqual([dead?.status, dead?.retry, dead?.error, dead?.finished_at], ["error", 0, INTERRUPTED_MSG, 5000]);
+  assert.equal("stage" in (dead ?? {}), false, "the last stage the run reached stays on the row");
+  const hsDead = closingRowFor({ ...base, kind: "hs.tool", partner: "br", status: "error", error: "TOOL job partial", result: { campaign_id: "c9" } }, "br", 9000);
+  assert.deepEqual([hsDead?.status, hsDead?.retry, hsDead?.error, hsDead?.campaign_id], ["interrupted", 0, "TOOL job partial", "c9"]);
+  // error, retryable → error with retry 1 (never "interrupted": Retry must be offered)
+  const clean = closingRowFor({ ...base, kind: "hs.lion", partner: "br", status: "error", retryable: true, error: "account_disabled" }, "br", 9000);
+  assert.deepEqual([clean?.status, clean?.retry, clean?.error], ["error", 1, "account_disabled"]);
+  // canceled → the canceled row
+  assert.deepEqual(closingRowFor({ ...base, status: "canceled" }, "in", 9000), canceledRow({ partner: "in" }, 5000));
+  // a job that never recorded when it ended → the check's own clock
+  assert.equal(closingRowFor({ ...base, status: "done", finished_at: null }, "in", 9000)?.finished_at, 9000);
+  // no job at all → the hand-off never reached the queue; nothing to retry on the server
+  const none = closingRowFor(null, "br", 9000);
+  assert.deepEqual([none?.status, none?.retry, none?.partner, none?.finished_at, none?.srv], ["error", 0, "br", 9000, 1]);
+  // the drawers tell "the queue has this job" from this marker — the text must keep its opening words
+  assert.match(String(none?.error), /^Not accepted by the queue/);
+  // every closing row is server-owned
+  for (const st of ["done", "error", "canceled"] as const) assert.equal(closingRowFor({ ...base, status: st }, "in", 1)?.srv, 1);
+});
+
+test("closingRowFor: a done row lands exactly where the rail's own verdict would have put it", () => {
+  for (const kind of ["mo.launch", "aif.launch", "av.launch", "fb.clone", "hs.lion", "hs.token", "hs.tool"] as QueueKind[]) {
+    const final = kind === "hs.lion" ? { ok: true, lionTaskId: "lion-task-1", name: "Final name" } : { ok: true, campaign_id: "c1", adset_id: "s1", ad_id: "a1", gcm: "mk7", link: "https://x", name: "Final name" };
+    const verdict = outcomeOf(jb(kind, { creatives: [{ url: "a" }] }), reply({ streamed: kind !== "hs.lion", final }), NOW);
+    assert.equal(verdict.status, "done", kind);
+    const closed = closingRowFor({ kind, partner: "p", status: "done", retryable: false, error: null, result: verdict.result, finished_at: NOW }, "p", NOW);
+    assert.equal(closed?.status, "done", kind);
+    assert.equal(closed?.stage, verdict.row.stage, `${kind}: stage`);
+    // every id the verdict's own row shows — the HS ad COUNT (the row's ad_id there) included
+    for (const k of ["campaign_id", "adset_id", "ad_id", "link", "gcm", "name"] as const) {
+      if (verdict.row[k] != null) assert.equal(closed?.[k], verdict.row[k], `${kind}: ${k}`);
+    }
+  }
 });

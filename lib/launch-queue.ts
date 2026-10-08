@@ -16,9 +16,12 @@ import {
   JOB_GAP_MAX_MS,
   JOB_GAP_MIN_MS,
   PUMP_MARGIN_MS,
+  closingRowFor,
+  isNewerBuild,
   unsupportedOutcome,
   unsupportedReason,
   worstCaseMs,
+  type JobForRow,
   type JobOutcome,
   type QueueJob,
 } from "./launch-queue-types.ts";
@@ -138,7 +141,7 @@ export async function runLane(deps: LaneDeps): Promise<LaneExit> {
       // handler for). Nothing is sent for it here, ever.
       const unsupported = unsupportedReason(job);
       if (unsupported) {
-        const queuedByNewer = Boolean(deps.build && job.build && job.build > deps.build);
+        const queuedByNewer = isNewerBuild(job.build ?? "", deps.build ?? "");
         if (queuedByNewer && deps.now() - job.queued_at < NEWER_BUILD_WAIT_MS) {
           // A newer build queued it — that build runs it. Give it back and step aside WITHOUT a
           // kick: the kick would come straight back here while this build still answers the
@@ -220,7 +223,15 @@ export async function runLane(deps: LaneDeps): Promise<LaneExit> {
   }
   if (exit === "lost") return exit;
   await deps.releaseLane().catch(() => {});
+  // THE RULE THAT MAKES A KICK LOOP IMPOSSIBLE: an invocation that ran no job never asks for another
+  // invocation. Every self-kick is then paid for with a real run (seconds, plus the breather), so no
+  // chain of pumps can spin on a condition that makes each of them step aside at once — whatever
+  // that condition is (seen on the bench 08.10: a pump that believed itself superseded kicked the
+  // very build it ran on, which yielded and kicked again, at network speed). A lane left waiting
+  // by this rule is restarted by the every-minute sweep.
+  const mayKick = ran > 0;
   if (exit === "handoff") {
+    if (!mayKick) return exit;
     if (kickOnlyIfQueued) {
       const waiting = await deps.peek(1).catch(() => [] as QueueJob[]);
       if (waiting.length > 0) await deps.kick().catch(() => {});
@@ -228,8 +239,60 @@ export async function runLane(deps: LaneDeps): Promise<LaneExit> {
     return exit;
   }
   // A wave can land between the last empty claim and the release — its own hand-off saw the lane
-  // busy and left the work to us. Look once more now that the lane is free.
+  // busy and left the work to us. Look once more now that the lane is free. (After an invocation
+  // that ran nothing there is no such window to cover: the wave's own pump retries the lane.)
+  if (!mayKick) return exit;
   const late = await deps.peek(1).catch(() => [] as QueueJob[]);
   if (late.length > 0) await deps.kick().catch(() => {});
   return exit;
+}
+
+// ---- rows that outlived their job ----
+
+export type ReconcileDeps = {
+  /** Server-owned rows that are still open (queued / running) and have been silent for a while,
+   *  oldest first. */
+  staleRows: () => Promise<Array<{ task_id: string; partner: string }>>;
+  /** The jobs behind these ids, in one read. An id that has no job is simply absent. */
+  jobs: (ids: string[]) => Promise<ReadonlyMap<string, JobForRow>>;
+  /** Write `row` over the task row ONLY while it is still open. True = it was written. */
+  patchOpen: (taskId: string, row: Record<string, unknown>) => Promise<boolean>;
+  /** At most this many rows are closed in one pass. */
+  max: number;
+  log?: (msg: string) => void;
+};
+
+/**
+ * Closing a job is two writes — the job document, then its row — and they can come apart: the
+ * function dies between them, the row write keeps failing, or something else closed the job. The row
+ * then says "running" for good (no client ever ages a server-owned row). So every sweep takes the
+ * server-owned rows that are still open and have been silent for a while, reads their jobs in one
+ * query, and writes — only over a row that is STILL open — the row its job calls for
+ * (closingRowFor). A row whose job is itself still queued or running is left alone, however old.
+ * Returns how many rows it closed. Rejects only when one of the two reads fails — nothing has been
+ * written then.
+ */
+export async function reconcileOpenRows(deps: ReconcileDeps, now: number): Promise<number> {
+  const rows = await deps.staleRows();
+  if (rows.length === 0) return 0;
+  const jobs = await deps.jobs(rows.map((r) => r.task_id));
+  let closed = 0;
+  for (const r of rows) {
+    const job = jobs.get(r.task_id) ?? null;
+    const patch = closingRowFor(job, r.partner, now);
+    if (!patch) continue; // its job is still queued / running — the row is right to be open
+    if (closed >= deps.max) {
+      deps.log?.(`row check: ${deps.max} rows closed in this pass — the rest wait for the next sweep`);
+      break;
+    }
+    try {
+      if (await deps.patchOpen(r.task_id, patch)) {
+        closed++;
+        deps.log?.(`row ${r.task_id} was still open although its job is ${job ? job.status : "absent"} — closed`);
+      }
+    } catch (e) {
+      deps.log?.(`row ${r.task_id} could not be closed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return closed;
 }

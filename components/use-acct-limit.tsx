@@ -12,7 +12,8 @@ import {
 import type { RichOption } from "@/lib/catalog";
 import { useAifTaskManager, useAvTaskManager, useTaskManager } from "./task-manager";
 import { useHsTaskManager } from "./hs-task-manager";
-import { useHandoffDemand, useHandoffItems } from "./launch-handoff";
+import { useHandoffDemand, useHandoffItems, useHandoffPending } from "./launch-handoff";
+import { uploadingLabel } from "./upload-guard";
 import { type QueueHealth, sweepLateMinutes } from "@/lib/launch-queue-types";
 
 // Client mirror of the per-account launch limit (5 campaigns / 30 min, window anchored at the
@@ -291,6 +292,10 @@ function SweepLateNotice({ minutes }: { minutes: number }) {
 /** Full-width red banner pinned under the header once the deployed build outruns this tab.
  *  Launching is hard-blocked everywhere while it shows — reload is the only way forward. */
 function StaleBuildBanner() {
+  // A hand-off still running FROM this tab (creatives uploading, the request not yet answered) dies
+  // with a reload — and the new build accepts it as it is. So while one is in flight the banner asks
+  // to wait instead of offering the reload.
+  const inFlight = useHandoffPending();
   return (
     <div className="fixed inset-x-0 top-[var(--hdr-h,4rem)] z-[90] flex justify-center px-4">
       <div
@@ -302,18 +307,29 @@ function StaleBuildBanner() {
         }
       >
         <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-danger" />
-        A newer version of Ad Launcher is live — this tab&apos;s launch limits are outdated, so
-        launching is paused here.
+        {inFlight > 0 ? (
+          <span>
+            A newer version of Ad Launcher is live. Do NOT reload yet — {uploadingLabel(inFlight)} from this tab;
+            reload once every one of them reads “with the server”.
+          </span>
+        ) : (
+          <span>
+            A newer version of Ad Launcher is live — this tab&apos;s launch limits are outdated, so launching is
+            paused here. Launches already with the server keep running.
+          </span>
+        )}
         <button
           type="button"
+          disabled={inFlight > 0}
           onClick={() => window.location.reload()}
           className={
             "ml-auto shrink-0 rounded-lg border border-danger/50 bg-danger/15 px-3 py-1.5 " +
             "text-[12px] font-bold text-danger transition-colors hover:bg-danger/25 " +
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50"
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50 " +
+            "disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-danger/15"
           }
         >
-          Reload now
+          {inFlight > 0 ? "Wait…" : "Reload now"}
         </button>
       </div>
     </div>

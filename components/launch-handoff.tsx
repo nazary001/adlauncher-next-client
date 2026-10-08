@@ -435,9 +435,9 @@ function HandoffOverlay({
               </p>
             ) : (
               <p className="mb-3 text-[12px] font-medium text-danger">
-                {unsure > 0
-                  ? "The server did not confirm — press Retry on each (safe, it cannot double a campaign). Do not launch them again from the board."
-                  : "Some campaigns were not handed over — retry or dismiss them."}
+                {allUnsure
+                  ? "The server did not confirm these. Where a row offers Retry, press it (safe — it cannot double a campaign); a row that is being checked clears by itself. Do not launch them again from the board."
+                  : "Some campaigns were not handed over — retry or dismiss them (each row says what it needs)."}
               </p>
             )}
 

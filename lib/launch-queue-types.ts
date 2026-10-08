@@ -132,7 +132,14 @@ export const BEACON_FRESH_MS = 3 * 60_000;
 export function isSuperseded(beacon: BuildBeacon | null, mine: string, now: number): boolean {
   if (!beacon || !mine || !beacon.build) return false;
   if (now - beacon.at > BEACON_FRESH_MS) return false;
-  return beacon.build > mine;
+  return isNewerBuild(beacon.build, mine);
+}
+
+/** Build stamps are ISO build times ("2026-10-08T06:36:12.345Z") — only two of THAT shape are
+ *  comparable; anything else (empty, a foreign value in a shared database) is never "newer". */
+const BUILD_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+export function isNewerBuild(other: string, mine: string): boolean {
+  return BUILD_STAMP.test(other) && BUILD_STAMP.test(mine) && other > mine;
 }
 
 // ---- timing ----
@@ -338,6 +345,55 @@ export function reapedRow(job: Pick<QueueJob, "kind" | "partner">, now: number):
   return { ...SRV, retry: 0, partner: job.partner, status: isHs(job.kind) ? "interrupted" : "error", error: INTERRUPTED_MSG, finished_at: now };
 }
 
+/** What the row check needs to know of a job. */
+export type JobForRow = Pick<QueueJob, "kind" | "partner" | "status" | "retryable" | "error" | "result" | "finished_at">;
+
+/** The stage a finished row shows — the one each rail's own terminal write uses (outcomeOf). */
+const doneStage = (kind: QueueKind): string => (kind === "hs.lion" ? "queue" : isHs(kind) ? "ads" : "ad");
+
+/** A server-owned row untouched for this long is checked against its job by the sweep. Longer than
+ *  any run's quietest stretch (a handler may sit in one stage for minutes) plus the pump's margin. */
+export const ROW_STALE_MS = 7 * 60_000;
+
+/**
+ * What a still-OPEN row (queued / running) should become, given its job document — or null when it
+ * is right to leave it open (the job itself is still queued or running). The sweep applies it with
+ * an atomic write-over-open-row, so it can never bury a verdict that arrives at the same moment.
+ *   • job done     → done at the rail's own final stage, with whatever ids the job recorded;
+ *   • job error    → error (or "interrupted" on the HS drawer when it is not retryable), the job's
+ *                    own message, its retry flag;
+ *   • job canceled → the canceled row;
+ *   • no job at all → the hand-off never reached the queue (the row is stamped first): not accepted.
+ */
+export function closingRowFor(
+  job: JobForRow | null,
+  rowPartner: string,
+  now: number,
+): RowPatch | null {
+  if (!job) {
+    return { ...SRV, retry: 0, partner: rowPartner, status: "error", stage: "queue", error: "Not accepted by the queue — nothing was sent; launch this campaign again", finished_at: now };
+  }
+  if (job.status === "queued" || job.status === "running") return null;
+  const at = job.finished_at ?? now;
+  const ids: RowPatch = {};
+  for (const k of ["campaign_id", "adset_id", "ad_id", "link", "gcm", "name"] as const) {
+    const v = job.result?.[k];
+    if (v) ids[k] = v;
+  }
+  if (job.status === "done") return { ...SRV, retry: 0, partner: job.partner, status: "done", stage: doneStage(job.kind), error: null, finished_at: at, ...ids };
+  if (job.status === "canceled") return canceledRow(job, at);
+  const retry = job.retryable ? 1 : 0;
+  return {
+    ...SRV,
+    retry,
+    partner: job.partner,
+    status: !retry && isHs(job.kind) ? "interrupted" : "error",
+    error: job.error || INTERRUPTED_MSG,
+    finished_at: at,
+    ...ids,
+  };
+}
+
 /** What the launch-limit poll tells every tab about the queue's sweep. */
 export type QueueHealth = { sweptAt: number | null; oldestQueuedAt: number | null };
 /** Jobs waiting this long while the sweep has been silent this long = worth telling the buyers. */
@@ -483,7 +539,8 @@ export function outcomeOf(job: Pick<QueueJob, "kind" | "partner" | "body">, repl
         status: "done",
         retryable: false,
         error: null,
-        result: { campaign_id: s(f.campaign_id), adset_id: s(f.adset_id), ...(name ? { name } : {}) },
+        // ad_id = the ad COUNT here, as on the row — recorded so the sweep's row check can restore it.
+        result: { campaign_id: s(f.campaign_id), adset_id: s(f.adset_id), ad_id: String(adCount), ...(name ? { name } : {}) },
         ambiguous: false,
         openRow: null,
         row: {

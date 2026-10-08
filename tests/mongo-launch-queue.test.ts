@@ -369,6 +369,25 @@ test("beacon + queue health: the last announced build (one document), and since 
   assert.equal(h.sweptAt, t0);
   assert.ok(h.oldestQueuedAt !== null && h.oldestQueuedAt <= t0 - 60_000, "this run's job, or an older leftover of the test database");
   assert.deepEqual(await S.lanesNeedingPump(Date.now()).then((ls) => ls.includes("@beacon")), false, "the beacon is never mistaken for a lane");
+  // Leave no announcement behind in the shared test database (an empty build reads as "never swept").
+  await S.writeBeacon("", 0);
+  assert.equal(await S.readBeacon(), null);
+});
+
+test("findJobsBrief: the jobs of many ids in one read, without their bodies; unknown ids are simply absent", live, async () => {
+  const L = lane("brief");
+  await S.insertJob(newJob({ job_id: jid("b1"), lane: L, seq: 1, body: { big: "x".repeat(2000) } }));
+  await S.insertJob(newJob({ job_id: jid("b2"), lane: L, seq: 2 }));
+  const claimed = await S.claimNextJob(L, "A", Date.now());
+  assert.equal(claimed?.job_id, jid("b1"));
+  const m = await S.findJobsBrief([jid("b1"), jid("b2"), jid("nope")]);
+  assert.deepEqual([...m.keys()].sort(), [jid("b1"), jid("b2")].sort());
+  assert.equal(m.get(jid("b1"))?.status, "running");
+  assert.equal(m.get(jid("b2"))?.status, "queued");
+  assert.equal(m.get(jid("b1"))?.kind, "mo.launch");
+  assert.equal(m.get(jid("b1"))?.partner, "in");
+  assert.deepEqual(m.get(jid("b1"))?.body, {}, "bodies are not read");
+  assert.equal((await S.findJobsBrief([])).size, 0);
 });
 
 after(async () => {

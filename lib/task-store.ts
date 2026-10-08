@@ -295,6 +295,25 @@ export async function patchOpenTaskRow(taskId: string, fields: TaskRowData): Pro
   return r.matchedCount > 0;
 }
 
+/** Server-owned rows that are still open (queued / running) and have not been written for
+ *  `staleMs`, oldest first — the sweep checks each against its job (lib/launch-queue reconcileOpenRows).
+ *  The {status, createdAt} index narrows the read to the open rows (the live ones plus a few hundred
+ *  old browser-run rows nobody ever closed — measured on production 08.10: 439 documents, 4 ms).
+ *  Throws on a store failure. */
+export async function staleOpenServerRows(now: number, staleMs: number, limit: number): Promise<Array<{ task_id: string; partner: string }>> {
+  const c = await coll(LAUNCH_TASKS);
+  const docs = await bounded(
+    c
+      .find(
+        { status: { $in: ["queued", "running"] }, srv: 1, updatedAt: { $lt: new Date(now - staleMs) } },
+        { projection: { _id: 0, task_id: 1, partner: 1 }, sort: { updatedAt: 1 }, limit, maxTimeMS: STORE_TIMEOUT_MS },
+      )
+      .toArray(),
+    "launch-task stale open rows",
+  );
+  return docs.filter((d) => typeof d.task_id === "string" && d.task_id).map((d) => ({ task_id: String(d.task_id), partner: String(d.partner ?? "") }));
+}
+
 /** Delete one row by its documentId (the routes' owner-checked DELETE). True when a row went away;
  *  throws on a store failure (the route answers 502). */
 export async function deleteTaskRow(documentId: string): Promise<boolean> {

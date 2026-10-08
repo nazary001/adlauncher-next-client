@@ -6,7 +6,7 @@
 // that lands late gets exactly one kick.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { NEWER_BUILD_WAIT_MS, PREWARM_AHEAD, crashedOutcome, runLane, type LaneDeps } from "../lib/launch-queue.ts";
+import { NEWER_BUILD_WAIT_MS, PREWARM_AHEAD, crashedOutcome, reconcileOpenRows, runLane, type LaneDeps, type ReconcileDeps } from "../lib/launch-queue.ts";
 import { JOB_GAP_MAX_MS, JOB_GAP_MIN_MS, PUMP_MARGIN_MS, worstCaseMs, type JobOutcome, type QueueJob } from "../lib/launch-queue-types.ts";
 
 type Call = [string, ...unknown[]];
@@ -197,7 +197,7 @@ test("a failed extend exits 'lost' without releasing the lane", async () => {
   assert.equal(w.of("release").length, 0, "lost never releases — whoever holds it now carries on");
 });
 
-test("a job whose worst case does not fit the invocation is un-claimed, the lane released, a fresh invocation kicked (handoff) — even the FIRST job", async () => {
+test("a job whose worst case does not fit the invocation is un-claimed and the lane released (handoff) — even the FIRST job; a pump that ran nothing does not kick", async () => {
   const start = 1_000_000;
   // deadline leaves LESS than worstCase + margin → the first job cannot fit
   const deadlineAt = start + worstCaseMs("mo.launch") + PUMP_MARGIN_MS - 1;
@@ -206,7 +206,51 @@ test("a job whose worst case does not fit the invocation is un-claimed, the lane
   assert.deepEqual(w.of("unclaim").map((c) => c[1]), ["j1"]);
   assert.equal(w.of("run").length, 0, "nothing a platform kill could cut in half was started");
   assert.equal(w.of("release").length, 1);
-  assert.equal(w.of("kick").length, 1);
+  // An invocation that could not even start its first job would only spawn another one in the same
+  // position — a loop at network speed. The every-minute sweep restarts the lane instead.
+  assert.equal(w.of("kick").length, 0);
+});
+
+test("after at least one job ran, a job that no longer fits hands the lane to a fresh invocation (the kick)", async () => {
+  const start = 1_000_000;
+  const w = world({ jobs: [qj("j1"), qj("j2")], start, deadlineAt: start + worstCaseMs("mo.launch") + PUMP_MARGIN_MS + 5_000 });
+  w.deps.run = async (job) => {
+    w.calls.push(["run", job.job_id]);
+    w.advance(10_000); // j1 took its time: j2 no longer fits what is left
+    return okOutcome(job);
+  };
+  assert.equal(await runLane(w.deps), "handoff");
+  assert.deepEqual(w.of("run"), [["run", "j1"]]);
+  assert.deepEqual(w.of("unclaim").map((c) => c[1]), ["j2"]);
+  assert.equal(w.of("release").length, 1);
+  assert.equal(w.of("kick").length, 1, "paid for with a real run — this chain cannot spin");
+});
+
+test("NO KICK LOOP: whatever makes a pump step aside at once, an invocation that ran nothing never asks for another", async () => {
+  // Every way out of runLane that does no work, each with jobs still queued behind it.
+  const start = 1_000_000;
+  const cases: Array<[string, (w: ReturnType<typeof world>) => void]> = [
+    ["superseded before the first claim", (w) => void (w.deps.superseded = async () => true)],
+    ["the first job does not fit", (w) => void (w.deps.deadlineAt = start + 1)],
+    ["the first job cannot be marked begun", (w) => void (w.deps.begin = async () => false)],
+    ["the first job needs a newer build", (w) => void ((w.deps.build = "2026-10-08T00:00:00.000Z"), (w.queue[0] = qj("j1", { v: 2, build: "2026-10-09T00:00:00.000Z", queued_at: start })))],
+  ];
+  for (const [name, arrange] of cases) {
+    const w = world({ jobs: [qj("j1"), qj("j2")], start });
+    arrange(w);
+    assert.equal(await runLane(w.deps), "handoff", name);
+    assert.equal(w.of("run").length, 0, name);
+    assert.equal(w.of("release").length, 1, name + ": the lane is free for the sweep");
+    assert.equal(w.of("kick").length, 0, name + ": no kick");
+  }
+  // ...and an empty lane that fills up right after the last claim: nothing ran → no kick either.
+  const empty = world({ jobs: [] });
+  empty.deps.claim = async () => {
+    empty.queue.push(qj("late"));
+    return null;
+  };
+  assert.equal(await runLane(empty.deps), "drained");
+  assert.equal(empty.of("kick").length, 0);
 });
 
 test("heartbeat: while a run is in flight it beats the job AND the lane, then stops", async () => {
@@ -343,7 +387,7 @@ test("a job that cannot be recorded as begun is NOT run: un-claimed, lane releas
   }
 });
 
-test("an un-claim the store drops on the fit check does not strand the lane: still a hand-off, released and kicked", async () => {
+test("an un-claim the store drops on the fit check does not strand the lane: still a hand-off, and the lane is released", async () => {
   const start = 1_000_000;
   const w = world({ jobs: [qj("j1")], start, deadlineAt: start + worstCaseMs("mo.launch") + PUMP_MARGIN_MS - 1 });
   w.deps.unclaim = async (job) => {
@@ -353,26 +397,34 @@ test("an un-claim the store drops on the fit check does not strand the lane: sti
   assert.equal(await runLane(w.deps), "handoff");
   assert.equal(w.of("run").length, 0);
   assert.equal(w.of("begin").length, 0, "a job that does not fit is never marked begun — the sweeper may re-queue it");
-  assert.equal(w.of("release").length, 1);
-  assert.equal(w.of("kick").length, 1);
+  assert.equal(w.of("release").length, 1, "the lane is released all the same");
+  assert.equal(w.of("kick").length, 0, "nothing ran in this invocation — the sweep restarts the lane");
 });
 
 // ---- updates: a pump that has been replaced hands its lane over; jobs a build cannot run ----
 
-test("a newer build is live: the pump takes nothing more, releases the lane, and kicks only when work is waiting", async () => {
+test("a newer build is live: the pump takes nothing more and releases the lane; having run nothing itself, it leaves the restart to the sweep", async () => {
   const w = world({ jobs: [qj("j1"), qj("j2")] });
   w.deps.superseded = async () => true;
   assert.equal(await runLane(w.deps), "handoff");
   assert.equal(w.of("claim").length, 0, "nothing is claimed by a replaced build");
   assert.equal(w.of("run").length, 0);
   assert.equal(w.of("release").length, 1);
-  assert.equal(w.of("kick").length, 1, "jobs are waiting → the new build is asked to take the lane");
+  assert.equal(w.of("kick").length, 0, "it ran nothing — the new build's own sweep takes the lane within a minute");
+});
 
-  const empty = world({ jobs: [] });
-  empty.deps.superseded = async () => true;
-  assert.equal(await runLane(empty.deps), "handoff");
-  assert.equal(empty.of("release").length, 1);
-  assert.equal(empty.of("kick").length, 0, "nothing queued → no invocation is spent on it");
+test("a newer build goes live after the LAST job of a wave: handed over, but no invocation is spent on an empty lane", async () => {
+  const w = world({ jobs: [qj("j1")] });
+  let live = false;
+  w.deps.superseded = async () => live;
+  w.deps.run = async (job) => {
+    w.calls.push(["run", job.job_id]);
+    live = true;
+    return okOutcome(job);
+  };
+  assert.equal(await runLane(w.deps), "handoff");
+  assert.equal(w.of("release").length, 1);
+  assert.equal(w.of("kick").length, 0, "nothing is queued behind it");
 });
 
 test("an update that lands mid-wave: the running job is finished and settled, the rest is left — in order — to the new build", async () => {
@@ -435,4 +487,101 @@ test("a job no live build can run (a rollback): refused cleanly and retryably on
     assert.equal(w.of("begin").filter((c) => c[1] === job.job_id).length, 0, "never marked begun");
     assert.equal(w.of("unclaim").length, 0);
   }
+});
+
+// ---------------------------------------------------------------------------
+// reconcileOpenRows — rows that outlived their job
+// ---------------------------------------------------------------------------
+
+type StaleRow = { task_id: string; partner: string };
+function rowWorld(rows: StaleRow[], jobs: Record<string, Partial<QueueJob>>, opts: { max?: number; closedMeanwhile?: string[]; failOn?: string[] } = {}) {
+  const writes: Array<{ id: string; row: Record<string, unknown> }> = [];
+  const logs: string[] = [];
+  let jobReads = 0;
+  const deps: ReconcileDeps = {
+    staleRows: async () => rows,
+    jobs: async (ids) => {
+      jobReads++;
+      return new Map(ids.filter((id) => jobs[id]).map((id) => [id, qj(id, jobs[id])]));
+    },
+    patchOpen: async (id, row) => {
+      if (opts.failOn?.includes(id)) throw new Error("store down");
+      if (opts.closedMeanwhile?.includes(id)) return false;
+      writes.push({ id, row });
+      return true;
+    },
+    max: opts.max ?? 40,
+    log: (m) => logs.push(m),
+  };
+  return { deps, writes, logs, jobReads: () => jobReads };
+}
+const sr = (...ids: string[]): StaleRow[] => ids.map((task_id) => ({ task_id, partner: "in" }));
+
+test("row check: a row whose job is still queued or running is never touched, however old", async () => {
+  const w = rowWorld(sr("q", "r"), { q: { status: "queued" }, r: { status: "running", began: true } });
+  assert.equal(await reconcileOpenRows(w.deps, 9000), 0);
+  assert.deepEqual(w.writes, []);
+  assert.equal(w.jobReads(), 1, "one read for all the jobs");
+});
+
+test("row check: each row gets the row its closed job calls for; a row with no job was never accepted", async () => {
+  const w = rowWorld(sr("done", "clean", "dead", "gone", "live", "canceled"), {
+    done: { status: "done", finished_at: 5000, result: { campaign_id: "c1", adset_id: "s1", ad_id: "a1" } },
+    clean: { status: "error", retryable: true, error: "account_disabled", finished_at: 5000 },
+    dead: { kind: "hs.tool", partner: "br", status: "error", retryable: false, error: null, finished_at: 5000 },
+    live: { status: "running", began: true },
+    canceled: { status: "canceled", finished_at: 5000 },
+  });
+  assert.equal(await reconcileOpenRows(w.deps, 9000), 5);
+  assert.deepEqual(w.writes.map((x) => x.id), ["done", "clean", "dead", "gone", "canceled"], "in the order given (oldest first); the live one is skipped");
+  const by = Object.fromEntries(w.writes.map((x) => [x.id, x.row]));
+  assert.deepEqual([by.done.status, by.done.stage, by.done.campaign_id, by.done.retry, by.done.srv], ["done", "ad", "c1", 0, 1]);
+  assert.deepEqual([by.clean.status, by.clean.retry, by.clean.error], ["error", 1, "account_disabled"]);
+  assert.deepEqual([by.dead.status, by.dead.retry, by.dead.partner], ["interrupted", 0, "br"]);
+  assert.match(String(by.dead.error), /^Interrupted on the server/);
+  assert.deepEqual([by.gone.status, by.gone.retry, by.gone.partner, by.gone.finished_at], ["error", 0, "in", 9000]);
+  assert.match(String(by.gone.error), /^Not accepted by the queue/);
+  assert.equal(by.canceled.error, "Canceled before it started");
+  assert.equal(w.logs.filter((l) => /was still open/.test(l)).length, 5, "every closed row is said in the log");
+});
+
+test("row check: a row that closed in the meantime is not counted, and a write that fails does not stop the rest", async () => {
+  const jobs = { a: { status: "done" }, b: { status: "done" }, c: { status: "done" } } as Record<string, Partial<QueueJob>>;
+  const w = rowWorld(sr("a", "b", "c"), jobs, { closedMeanwhile: ["a"], failOn: ["b"] });
+  assert.equal(await reconcileOpenRows(w.deps, 9000), 1);
+  assert.deepEqual(w.writes.map((x) => x.id), ["c"]);
+  assert.equal(w.logs.filter((l) => /could not be closed/.test(l)).length, 1);
+});
+
+test("row check: at most `max` rows are closed in one pass — rows that need no write do not use the allowance", async () => {
+  const ids = ["live1", "live2", "d1", "d2", "d3", "d4"];
+  const jobs = Object.fromEntries(ids.map((id) => [id, { status: id.startsWith("live") ? "running" : "done" }])) as Record<string, Partial<QueueJob>>;
+  const w = rowWorld(sr(...ids), jobs, { max: 3 });
+  assert.equal(await reconcileOpenRows(w.deps, 9000), 3);
+  assert.deepEqual(w.writes.map((x) => x.id), ["d1", "d2", "d3"], "the oldest first; the fourth waits for the next sweep");
+  assert.equal(w.logs.filter((l) => /wait for the next sweep/.test(l)).length, 1);
+  // exactly `max` stranded rows: all closed, and nothing is said about a rest that does not exist
+  const exact = rowWorld(sr("d1", "d2", "d3"), jobs, { max: 3 });
+  assert.equal(await reconcileOpenRows(exact.deps, 9000), 3);
+  assert.equal(exact.logs.filter((l) => /wait for the next sweep/.test(l)).length, 0);
+});
+
+test("row check: nothing stale → the jobs are not even read; a failed read writes nothing and is the caller's to report", async () => {
+  const none = rowWorld([], {});
+  assert.equal(await reconcileOpenRows(none.deps, 9000), 0);
+  assert.equal(none.jobReads(), 0);
+
+  const noRows = rowWorld(sr("a"), { a: { status: "done" } });
+  noRows.deps.staleRows = async () => {
+    throw new Error("rows unavailable");
+  };
+  await assert.rejects(reconcileOpenRows(noRows.deps, 9000), /rows unavailable/);
+  assert.deepEqual(noRows.writes, []);
+
+  const noJobs = rowWorld(sr("a"), { a: { status: "done" } });
+  noJobs.deps.jobs = async () => {
+    throw new Error("jobs unavailable");
+  };
+  await assert.rejects(reconcileOpenRows(noJobs.deps, 9000), /jobs unavailable/);
+  assert.deepEqual(noJobs.writes, [], "a row is never closed as 'no job' because the jobs could not be read");
 });

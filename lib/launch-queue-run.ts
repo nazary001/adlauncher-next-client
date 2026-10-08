@@ -30,8 +30,10 @@ import {
   type BuildBeacon,
   JOB_SCHEMA_VERSION,
   PUMP_BUDGET_MS,
+  ROW_STALE_MS,
   canceledRow,
   handlerBody,
+  isNewerBuild,
   isSuperseded,
   laneOf,
   outcomeOf,
@@ -41,7 +43,7 @@ import {
   worstCaseMs,
   type RunReply,
 } from "@/lib/launch-queue-types";
-import { type LaneDeps, runLane } from "@/lib/launch-queue";
+import { type LaneDeps, reconcileOpenRows, runLane } from "@/lib/launch-queue";
 import {
   type NewJob,
   acquireLane as storeAcquireLane,
@@ -50,6 +52,7 @@ import {
   claimNextJob,
   existingJobIds,
   extendLane as storeExtendLane,
+  findJobsBrief,
   finishJob,
   insertJob,
   lanesNeedingPump,
@@ -62,7 +65,7 @@ import {
   unclaimJob,
   writeBeacon,
 } from "@/lib/launch-queue-store";
-import { patchOpenTaskRow, storeConfigured, upsertTaskRow } from "@/lib/task-store";
+import { patchOpenTaskRow, staleOpenServerRows, storeConfigured, upsertTaskRow } from "@/lib/task-store";
 import { computeInternalToken, computeSelfOrigin, mayAnnounceBuild, parseReplyLines, pumpBudgetMs, queueBuild, timingEqual } from "@/lib/launch-queue-wire";
 import { POST as launchPOST } from "@/app/api/launch/route";
 import { POST as aifLaunchPOST } from "@/app/api/aif/launch/route";
@@ -341,6 +344,7 @@ export async function pumpLane(lane: string, opts: { origin: string; startedAt: 
   // The beacon is re-read at most every BEACON_RECHECK_MS — one small read per job at worst.
   let beacon: BuildBeacon | null = null;
   let beaconReadAt = 0;
+  let confirmed = false;
   const deps: LaneDeps = {
     now: () => Date.now(),
     deadlineAt: opts.startedAt + pumpBudgetMs(process.env, PUMP_BUDGET_MS),
@@ -370,8 +374,13 @@ export async function pumpLane(lane: string, opts: { origin: string; startedAt: 
         } catch {
           /* a store blip: keep the last picture — yielding is an optimisation, never a duty */
         }
+        // The beacon only RAISES the question. A pump steps aside only when the production address
+        // itself answers with a newer build — i.e. when the kick it is about to send will land on
+        // code that takes the lane, not on this same build (the beacon is a shared document; it
+        // must never be able to make production pumps bounce a lane between themselves).
+        confirmed = isSuperseded(beacon, build, now) && isNewerBuild(await liveBuild(opts.origin), build);
       }
-      return isSuperseded(beacon, build, now);
+      return confirmed;
     },
     sleep,
     every: (ms, fn) => {
@@ -518,12 +527,13 @@ export async function cancelJobs(
   return { taskIds: jobs.map((j) => j.job_id), lanes: [...new Set(jobs.map((j) => j.lane))] };
 }
 
-/** The cron's sweep: reap dead leases (write the interrupted row only OVER a still-open row), then
- *  kick every lane with queued work and no live lock (in parallel, at most 20). Never throws. */
+/** The cron's sweep: reap dead leases (write the interrupted row only OVER a still-open row), kick
+ *  every lane with queued work and no live lock (in parallel, at most 20), then close the rows that
+ *  stayed open although their job is not. Never throws. */
 export async function sweepQueue(
   origin: string,
   opts: { announce?: boolean } = {},
-): Promise<{ reaped: number; requeued: number; kicked: number; lanesQueued: number; unkicked: string[] }> {
+): Promise<{ reaped: number; requeued: number; rowsClosed: number; kicked: number; lanesQueued: number; unkicked: string[] }> {
   const now = Date.now();
   // Tell every pump which build is being swept (= which build is production right now): pumps of an
   // OLDER build then hand their lanes over, so an update takes the queue over within one job. Only a
@@ -565,8 +575,33 @@ export async function sweepQueue(
   // back to the caller: the cron route pumps it in its own invocation, so a wave never depends on the
   // self-call working. `kicked` counts only the kicks a pump really accepted.
   const unkicked = toKick.filter((_, i) => !answers[i]);
-  return { reaped, requeued, kicked: toKick.length - unkicked.length, lanesQueued: lanes.length, unkicked };
+  // Last, the rows: a server-owned row that stayed open although its job is not gets the row its job
+  // calls for (lib/launch-queue.ts reconcileOpenRows). After the kicks — a slow read here must never
+  // hold a lane back.
+  let rowsClosed = 0;
+  try {
+    rowsClosed = await reconcileOpenRows(
+      {
+        staleRows: () => staleOpenServerRows(now, ROW_STALE_MS, RECONCILE_SCAN),
+        jobs: findJobsBrief,
+        patchOpen: patchOpenTaskRow,
+        max: RECONCILE_MAX,
+        log,
+      },
+      now,
+    );
+  } catch (e) {
+    log(`row check failed: ${errMsg(e)}`);
+  }
+  return { reaped, requeued, rowsClosed, kicked: toKick.length - unkicked.length, lanesQueued: lanes.length, unkicked };
 }
+
+// ---- rows that outlived their job (the check itself: lib/launch-queue.ts reconcileOpenRows) ----
+
+/** How many stale open rows one sweep looks at (their jobs are read in ONE query), and how many it
+ *  may close. A long wave that is legitimately queued is only looked at — it costs no writes. */
+const RECONCILE_SCAN = 1000;
+const RECONCILE_MAX = 40;
 
 // ---- which build is this ----
 
@@ -577,6 +612,25 @@ const BEACON_RECHECK_MS = 15_000;
  *  `env` values are build-time replacements, a dynamic lookup would find nothing at runtime. */
 export function thisBuild(): string {
   return queueBuild(process.env.NEXT_PUBLIC_BUILD_STAMP, process.env);
+}
+
+/** Which build answers at `origin` right now (GET /api/launch-queue/pump) — "" when it cannot be
+ *  asked (no origin, refused, slow): then nobody yields. Never throws. */
+async function liveBuild(origin: string): Promise<string> {
+  if (!origin) return "";
+  try {
+    const res = await fetch(`${origin.replace(/\/+$/, "")}/api/launch-queue/pump`, {
+      headers: { authorization: `Bearer ${internalToken()}` },
+      signal: AbortSignal.timeout(5_000),
+      redirect: "manual",
+      cache: "no-store",
+    });
+    if (!res.ok) return "";
+    const body = (await res.json().catch(() => null)) as { build?: unknown } | null;
+    return typeof body?.build === "string" ? body.build : "";
+  } catch {
+    return "";
+  }
 }
 
 // ---- the continuation kick + internal auth ----

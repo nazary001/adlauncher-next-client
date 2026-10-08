@@ -88,3 +88,34 @@ test("live: patchOpenTaskRow writes only over a row that is still open — one a
     await wipe("launch_tasks", { task_id: { $in: [open, closed] } });
   }
 });
+
+test("live: staleOpenServerRows finds only rows that are server-owned, still open AND silent for the given time — oldest first", live, async () => {
+  const ts = await import("../lib/task-store.ts");
+  const c = await col("launch_tasks");
+  const ids = { stale: `st-${RUN}`, stale2: `s2-${RUN}`, fresh: `fr-${RUN}`, closed: `cl-${RUN}`, client: `cu-${RUN}` };
+  const mine = Object.values(ids);
+  await wipe("launch_tasks", { task_id: { $in: mine } });
+  try {
+    await ts.upsertTaskRow("nazar", ids.stale, { status: "running", srv: 1, retry: 0, partner: "br" });
+    await ts.upsertTaskRow("nazar", ids.stale2, { status: "queued", srv: 1, retry: 0, partner: "in" });
+    await ts.upsertTaskRow("nazar", ids.fresh, { status: "queued", srv: 1, retry: 0, partner: "in" });
+    await ts.upsertTaskRow("nazar", ids.closed, { status: "done", srv: 1, retry: 0, partner: "br" });
+    await ts.upsertTaskRow("nazar", ids.client, { status: "running", partner: "br" }); // a row the queue never owned
+    // Far in the past, so these sort before any leftover of the shared test database.
+    await c.updateMany({ task_id: { $in: [ids.stale, ids.closed, ids.client] } }, { $set: { updatedAt: new Date("2001-01-01T00:00:00Z") } });
+    await c.updateOne({ task_id: ids.stale2 }, { $set: { updatedAt: new Date("2001-01-02T00:00:00Z") } });
+    const found = (await ts.staleOpenServerRows(Date.now(), 7 * 60_000, 1000)).filter((r) => mine.includes(r.task_id));
+    assert.deepEqual(found, [
+      { task_id: ids.stale, partner: "br" },
+      { task_id: ids.stale2, partner: "in" },
+    ]);
+    // the limit cuts from the OLDEST end
+    const first = await ts.staleOpenServerRows(Date.now(), 7 * 60_000, 1);
+    assert.deepEqual(first, [{ task_id: ids.stale, partner: "br" }]);
+    // and the same rows are simply not stale to a longer patience
+    const patient = (await ts.staleOpenServerRows(new Date("2001-01-01T00:05:00Z").getTime(), 7 * 60_000, 1000)).filter((r) => mine.includes(r.task_id));
+    assert.deepEqual(patient, []);
+  } finally {
+    await wipe("launch_tasks", { task_id: { $in: mine } });
+  }
+});

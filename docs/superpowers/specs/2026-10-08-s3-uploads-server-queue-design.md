@@ -168,6 +168,23 @@ handler's own stage writes (unchanged) → `outcome.row` (always) + `outcome.ope
 outcome is ambiguous AND the row is still non-terminal). A canceled job's row is `status:"error",
 stage:"canceled"`.
 
+**Rows that outlive their job.** Closing a job is two writes — the job document, then its row — and
+they can come apart (the function dies between them, the row write keeps failing). No client ever
+ages a server-owned row, so such a row would read "running" for good. Every sweep therefore checks
+the server-owned rows that are still open and have been silent for `ROW_STALE_MS` (7 min) against
+their jobs (`reconcileOpenRows` in `lib/launch-queue.ts`: one read of the rows, one of their jobs)
+and writes — only over a row that is STILL open — the row its job calls for (`closingRowFor`):
+
+| the job is | the row becomes |
+| --- | --- |
+| queued / running | left alone, however old |
+| done | `done` at the rail's own final stage, with the ids the job recorded |
+| error | the job's message and retry flag (`interrupted` on the HS drawer when not retryable) |
+| canceled | the canceled row |
+| absent | `Not accepted by the queue — nothing was sent` (the hand-off stamped the row and died before it stored the job) |
+
+At most 40 rows are closed per sweep (1000 looked at); the cron answer reports `rowsClosed`.
+
 ### 4.5 Launch-limit demand
 
 `GET /api/acct-limit` adds `queued: { <account>: n }` (jobs still QUEUED per ad account). The client
@@ -207,10 +224,18 @@ when the owner ships, or a deploy is rolled back).
 * **The beacon** (`launch_lanes` document `@beacon`, `writeBeacon` / `readBeacon`): every real cron
   tick of the production deployment (`mayAnnounceBuild`: production, or not on Vercel — never a
   preview) writes its build stamp (`NEXT_PUBLIC_BUILD_STAMP`, an ISO build time). Before each claim a
-  pump re-reads it (at most every 15 s): when a NEWER build is being swept (`isSuperseded`) the pump
-  takes nothing more, releases the lane and kicks — **the new build takes every lane over within one
-  job**. Never toward an older build (a rollback, or a new build's first minute before its own first
-  sweep) — yielding "down" would bounce the lane between two builds.
+  pump re-reads it (at most every 15 s). The beacon only raises the question: the pump steps aside
+  when a NEWER build is being swept (`isSuperseded`) AND the production address itself answers with
+  a newer build (`GET /api/launch-queue/pump` → `{ build }`, `liveBuild`) — i.e. only when its kick
+  will land on code that takes the lane. Then it takes nothing more and releases the lane — **the new
+  build takes every lane over within one job**. Never toward an older build (a rollback, or a new
+  build's first minute before its own first sweep), and never on a stamp that is not an ISO build
+  time (`isNewerBuild`).
+* **No kick loops, by construction.** An invocation that ran no job never asks for another invocation
+  (`mayKick = ran > 0` in `runLane`): every self-kick is paid for with a real run, so no chain of
+  pumps can spin on a condition that makes each of them step aside at once. A lane left waiting by
+  this rule is restarted by the every-minute sweep. (Found on the bench, and independently in review
+  for a rollback: a pump that believed itself superseded kicked the very build it ran on.)
 * **Versions.** A job document carries `v` (`JOB_SCHEMA_VERSION`) and the `build` that queued it. A
   pump never runs a job it does not understand (`unsupportedReason`: a newer `v`, or a kind it has
   no handler for): a job a newer build queued is given back and left for that build for up to 5 min
@@ -224,16 +249,25 @@ when the owner ships, or a deploy is rolled back).
 * **If an instance dies mid-job** (the platform's doing, not a deploy's): the job that was running
   is closed as interrupted once its lease runs out (never re-run — its outcome is unknown), a job
   that was only claimed goes back to the queue, and the sweep restarts the lane on the current build.
+  A row left open by a death between "close the job" and "write its row" is closed by the sweep's
+  row check (§4.4).
 * **Nobody is left guessing.** `GET /api/acct-limit` (every tab polls it) carries `queue: { sweptAt,
   oldestQueuedAt }`; when jobs have waited 3+ min and the sweep has been silent 3+ min
   (`sweepLateMinutes`) every tab shows an amber notice. A stopped cron is the one failure that could
   leave a stranded lane waiting with nobody told.
+* **A hand-off still running from a tab survives the update too.** Creatives upload and the hand-off
+  request go to the production address — the new build — which accepts them as they are. The one
+  thing that would cut it is a reload, so while a hand-off is in flight the stale-build banner asks
+  to wait ("Do NOT reload yet — N campaigns are still being handed over") and its Reload button is
+  disabled; the leave-page confirm (`useUnloadGuard`) stands behind it.
 * **What an update still costs a buyer:** the stale-build guard (owner rule 08-18) pauses launching
   in tabs older than the deployment until they reload, and a reload empties the board — cards that
   were prepared but not launched are lost. Everything already handed over is unaffected.
 
-Bench: `_e2e/_adl_queue_update.mts` runs two servers as two builds — U1 an update mid-wave (the old
-build hands over, the new one finishes, each job exactly once), U2 the old instance killed mid-job.
+Bench: `_e2e/_adl_queue_update.mts` runs two servers — U1 an update mid-wave as two builds (the old
+build hands over, the new one finishes, each job exactly once), U2 an instance killed mid-job (the
+other one takes the lane over, the dead job is closed as interrupted and never re-run).
+`_e2e/_adl_queue_extra.mts` F pulls a job and its row apart on purpose and lets the sweep repair it.
 
 ## 5. Client
 
@@ -289,6 +323,23 @@ Their `fireWave` keeps its shape and its single wave POST. Only: (a) uploads go 
 (scope `gg` / `sn` / `tt`, id `<waveId>:<cardId>`) and moved `uploading → sending → accepted | failed`
 at the board's existing transitions. TikTok's avatar crop goes through `uploadCreativeBlob(...,
 { purpose: "keep" })`.
+
+**A wave whose request got no answer is HELD** (`components/wave-hold-core.ts`, `wave-hold.ts`;
+review find 08.10). These rails know a wave only by its id, and the id follows the set of ready
+cards — so cards left launchable after a lost answer went out again under a NEW id as soon as a card
+was added or edited, and the server built the same campaigns twice. Now, when the wave POST throws
+or comes back without a verdict (a gateway's 502 / 504 page), the cards that were in it go to state
+`unsure`: shown, editable, not launchable. The board asks `GET /api/wave-status?rail=…&id=<waveId>`
+every 3 s — one read of the wave's claim, the record each rail writes the moment it accepts a wave:
+
+| the server says | the cards become |
+| --- | --- |
+| the claim exists | `ok` — "queued; only the answer was lost" (the hand-off items turn accepted) |
+| no claim, and 3 min have passed since the failure | `error` — "the server never received this wave — launch it again" |
+| it cannot be asked (offline, 5xx, session gone) | still held — a wave is never released on silence |
+
+A JSON refusal (`{ ok: false, error }`) is a definite answer and holds nothing. Not covered yet: the
+three CLONE boards keep their earlier behaviour (a note; re-firing the same rows re-sends the same id).
 
 ## 6. Deploy
 

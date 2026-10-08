@@ -153,6 +153,20 @@ export async function findJob(jobId: string): Promise<QueueJob | null> {
   return doc ? toJob(doc) : null;
 }
 
+/** The jobs behind these ids in ONE read (without their bodies) — for the sweep's row check. Ids
+ *  with no document are simply absent from the map. Throws on a store failure. */
+export async function findJobsBrief(jobIds: string[]): Promise<Map<string, QueueJob>> {
+  const out = new Map<string, QueueJob>();
+  if (jobIds.length === 0) return out;
+  const c = await coll(LAUNCH_JOBS);
+  const docs = await bounded(
+    c.find({ job_id: { $in: jobIds } }, { projection: { _id: 0, body: 0, row: 0 }, maxTimeMS: STORE_TIMEOUT_MS }).toArray(),
+    "launch-jobs brief",
+  );
+  for (const d of docs) out.set(String(d.job_id), toJob(d));
+  return out;
+}
+
 /**
  * ATOMICALLY claim the lane's next queued job — lowest `seq` first — in ONE findOneAndUpdate:
  * status queued → running, runner, lease_until = now + JOB_LEASE_MS, started_at = now, attempts + 1.

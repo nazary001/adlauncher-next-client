@@ -1,5 +1,5 @@
 import { NextResponse, after } from "next/server";
-import { isInternalRequest, laneNameValid, pumpLane, selfOrigin } from "@/lib/launch-queue-run";
+import { isInternalRequest, laneNameValid, pumpLane, selfOrigin, thisBuild } from "@/lib/launch-queue-run";
 
 export const runtime = "nodejs";
 // This invocation HOSTS the lane pump (after() extends its lifetime): maxDuration is the pump's full
@@ -12,6 +12,16 @@ export const maxDuration = 800;
  * token (so self-kicks work even where CRON_SECRET is unset) or CRON_SECRET, compared constant-time.
  * Body: { lane }. Answers 202 immediately and pumps the lane in after().
  */
+/**
+ * GET /api/launch-queue/pump — "which build answers at this address?" (same internal bearer). A pump
+ * that the beacon says has been replaced asks the production address this before it steps aside: it
+ * yields only to a build that will really receive its kick.
+ */
+export async function GET(req: Request): Promise<NextResponse> {
+  if (!isInternalRequest(req)) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  return NextResponse.json({ ok: true, build: thisBuild() }, { headers: { "Cache-Control": "no-store" } });
+}
+
 export async function POST(req: Request): Promise<NextResponse> {
   // Anchor the pump budget at the invocation start, before any await (see /api/launch-queue).
   const startedAt = Date.now();
