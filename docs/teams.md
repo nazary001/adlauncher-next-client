@@ -81,6 +81,18 @@ git push origin main
 
 `upstream` (the first launcher's GitHub repo) is fetch-only in that folder on purpose.
 
+**A commit that is already in the second repo keeps its id.** A branch that holds such commits is
+brought up to date with `git merge origin/main` — never `git rebase` / `git pull --rebase`: a rebase
+renames them, the two histories part, and step 2 stops being a fast-forward (it fails loudly; the way
+back is to reset the second folder to the first launcher's `main` and force-push it). Commits the
+second repo has not seen can be rebased as usual. The habit that keeps this from ever coming up: the
+second launcher takes its commits from `upstream main` — after the first one has shipped them. (It
+came up on day one: the first launcher's `main` gained a Snapchat fix while this branch was already
+the second repo's history — hence the merge commit `a8090bb`.)
+
+A push to the second repo's `main` is a production deploy of the GLO-02 launcher (Vercel builds it
+in about a minute); its every-minute queue sweep moves to the new build by itself.
+
 ## Giving GLO-02 more
 
 Edit its entry in `lib/team.ts` — the tests in `tests/team.test.ts` pin what each team reaches and
