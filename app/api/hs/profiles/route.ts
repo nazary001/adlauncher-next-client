@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { hsTokenConfigured } from "@/lib/hs-token-launch";
 import { LION_ACR, lionConfigured, lionProfiles } from "@/lib/lion";
+import { teamHas } from "@/lib/team";
 
 export const runtime = "nodejs";
 // Bounded upstreams (LION 60s x2 / Graph 15s) — cap the function so an abandoned poll can
@@ -21,7 +22,9 @@ export async function GET(req: Request): Promise<NextResponse> {
   }
   try {
     const profiles = await lionProfiles();
-    return NextResponse.json({ ok: true, acr: LION_ACR, profiles, tokenLaunch: await hsTokenConfigured() });
+    // tokenLaunch is false outright on a team without the FB-token rail (lib/team) — no registry read.
+    const tokenLaunch = teamHas("channel:token") && (await hsTokenConfigured());
+    return NextResponse.json({ ok: true, acr: LION_ACR, profiles, tokenLaunch });
   } catch (e) {
     return NextResponse.json({ ok: false, error: String((e as Error).message) }, { status: 502 });
   }

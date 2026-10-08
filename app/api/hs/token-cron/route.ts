@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { hsProbeTokenHealth, hsTokenConfigured } from "@/lib/hs-token-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
+import { teamHas } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -28,6 +29,9 @@ export async function GET(req: Request) {
   if (!cronOk && !sessionOk) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
+  // vercel.json schedules this sweep for every deployment of the codebase; a team without the
+  // FB-token rail (lib/team) has no pool to check — answer "skipped", not an error.
+  if (!teamHas("channel:token")) return NextResponse.json({ ok: true, skipped: "no_token_rail", tokens: [] });
   if (!(await hsTokenConfigured())) return NextResponse.json({ ok: true, tokens: [] });
 
   try {

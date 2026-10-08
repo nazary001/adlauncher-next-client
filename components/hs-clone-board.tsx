@@ -18,6 +18,7 @@ import { makeGate } from "@/lib/launch-guards";
 import { relabelNameGeo } from "@/lib/targeting-override";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import type { PartnerId } from "@/lib/partners";
+import { teamHas } from "@/lib/team";
 import {
   ChevronDownIcon,
   CopyIcon,
@@ -39,6 +40,14 @@ import type { SessionUser } from "./user-menu";
 
 const MAX_COPIES = 20;
 const MAX_SOURCES = 30;
+
+// Which HS launch channels this build's team has (lib/team). glo-01 carries all three; a lion-only
+// team (glo-02) has no FB-token or TOOL rail — those pollers park and the channel control hides.
+// Build-time constants, so the hooks that read them stay unconditional.
+const HAS_TOKEN_RAIL = teamHas("channel:token");
+const HAS_TOOL_RAIL = teamHas("channel:tool");
+/** More than the always-present LION channel exists → render the channel control; else hide it. */
+const SHOW_CHANNELS = HAS_TOKEN_RAIL || HAS_TOOL_RAIL;
 
 /** One source campaign row: LION-read facts + the editable overrides. */
 type Row = {
@@ -207,7 +216,8 @@ export function HsCloneBoard({
   // TOOL launch channel readiness for HS (owner ask 28.09): key + scopes + ≥1 live account this
   // buyer may reach. Gates the TOOL segment; a stale "tool" pick with the rail not ready falls back
   // to LION at fire time. Only the Cloner mode fires on TOOL (JURO via TOOL is the next step).
-  const toolReady = useToolReady(partner, "clone");
+  // Parked on a team without the TOOL rail (lib/team): its /api/tool/ready 404s forever, so don't poll.
+  const toolReady = useToolReady(partner, "clone", HAS_TOOL_RAIL);
 
   const [profile, setProfile] = useState("");
   const [account, setAccount] = useState("");
@@ -242,8 +252,10 @@ export function HsCloneBoard({
       if (!initialMode && (m === "juro" || m === "clone")) setMode(m);
       // pre-split storage carried the mode inside the channel key ("juro") — map it forward
       else if (!initialMode && v === "juro") setMode("juro");
-      if (v === "token" || v === "lion" || v === "tool") setDupChannel(v);
-      if (j === "token" || j === "lion") setJuroChannel(j);
+      // Skip restoring a channel this team doesn't have (lib/team): a stale "token"/"tool" pick
+      // from another build must not resurrect a rail that no longer exists here.
+      if (v === "lion" || (v === "token" && HAS_TOKEN_RAIL) || (v === "tool" && HAS_TOOL_RAIL)) setDupChannel(v);
+      if (j === "lion" || (j === "token" && HAS_TOKEN_RAIL)) setJuroChannel(j);
     } catch {
       /* storage disabled — session-local pick only */
     }
@@ -297,16 +309,18 @@ export function HsCloneBoard({
 
   const data = profile ? hs.dataFor(profile) : undefined;
 
+  // The HAS_*_RAIL gates pin this to "lion"/"juro" on a lion-only team (lib/team) — true on glo-01,
+  // so the resolution there is unchanged.
   const effDupChannel: "lion" | "token" | "tool" | "juro" | "juro-token" =
     mode === "juro"
-      ? juroChannel === "token" && hs.tokenLaunch
+      ? juroChannel === "token" && HAS_TOKEN_RAIL && hs.tokenLaunch
         ? "juro-token"
         : "juro"
       : // Cloner: a "tool" pick only holds while the TOOL rail is ready (else it falls back to the
         // FB-token check, then LION — same stale-pick rule the token rail has).
-        dupChannel === "tool" && toolReady.ready
+        dupChannel === "tool" && HAS_TOOL_RAIL && toolReady.ready
         ? "tool"
-        : dupChannel === "token" && hs.tokenLaunch
+        : dupChannel === "token" && HAS_TOKEN_RAIL && hs.tokenLaunch
           ? "token"
           : "lion";
   /** Both FB-Token channels ride the same token pool — one flag for every pool-dependent gate. */
@@ -369,7 +383,7 @@ export function HsCloneBoard({
   const autoPage = needsPage
     ? leastFilledPage(
         (data?.pages ?? []).map((p) => {
-          const st = hs.pageStats(p.value);
+          const st = hs.pageFill(p.value);
           return { id: p.value, used: st?.used ?? null, limit: st?.limit ?? null, disabled: p.disabled };
         }),
       )
@@ -566,7 +580,7 @@ export function HsCloneBoard({
     needsPage && prof
       ? leastFilledPage(
           (hs.dataFor(prof)?.pages ?? []).map((pg) => {
-            const st = hs.pageStats(pg.value);
+            const st = hs.pageFill(pg.value);
             return { id: pg.value, used: st?.used ?? null, limit: st?.limit ?? null, disabled: pg.disabled };
           }),
         )
@@ -695,6 +709,10 @@ export function HsCloneBoard({
   const pageOver = pageShort.length > 0;
   /** The Settings (default) page's own meter + what the wave adds THERE (rows bound to it). */
   const boundPageStats = needsPage && effPage ? hs.pageStats(effPage) : null;
+  // SHOWING the default page's fill reads pageFill, so a registry-less team (feed mode "tally")
+  // still sees "~N/limit"; BLOCKING stays on pageStats (null in tally → never over). In registry /
+  // legacy mode pageFill === pageStats, so glo-01 renders exactly as before (components/use-hs).
+  const boundPageFill = needsPage && effPage ? hs.pageFill(effPage) : null;
   const pageAdsDemand = effPage ? (pageDemand.get(effPage) ?? 0) : 0;
   const defaultPageOver = pageShort.some((x) => x.pageId === effPage);
   // JURO: ads land on each source's OWN page(s) — demand is summed PER PAGE across the whole
@@ -737,12 +755,15 @@ export function HsCloneBoard({
   const juroFankaRows =
     mode === "juro"
       ? [...juroPageDemand.entries()].map(([pageId, need]) => {
+          // fill = what to SHOW (pageFill — an estimate in tally mode); st = what to BLOCK on
+          // (pageStats — null in tally → never "over"). Equal in registry/legacy → glo-01 unchanged.
+          const fill = hs.pageFill(pageId);
           const st = hs.pageStats(pageId);
           return {
             pageId,
-            name: data?.pages.find((o) => o.value === pageId)?.label || st?.name || pageId,
+            name: data?.pages.find((o) => o.value === pageId)?.label || fill?.name || pageId,
             need,
-            st,
+            fill,
             over: st !== null && need > st.free,
             bad: juroPageBad(pageId),
           };
@@ -797,7 +818,8 @@ export function HsCloneBoard({
   // The token rails HERE sign with the duplicate/JURO signer (dedicated FB_HS_DUP_TOKEN since
   // 09-03, else the launch pool) — ITS health gates the channel (the server gate refuses waves
   // anyway — this keeps the click honest instead of round-tripping into a 429).
-  const tokenStatus = useHsTokenStatus();
+  // Parked on a team without the token rail (lib/team): its /api/hs/token-status 404s forever.
+  const tokenStatus = useHsTokenStatus(HAS_TOKEN_RAIL);
   const dupSigner = tokenStatus.dup;
   const tokensDown = tokenStatus.loaded
     ? dupSigner?.dedicated
@@ -1104,6 +1126,9 @@ export function HsCloneBoard({
                     );
                   })}
                 </div>
+                {/* The channel control only renders when the team has more than LION (lib/team) —
+                    a lion-only team (glo-02) has no FB-token / TOOL rail, so there is nothing to pick. */}
+                {SHOW_CHANNELS ? (
                 <div className="grid grid-cols-3 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
                   {[
                     { key: "lion" as const, label: "LION API", ready: true, down: false, hint: undefined as string | undefined },
@@ -1135,7 +1160,16 @@ export function HsCloneBoard({
                               ? `Launches through TOOL · ${toolReady.accounts.size} account${toolReady.accounts.size === 1 ? "" : "s"}`
                               : toolReady.message || "TOOL is not ready for HS",
                     },
-                  ].map((opt) => {
+                  ]
+                    // Offer only the channels this team has (lib/team): LION always, the others
+                    // behind their build-time rail flags. All three on glo-01 → unchanged there.
+                    .filter(
+                      (opt) =>
+                        opt.key === "lion" ||
+                        (opt.key === "token" && HAS_TOKEN_RAIL) ||
+                        (opt.key === "tool" && HAS_TOOL_RAIL),
+                    )
+                    .map((opt) => {
                     const active = (mode === "juro" ? juroChannel : dupChannel) === opt.key;
                     return (
                       <button
@@ -1168,6 +1202,7 @@ export function HsCloneBoard({
                     );
                   })}
                 </div>
+                ) : null}
                 <p
                   className={
                     "text-center text-[10px] leading-relaxed " +
@@ -1238,8 +1273,8 @@ export function HsCloneBoard({
                   // button locks on the same flag). Unknown meter → no line, no gate; "~" marks
                   // the LION-tally estimate (registry never read this page).
                   hint={
-                    effPage && boundPageStats && !defaultPageOver
-                      ? `${pageIsAuto ? "auto · least filled · " : ""}${boundPageStats.approx ? "~" : ""}${boundPageStats.used}/${boundPageStats.limit} ads on this page · ${boundPageStats.approx ? "~" : ""}${boundPageStats.free} free` +
+                    effPage && boundPageFill && !defaultPageOver
+                      ? `${pageIsAuto ? "auto · least filled · " : ""}${boundPageFill.approx ? "~" : ""}${boundPageFill.used}/${boundPageFill.limit} ads on this page · ${boundPageFill.approx ? "~" : ""}${boundPageFill.free} free` +
                         (pageAdsDemand > 0 ? ` · wave adds ${pageAdsDemand}` : "")
                       : pageIsAuto
                         ? `auto · least filled fanka — pick another to override${data && data.pagesHidden > 0 ? ` · ${data.pagesHidden} hidden (not OK in hs-tools)` : ""}`
@@ -1301,24 +1336,24 @@ export function HsCloneBoard({
                               >
                                 not OK · {p.bad}
                               </span>
-                            ) : p.st ? (
+                            ) : p.fill ? (
                               <span
                                 className={
                                   "shrink-0 font-mono text-[10.5px] tabular-nums " +
                                   (p.over
                                     ? "font-semibold text-danger"
-                                    : p.st.limit > 0 && p.st.used / p.st.limit >= 0.8
+                                    : p.fill.limit > 0 && p.fill.used / p.fill.limit >= 0.8
                                       ? "text-warn"
                                       : "text-faint")
                                 }
                                 title={
-                                  `${p.st.approx ? "~" : ""}${p.st.used} of ${p.st.limit} ad slots used — ` +
-                                  `${p.st.approx ? "~" : ""}${p.st.free} free` +
+                                  `${p.fill.approx ? "~" : ""}${p.fill.used} of ${p.fill.limit} ad slots used — ` +
+                                  `${p.fill.approx ? "~" : ""}${p.fill.free} free` +
                                   (p.need > 0 ? ` · this wave adds ${p.need}` : "")
                                 }
                               >
-                                {p.st.approx ? "~" : ""}
-                                {p.st.used}/{p.st.limit} · free {p.st.free}
+                                {p.fill.approx ? "~" : ""}
+                                {p.fill.used}/{p.fill.limit} · free {p.fill.free}
                                 {p.need > 0 ? ` · +${p.need}` : ""}
                               </span>
                             ) : (
@@ -1679,8 +1714,11 @@ export function HsCloneBoard({
                             chip also shows what the wave needs — red when it won't fit (the fire
                             button locks on the same check). Cloner mode: info only. */}
                         {r.info?.pages.map((p) => {
-                          const st = hs.pageStats(p.pageId);
-                          const name = data?.pages.find((o) => o.value === p.pageId)?.label || st?.name || p.pageId;
+                          // SHOW the fanka fill from pageFill (an estimate in tally mode); the red
+                          // "over" verdict still comes from pageStats via juroPageOver. Equal in
+                          // registry/legacy, so glo-01 is unchanged (components/use-hs).
+                          const fill = hs.pageFill(p.pageId);
+                          const name = data?.pages.find((o) => o.value === p.pageId)?.label || fill?.name || p.pageId;
                           const need = juroPageDemand.get(p.pageId) ?? p.ads * copiesEff;
                           const over = mode === "juro" && juroPageOver(p.pageId);
                           // Owner rule 09-07: a JURO source fanka must be OK in hs-tools — a known
@@ -1693,16 +1731,16 @@ export function HsCloneBoard({
                                 "inline-flex max-w-full items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] tabular-nums " +
                                 (over || bad
                                   ? "border-danger/40 bg-danger/10 text-danger"
-                                  : st && st.limit > 0 && st.used / st.limit >= 0.8
+                                  : fill && fill.limit > 0 && fill.used / fill.limit >= 0.8
                                     ? "border-warn/40 bg-warn/10 text-warn"
                                     : "border-line bg-surface text-faint")
                               }
                               title={
                                 `${mode === "juro" ? "JURO copies land here — " : "Source ads live on "}${name} · ${p.pageId}` +
                                 (bad ? ` · hs-tools marks this fanka ${bad.toUpperCase()} — only OK fankas may launch; this source's JURO copies would be refused` : "") +
-                                (st
-                                  ? ` · ${st.approx ? "~" : ""}${st.used} of ${st.limit} ad slots used, ${st.approx ? "~" : ""}${st.free} free` +
-                                    (st.approx ? " (LION-tally estimate)" : "") +
+                                (fill
+                                  ? ` · ${fill.approx ? "~" : ""}${fill.used} of ${fill.limit} ad slots used, ${fill.approx ? "~" : ""}${fill.free} free` +
+                                    (fill.approx ? " (LION-tally estimate)" : "") +
                                     (mode === "juro" && need > 0 ? ` · this wave adds ${need}` : "")
                                   : " · fill unknown")
                               }
@@ -1710,11 +1748,11 @@ export function HsCloneBoard({
                               <span className="truncate text-dim">{name}</span>
                               {bad ? (
                                 <span className="font-semibold uppercase">not OK · {bad}</span>
-                              ) : st ? (
+                              ) : fill ? (
                                 <span>
-                                  {st.approx ? "~" : ""}
-                                  {st.used}/{st.limit}
-                                  {over ? ` · needs ${need}, free ${st.free}` : ""}
+                                  {fill.approx ? "~" : ""}
+                                  {fill.used}/{fill.limit}
+                                  {over ? ` · needs ${need}, free ${fill.free}` : ""}
                                 </span>
                               ) : (
                                 <span>fill ?</span>

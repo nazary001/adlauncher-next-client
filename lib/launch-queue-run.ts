@@ -21,6 +21,7 @@ import { uploadVideo } from "@/lib/fb-media";
 import { resolveMoSigner } from "@/lib/mo-soc";
 import { aifRail } from "@/lib/aif-launch";
 import { partnerConfig, type PartnerId } from "@/lib/partners";
+import { TEAM, teamAllowsJob } from "@/lib/team";
 import {
   SCOPE_PARTNER,
   type EnqueueInput,
@@ -39,6 +40,7 @@ import {
   outcomeOf,
   queuedRow,
   reapedRow,
+  refusedOutcome,
   runningRow,
   worstCaseMs,
   type RunReply,
@@ -193,6 +195,11 @@ async function invokeHandler(job: QueueJob): Promise<RunReply> {
 
 /** Run a job to its verdict. Must never throw (runLane treats a throw as a crash). */
 export async function runJob(job: QueueJob): Promise<JobOutcome> {
+  // The handlers run in-process here, past proxy.ts — so the queue is its own team gate (lib/team):
+  // a kind this team's launcher does not have is never dispatched. Nothing is sent for it.
+  if (!teamAllowsJob(job.scope, job.kind)) {
+    return refusedOutcome(job, `This launcher (${TEAM.label}) does not run ${job.kind} launches — nothing was sent`, Date.now());
+  }
   const reply = await invokeHandler(job);
   return outcomeOf(job, reply, Date.now());
 }

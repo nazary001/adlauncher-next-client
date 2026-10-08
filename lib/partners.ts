@@ -6,6 +6,7 @@ import { bidKind } from "./types";
 import { type AifFlow, AIF_RW_BASE, aifFlowOf, aifLinkSegments } from "./aif-link";
 import { AV_KEY_POOL_MAX, avKeyCode, avLinkSegments } from "./av-link";
 import { avLockPatch } from "./av-delivery";
+import { TEAM } from "./team.ts";
 
 export type Bound = { id: string; name: string };
 
@@ -82,6 +83,10 @@ export type PartnerConfig = {
   avLaunch?: boolean;
   /** Not built out yet → the switcher renders this partner disabled ("in development"). */
   inDevelopment?: boolean;
+  /** Not one of THIS team's partners (lib/team) → the switcher does not render it at all. Such a
+   *  partner is `inDevelopment` too, so nothing can land on it (sanitizePartnerId) and its task
+   *  drawer stays dormant. */
+  hidden?: boolean;
   /** Meta's per-Page ad-limit tier for the bound fanpage. The Graph API returns the live
    *  "ads running or in review" count but not this ceiling, so it's configured. Default = 250. */
   pageAdLimit?: number;
@@ -281,19 +286,24 @@ const AIF_LANDINGS: Landing[] = [
  *  LION's google-weapon API, pinned to the HS partner. Built-time gate, same dormant-on-prod
  *  pattern as HS/AIF — set NEXT_PUBLIC_GOOGLE_ENABLED=1 in .env.local (NOT on Vercel yet). It
  *  unlocks the header's Google tab + the /google route; NEXT_PUBLIC_* is inlined at build time. */
-export const GOOGLE_ENABLED = process.env.NEXT_PUBLIC_GOOGLE_ENABLED === "1";
+export const GOOGLE_ENABLED = TEAM.platforms.includes("google") && process.env.NEXT_PUBLIC_GOOGLE_ENABLED === "1";
 
 /** Snapchat is a PLATFORM tab too (not a PartnerId): the rail launches on our OWN Snapchat ad
  *  account through the Marketing API — there is no partner rail to pin. Build-time gate, same
  *  dormant-on-prod pattern — set NEXT_PUBLIC_SNAP_ENABLED=1 in .env.local ONLY (never on Vercel
  *  in this phase). It unlocks the header's Snapchat tab + the /snap routes. */
-export const SNAP_ENABLED = process.env.NEXT_PUBLIC_SNAP_ENABLED === "1";
+export const SNAP_ENABLED = TEAM.platforms.includes("snap") && process.env.NEXT_PUBLIC_SNAP_ENABLED === "1";
 
 /** TikTok is a PLATFORM tab (not a PartnerId), pinned to the HS partner like Google: the rail runs
  *  entirely through LION's tiktok-weapon API. Build-time gate, same dormant-on-prod pattern — set
  *  NEXT_PUBLIC_TIKTOK_ENABLED=1 in .env.local ONLY (not on Vercel until the owner says so). It
  *  unlocks the header's TikTok tab + the /tiktok routes; NEXT_PUBLIC_* is inlined at build time. */
-export const TIKTOK_ENABLED = process.env.NEXT_PUBLIC_TIKTOK_ENABLED === "1";
+export const TIKTOK_ENABLED = TEAM.platforms.includes("tiktok") && process.env.NEXT_PUBLIC_TIKTOK_ENABLED === "1";
+
+/** A partner that is not this team's (lib/team): hidden from the switcher and, being "in
+ *  development" as well, unreachable through every ?partner= path, with its task drawer dormant.
+ *  The first team has every partner, so this is false for all four there. */
+const offTeam = (id: PartnerId): boolean => !TEAM.partners.includes(id);
 
 export const PARTNERS: PartnerConfig[] = [
   {
@@ -316,7 +326,9 @@ export const PARTNERS: PartnerConfig[] = [
     // baked into the build (.env.local locally; NOT set on Vercel until the LION_* env and a
     // battle smoke land). NEXT_PUBLIC_* is inlined at build time — enabling HS on prod means
     // setting the env var and redeploying, no code change.
-    inDevelopment: process.env.NEXT_PUBLIC_HS_ENABLED !== "1",
+    // A team whose ONLY partner is HS has nothing to fall back to — there it is always live.
+    inDevelopment: offTeam("br") || (process.env.NEXT_PUBLIC_HS_ENABLED !== "1" && TEAM.partners.length > 1),
+    hidden: offTeam("br"),
   },
   {
     id: "in",
@@ -340,6 +352,8 @@ export const PARTNERS: PartnerConfig[] = [
     // creative, same tree shape as the HS token rail. Files ride through the Blob broker
     // (500MB/video ceiling, images pre-validated ≤8MB) — never through a function body.
     maxCreatives: 5,
+    inDevelopment: offTeam("in"),
+    hidden: offTeam("in"),
   },
   {
     id: "us",
@@ -365,7 +379,8 @@ export const PARTNERS: PartnerConfig[] = [
     // AIF ships DORMANT on prod, same pattern as HS: the switcher unlocks only where
     // NEXT_PUBLIC_AIF_ENABLED=1 is baked into the build (.env.local locally; not set on Vercel
     // until the FB_AIF_LAUNCH_TOKEN env and a battle smoke land).
-    inDevelopment: process.env.NEXT_PUBLIC_AIF_ENABLED !== "1",
+    inDevelopment: offTeam("us") || process.env.NEXT_PUBLIC_AIF_ENABLED !== "1",
+    hidden: offTeam("us"),
   },
   {
     id: "av",
@@ -391,7 +406,8 @@ export const PARTNERS: PartnerConfig[] = [
     // AV ships DORMANT, same pattern as HS/AIF: the switcher unlocks only where
     // NEXT_PUBLIC_AV_ENABLED=1 is baked into the build (.env.local — local only for now); every
     // /api/av/* route answers 404 av_rail_disabled without it (lib/av-launch avRailEnabled).
-    inDevelopment: process.env.NEXT_PUBLIC_AV_ENABLED !== "1",
+    inDevelopment: offTeam("av") || process.env.NEXT_PUBLIC_AV_ENABLED !== "1",
+    hidden: offTeam("av"),
   },
 ];
 
@@ -403,13 +419,14 @@ export function partnerConfig(id: PartnerId): PartnerConfig {
   return PARTNERS.find((p) => p.id === id) ?? PARTNERS[0];
 }
 
-/** URL ?partner= → a partner id the switcher can actually be on: unknown values and
- *  in-development partners fall back to MO. Shared by the launcher and clone pages so a
- *  refresh keeps the picked partner instead of snapping back to MO. */
+/** URL ?partner= → a partner id the switcher can actually be on: unknown values, in-development
+ *  partners and partners that are not this team's fall back to the team's default (MO on the first
+ *  team, lib/team). Shared by the launcher and clone pages so a refresh keeps the picked partner
+ *  instead of snapping back to the default. */
 export function sanitizePartnerId(raw: unknown): PartnerId {
   const id = Array.isArray(raw) ? raw[0] : raw;
   const p = PARTNERS.find((x) => x.id === String(id ?? ""));
-  return p && !p.inDevelopment ? p.id : "in";
+  return p && !p.inDevelopment ? p.id : TEAM.defaultPartner;
 }
 
 /** Readiness requirements for a partner — single source for the card dot, the Launch bay and the

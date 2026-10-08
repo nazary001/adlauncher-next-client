@@ -3,6 +3,7 @@ import { LionError, lionConfigured, lionPageAdCounts } from "@/lib/lion";
 import { hsPageAdCounts } from "@/lib/hs-page-volume";
 import { hsPagesConfigured, hsToolsPageStates, hsToolsPageStats } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
+import { TEAM } from "@/lib/team";
 
 export const runtime = "nodejs";
 // The keyless-fallback path is LION's full metrics payload (multi-MB, routinely laggy) PLUS a
@@ -36,10 +37,24 @@ export const maxDuration = 120;
  *
  * KILL SWITCH: without HS_PAGES_API_KEY the route serves the legacy feed (LION metrics tally +
  * partner-token ads_volume sweep, mode "legacy", absent = 0 counted ads — the old contract).
+ *
+ * NO REGISTRY FOR THE TEAM (lib/team pagesRegistry: false — the box does not track its fanpages and
+ * no volume token reads them): mode "tally" = LION's own count of the team's active ads per page and
+ * nothing else. It overcounts (dead ads inside ACTIVE campaigns), so the client shows it as "~N",
+ * defaults the pickers on it and NEVER blocks a launch on it.
  */
 export async function GET(req: Request) {
   if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
+
+  if (!TEAM.pagesRegistry) {
+    if (!lionConfigured()) return NextResponse.json({ ok: false, reason: "no_token", counts: {} });
+    try {
+      return NextResponse.json({ ok: true, mode: "tally", counts: await lionPageAdCounts({ emptyOk: true }) });
+    } catch (e) {
+      return NextResponse.json({ ok: false, reason: "api", error: (e as Error).message ?? String(e), counts: {} }, { status: 502 });
+    }
   }
 
   if (hsPagesConfigured()) {

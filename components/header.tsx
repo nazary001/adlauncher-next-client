@@ -12,7 +12,9 @@ import { GoogleTaskManagerButton } from "./google-task-manager";
 import { SnapTaskManagerButton } from "./snap-task-manager";
 import { TiktokTaskManagerButton } from "./tiktok-task-manager";
 import { UserMenu, type SessionUser } from "./user-menu";
+import { TeamBadge } from "./team-badge";
 import { GOOGLE_ENABLED, SNAP_ENABLED, TIKTOK_ENABLED, partnerConfig, type PartnerId } from "@/lib/partners";
+import { TEAM, teamHas } from "@/lib/team";
 
 /** "console" = an owner tool page (e.g. /sessions) that belongs to no ad platform: no tab is
  *  active, the partner switcher gives way to a static label, the FB widgets stay hidden. */
@@ -21,23 +23,30 @@ type Platform = "facebook" | "tiktok" | "google" | "snapchat" | "console";
 function Logo() {
   return (
     <Link href="/" className="group flex select-none items-center gap-3">
-      <span
-        className={
-          "relative flex h-9 w-9 items-center justify-center overflow-hidden rounded-xl " +
-          "bg-gradient-to-br from-accent via-[#5b6bff] to-accent2 " +
-          "shadow-[0_0_24px_rgba(61,127,255,0.35)] transition-shadow duration-300 " +
-          "group-hover:shadow-[0_0_32px_rgba(124,92,255,0.5)]"
-        }
-      >
-        <span className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(255,255,255,0.35),transparent_55%)]" />
-        <RocketIcon className="relative h-5 w-5 text-white transition-transform duration-300 ease-out group-hover:-translate-y-[2px] group-hover:translate-x-[2px]" />
+      <span className="relative shrink-0">
+        <span
+          className={
+            "relative flex h-9 w-9 items-center justify-center overflow-hidden rounded-xl " +
+            "bg-gradient-to-br from-accent via-[#5b6bff] to-accent2 " +
+            "shadow-[0_0_24px_rgba(61,127,255,0.35)] transition-shadow duration-300 " +
+            "group-hover:shadow-[0_0_32px_rgba(124,92,255,0.5)]"
+          }
+        >
+          <span className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(255,255,255,0.35),transparent_55%)]" />
+          <RocketIcon className="relative h-5 w-5 text-white transition-transform duration-300 ease-out group-hover:-translate-y-[2px] group-hover:translate-x-[2px]" />
+        </span>
+        {/* The team's mark (lib/team) is on screen at EVERY width: pinned to the logo — where it costs
+            the row no pixels — exactly where the wordmark below is hidden, and next to the wordmark
+            wherever that shows. */}
+        <TeamBadge corner className="sm:hidden lg:inline xl:hidden" />
       </span>
       {/* The wordmark gives way where the row is tightest: phones, and the single-row lg band
           (1024–1279px) where every pixel goes to the switcher + tabs. Never wraps (it used to break
           into "Ad / Launcher" once the row got crowded). */}
       <span className="hidden flex-col whitespace-nowrap leading-none sm:flex lg:hidden xl:flex">
-        <span className="text-[17px] font-semibold tracking-tight text-ink">
+        <span className="flex items-center gap-1.5 text-[17px] font-semibold tracking-tight text-ink">
           Ad Launcher
+          <TeamBadge />
         </span>
         <span className="mt-1 text-[9.5px] font-medium uppercase tracking-[0.22em] text-faint">
           Campaign console
@@ -83,7 +92,8 @@ function PlatformTabs({ platform }: { platform: Platform }) {
         <span className={label(onFacebook)}>Facebook</span>
       </Link>
 
-      {TIKTOK_ENABLED ? (
+      {/* A platform that is not this team's (lib/team) has no tab at all — not even the dormant cue. */}
+      {!TEAM.platforms.includes("tiktok") ? null : TIKTOK_ENABLED ? (
         <Link
           href="/tiktok"
           aria-current={onTiktok ? "page" : undefined}
@@ -108,7 +118,7 @@ function PlatformTabs({ platform }: { platform: Platform }) {
         </button>
       )}
 
-      {GOOGLE_ENABLED ? (
+      {!TEAM.platforms.includes("google") ? null : GOOGLE_ENABLED ? (
         // Real navigation target: full-colour Google mark, active pill when we're on /google.
         <Link
           href="/google"
@@ -134,7 +144,7 @@ function PlatformTabs({ platform }: { platform: Platform }) {
         </button>
       )}
 
-      {SNAP_ENABLED ? (
+      {!TEAM.platforms.includes("snap") ? null : SNAP_ENABLED ? (
         <Link
           href="/snap"
           aria-current={onSnap ? "page" : undefined}
@@ -230,7 +240,7 @@ export function Header({
           {/* HS launch-token pool (T1→T2 failover) — health dots + which bearer is in use;
               keeping it on screen also keeps the shared failover state fresh (the status
               endpoint's probe marks burned tokens for the whole fleet). FB rail only. */}
-          {!pinned && partnerConfig(partner).lionLaunch ? <HsTokenStatusWidget /> : null}
+          {!pinned && partnerConfig(partner).lionLaunch && teamHas("channel:token") ? <HsTokenStatusWidget /> : null}
           {/* Per-account launch-limit timer (5 campaigns / 30 min) — the FB rails' concern; the
               Google rail has no such per-account window (LION owns pacing), nor does Snapchat
               (the server pump paces the wave). */}

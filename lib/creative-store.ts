@@ -38,6 +38,7 @@ import {
   isCreativeKey,
   isSha256Hex,
 } from "./creative-url.ts";
+import { teamNamespace } from "./team.ts";
 
 // ---- injected S3 surface (the real bindings are at the bottom; fakes drive the tests) ----
 
@@ -82,11 +83,15 @@ const mib = (bytes: number) => Math.round(bytes / (1024 * 1024));
 
 /** The uploader's key namespace: a short, stable, opaque tag of the username (not a secret — it is
  *  always derived HERE from the authenticated session, never taken from the request). Null without
- *  a username: the key then carries no tag, which is reserved for bytes the server hashed itself. */
-export function creativeOwnerTag(owner: string | null | undefined): string | null {
+ *  a username: the key then carries no tag, which is reserved for bytes the server hashed itself.
+ *  Two teams share the bucket: the same username on both must not share a namespace (nor its "these
+ *  bytes are already here" shortcut), so every team but the first folds its id in — the first team's
+ *  tags, and with them its object keys, stay exactly what they were. */
+export function creativeOwnerTag(owner: string | null | undefined, namespace: string = teamNamespace()): string | null {
   const name = String(owner ?? "").trim();
   if (!name) return null;
-  return createHash("sha256").update(`creative-owner:${name}`).digest("hex").slice(0, 12);
+  const who = namespace ? `creative-owner:${namespace}:${name}` : `creative-owner:${name}`;
+  return createHash("sha256").update(who).digest("hex").slice(0, 12);
 }
 
 /** 48 lower-case hex chars from the CSPRNG — creativeObjectKey slices it to 40 and needs ≥ 16. */

@@ -13,6 +13,7 @@ import {
   money,
 } from "@/lib/fb-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
+import { teamHas } from "@/lib/team";
 import {
   FbError,
   accountPixels,
@@ -122,6 +123,10 @@ export async function POST(req: Request) {
   const session = sessionFromCookieHeader(req.headers.get("cookie"));
   if (!session) {
     return NextResponse.json({ ok: false, stage: "auth", error: "unauthorized" }, { status: 401 });
+  }
+  // …and, for the same reason, asks the team gate itself (lib/team): this is the MO rail's launch.
+  if (!teamHas("partner:in")) {
+    return NextResponse.json({ ok: false, stage: "auth", error: "not_available" }, { status: 404 });
   }
   // Wall-clock origin for the TOOL job deadline (see TOOL_DEADLINE_MS) — captured before any await
   // so the whole request shares one budget.

@@ -38,6 +38,7 @@ import {
 } from "@/lib/lion";
 import { type GeoOverride, parseGeoOverride } from "@/lib/targeting-override";
 import { hsRenameCampaign } from "@/lib/hs-token-launch";
+import { teamHas } from "@/lib/team";
 import { isTransientGraphError } from "@/lib/graph-retry";
 import { type ShotBinds, acctLimitRefusal, bindsKey, demandByAccount, distinctBy, resolveShotBinds } from "@/lib/hs-shot-binds";
 
@@ -631,7 +632,8 @@ async function pumpJuro(user: string, shots: JuroShot[], deadline: number): Prom
           // The board's EXACT name onto the born campaign (owner ask 09-09) — a campaign-level
           // Graph write signed by whichever bearer sees the account (allowed under the VD-C1
           // ad-set ward); transient misses retry next tick, final walls give up quietly.
-          if (s.cloneId && s.name && !s.renamed) {
+          // (A team without our FB tokens — lib/team — keeps LION's own name: nothing could sign it.)
+          if (s.cloneId && s.name && !s.renamed && teamHas("channel:token")) {
             try {
               await hsRenameCampaign(s.cloneId, s.name, s.binds.account);
               s.renamed = true;

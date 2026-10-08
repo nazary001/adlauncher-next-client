@@ -432,6 +432,21 @@ export function unsupportedOutcome(job: Pick<QueueJob, "partner">, why: "version
   };
 }
 
+/** The verdict of a job this TEAM's launcher does not have at all (lib/team teamAllowsJob) — the
+ *  hand-off refuses such a job, so this only ever settles one that reached the store some other way.
+ *  Nothing was sent; not retryable, because no later run of this launcher could run it either. */
+export function refusedOutcome(job: Pick<QueueJob, "partner">, error: string, now: number): JobOutcome {
+  return {
+    status: "error",
+    retryable: false,
+    error,
+    result: null,
+    ambiguous: false,
+    openRow: null,
+    row: { ...SRV, retry: 0, partner: job.partner, status: "error", stage: "queued", error, finished_at: now },
+  };
+}
+
 // ---- the verdict of one run ----
 
 export type JobOutcome = {

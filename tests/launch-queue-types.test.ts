@@ -29,6 +29,7 @@ import {
   reapedRow,
   runningRow,
   sweepLateMinutes,
+  refusedOutcome,
   unsupportedOutcome,
   unsupportedReason,
   worstCaseMs,
@@ -404,6 +405,16 @@ test("unsupportedReason: a newer document shape or an unknown kind; a document w
   assert.equal(unsupportedReason({ kind: "hs.tool", v: JOB_SCHEMA_VERSION }), null);
   assert.equal(unsupportedReason({ kind: "mo.launch", v: JOB_SCHEMA_VERSION + 1 }), "version");
   assert.equal(unsupportedReason({ kind: "xx.future" as QueueKind }), "kind");
+});
+
+test("refusedOutcome: a kind the team's launcher does not have — final, nothing ambiguous, no Retry", () => {
+  const o = refusedOutcome({ partner: "br" }, "This launcher (GLO-02) does not run hs.token launches — nothing was sent", 123);
+  assert.equal(o.status, "error");
+  assert.equal(o.retryable, false);
+  assert.equal(o.ambiguous, false);
+  assert.equal(o.openRow, null);
+  assert.equal(o.result, null);
+  assert.deepEqual(o.row, { srv: 1, retry: 0, partner: "br", status: "error", stage: "queued", error: o.error, finished_at: 123 });
 });
 
 test("unsupportedOutcome: a clean refusal — retryable, nothing ambiguous, the row says nothing was sent", () => {

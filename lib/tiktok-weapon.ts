@@ -9,6 +9,7 @@
 // ⚠️ Every path ends with a trailing slash.
 
 import type { TiktokCloneWire, TiktokJuroWire, TiktokLaunchWire, TiktokTaskLike } from "./tiktok-launch";
+import { TEAM } from "./team.ts";
 
 const PRODUCTION_HOST = "tiktok-weapon.highstakes.tech";
 const BASE = (process.env.TIKTOK_WEAPON_BASE || `https://${PRODUCTION_HOST}`).replace(/\/+$/, "");
@@ -31,7 +32,7 @@ export const tiktokWeaponConfigured = (): boolean => Boolean(TOKEN);
 /** The TikTok rail's dormancy switch, read SERVER-side too: the build-time NEXT_PUBLIC flag hides
  *  the tab/page, but the money-creating routes must not be reachable by a crafted authenticated
  *  POST on a deployment where the rail is meant to be off (prod until the owner enables it). */
-export const tiktokRailEnabled = (): boolean => process.env.NEXT_PUBLIC_TIKTOK_ENABLED === "1";
+export const tiktokRailEnabled = (): boolean => TEAM.platforms.includes("tiktok") && process.env.NEXT_PUBLIC_TIKTOK_ENABLED === "1";
 
 /** Bases a launch may ALWAYS reach: the contract mock lives on the loopback interface. */
 const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);

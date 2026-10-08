@@ -3,6 +3,7 @@
 
 import { juroStoryPages } from "./juro";
 import { activateRetryDelay } from "./activate-retry";
+import { TEAM, teamAcrProblem, teamOwnsProfile } from "./team.ts";
 
 const BASE = (process.env.LION_BASE || "https://lion.highstakes.tech").replace(/\/+$/, "");
 const TOKEN = process.env.LION_TOKEN ?? "";
@@ -34,6 +35,9 @@ export const lionTokenConfigured = (): boolean => Boolean(TOKEN);
  *  writes keep the retry. */
 async function lionFetch(path: string, init?: RequestInit, attempts = 2): Promise<unknown> {
   if (!TOKEN) throw new LionError("LION_TOKEN is not configured");
+  // Another team's LION key on this build would launch one team's campaigns under the other's name.
+  const wrongTeam = teamAcrProblem(LION_ACR);
+  if (wrongTeam) throw new LionError(wrongTeam, 500);
   const url = `${BASE}${path}`;
   let lastErr: unknown;
   for (let attempt = 0; attempt < attempts; attempt++) {
@@ -121,6 +125,13 @@ const fresh = <T>(e: CacheEntry<T> | undefined): T | undefined =>
 
 const str = (v: unknown): string => (v == null ? "" : String(v));
 
+/** LION's profile list is COMPANY-WIDE: every team's key lists, reads and may launch on every team's
+ *  profiles (probed 08.10). A profile of another team is therefore refused HERE — before anything is
+ *  read or sent — by every reader and every campaign-creating write below, so no route can forget it. */
+function assertOwnProfile(slug: string): void {
+  if (!teamOwnsProfile(slug)) throw new LionError(`profile "${slug}" is not a ${TEAM.label} profile`, 403);
+}
+
 export type LionProfile = {
   /** The stable identifier every LION wire takes ("glo-01-10") — binds validate against it. */
   slug: string;
@@ -132,7 +143,8 @@ export type LionProfile = {
 
 /** Profiles the token can operate on: the slug (identifier) plus LION's display fields (owner
  *  ask 09-01 — the pickers show the internal "globecoders-NN" label next to the slug). Probed
- *  09-01: names now arrive clean UTF-8 (the historical double-encoded-cyrillic issue is gone). */
+ *  09-01: names now arrive clean UTF-8 (the historical double-encoded-cyrillic issue is gone).
+ *  Only THIS team's profiles (lib/team teamOwnsProfile) — LION answers the whole company's list. */
 export async function lionProfiles(): Promise<LionProfile[]> {
   const cached = fresh(profilesCache.entry);
   if (cached) return cached;
@@ -141,9 +153,11 @@ export async function lionProfiles(): Promise<LionProfile[]> {
     const raw = Array.isArray(body?.profiles) ? (body!.profiles as Record<string, unknown>[]) : [];
     const rows = raw
       .map((p) => ({ slug: str(p.slug), label: str(p.label).trim(), name: str(p.name).trim() }))
-      .filter((p) => p.slug)
+      .filter((p) => p.slug && teamOwnsProfile(p.slug))
       .sort((a, b) => a.slug.localeCompare(b.slug));
-    if (rows.length === 0) throw new LionError("LION returned no profiles", undefined, body);
+    if (rows.length === 0) {
+      throw new LionError(raw.length > 0 ? `LION lists no ${TEAM.label} profiles` : "LION returned no profiles", undefined, body);
+    }
     profilesCache.entry = { at: Date.now(), value: rows };
     return rows;
   });
@@ -152,6 +166,7 @@ export async function lionProfiles(): Promise<LionProfile[]> {
 /** A profile's accounts, pages and locales (the create/ bind space). Heavy (hundreds of
  *  accounts) → cached 10 min per slug. */
 export async function lionProfileData(slug: string): Promise<LionProfileData> {
+  assertOwnProfile(slug);
   const cached = fresh(profileDataCache.get(slug));
   if (cached) return cached;
   return dedupe(`data:${slug}`, async () => {
@@ -180,6 +195,7 @@ export async function lionProfileData(slug: string): Promise<LionProfileData> {
 
 /** Pixels of one ad account under a profile. */
 export async function lionAccountPixels(slug: string, accountId: string): Promise<LionPixel[]> {
+  assertOwnProfile(slug);
   const key = `${slug}|${accountId}`;
   const cached = fresh(pixelsCache.get(key));
   if (cached) return cached;
@@ -216,6 +232,7 @@ export async function lionCreateCampaign(binds: {
   pixel_id: string;
   campaign: Record<string, unknown>;
 }): Promise<LionCreateResult> {
+  assertOwnProfile(binds.profile_slug);
   const body = (await lionPostOnce("/api/facebook/campaigns/create/", {
     profile_slug: binds.profile_slug,
     account_id: binds.account_id,
@@ -283,6 +300,7 @@ export async function lionDuplicate(args: {
   /** FB locales as { name, id }; omitted = the source's languages, [] = all languages. */
   locales?: { name: string; id: string }[];
 }): Promise<LionDuplicationResult> {
+  assertOwnProfile(args.profile_slug);
   const body = (await lionPostOnce("/api/facebook/campaigns/duplicate/", {
     profile_slug: args.profile_slug,
     account_id: args.account_id,
@@ -347,6 +365,7 @@ export async function lionJurar(args: {
   starting_bid?: number;
   conversion_event: string;
 }): Promise<LionJuroResult> {
+  assertOwnProfile(args.profile_slug);
   const body = (await lionPostOnce("/api/facebook/campaigns/jurar/", {
     profile_slug: args.profile_slug,
     account_id: args.account_id,
@@ -559,7 +578,7 @@ async function lionMyBids(): Promise<Map<string, number>> {
 // per-page limit meters. Cached slim (page → count), never the raw rows.
 let pageVolumeCache: { at: number; counts: Record<string, number> } | null = null;
 
-export async function lionPageAdCounts(): Promise<Record<string, number>> {
+export async function lionPageAdCounts(opts: { emptyOk?: boolean } = {}): Promise<Record<string, number>> {
   if (pageVolumeCache && Date.now() - pageVolumeCache.at < TTL_MS) return pageVolumeCache.counts;
   return dedupe("pagevolume", async () => {
     const body = (await lionGet(`/api/facebook/campaigns/metrics/?date=${saoPauloToday()}`)) as unknown;
@@ -570,7 +589,9 @@ export async function lionPageAdCounts(): Promise<Record<string, number>> {
         : [];
     // An empty answer is a LION hiccup (or the São Paulo midnight reset), not "every page is
     // free" — throw so the client leaves badges off instead of painting believable zeros.
-    if (rows.length === 0) throw new LionError("LION metrics returned no rows", undefined, null);
+    // (`emptyOk`: a team that has launched nothing yet really has no rows, and its tally is only
+    // ever advisory — see /api/hs/page-volume mode "tally".)
+    if (rows.length === 0 && !opts.emptyOk) throw new LionError("LION metrics returned no rows", undefined, null);
     const counts: Record<string, number> = {};
     for (const r of rows) {
       if (str(r.campaign_status) !== "ACTIVE") continue;

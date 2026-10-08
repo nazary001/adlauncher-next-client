@@ -4,10 +4,11 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AvFlag, CheckIcon, ChevronDownIcon, KeyIcon, LogoutIcon, SessionsIcon, SparklesIcon, UsersIcon } from "./icons";
+import { TEAM } from "@/lib/team";
 
 // AV keys is an owner tool that only makes sense where the AV rail is unlocked (local only for now).
 // The build-time flag is inlined into this client bundle exactly like the switcher's gate.
-const AV_ENABLED = process.env.NEXT_PUBLIC_AV_ENABLED === "1";
+const AV_ENABLED = TEAM.ownerTools.includes("avKeys") && process.env.NEXT_PUBLIC_AV_ENABLED === "1";
 
 export type SessionUser = {
   username: string;
@@ -141,6 +142,7 @@ export function UserMenu({ user }: { user: SessionUser }) {
           <p className="px-2.5 pb-1 pt-1.5 text-[9.5px] font-semibold uppercase tracking-[0.18em] text-faint select-none">
             Owner tools
           </p>
+          {TEAM.ownerTools.includes("accounts") ? (
           <Link
             href="/accounts"
             role="menuitem"
@@ -170,6 +172,8 @@ export function UserMenu({ user }: { user: SessionUser }) {
               </span>
             </span>
           </Link>
+          ) : null}
+          {TEAM.ownerTools.includes("autoLandings") ? (
           <Link
             href="/auto-landings"
             role="menuitem"
@@ -199,6 +203,8 @@ export function UserMenu({ user }: { user: SessionUser }) {
               </span>
             </span>
           </Link>
+          ) : null}
+          {TEAM.ownerTools.includes("tokens") ? (
           <Link
             href="/tokens"
             role="menuitem"
@@ -228,7 +234,9 @@ export function UserMenu({ user }: { user: SessionUser }) {
               </span>
             </span>
           </Link>
+          ) : null}
 
+          {TEAM.ownerTools.includes("sessions") ? (
           <Link
             href="/sessions"
             role="menuitem"
@@ -258,6 +266,7 @@ export function UserMenu({ user }: { user: SessionUser }) {
               </span>
             </span>
           </Link>
+          ) : null}
 
           {/* AV keys — only where the AV rail is unlocked (NEXT_PUBLIC_AV_ENABLED=1, local for now);
               the page itself also redirects home when the flag is off. */}

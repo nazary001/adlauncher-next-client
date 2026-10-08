@@ -36,6 +36,7 @@ import { BID_STRATEGIES, OS_OPTIONS, countryName, geoSummary } from "@/lib/catal
 import { TOOL_MARK, toolEnsureMark } from "@/lib/tool-launch";
 import { AIF_VALUE_PIXEL, type PartnerId, aifOfferablePixels, partnerConfig, pickAifPixel } from "@/lib/partners";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
+import { teamHas } from "@/lib/team";
 import { AutoTextarea, BidKindTag, Field, Select } from "./ui";
 import {
   AlertIcon,
@@ -72,6 +73,10 @@ import type { SessionUser } from "./user-menu";
  *  todayPrefixDDMM), identical on the server render and the client hydration (the old
  *  renderer-clock version caused React #418 on every board open for hours every night, live 09-09). */
 const todayDDMM = (): string => todayPrefixDDMM();
+
+// A team without the TOOL rail (lib/team) must not poll /api/tool/ready — on such a team it 404s
+// forever. glo-01 has the rail, so this is true there and the poll is unchanged.
+const HAS_TOOL_RAIL = teamHas("channel:tool");
 
 const cellInput =
   "h-8 w-full rounded-md border border-line bg-surface2 px-2 text-[12px] font-mono tabular-nums text-ink " +
@@ -281,7 +286,7 @@ function CloneInner({
   // 28.09): the ready endpoint answers partner=av&rail=clone with ready:false / not_available and a
   // message pointing at the AV token on /tokens. We still POLL it (so the TOOL segment shows that
   // message as its disabled tooltip) but AV never FIRES through it.
-  const toolReady = useToolReady(partnerId, "clone");
+  const toolReady = useToolReady(partnerId, "clone", HAS_TOOL_RAIL);
   /** The channel that actually fires: a "tool" pick only holds while the rail is READY (else the
    *  segment is disabled and the fire falls back to FB Token). AV never fires through TOOL. */
   const onTool = !avMode && channel === "tool" && toolReady.ready;

@@ -49,6 +49,11 @@ export type HsCatalog = {
    *  null = unknown (feed not landed, or registry answered without a tally gap-fill); legacy mode
    *  keeps its absent-=-0 contract. */
   pageStats: (pageId: string) => { used: number; limit: number; free: number; name: string; approx: boolean } | null;
+  /** The same meter for SHOWING and for DEFAULTING only (the "least filled" pick, a fill line under
+   *  a picker). Identical to pageStats wherever the registry meters the pages; on a team without it
+   *  (feed mode "tally") this carries LION's own tally — an overcounting estimate nothing may block
+   *  a launch on, which is exactly why pageStats answers null there. */
+  pageFill: (pageId: string) => { used: number; limit: number; free: number; name: string; approx: boolean } | null;
   /** hs-tools registry state of ONE fanpage ("ok" / "banned" / "pub_stale" / "no_access" / …;
    *  "" = the registry has no row for it). null = the registry feed hasn't landed (or runs in
    *  legacy mode) → unknown here; the server gate still judges at fire time. */
@@ -64,6 +69,7 @@ const EMPTY: HsCatalog = {
   ensureProfile: () => {},
   ensurePixels: () => {},
   pageStats: () => null,
+  pageFill: () => null,
   pageState: () => null,
 };
 
@@ -101,8 +107,10 @@ export function useHs(enabled: boolean): HsCatalog {
      *  team-wide), not unknown. */
     tallied: boolean;
     /** hs-tools registry: a page absent from counts is UNKNOWN (untagged, pickable) unless
-     *  `tallied`. Legacy sweep: absent means 0 counted ads — the old "0/limit" contract. */
-    mode: "registry" | "legacy";
+     *  `tallied`. Legacy sweep: absent means 0 counted ads — the old "0/limit" contract.
+     *  Tally (a team whose pages the registry does not track): LION's own count of the team's
+     *  active ads per page — an ESTIMATE: shown as "~N", defaulted on, never blocked on. */
+    mode: "registry" | "legacy" | "tally";
   } | null>(null);
   // Fetch guards live in refs, NOT in the state maps: a state-updater runs whenever React gets to
   // it, so "claim the slot inside the updater" races the render and can silently never start the
@@ -202,7 +210,7 @@ export function useHs(enabled: boolean): HsCatalog {
             states: d.states ?? {},
             approx: new Set(d.approx ?? []),
             tallied: d.tallied === true,
-            mode: d.mode === "registry" ? "registry" : "legacy",
+            mode: d.mode === "registry" ? "registry" : d.mode === "tally" ? "tally" : "legacy",
           });
           return;
         }
@@ -355,16 +363,18 @@ export function useHs(enabled: boolean): HsCatalog {
           pages: d.pages.map((p) => {
             const raw = counts[p.value];
             const known = typeof raw === "number";
-            const n = known ? (raw as number) : mode === "legacy" ? 0 : tallied ? 0 : null;
+            const n = known ? (raw as number) : mode !== "registry" ? 0 : tallied ? 0 : null;
             if (n === null) return p;
-            const isApprox = mode === "registry" && (known ? approx.has(p.value) : true);
+            const isApprox = mode === "tally" || (mode === "registry" && (known ? approx.has(p.value) : true));
             const lim = limits[p.value] ?? PAGE_AD_LIMIT;
             const ratio = lim > 0 ? n / lim : 0;
             const tagTone: RichOption["tagTone"] = ratio >= 1 ? "danger" : ratio >= 0.8 ? "warn" : "dim";
             // Full pages stay listed (the red count explains itself) but can't be picked — a
             // launch would just burn against Meta's per-page ad limit. The tally overcounts
             // (dead ads inside ACTIVE campaigns), so an approx-full page errs safe too.
-            return { ...p, tag: `${isApprox ? "~" : ""}${n}/${lim}`, tagTone, disabled: ratio >= 1 };
+            // On the tally alone (no real meter for this team's pages) a red count only warns:
+            // the page stays pickable, Meta's own limit is the judge.
+            return { ...p, tag: `${isApprox ? "~" : ""}${n}/${lim}`, tagTone, disabled: mode !== "tally" && ratio >= 1 };
           }),
         },
       );
@@ -380,13 +390,13 @@ export function useHs(enabled: boolean): HsCatalog {
 
   // Raw per-page meter for consumers outside the picker decoration (the clone board's wave gate,
   // JURO's per-source fanka check) — same absent-page semantics as the badge grammar above.
-  const pageStats = useCallback(
+  const pageFill = useCallback(
     (pageId: string): { used: number; limit: number; free: number; name: string; approx: boolean } | null => {
       if (!pageVolume || !pageId) return null;
       const { counts, limits, names, approx, tallied, mode } = pageVolume;
       const raw = counts[pageId];
       const known = typeof raw === "number";
-      const used = known ? (raw as number) : mode === "legacy" ? 0 : tallied ? 0 : null;
+      const used = known ? (raw as number) : mode !== "registry" ? 0 : tallied ? 0 : null;
       if (used === null) return null;
       const limit = limits[pageId] ?? PAGE_AD_LIMIT;
       return {
@@ -394,10 +404,16 @@ export function useHs(enabled: boolean): HsCatalog {
         limit,
         free: Math.max(limit - used, 0),
         name: names[pageId] ?? "",
-        approx: mode === "registry" && (known ? approx.has(pageId) : true),
+        approx: mode === "tally" || (mode === "registry" && (known ? approx.has(pageId) : true)),
       };
     },
     [pageVolume],
+  );
+  // What the wave gates read. The tally is an estimate that overcounts (dead ads inside ACTIVE
+  // campaigns) and is all a team without the registry has — so it gates nothing: null there.
+  const pageStats = useCallback(
+    (pageId: string) => (pageVolume?.mode === "tally" ? null : pageFill(pageId)),
+    [pageVolume, pageFill],
   );
 
   // The registry's word on one fanka — registry mode only; the legacy feed carries no states, so
@@ -416,8 +432,8 @@ export function useHs(enabled: boolean): HsCatalog {
   return useMemo(
     () =>
       enabled
-        ? { acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels, pageStats, pageState }
+        ? { acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels, pageStats, pageFill, pageState }
         : EMPTY,
-    [enabled, acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels, pageStats, pageState],
+    [enabled, acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels, pageStats, pageFill, pageState],
   );
 }

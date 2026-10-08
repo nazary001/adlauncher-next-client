@@ -7,12 +7,21 @@ import { UploadingNotice } from "./upload-guard";
 import { CONVERSION_EVENTS, geoSummary } from "@/lib/catalog";
 import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { type PartnerConfig, launchReadyOpts, markerPool } from "@/lib/partners";
+import { teamHas } from "@/lib/team";
 import type { HsLaunchChannel } from "./hs-task-manager";
 import type { ToolReadyState } from "./use-tool-ready";
 import type { SlotSigner } from "./use-signers";
 import { SignerBadge } from "./signer-badge";
 import { CheckIcon, EyeIcon, RocketIcon } from "./icons";
 import { useAcctLimits } from "./use-acct-limit";
+
+// lib/team: the non-lion HS rails THIS build's team offers. With neither (a lion-only team,
+// glo-02) there is nothing to choose between, so the rail control and its caption are not rendered
+// at all and the wave always fires on LION. glo-01 has both, so the full three-segment control
+// shows exactly as before.
+const HS_TOKEN_RAIL = teamHas("channel:token");
+const HS_TOOL_RAIL = teamHas("channel:tool");
+const HS_RAIL_CHOICE = HS_TOKEN_RAIL || HS_TOOL_RAIL;
 
 export function LaunchRail({
   campaigns,
@@ -264,34 +273,46 @@ export function LaunchRail({
           {/* HS launch rail: LION's create weapon vs our FB token building the same tree
               directly on the Graph (partner-approved bypass — same name pattern, same binds,
               +30 min delivery gap). One pick for the whole wave. */}
-          {partner.lionLaunch ? (
+          {/* Only shown when the team has more than the LION rail to choose between (lib/team): a
+              lion-only team has nothing to pick, so neither the control nor its caption renders and
+              every HS wave fires on LION. */}
+          {partner.lionLaunch && HS_RAIL_CHOICE ? (
             <div className="flex flex-col gap-1">
               {/* Three rails now (owner ask 28.09): LION's create weapon, our FB token direct on
                   the Graph, or the HS TOOL sessions service. TOOL is offered only while the server
                   says it's ready (a live session sees this partner's accounts) — otherwise the
                   segment is disabled with the server's reason as its tooltip; a stale "tool" pick
-                  with the rail not ready falls back to LION at fire time (board's effective rule). */}
+                  with the rail not ready falls back to LION at fire time (board's effective rule).
+                  A segment exists only for a rail THIS team has (token/tool — lib/team). */}
               <div className="grid grid-cols-3 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
                 {(
                   [
                     { key: "lion" as const, label: "LION API", ready: true, title: undefined as string | undefined },
-                    {
-                      key: "token" as const,
-                      label: "FB Token",
-                      ready: hsTokenReady,
-                      title: hsTokenReady ? undefined : "FB token not configured on the server (FB_HS_LAUNCH_TOKEN)",
-                    },
-                    {
-                      key: "tool" as const,
-                      label: "TOOL",
-                      ready: toolReady,
-                      title: toolReady
-                        ? undefined
-                        : tool?.message ||
-                          (tool && !tool.loaded
-                            ? "Checking TOOL readiness…"
-                            : "TOOL is not ready — no live session sees this partner's accounts"),
-                    },
+                    ...(HS_TOKEN_RAIL
+                      ? [
+                          {
+                            key: "token" as const,
+                            label: "FB Token",
+                            ready: hsTokenReady,
+                            title: hsTokenReady ? undefined : "FB token not configured on the server (FB_HS_LAUNCH_TOKEN)",
+                          },
+                        ]
+                      : []),
+                    ...(HS_TOOL_RAIL
+                      ? [
+                          {
+                            key: "tool" as const,
+                            label: "TOOL",
+                            ready: toolReady,
+                            title: toolReady
+                              ? undefined
+                              : tool?.message ||
+                                (tool && !tool.loaded
+                                  ? "Checking TOOL readiness…"
+                                  : "TOOL is not ready — no live session sees this partner's accounts"),
+                          },
+                        ]
+                      : []),
                   ]
                 ).map((opt) => {
                   const active = hsChannel === opt.key;

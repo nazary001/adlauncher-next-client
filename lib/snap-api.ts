@@ -11,6 +11,7 @@
 // request_status:"ERROR" + display_message/debug_message.
 
 import type { SnapAdSquadWire, SnapAdWire, SnapCampaignWire, SnapCreativeWire } from "./snap-launch";
+import { TEAM } from "./team.ts";
 
 const API_BASE = (process.env.SNAP_API_BASE || "https://adsapi.snapchat.com/v1").replace(/\/+$/, "");
 const AUTH_BASE = (process.env.SNAP_AUTH_BASE || "https://accounts.snapchat.com").replace(/\/+$/, "");
@@ -33,7 +34,7 @@ export class SnapApiError extends Error {
 }
 
 /** The rail's dormancy switch read SERVER-side too (the NEXT_PUBLIC flag only hides the tab). */
-export const snapRailEnabled = (): boolean => process.env.NEXT_PUBLIC_SNAP_ENABLED === "1";
+export const snapRailEnabled = (): boolean => TEAM.platforms.includes("snap") && process.env.NEXT_PUBLIC_SNAP_ENABLED === "1";
 export const snapConfigured = (): boolean => Boolean(CLIENT_ID && CLIENT_SECRET && REFRESH_TOKEN);
 /** Board defaults from env (all optional; the catalog route hands them to the pickers). */
 export const snapDefaults = () => ({

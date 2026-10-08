@@ -29,7 +29,7 @@ export function PartnerSwitcher({
         aria-label="Partner"
         className="flex items-center gap-1 rounded-full border border-line bg-surface p-1"
       >
-        {PARTNERS.map(({ id, label, Flag, inDevelopment }) => {
+        {PARTNERS.filter((p) => !p.hidden).map(({ id, label, Flag, inDevelopment }) => {
           const active = id === value;
           // Pinned by `lockedNote`: every partner but the current one is disabled (the rail can't
           // switch here). Same disabled styling as an in-development partner; only the tip differs.

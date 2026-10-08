@@ -328,6 +328,12 @@ test("owner tag: stable, opaque, 12 hex — different buyers differ, no username
   assert.equal(creativeOwnerTag(""), null);
   assert.equal(creativeOwnerTag(null), null);
   assert.equal(creativeOwnerTag(undefined), null);
+  // Two teams share the bucket (lib/team): the same username on another team is another namespace,
+  // while the first team's tag — an empty namespace — is the pre-team formula, byte for byte.
+  assert.equal(creativeOwnerTag("alice", ""), a);
+  assert.notEqual(creativeOwnerTag("alice", "glo-02"), a);
+  assert.match(String(creativeOwnerTag("alice", "glo-02")), /^[0-9a-f]{12}$/);
+  assert.notEqual(creativeOwnerTag("alice", "glo-02"), creativeOwnerTag("alice", "glo-03"));
 });
 
 test("plan: the same sha from two buyers lands on two different keys", async () => {

@@ -29,8 +29,10 @@ export default async function ClonePage({
 
   const sp = await searchParams;
   const ids = parseIds(sp.ids);
-  // Shared sanitizer: unknown AND in-development partners fall back to MO (a stale prod URL
-  // must not open the board on a partner the switcher itself refuses).
+  // Shared sanitizer: unknown AND in-development partners fall back to the team's default partner
+  // (lib/team — MO on glo-01) so a stale prod URL never opens the board on a partner the switcher
+  // itself refuses. A team whose only partner is HS (glo-02) always lands on HS, whose lionLaunch
+  // picks the HS clone board below for every ?partner= value.
   const partner: PartnerId = sanitizePartnerId(sp.partner);
   // ?mode=juro|clone opens the HS board straight in that mode (external tools deep-link JURO
   // the same way they deep-link the cloner); a present mode wins over the buyer's remembered
@@ -66,7 +68,8 @@ export default async function ClonePage({
       ) : (
         // MO, AIF and AV share the Graph clone board — the partner prop picks the rail (token,
         // marker/key registry, pixel policy — AV binds none) end to end. AV only reaches here when
-        // NEXT_PUBLIC_AV_ENABLED=1 (sanitizePartnerId drops in-development partners to MO otherwise).
+        // NEXT_PUBLIC_AV_ENABLED=1 (sanitizePartnerId drops in-development partners to the team's
+        // default partner otherwise).
         <CloneBoard
           user={{ username: session.username, role: session.role ?? null, owner: isOwnerSession(session) }}
           initialIds={ids}

@@ -2,6 +2,7 @@ import { NextResponse, after } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { QUEUE_SCOPES, type QueueActionResponse, type QueueEnqueueResponse, type QueueScope, parseEnqueue } from "@/lib/launch-queue-types";
 import { acceptEnqueue, cancelJobs, pumpLane, retryJobs, selfOrigin } from "@/lib/launch-queue-run";
+import { teamAllowsJob } from "@/lib/team";
 
 export const runtime = "nodejs";
 // The hand-off answers at once (after(pumpLane) runs the wave in the background), but the SAME
@@ -72,6 +73,13 @@ export async function POST(req: Request): Promise<NextResponse> {
   // enqueue (default)
   const parsed = parseEnqueue(body);
   if (!parsed.ok) return NextResponse.json({ ok: false, error: parsed.error } as QueueEnqueueResponse, { status: 400, headers: noStore });
+  // The team gate of the queue (lib/team): a queued launch never passes proxy.ts — the pump calls its
+  // handler in-process — so a rail or channel this team's launcher does not have is refused HERE,
+  // before anything is stored. The client sends the kind; this is where it is judged.
+  const foreign = parsed.value.jobs.find((j) => !teamAllowsJob(parsed.value.scope, j.kind));
+  if (foreign) {
+    return NextResponse.json({ ok: false, error: `not_available: ${foreign.kind}` } as QueueEnqueueResponse, { status: 403, headers: noStore });
+  }
   const res = await acceptEnqueue(session, parsed.value, origin);
   if (!res.ok) return NextResponse.json({ ok: false, error: res.error } as QueueEnqueueResponse, { status: res.status, headers: noStore });
   for (const lane of res.lanes) after(() => pumpLane(lane, { origin, startedAt }));

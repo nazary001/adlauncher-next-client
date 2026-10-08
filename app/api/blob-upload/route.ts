@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
 import { sessionFromCookieHeader } from "@/lib/session";
+import { teamHas } from "@/lib/team";
 
 export const runtime = "nodejs";
 
@@ -15,6 +16,9 @@ const UNAUTHORIZED = "unauthorized";
  *      own signature check, so it must NOT be behind the proxy auth gate (excluded in proxy.ts).
  */
 export async function POST(req: Request): Promise<NextResponse> {
+  // Excluded from the proxy, so the team gate (lib/team) is asked here: only the first team ever had
+  // tabs that upload through Vercel Blob.
+  if (!teamHas("legacyBlob")) return NextResponse.json({ error: "not_available" }, { status: 404 });
   let body: HandleUploadBody;
   try {
     body = (await req.json()) as HandleUploadBody;

@@ -27,12 +27,13 @@ import { uploadImage, uploadVideo, videoThumb, waitForVideo } from "./fb-media";
 import { resolveSlot } from "./fb-tokens";
 import { type TokenRail, slotOf } from "./fb-token-registry";
 import { avRegisteredCount } from "./av-link";
+import { TEAM } from "./team.ts";
 
 type Json = Record<string, unknown>;
 
 /** Server twin of the build-time switcher gate (NEXT_PUBLIC_* is inlined into both bundles): every
  *  /api/av/* route answers 404 `av_rail_disabled` without it — the rail is dormant, not half-open. */
-export const avRailEnabled = (): boolean => process.env.NEXT_PUBLIC_AV_ENABLED === "1";
+export const avRailEnabled = (): boolean => TEAM.partners.includes("av") && process.env.NEXT_PUBLIC_AV_ENABLED === "1";
 
 /** How many pool keys (av001…avN) the owner registered in AV's "UTM Campaign Values" — the ONLY
  *  launchable keys. Unset / 0 = the stub: no AV launch or clone can claim a key. */

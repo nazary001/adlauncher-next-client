@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 import { RocketIcon } from "./icons";
+import { TeamBadge } from "./team-badge";
+import { TEAM } from "@/lib/team";
 
 function Spinner() {
   return (
@@ -57,7 +59,10 @@ export function LoginForm() {
           <RocketIcon className="relative h-6 w-6 text-white" />
         </span>
         <div className="leading-tight">
-          <h1 className="text-[18px] font-semibold text-ink">Ad Launcher</h1>
+          <h1 className="flex items-center justify-center gap-2 text-[18px] font-semibold text-ink">
+            Ad Launcher
+            <TeamBadge />
+          </h1>
           <p className="mt-1 text-[12px] text-dim">Sign in to the campaign console</p>
         </div>
       </div>
@@ -120,7 +125,9 @@ export function LoginForm() {
       </button>
 
       <p className="text-center text-[11px] leading-relaxed text-faint">
-        Use your Amazon Tools account — the same login works here.
+        {TEAM.toolsDirectory
+          ? "Use your Amazon Tools account — the same login works here."
+          : `The ${TEAM.label} team has its own logins here — ask the owner for yours.`}
       </p>
     </form>
   );

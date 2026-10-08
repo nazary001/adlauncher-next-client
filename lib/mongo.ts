@@ -2,6 +2,7 @@
 // Copy into each project unchanged. Requires: npm i mongodb@^6
 import { MongoClient, type Db, type Collection, type Document } from 'mongodb';
 import { randomBytes } from 'node:crypto';
+import { TEAM, teamAllowsDb } from './team.ts';
 
 const DB_NAME = process.env.MONGODB_DB || 'gc';
 
@@ -30,6 +31,10 @@ export function getClient(): Promise<MongoClient> {
 }
 
 export async function getDb(): Promise<Db> {
+  // The one project-side addition to the shared template: each team's launcher runs on its OWN
+  // database (lib/team.ts). A build pointed at another team's would mix their users, launch queue
+  // and task registry — so every store call fails instead.
+  if (!teamAllowsDb(DB_NAME)) throw new Error(`MONGODB_DB="${DB_NAME}" is not the ${TEAM.label} launcher's database`);
   return (await getClient()).db(DB_NAME);
 }
 

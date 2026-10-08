@@ -13,6 +13,12 @@ import type { SessionUser } from "./user-menu";
 import { useAdAccounts } from "./use-adaccounts";
 import { CheckIcon, PlusIcon, SearchIcon, UsersIcon, XIcon } from "./icons";
 import { PARTNERS, partnerConfig, type PartnerId } from "@/lib/partners";
+import { TEAM, teamHas } from "@/lib/team";
+
+// Build-time team capabilities (lib/team): the HS pool note names the FB Token rail only on a team
+// that has it, and a bare board defaults to the team's own partner. Both are no-ops for glo-01
+// (it has the token rail; its default partner is MO).
+const HAS_TOKEN_RAIL = teamHas("channel:token");
 
 type TeamUser = { username: string; role: string | null; source: string };
 type AssignMap = Record<string, string[]>;
@@ -348,7 +354,7 @@ function SkeletonRows({ n = 5 }: { n?: number }) {
 
 export function AccountAccessBoard({
   user,
-  initialPartner = "in",
+  initialPartner = TEAM.defaultPartner,
 }: {
   user: SessionUser;
   initialPartner?: PartnerId;
@@ -423,11 +429,19 @@ export function AccountAccessBoard({
 
   // ---- data: per-rail account catalogs ---------------------------------------------------------
   // MO + AIF load eagerly (tab switches feel instant); both endpoints answer from server caches.
-  const moAccounts = useAdAccounts(true, undefined, "/api/adaccounts");
-  const aifAccounts = useAdAccounts(true, undefined, "/api/aif/adaccounts");
+  // Only for a partner that is this team's (lib/team) — a hidden partner has no tab here and its
+  // catalog route 404s, so loading it would just poll a route that can never answer. `hidden` is
+  // false for every partner on glo-01, so both still load eagerly there.
+  const moAccounts = useAdAccounts(!partnerConfig("in").hidden, undefined, "/api/adaccounts");
+  const aifAccounts = useAdAccounts(!partnerConfig("us").hidden, undefined, "/api/aif/adaccounts");
   // AV's catalog endpoint 404s (`av_rail_disabled`) while the rail is dormant — only load it once
-  // the build flag is on, otherwise the tab would poll a route that can never answer.
-  const avAccounts = useAdAccounts(!partnerConfig("av").inDevelopment, undefined, "/api/av/adaccounts");
+  // the build flag is on AND AV is this team's partner, otherwise the tab would poll a route that
+  // can never answer.
+  const avAccounts = useAdAccounts(
+    !partnerConfig("av").inDevelopment && !partnerConfig("av").hidden,
+    undefined,
+    "/api/av/adaccounts",
+  );
 
   // HS: ONE flat list — the MAIN pool only (owner ask 08-21). The globecoders profiles mirror
   // one VD-C1 account pool, so the page loads the first non-FARM profile's bind space and shows
@@ -886,7 +900,7 @@ export function AccountAccessBoard({
                 {hs !== null && hs !== "error" ? (
                   <p className="px-1 text-[10.5px] leading-relaxed text-faint">
                     Main HS pool · {hs.list.length} accounts. An assignment follows the account
-                    into every LION profile and the FB Token rail automatically.
+                    into every LION profile{HAS_TOKEN_RAIL ? " and the FB Token rail" : ""} automatically.
                   </p>
                 ) : null}
               </div>

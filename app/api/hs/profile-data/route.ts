@@ -4,6 +4,7 @@ import { hsOfferablePages } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { hsDupTokenAccountIds, hsDupTokenConfigured, hsTokenAccountIds, hsTokenConfigured } from "@/lib/hs-token-launch";
 import { lionConfigured, lionProfileData } from "@/lib/lion";
+import { teamHas } from "@/lib/team";
 
 export const runtime = "nodejs";
 // A cold profile-data pull is heavy on LION's side (hundreds of accounts) — give it headroom.
@@ -32,12 +33,13 @@ export async function GET(req: Request): Promise<NextResponse> {
     // so the pre-filter must match the bearer that will actually build).
     // null = sweep unavailable → the client skips filtering (fail open, Graph is the backstop).
     let tokenAccounts: string[] | null = null;
-    if (await hsTokenConfigured()) {
+    const tokenRail = teamHas("channel:token"); // no FB-token rail on this team → nothing to sweep
+    if (tokenRail && (await hsTokenConfigured())) {
       const ids = await hsTokenAccountIds();
       if (ids) tokenAccounts = accounts.filter((a) => ids.has(a.id.replace(/^act_/, ""))).map((a) => a.id);
     }
     let dupTokenAccounts: string[] | null = null;
-    if (await hsDupTokenConfigured()) {
+    if (tokenRail && (await hsDupTokenConfigured())) {
       const ids = await hsDupTokenAccountIds();
       if (ids) dupTokenAccounts = accounts.filter((a) => ids.has(a.id.replace(/^act_/, ""))).map((a) => a.id);
     }

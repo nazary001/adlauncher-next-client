@@ -244,6 +244,10 @@ const MO_SCOPE: TmScope = {
   label: "Tasks",
   title: "Task Manager",
   subtitle: "Team launch & clone queue",
+  // Dormant when MO is not this team's partner (lib/team) — the server already 404s its routes, so
+  // a polling instance would just collect 404s. Keyed on `hidden`, NOT inDevelopment, so glo-01
+  // (where MO is always a partner) is unchanged.
+  dormant: partnerConfig("in").hidden === true,
 };
 const AIF_SCOPE: TmScope = {
   api: "/api/launch-tasks?scope=aif",
@@ -252,6 +256,9 @@ const AIF_SCOPE: TmScope = {
   label: "AIF Tasks",
   title: "AIF Task Manager",
   subtitle: "AIF launch queue · team view",
+  // Dormant when AIF is not this team's partner (lib/team) — `hidden`, NOT inDevelopment, so glo-01
+  // keeps polling AIF even while it is env-gated "in development" there, exactly as it does today.
+  dormant: partnerConfig("us").hidden === true,
 };
 const AV_SCOPE: TmScope = {
   api: "/api/launch-tasks?scope=av",

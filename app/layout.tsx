@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { TEAM } from "@/lib/team";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -13,7 +14,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Ad Launcher — campaign console",
+  // Every tab title carries the team's mark (lib/team): the two launchers open side by side must
+  // not read the same. The template prefixes the child pages' own titles.
+  title: { default: `${TEAM.label} · Ad Launcher — campaign console`, template: `${TEAM.label} · %s` },
   description: "Internal console for launching ad campaigns across Facebook, TikTok and Google.",
 };
 

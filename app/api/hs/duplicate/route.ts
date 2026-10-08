@@ -31,6 +31,7 @@ import {
   lionSourceBidFacts,
 } from "@/lib/lion";
 import { hsRenameCampaign } from "@/lib/hs-token-launch";
+import { teamHas } from "@/lib/team";
 import { isTransientGraphError } from "@/lib/graph-retry";
 import { type ShotBinds, acctLimitRefusal, bindsKey, demandByAccount, distinctBy, resolveShotBinds } from "@/lib/hs-shot-binds";
 import { type GeoOverride, lionDuplicateTargeting, parseGeoOverride } from "@/lib/targeting-override";
@@ -837,7 +838,8 @@ async function pumpBatch(user: string, shots: BatchShot[], deadline: number): Pr
           // An override row's name already carries the new geo (the board relabels the [CODES]
           // group), so it renames like any other. Transient misses retry next tick, final walls
           // give up quietly.
-          if (s.cloneId && s.name && !s.renamed) {
+          // (A team without our FB tokens — lib/team — keeps LION's own name: nothing could sign it.)
+          if (s.cloneId && s.name && !s.renamed && teamHas("channel:token")) {
             try {
               await hsRenameCampaign(s.cloneId, s.name, s.binds.account);
               s.renamed = true;

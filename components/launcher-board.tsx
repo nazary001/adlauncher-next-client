@@ -17,6 +17,7 @@ import {
   pickAifPixel,
 } from "@/lib/partners";
 import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
+import { TEAM, teamHas } from "@/lib/team";
 import { toolEnsureMark } from "@/lib/tool-launch";
 import { makeGate } from "@/lib/launch-guards";
 import { Header } from "./header";
@@ -68,6 +69,12 @@ const GCM_LOW_WATER = 15;
 /** The HS launch-rail pick (LION API | FB Token | TOOL) survives refreshes — buyers run whole
  *  waves on one rail, re-picking it every session would invite accidental LION shots mid-wave. */
 const HS_CHANNEL_LS = "adlauncher.hs.channel";
+// lib/team: does THIS build's team offer the HS FB-token / TOOL rails? A lion-only team (glo-02)
+// has neither, so the rail pick can never leave LION, the saved pick is not restored, and the
+// token-status / TOOL-ready polls — whose routes 404 there — never run. glo-01 has all three
+// channels, so both are true and every path below behaves exactly as before.
+const HAS_TOKEN_RAIL = teamHas("channel:token");
+const HAS_TOOL_RAIL = teamHas("channel:tool");
 /** MO/AIF launch-rail pick (FB Token | TOOL) — one key per partner (owner ask 28.09). MO uses the
  *  fresh `...channel2` key, NOT the retired `adlauncher.mo.channel` (the old soc-signer switch). */
 const MO_CHANNEL_LS = "adlauncher.mo.channel2";
@@ -202,7 +209,7 @@ function fillPageDefaults(rows: Campaign[], partner: PartnerConfig, fanpages: Fa
 
 /** Rendered inside the (app) layout's TaskManagerProvider — the queue lives up there so it
  *  survives navigating between the launcher and the clone board. */
-export function LauncherBoard({ user, initialPartner = "in" }: { user?: SessionUser; initialPartner?: PartnerId }) {
+export function LauncherBoard({ user, initialPartner = TEAM.defaultPartner }: { user?: SessionUser; initialPartner?: PartnerId }) {
   return <LauncherInner user={user} initialPartner={initialPartner} />;
 }
 
@@ -290,7 +297,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // 28.09 "сделай чтобы лаунчер оттуда кабинеты тянул"): the live av-01 session sees the GC-AV
   // cabinets, and for AV the ready `rows` ARE the account catalog (AV has no FB token). So every
   // partner polls it — the endpoint decides who is TOOL-ready.
-  const toolReady = useToolReady(partnerId, "launch");
+  // Parked on a team without the TOOL rail (lib/team): /api/tool/* answers 404 there, so polling
+  // it while HS is active would 404 forever. glo-01 has the rail, so this stays an always-on poll.
+  const toolReady = useToolReady(partnerId, "launch", HAS_TOOL_RAIL);
   const signers = useSigners(graphRail);
   const railSigner = graphRail
     ? (signers.slots?.[partner.avLaunch ? "av.launch" : partner.aifLaunch ? "aif.launch" : "mo.launch"] ?? null)
@@ -320,8 +329,12 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   );
   // HS launch-token pool health — powers the "all tokens burned" banner (the server gate is the
   // enforcement; this is the courtesy warning before buyers build a wave into a 429).
-  const hsTokenStatus = useHsTokenStatus(Boolean(partner.lionLaunch));
-  const hsTokensDown = partner.lionLaunch ? hsTokensAllDown(hsTokenStatus.tokens, hsTokenStatus.loaded) : false;
+  // Only polled where the FB-token rail exists (lib/team): on a lion-only team there is no token
+  // rail and /api/hs/token-status answers 404, so the "all tokens burned" warning has nothing to
+  // report and the poll is parked. glo-01 has the rail, so this is unchanged.
+  const hsTokenStatus = useHsTokenStatus(Boolean(partner.lionLaunch) && HAS_TOKEN_RAIL);
+  const hsTokensDown =
+    partner.lionLaunch && HAS_TOKEN_RAIL ? hsTokensAllDown(hsTokenStatus.tokens, hsTokenStatus.loaded) : false;
   // Token ad accounts (with their pixels) for the account/pixel pickers — read from the picked
   // signer's catalog (a soc may see a different account set than the system user). NOT read for AV
   // (owner ask 28.09): AV launches only through TOOL, so its cabinets come from the live TOOL
@@ -351,8 +364,11 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       // Safe setState-in-effect: runs once on mount (localStorage is unreadable during SSR),
       // and only flips a default when a pick was actually saved.
       const v = localStorage.getItem(HS_CHANNEL_LS);
+      // Restore only a rail THIS team actually has (lib/team): on a lion-only team the pick can
+      // never leave LION, so a stale "token"/"tool" from another build is ignored. glo-01 has
+      // every rail, so this restores exactly as before.
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (v === "token" || v === "lion" || v === "tool") setHsChannel(v);
+      if (v === "lion" || (v === "token" && HAS_TOKEN_RAIL) || (v === "tool" && HAS_TOOL_RAIL)) setHsChannel(v);
       const mo = localStorage.getItem(MO_CHANNEL_LS);
       if (mo === "token" || mo === "tool") setMoChannel(mo);
       const aif = localStorage.getItem(AIF_CHANNEL_LS);

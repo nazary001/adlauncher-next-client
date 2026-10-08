@@ -26,7 +26,14 @@ import {
 } from "react";
 import { moneyLabel } from "@/lib/types";
 import { STALE_MS, ownerHue } from "@/lib/task-view";
+import { TEAM } from "@/lib/team";
 import { AlertIcon, CheckIcon, CopyIcon, GoogleMark, RocketIcon, TasksIcon, XIcon } from "./icons";
+
+// Google is a PLATFORM tab (lib/team): a team without it has no header tab and the /api/google*
+// routes 404, so this provider must generate NO server traffic there (the Snap/TikTok dormant
+// pattern). Gated on the TEAM having the platform — NOT the NEXT_PUBLIC_GOOGLE_ENABLED flag — so
+// glo-01 (which has Google) keeps polling exactly as before whatever its build flags are.
+const HAS_GOOGLE = TEAM.platforms.includes("google");
 
 // ---------- model ----------
 
@@ -330,6 +337,7 @@ export function GoogleTaskManagerProvider({
   /** Upsert one Google row's dynamic fields to Strapi (partner="gg" is forced server-side),
    *  chained PER TASK so transitions land in order. 20 s timeout; one retry on network failure. */
   const saveRemote = useCallback((id: string, dyn: Record<string, unknown>) => {
+    if (!HAS_GOOGLE) return;
     const body = JSON.stringify({ tasks: [{ task_id: id, ...dyn }] });
     const post = () =>
       fetch("/api/google-tasks", {
@@ -357,6 +365,7 @@ export function GoogleTaskManagerProvider({
 
   /** Pull the team's Google rows and merge them in (mine stay mine while my patch is newer). */
   const loadRemote = useCallback(() => {
+    if (!HAS_GOOGLE) return;
     fetch("/api/google-tasks", { signal: AbortSignal.timeout(20_000) })
       .then(async (r) => {
         if (!r.ok) return;
@@ -377,6 +386,7 @@ export function GoogleTaskManagerProvider({
   // Shared-store polling: keep the team's rows fresh (faster while the drawer is open), and drive
   // a coarse clock so stale detection advances even with the drawer closed.
   useEffect(() => {
+    if (!HAS_GOOGLE) return;
     const tick = () => {
       if (document.hidden) return;
       const interval = openRef.current ? SHARED_POLL_OPEN_MS : SHARED_POLL_CLOSED_MS;
@@ -405,6 +415,7 @@ export function GoogleTaskManagerProvider({
   // ---- LION finisher: only MY LEGACY running rows (stamped before 15.09) with a google-weapon task id ----
 
   const finish = useCallback(async () => {
+    if (!HAS_GOOGLE) return;
     const now = Date.now();
     // Age out MY running rows stuck for 3 h — stop burning polls, tell the buyer. Runs BEFORE the
     // busy latch so it fires even if a status fetch is wedged.
@@ -484,6 +495,7 @@ export function GoogleTaskManagerProvider({
   }, [isMine, patch, saveRemote]);
 
   useEffect(() => {
+    if (!HAS_GOOGLE) return;
     const tick = () => {
       if (document.hidden) return;
       const interval = openRef.current ? FINISH_OPEN_MS : FINISH_CLOSED_MS;
@@ -509,7 +521,7 @@ export function GoogleTaskManagerProvider({
 
   // Immediate shared + finisher pull when the drawer opens — live rows without waiting a tick.
   useEffect(() => {
-    if (!open) return;
+    if (!HAS_GOOGLE || !open) return;
     lastSharedPollRef.current = Date.now();
     lastFinishRef.current = Date.now();
     loadRemote();

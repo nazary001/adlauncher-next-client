@@ -5,6 +5,7 @@ import { type Campaign, bidKind, normalizeRoasGoal, parseMoney } from "./types";
 import type { LinkSegment } from "./partners";
 import { CONVERSION_EVENTS } from "./catalog";
 import { TOOL_MARK } from "./tool-launch";
+import { TEAM } from "./team.ts";
 
 /** LION validates the `(REDIR_LABEL)` name segment against redirect_type with this exact map. */
 export const HS_REDIRECT_LABELS: Record<string, string> = {
@@ -70,7 +71,7 @@ export function hsLinkSegments(
   if (!base) return [];
   if (/[?&]utm_source=/.test(base)) return [{ text: base, role: "slug" }];
   const sep = base.includes("?") ? "&" : "?";
-  const mb = (acr || "GLO-01").toLowerCase();
+  const mb = (acr || TEAM.label).toLowerCase();
   if (c.redirectType === "HIGH ADX") {
     return [
       { text: base, role: "slug" },

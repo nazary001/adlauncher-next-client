@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { SESSION_COOKIE, renewedSessionToken, sessionCookieOptions, verifySession } from "@/lib/session";
+import { teamAllowsPath } from "@/lib/team";
 
 /**
  * Auth gate. Runs on everything except static assets, the login page and /api/auth/*.
@@ -8,11 +9,26 @@ import { SESSION_COOKIE, renewedSessionToken, sessionCookieOptions, verifySessio
  * routes every few seconds, so a working buyer never hits the 7-day wall mid-wave; see
  * lib/session renewedSessionToken); otherwise API calls get 401 and page/asset requests are
  * sent to /login. (Next 16 proxy runs on the Node.js runtime, so node:crypto is available.)
+ *
+ * Team gate (lib/team): a signed-in request for something THIS team's launcher does not have — another
+ * partner's rail, a launch channel or a platform tab it was not given — is refused here, whatever the
+ * UI shows: an API call answers 404, a page goes home. The first team has everything, so nothing is
+ * ever refused there. The routes excluded from the matcher below gate themselves, and a QUEUED launch
+ * never passes here at all (the pump calls its handler in-process) — the queue asks lib/team itself.
  */
 export function proxy(request: NextRequest) {
   const token = request.cookies.get(SESSION_COOKIE)?.value;
   const session = verifySession(token);
   if (session) {
+    if (!teamAllowsPath(request.nextUrl.pathname)) {
+      if (request.nextUrl.pathname.startsWith("/api")) {
+        return NextResponse.json({ ok: false, error: "not_available" }, { status: 404 });
+      }
+      const home = request.nextUrl.clone();
+      home.pathname = "/";
+      home.search = "";
+      return NextResponse.redirect(home);
+    }
     const res = NextResponse.next();
     const renewed = renewedSessionToken(session);
     if (renewed) res.cookies.set(SESSION_COOKIE, renewed.token, sessionCookieOptions(renewed.maxAge));

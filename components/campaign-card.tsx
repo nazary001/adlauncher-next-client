@@ -438,7 +438,7 @@ function CampaignCardBase({
     hsMode && hsData && !c.page
       ? leastFilledPage(
           hsData.pages.map((p) => {
-            const st = hs?.pageStats(p.value);
+            const st = hs?.pageFill(p.value);
             return { id: p.value, used: st?.used ?? null, limit: st?.limit ?? null, disabled: p.disabled };
           }),
         )

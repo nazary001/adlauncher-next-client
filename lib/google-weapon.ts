@@ -7,6 +7,7 @@
 import { googleWeaponErrorMessage, isGoogleLaunchAccount, type GoogleLaunchWire } from "./google-bid";
 import { foldGoogleLaunchCatalog, type GoogleHiddenAccount } from "./google-account-status";
 import { ensureGoogleDataset, saoPauloDate, type GoogleEnsureResult } from "./google-source";
+import { TEAM } from "./team.ts";
 
 const BASE = (process.env.GOOGLE_WEAPON_BASE || "https://google-weapon.highstakes.tech").replace(/\/+$/, "");
 // Same bearer as LION unless the partner hands out a dedicated one.
@@ -28,7 +29,7 @@ export const googleWeaponConfigured = (): boolean => Boolean(TOKEN);
 /** The Google rail's dormancy switch, read SERVER-side too: the build-time NEXT_PUBLIC flag hides
  *  the tab/page, but the money-creating routes must not be reachable by a crafted authenticated
  *  POST on a deployment where the rail is meant to be off (prod until the owner enables it). */
-export const googleRailEnabled = (): boolean => process.env.NEXT_PUBLIC_GOOGLE_ENABLED === "1";
+export const googleRailEnabled = (): boolean => TEAM.platforms.includes("google") && process.env.NEXT_PUBLIC_GOOGLE_ENABLED === "1";
 
 /** Fetch with auth + one retry on network errors / 5xx. 4xx bodies are surfaced verbatim (they
  *  carry the actionable sentence). `attempts=1` disables the retry — REQUIRED for the two

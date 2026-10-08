@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { DEFAULT_TEAM, TEAM, type TeamConfig } from "./team.ts";
 
 // Server-only. HMAC-signed session cookie (no JWT dependency). Runs in the proxy (Node
 // runtime in Next 16) and route handlers.
@@ -25,6 +26,10 @@ export type Session = {
   username: string;
   email?: string;
   role?: string | null;
+  /** The team whose launcher minted this cookie (lib/team). A cookie is only ever valid on its own
+   *  team's deployment — next to the per-team AUTH_SECRET, so a copied secret alone opens nothing.
+   *  Absent on cookies signed before teams existed: those are the first team's. */
+  team?: string;
   iat?: number; // login time, epoch seconds (absent on tokens signed before 01.10)
   exp: number; // epoch seconds
 };
@@ -39,10 +44,11 @@ function signPayload(payload: Session): string {
   return `${body}.${sign(body)}`;
 }
 
-/** Create a signed, expiring session token. A fresh login stamps `iat` (the login time). */
-export function signSession(data: Omit<Session, "exp">, ttlSec = SESSION_TTL_SEC): string {
+/** Create a signed, expiring session token. A fresh login stamps `iat` (the login time). The team
+ *  is always THIS deployment's — every mint (the login, the queue's run-as-owner cookie) gets it here. */
+export function signSession(data: Omit<Session, "exp">, ttlSec = SESSION_TTL_SEC, team: TeamConfig = TEAM): string {
   const now = nowSec();
-  return signPayload({ ...data, iat: data.iat ?? now, exp: now + ttlSec });
+  return signPayload({ ...data, team: team.id, iat: data.iat ?? now, exp: now + ttlSec });
 }
 
 /** The session cookie's attributes — one source for the login route and the proxy's renewal. */
@@ -62,13 +68,13 @@ export function sessionCookieOptions(maxAgeSec: number) {
  * absolute lifetime from login is spent (then it simply runs out, as before). A token signed
  * before `iat` existed counts its login as exp − TTL (what the old code issued).
  */
-export function renewedSessionToken(s: Session, now = nowSec()): { token: string; maxAge: number } | null {
+export function renewedSessionToken(s: Session, now = nowSec(), team: TeamConfig = TEAM): { token: string; maxAge: number } | null {
   if (s.exp - now > SESSION_TTL_SEC - SESSION_RENEW_AFTER_SEC) return null; // < a day old
   const loginAt = s.iat ?? s.exp - SESSION_TTL_SEC;
   const exp = Math.min(now + SESSION_TTL_SEC, loginAt + SESSION_MAX_LIFETIME_SEC);
   if (exp <= s.exp) return null; // at the lifetime cap — nothing to extend
   const { sub, username, email, role } = s;
-  return { token: signPayload({ sub, username, email, role, iat: loginAt, exp }), maxAge: exp - now };
+  return { token: signPayload({ sub, username, email, role, team: team.id, iat: loginAt, exp }), maxAge: exp - now };
 }
 
 /** Read + verify the session straight from a request's Cookie header. Used by routes that are
@@ -92,8 +98,9 @@ export function sessionFromCookieHeader(cookieHeader: string | null): Session | 
   return null;
 }
 
-/** Verify signature + expiry; returns the session, or null if missing/tampered/expired. */
-export function verifySession(token: string | undefined | null): Session | null {
+/** Verify signature + expiry + team; returns the session, or null if missing/tampered/expired or
+ *  minted for another team's launcher. */
+export function verifySession(token: string | undefined | null, team: TeamConfig = TEAM): Session | null {
   if (!token || !SECRET) return null;
   const dot = token.indexOf(".");
   if (dot < 0) return null;
@@ -104,6 +111,7 @@ export function verifySession(token: string | undefined | null): Session | null 
   try {
     const payload = JSON.parse(unb64u(body)) as Session;
     if (!payload.exp || payload.exp < nowSec()) return null;
+    if ((payload.team ?? DEFAULT_TEAM) !== team.id) return null;
     return payload;
   } catch {
     return null;

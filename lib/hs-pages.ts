@@ -19,6 +19,7 @@
 
 import { gatePages, pageGateRefusal, registryRowStates } from "./hs-page-gate";
 import type { PartnerId } from "./partners";
+import { TEAM } from "./team.ts";
 
 const BASE = (process.env.HS_PAGES_API_URL || "https://hs.gctracking.xyz").replace(/\/+$/, "");
 const KEY = process.env.HS_PAGES_API_KEY ?? "";
@@ -35,7 +36,10 @@ function scopeOf(partner: PartnerId): string {
   return s;
 }
 
-export const hsPagesConfigured = (): boolean => KEY.length > 0;
+// A team whose fanpages the box does not track (lib/team pagesRegistry: false) has no registry at
+// all, whatever the env carries: nothing is read from it, nothing is reported into it — its pages
+// would otherwise land in the first team's ledger — and the gate below has no verdict to give.
+export const hsPagesConfigured = (): boolean => TEAM.pagesRegistry && KEY.length > 0;
 
 export type PageStats = {
   used: number;
@@ -194,6 +198,9 @@ export async function hsPageRefusal(
   partner: PartnerId,
   pages: ReadonlyArray<{ id: string; name?: string }>,
 ): Promise<HsPageRefusal | null> {
+  // No registry for this team's pages → there is no verdict to gate on: every page of the (team-owned)
+  // LION profile may launch. The first team keeps the unconditional rule below.
+  if (!TEAM.pagesRegistry) return null;
   if (!hsPagesConfigured()) {
     return { error: `fanka_status_unavailable — HS_PAGES_API_KEY is not configured; ${GATE_RULE}`, status: 503 };
   }
@@ -220,6 +227,7 @@ export async function hsOfferablePages<T extends { id: string }>(
   partner: PartnerId,
   pages: readonly T[],
 ): Promise<{ pages: T[]; hidden: number; unavailable: string | null }> {
+  if (!TEAM.pagesRegistry) return { pages: [...pages], hidden: 0, unavailable: null };
   if (!hsPagesConfigured()) {
     return { pages: [], hidden: pages.length, unavailable: "HS_PAGES_API_KEY is not configured" };
   }
