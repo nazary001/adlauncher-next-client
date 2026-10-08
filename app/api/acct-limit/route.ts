@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { acctLimitSnapshot } from "@/lib/acct-limit";
-import { queuedDemandByAccount } from "@/lib/launch-queue-store";
+import { queueHealth, queuedDemandByAccount } from "@/lib/launch-queue-store";
+import type { QueueHealth } from "@/lib/launch-queue-types";
 
 export const runtime = "nodejs";
 
@@ -26,10 +27,18 @@ export async function GET(req: Request): Promise<NextResponse> {
     } catch {
       queued = {};
     }
+    // When the queue's every-minute sweep last ran and since when its oldest job has been waiting —
+    // so every open tab can say so when the sweep stops (best effort, like `queued`).
+    let queue: QueueHealth | null = null;
+    try {
+      queue = await queueHealth();
+    } catch {
+      queue = null;
+    }
     return NextResponse.json(
       // `build` = this deployment's build stamp: a client whose inlined stamp differs is a
       // stale tab and must reload before launching (its pre-flight gates are outdated).
-      { ok: true, build: process.env.NEXT_PUBLIC_BUILD_STAMP ?? "", ...snap, queued },
+      { ok: true, build: process.env.NEXT_PUBLIC_BUILD_STAMP ?? "", ...snap, queued, queue },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (e) {

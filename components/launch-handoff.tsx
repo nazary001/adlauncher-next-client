@@ -233,7 +233,7 @@ export function LaunchHandoffHost(): JSX.Element | null {
     <>
       {overlayShown ? <HandoffOverlay items={waveList} onClose={close} openDrawer={openDrawer} /> : null}
       {!overlayShown && (pending > 0 || failed > 0) ? (
-        <HandoffPill items={items} pending={pending} failed={failed} onOpen={reopen} />
+        <HandoffPill items={items} pending={pending} failed={failed} unsure={items.filter((i) => i.phase === "failed" && i.uncertain).length} onOpen={reopen} />
       ) : null}
     </>
   );
@@ -281,6 +281,9 @@ function HandoffOverlay({
   // a spinner over "Handing over…" would read as "still working" while it waits for the buyer.
   const notHanded = items.filter((i) => i.phase === "failed").length;
   const stalled = !anyPending && notHanded > 0;
+  // Failed items the server may in fact hold (no verdict came back) — never worded as "not handed over".
+  const unsure = items.filter((i) => i.phase === "failed" && i.uncertain).length;
+  const allUnsure = notHanded > 0 && unsure === notHanded;
 
   const bytesFraction = aggFraction(snaps);
 
@@ -384,9 +387,13 @@ function HandoffOverlay({
                 {done
                   ? "Handed to the server"
                   : stalled
-                    ? notHanded === 1
-                      ? "1 campaign was not handed over"
-                      : `${notHanded} campaigns were not handed over`
+                    ? allUnsure
+                      ? notHanded === 1
+                        ? "1 campaign is not confirmed"
+                        : `${notHanded} campaigns are not confirmed`
+                      : notHanded === 1
+                        ? "1 campaign was not handed over"
+                        : `${notHanded} campaigns were not handed over`
                     : "Handing over to the server…"}
               </h2>
               <p className="mt-1 font-mono text-[12px] tabular-nums text-dim" aria-live="polite">
@@ -428,7 +435,9 @@ function HandoffOverlay({
               </p>
             ) : (
               <p className="mb-3 text-[12px] font-medium text-danger">
-                Some campaigns were not handed over — retry or dismiss them.
+                {unsure > 0
+                  ? "The server did not confirm — press Retry on each (safe, it cannot double a campaign). Do not launch them again from the board."
+                  : "Some campaigns were not handed over — retry or dismiss them."}
               </p>
             )}
 
@@ -685,11 +694,14 @@ function HandoffPill({
   items,
   pending,
   failed,
+  unsure,
   onOpen,
 }: {
   items: readonly HandoffItem[];
   pending: number;
   failed: number;
+  /** How many of the failed ones got no verdict (the server may hold them). */
+  unsure: number;
   onOpen: () => void;
 }) {
   // A failed item owns the pill (red) until it is retried or dismissed; otherwise show hand-off
@@ -718,7 +730,13 @@ function HandoffPill({
           <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-danger" />
         </span>
         <span className="whitespace-nowrap text-[12.5px] font-semibold text-danger">
-          {failed === 1 ? "1 campaign was NOT handed over" : `${failed} campaigns were NOT handed over`}
+          {unsure === failed
+            ? failed === 1
+              ? "1 campaign is NOT confirmed"
+              : `${failed} campaigns are NOT confirmed`
+            : failed === 1
+              ? "1 campaign was NOT handed over"
+              : `${failed} campaigns were NOT handed over`}
           <span className="font-medium text-dim"> — open</span>
         </span>
       </button>

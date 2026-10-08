@@ -117,6 +117,22 @@ export function laneNameValid(lane: unknown): lane is string {
  * ADL_QUEUE_BUDGET_MS can only SHORTEN it, and only off production — the local bench uses it to
  * prove a lane survives being handed from one invocation to the next without waiting 13 minutes.
  */
+/** This deployment's build stamp for the queue. `inlined` is process.env.NEXT_PUBLIC_BUILD_STAMP as
+ *  the bundler inlined it (an ISO build time — the caller must read it LITERALLY, next.config `env`
+ *  values exist only as build-time replacements). Off production a bench may stand in for "another
+ *  build" with ADL_QUEUE_BUILD — the same seam as ADL_QUEUE_BUDGET_MS; production never reads it. */
+export function queueBuild(inlined: string | undefined, env: Env): string {
+  const override = env.VERCEL_ENV === "production" ? "" : String(env.ADL_QUEUE_BUILD ?? "").trim();
+  return override || String(inlined ?? "").trim();
+}
+
+/** May THIS deployment announce itself as the current build? Only the production deployment (the
+ *  one Vercel Cron sweeps) — or a process that is not on Vercel at all (the local bench). A preview
+ *  sharing the database must never make production pumps step aside. */
+export function mayAnnounceBuild(env: Env): boolean {
+  return env.VERCEL_ENV === "production" || !env.VERCEL;
+}
+
 export function pumpBudgetMs(env: Env, fallback: number): number {
   if (env.VERCEL_ENV === "production") return fallback;
   const raw = Number(env.ADL_QUEUE_BUDGET_MS);

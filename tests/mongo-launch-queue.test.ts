@@ -348,6 +348,29 @@ test("queuedDemandByAccount: counts QUEUED jobs per known account, ignores null-
   assert.equal(demand[acctB], 1);
 });
 
+test("jobs carry their document version and the build that queued them (a job queued without them is version 1)", live, async () => {
+  const L = lane("ver");
+  await S.insertJob(newJob({ job_id: jid("v1"), lane: L, seq: 1 }));
+  await S.insertJob(newJob({ job_id: jid("v2"), lane: L, seq: 2, v: 2, build: "2026-10-09T00:00:00.000Z" }));
+  const a = await S.claimNextJob(L, "A", Date.now());
+  assert.deepEqual([a?.job_id, a?.v, a?.build], [jid("v1"), 1, null]);
+  const b = await S.claimNextJob(L, "A", Date.now());
+  assert.deepEqual([b?.job_id, b?.v, b?.build], [jid("v2"), 2, "2026-10-09T00:00:00.000Z"]);
+});
+
+test("beacon + queue health: the last announced build (one document), and since when the oldest job waits", live, async () => {
+  const t0 = Date.now();
+  await S.writeBeacon("build-" + RUN + "-a", t0 - 5_000);
+  await S.writeBeacon("build-" + RUN + "-b", t0); // the second write replaces the first
+  assert.deepEqual(await S.readBeacon(), { build: "build-" + RUN + "-b", at: t0 });
+  const L = lane("health");
+  await S.insertJob(newJob({ job_id: jid("h1"), lane: L, seq: 1, queued_at: t0 - 60_000 }));
+  const h = await S.queueHealth();
+  assert.equal(h.sweptAt, t0);
+  assert.ok(h.oldestQueuedAt !== null && h.oldestQueuedAt <= t0 - 60_000, "this run's job, or an older leftover of the test database");
+  assert.deepEqual(await S.lanesNeedingPump(Date.now()).then((ls) => ls.includes("@beacon")), false, "the beacon is never mistaken for a lane");
+});
+
 after(async () => {
   if (HAVE_DB) await wipeAll();
   await closeDb();

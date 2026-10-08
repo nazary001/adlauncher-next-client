@@ -277,6 +277,24 @@ export async function upsertTaskRow(
   }
 }
 
+/**
+ * Write `fields` ONLY over a row that is still open (queued / running) — ONE atomic conditional
+ * update. The launch queue uses it for verdicts it is not sure of ("interrupted", an unknown
+ * outcome): such a write must never bury a terminal state the handler itself wrote a moment ago,
+ * and it must not depend on a prior read (a store blip on that read used to leave the row
+ * "running" for good — review find 08.10). True = written; false = the row is already terminal,
+ * or absent. Throws on a store failure, so the caller can try again.
+ */
+export async function patchOpenTaskRow(taskId: string, fields: TaskRowData): Promise<boolean> {
+  const data: TaskRowData = typeTaskFields(pickTaskFields({ ...fields }));
+  const c = await coll(LAUNCH_TASKS);
+  const r = await bounded(
+    c.updateOne({ task_id: taskId, status: { $in: ["queued", "running"] } }, { $set: { ...data, updatedAt: new Date() } }),
+    "launch-task open patch",
+  );
+  return r.matchedCount > 0;
+}
+
 /** Delete one row by its documentId (the routes' owner-checked DELETE). True when a row went away;
  *  throws on a store failure (the route answers 502). */
 export async function deleteTaskRow(documentId: string): Promise<boolean> {

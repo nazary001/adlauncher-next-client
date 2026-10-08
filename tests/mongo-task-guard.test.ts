@@ -65,3 +65,26 @@ test("live: a client write never buries a server-owned row, and can never stamp 
     await wipe("launch_tasks", { task_id: { $in: [idA, idB] } });
   }
 });
+
+test("live: patchOpenTaskRow writes only over a row that is still open — one atomic step, never over a verdict", live, async () => {
+  const ts = await import("../lib/task-store.ts");
+  const c = await col("launch_tasks");
+  const open = `open-${RUN}`;
+  const closed = `closed-${RUN}`;
+  await wipe("launch_tasks", { task_id: { $in: [open, closed] } });
+  try {
+    await ts.upsertTaskRow("nazar", open, { status: "running", stage: "submit", srv: 1, retry: 0, partner: "br" });
+    await ts.upsertTaskRow("nazar", closed, { status: "done", stage: "ad", srv: 1, retry: 0, partner: "br", campaign_id: "123" });
+    const interrupted = { srv: 1, retry: 0, partner: "br", status: "interrupted", error: "Interrupted on the server mid-run", finished_at: 5 };
+    assert.equal(await ts.patchOpenTaskRow(open, interrupted), true);
+    assert.equal(await ts.patchOpenTaskRow(closed, interrupted), false, "a finished row is not touched");
+    assert.equal(await ts.patchOpenTaskRow(`missing-${RUN}`, interrupted), false, "an absent row is not created");
+    const a = await c.findOne({ task_id: open });
+    assert.deepEqual([a?.status, a?.error, a?.srv], ["interrupted", "Interrupted on the server mid-run", 1]);
+    const b = await c.findOne({ task_id: closed });
+    assert.deepEqual([b?.status, b?.campaign_id, b?.error ?? null], ["done", "123", null]);
+    assert.equal(await ts.patchOpenTaskRow(open, { status: "error" }), false, "second time: it is closed now");
+  } finally {
+    await wipe("launch_tasks", { task_id: { $in: [open, closed] } });
+  }
+});

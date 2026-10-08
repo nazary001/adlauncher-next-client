@@ -97,14 +97,21 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
   }));
   const pixelOptionsFor = (t: GwCustomer | null): RichOption[] => (t?.pixels ?? []).map((p) => ({ value: p, label: p }));
 
+  // Any edit makes a queued / failed card a fresh draft again (and drops the preview) — the same rule
+  // the TikTok board keeps. Without it a card that was already launched stayed "ready", so adding
+  // one more card and pressing Launch built every earlier campaign a SECOND time (review find 08.10).
   const patch = (id: string, p: Partial<LaunchCard>) => {
-    setCards((cs) => cs.map((c) => (c.id === id ? { ...c, ...p } : c)));
+    setCards((cs) => cs.map((c) => (c.id === id ? { ...c, ...p, state: "idle", msg: undefined, progress: undefined } : c)));
     setPreviewed(false);
   };
   // A per-ad-group edit merges at the board level (never through a stale card closure) so an async
   // logo-dims read or a fast second keystroke can't clobber a concurrent edit on the same card.
   const patchAdGroup = (cardId: string, agId: string, p: Partial<AdGroup>) => {
-    setCards((cs) => cs.map((c) => (c.id === cardId ? { ...c, adGroups: c.adGroups.map((a) => (a.id === agId ? { ...a, ...p } : a)) } : c)));
+    setCards((cs) =>
+      cs.map((c) =>
+        c.id === cardId ? { ...c, adGroups: c.adGroups.map((a) => (a.id === agId ? { ...a, ...p } : a)), state: "idle", msg: undefined, progress: undefined } : c,
+      ),
+    );
     setPreviewed(false);
   };
   // A launch-lifecycle patch (upload progress / result) must NOT reset the preview.
@@ -137,7 +144,9 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
   // ---- bulk ad groups: replace or append a card's ad-group list --------------------------------
   const applyBulk = (groups: AdGroup[], replace: boolean) => {
     if (!bulkCardId || groups.length === 0) return;
-    setCards((cs) => cs.map((c) => (c.id === bulkCardId ? { ...c, adGroups: replace ? groups : [...c.adGroups, ...groups] } : c)));
+    setCards((cs) =>
+      cs.map((c) => (c.id === bulkCardId ? { ...c, adGroups: replace ? groups : [...c.adGroups, ...groups], state: "idle", msg: undefined, progress: undefined } : c)),
+    );
     setBulkCardId(null);
     setPreviewed(false);
   };
@@ -150,7 +159,9 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
     const pixelNeeded = Boolean(target && target.pixels.length > 1 && !effPixel);
     const noPixel = Boolean(target && target.pixels.length === 0);
     const refusal = launchCardRefusal(card);
-    const ready = Boolean(card.customer && target && !pixelNeeded && !refusal);
+    // A card that is already with the server is not launchable again until it is edited.
+    const queued = card.state === "ok";
+    const ready = Boolean(card.customer && target && !pixelNeeded && !refusal) && !queued;
     const why = !card.customer
       ? "pick a customer"
       : !target
@@ -159,7 +170,9 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
           ? "pick a conversion pixel"
           : refusal
             ? refusal
-            : "";
+            : queued
+              ? "already queued — edit the card to launch it again"
+              : "";
     return { card, target, currency, effPixel, pixelNeeded, noPixel, refusal, ready, why, pixelOptions: pixelOptionsFor(target) };
   });
 
@@ -196,8 +209,9 @@ export function GoogleLaunchBoard({ user }: { user?: SessionUser }) {
     const ready = view.filter((v) => v.ready); // snapshot — the loop mutates card state below
     const sig = JSON.stringify(ready.map((v) => launchCardSignature(v.card)));
     if (!waveRef.current || waveRef.current.sig !== sig) waveRef.current = { sig, id: crypto.randomUUID() };
-    const waveId = waveRef.current.id;
-    const hid = (id: string) => `${waveId}:${id}`;
+    // One hand-off item per CARD, not per wave: a card that failed in one wave and is launched again
+    // resets its own item instead of leaving a stale "NOT handed over" behind (review find 08.10).
+    const hid = (id: string) => `gg:${id}`;
 
     // Register every campaign of this Launch click on the hand-off screen (it owns the leave-page
     // guard now). Its sources are the card's local files that still need uploading — the Dropzone

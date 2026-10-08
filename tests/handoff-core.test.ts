@@ -159,3 +159,24 @@ test("reduceDropAcceptedOutside: accepted items no overlay is showing are droppe
   // nothing to drop → the very same state (no spurious re-render)
   assert.equal(reduceDropAcceptedOutside(hidden, null), hidden);
 });
+
+test("uncertain: a failed hand-off with no verdict is marked, and the mark dies with the failure", () => {
+  let s = reduceBegin(initialHandoffState, [init("a"), init("b")], 1000);
+  s = reducePatch(s, "a", { phase: "failed", error: "could not confirm", uncertain: true });
+  s = reducePatch(s, "b", { phase: "failed", error: "refused", uncertain: false });
+  assert.equal(s.items[0].uncertain, true);
+  assert.equal(s.items[1].uncertain, undefined, "a definite refusal is never 'uncertain'");
+  // the server's row turned up → accepted: the mark goes
+  s = reducePatch(s, "a", { phase: "accepted", error: null, retry: null });
+  assert.equal(s.items[0].phase, "accepted");
+  assert.equal(s.items[0].uncertain, undefined);
+  // a retry (re-begin) of an uncertain item starts clean
+  let t = reduceBegin(initialHandoffState, [init("c")], 1000);
+  t = reducePatch(t, "c", { phase: "failed", error: "x", uncertain: true });
+  t = reduceBegin(t, [init("c")], 5000);
+  assert.deepEqual([t.items[0].phase, t.items[0].uncertain, t.items[0].error], ["uploading", undefined, undefined]);
+  // the mark cannot be put on an item that is not failed
+  let u = reduceBegin(initialHandoffState, [init("d")], 1000);
+  u = reducePatch(u, "d", { uncertain: true });
+  assert.equal(u.items[0].uncertain, undefined);
+});

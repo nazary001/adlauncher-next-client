@@ -18,6 +18,7 @@ import {
   JOB_TTL_MS,
   LANE_LEASE_MS,
   REAP_GRACE_MS,
+  type BuildBeacon,
   type JobResult,
   type QueueJob,
   type QueueScope,
@@ -32,7 +33,8 @@ const REAP_MAX = 50;
 
 /** What a new job needs; the store adds status "queued", attempts 0, the leases, timestamps, the
  *  Strapi-style envelope (lib/store.ts insertFresh) and `expire_at` (JOB_TTL_MS, TTL index). */
-export type NewJob = Pick<QueueJob, "job_id" | "owner" | "role" | "sub" | "scope" | "kind" | "lane" | "partner" | "account" | "body" | "row" | "seq" | "queued_at">;
+export type NewJob = Pick<QueueJob, "job_id" | "owner" | "role" | "sub" | "scope" | "kind" | "lane" | "partner" | "account" | "body" | "row" | "seq" | "queued_at"> &
+  Partial<Pick<QueueJob, "v" | "build">>;
 
 // The two UNIQUE indexes the queue's safety RESTS on: without `job_id` unique a hand-off POSTed twice
 // at the same instant inserts the job twice (→ a campaign launched twice); without `lane` unique two
@@ -85,6 +87,9 @@ function toJob(doc: Document): QueueJob {
     runner: doc.runner == null ? null : String(doc.runner),
     error: doc.error == null ? null : String(doc.error),
     result: (doc.result ?? null) as JobResult | null,
+    // Documents written before versions existed carry no `v` — they are version 1.
+    v: Number(doc.v) > 0 ? Number(doc.v) : 1,
+    build: doc.build == null ? null : String(doc.build),
   };
 }
 
@@ -129,6 +134,8 @@ export async function insertJob(job: NewJob): Promise<"inserted" | "duplicate"> 
       runner: null,
       error: null,
       result: null,
+      v: Number(job.v) > 0 ? Number(job.v) : 1,
+      build: job.build ?? null,
       // TTL: documents age out JOB_TTL_MS after they were queued (index on expire_at).
       expire_at: new Date(job.queued_at + JOB_TTL_MS),
     });
@@ -446,4 +453,43 @@ export async function queuedDemandByAccount(): Promise<Record<string, number>> {
     out[String(r._id)] = Number(r.n) || 0;
   }
   return out;
+}
+
+// ---- the "current build" beacon + the health of the sweep ----
+//
+// One reserved document in `launch_lanes` (its UNIQUE `lane` index makes it one document for
+// certain; "@beacon" can never be a real lane — those are "<scope>:<user>"). The production sweep
+// writes its build stamp every minute; pumps read it to learn that a newer build has taken over
+// (launch-queue-types isSuperseded), and the launch-limit poll reads its age to tell the buyers
+// when the sweep has stopped.
+
+const BEACON_LANE = "@beacon";
+
+/** Record `build` as the build being swept right now. */
+export async function writeBeacon(build: string, now: number): Promise<void> {
+  await ensureQueueIndexes();
+  const c = await coll(LAUNCH_LANES);
+  await bounded(
+    c.updateOne({ lane: BEACON_LANE }, { $set: { build, at: now, updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } }, { upsert: true }),
+    "launch-queue beacon write",
+  );
+}
+
+/** The last build a sweep announced, or null (never swept). Throws on a store failure. */
+export async function readBeacon(): Promise<BuildBeacon | null> {
+  const c = await coll(LAUNCH_LANES);
+  const doc = await bounded(c.findOne({ lane: BEACON_LANE }, { projection: { _id: 0, build: 1, at: 1 }, maxTimeMS: STORE_TIMEOUT_MS }), "launch-queue beacon read");
+  if (!doc || typeof doc.build !== "string" || !doc.build) return null;
+  return { build: doc.build, at: Number(doc.at) || 0 };
+}
+
+/** What the buyers' tabs need to notice a queue nobody is sweeping: when the sweep last ran, and
+ *  since when the oldest job has been waiting. */
+export async function queueHealth(): Promise<{ sweptAt: number | null; oldestQueuedAt: number | null }> {
+  const jobs = await coll(LAUNCH_JOBS);
+  const [beacon, oldest] = await Promise.all([
+    readBeacon(),
+    bounded(jobs.find({ status: "queued" }, { projection: { _id: 0, queued_at: 1 }, sort: { queued_at: 1 }, limit: 1, maxTimeMS: STORE_TIMEOUT_MS }).toArray(), "launch-jobs oldest queued"),
+  ]);
+  return { sweptAt: beacon ? beacon.at : null, oldestQueuedAt: oldest.length ? Number(oldest[0].queued_at) || null : null };
 }

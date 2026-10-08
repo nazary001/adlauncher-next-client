@@ -127,8 +127,12 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
   const profileOptions: RichOption[] = (catalog?.profiles ?? []).map((p) => ({ value: p.id, label: p.displayName || p.id, subLabel: p.id }));
   const pixelOptionsFor = (a: SnapCatalogAccount | null): RichOption[] => (a?.pixels ?? []).map((p) => ({ value: p.id, label: p.name || p.id, subLabel: p.id }));
 
+  // Any edit makes a queued / failed card a fresh draft again (and drops the preview) — the same rule
+  // the TikTok board keeps. Without it a card that was already launched stayed "ready", so adding
+  // one more card and pressing Launch built every earlier campaign a SECOND time, on fresh partner
+  // keys (review find 08.10).
   const patch = (id: string, p: Partial<SnapCard>) => {
-    setCards((cs) => cs.map((c) => (c.id === id ? { ...c, ...p } : c)));
+    setCards((cs) => cs.map((c) => (c.id === id ? { ...c, ...p, state: "idle", msg: undefined, progress: undefined } : c)));
     setPreviewed(false);
   };
   const setCardState = (id: string, p: Partial<SnapCard>) => setCards((cs) => cs.map((c) => (c.id === id ? { ...c, ...p } : c)));
@@ -167,10 +171,12 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
     const profileId = card.profileId || defaults?.profile || "";
     const refusal = snapCardRefusal(card, { pixelId: effPixel || undefined, profileId });
     const copies = snapCardCopies(card);
-    const ready = Boolean(card.adAccount && account && !pixelNeeded && !noPixel && !refusal);
+    // A card that is already with the server is not launchable again until it is edited.
+    const queued = card.state === "ok";
+    const ready = Boolean(card.adAccount && account && !pixelNeeded && !noPixel && !refusal) && !queued;
     const cardKeys = ready ? freeKeys.slice(keyCursor, keyCursor + copies) : [];
     if (ready) keyCursor += copies;
-    const why = !card.adAccount ? "pick an ad account" : !account ? "account not in our list" : noPixel ? "no pixel on this account — choose Landing page view" : pixelNeeded ? "pick a Snap Pixel" : refusal ? refusal : "";
+    const why = !card.adAccount ? "pick an ad account" : !account ? "account not in our list" : noPixel ? "no pixel on this account — choose Landing page view" : pixelNeeded ? "pick a Snap Pixel" : refusal ? refusal : queued ? "already queued — edit the card to launch it again" : "";
     view.push({ card, account, currency, effPixel, pixelNeeded, noPixel, profileId, refusal, ready, why, copies, keys: cardKeys, pixelOptions: pixelOptionsFor(account) });
   }
 
@@ -214,7 +220,9 @@ export function SnapLaunchBoard({ user }: { user?: SessionUser }) {
     const sig = JSON.stringify(ready.map((v) => snapCardSignature(v.card)));
     if (!waveRef.current || waveRef.current.sig !== sig) waveRef.current = { sig, id: crypto.randomUUID() };
     const waveId = waveRef.current.id;
-    const hid = (id: string) => `${waveId}:${id}`;
+    // One hand-off item per CARD, not per wave: a card that failed in one wave and is launched again
+    // resets its own item instead of leaving a stale "NOT handed over" behind (review find 08.10).
+    const hid = (id: string) => `sn:${id}`;
     // Register every campaign of this Launch click on the hand-off screen (it owns the leave-page
     // guard now); one item per card, though a card fans into `copies` campaigns.
     handoffBegin(

@@ -28,6 +28,9 @@ export type LaunchTask = {
   result?: { campaignId?: string; adsetId?: string; adId?: string; gcm?: string; link?: string };
   error?: string;
   queuedAt: number;
+  /** Client-only: when the drawer added this row OPTIMISTICALLY (the server had just accepted the
+   *  hand-off). Its short lifetime counts from here — never stored, never sent. */
+  optimisticAt?: number;
   startedAt?: number;
   finishedAt?: number;
   /** Server-side updatedAt (ms) of the Strapi row — the liveness signal behind `stale`. */

@@ -40,6 +40,9 @@ export type HandoffItem = {
   addedAt: number;
   /** Present on a failed item that can be re-sent as is. */
   retry?: () => void;
+  /** A failed item whose hand-off got NO verdict — the server may in fact have it. The screen then
+   *  says "not confirmed" (never "not handed over"): Retry is safe, a fresh launch of the card is not. */
+  uncertain?: boolean;
 };
 
 export type HandoffInit = {
@@ -58,6 +61,7 @@ export type HandoffPatch = {
   error?: string | null;
   retry?: (() => void) | null;
   label?: string;
+  uncertain?: boolean | null;
 };
 
 /** Begins within this window of the previous begin join the SAME wave — the boards enqueue a wave
@@ -130,6 +134,9 @@ export function reducePatch(state: HandoffState, id: string, patch: HandoffPatch
   if (patch.label !== undefined) next.label = patch.label;
   if (patch.error !== undefined) next.error = patch.error === null ? undefined : patch.error;
   if (patch.retry !== undefined) next.retry = patch.retry === null ? undefined : patch.retry;
+  if (patch.uncertain !== undefined) next.uncertain = patch.uncertain === true ? true : undefined;
+  // "Not confirmed" is a property of a FAILED hand-off only — any other phase clears it.
+  if (next.phase !== "failed") next.uncertain = undefined;
 
   const items = state.items.slice();
   items[at] = next;

@@ -27,8 +27,8 @@ import {
   useState,
 } from "react";
 import { ensureCreativeUploaded } from "./creative-uploads";
-import { handoffBegin, handoffPatch, useHandoffPending } from "./launch-handoff";
-import { cancelQueued, retryQueued, sendToQueue } from "./launch-queue-client";
+import { handoffBegin, handoffPatch, useHandoffItems, useHandoffPending } from "./launch-handoff";
+import { cancelQueued, isHandoffUnconfirmed, retryQueued, sendToQueue } from "./launch-queue-client";
 import { UploadingNotice } from "./upload-guard";
 import { type Campaign, type FileItem, bidTag, moneyLabel } from "@/lib/types";
 import { CANCELED_STAGE, type QueueKind } from "@/lib/launch-queue-types";
@@ -887,6 +887,21 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
     }
   }, [open, poll]);
 
+  // A hand-off this tab marked FAILED whose row the server nevertheless holds: the reply was lost on
+  // the way back, not the campaign. The server has it — clear the alarm (same rule as the MO / AIF /
+  // AV manager), or the buyer is left looking at "not confirmed" for a launch that is in fact running.
+  // An optimistic row never counts: only a row the poll brought from the server proves anything.
+  const handoffItems = useHandoffItems();
+  useEffect(() => {
+    for (const it of handoffItems) {
+      if (it.scope !== "hs" || it.phase !== "failed") continue;
+      const row = tasks.find((t) => t.id === it.id);
+      if (row?.srv && !row.optimisticAt && !(row.status === "error" && /^Not accepted by the queue/.test(row.error ?? ""))) {
+        handoffPatch(it.id, { phase: "accepted", error: null, retry: null });
+      }
+    }
+  }, [handoffItems, tasks]);
+
   // ---- actions ----
 
   // Launch no longer runs here (owner ask 08.10): it HANDS the wave over. Register the campaign on
@@ -1008,14 +1023,22 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
       const attempt = () => {
         run().catch((e) => {
           const error = e instanceof Error ? e.message : String(e);
+          // No verdict came back (the reply was lost): the server may hold the job — say "not
+          // confirmed", and look for its row now and once the short list cache has turned over.
+          const unsure = isHandoffUnconfirmed(e);
           handoffPatch(id, {
             phase: "failed",
             error,
+            uncertain: unsure,
             retry: () => {
               handoffPatch(id, { phase: "uploading", error: null, retry: null });
               attempt();
             },
           });
+          if (unsure) {
+            loadRemote();
+            window.setTimeout(loadRemote, 6_000);
+          }
         });
       };
       attempt();

@@ -88,13 +88,64 @@ export type QueueJob = {
   runner: string | null;
   error: string | null;
   result: JobResult | null;
+  /** Shape version of this document (JOB_SCHEMA_VERSION of the build that queued it). Absent on
+   *  documents written before versions existed = 1. A pump never runs a job newer than it knows. */
+  v?: number;
+  /** Build stamp of the deployment that accepted the hand-off (diagnostics only). */
+  build?: string | null;
 };
+
+// ---- updates: jobs outlive the build that queued them ----
+//
+// A job handed over under one deployment is routinely RUN by another: the owner ships an update
+// while a 40-campaign wave is still queued, or rolls one back. So:
+//   • a job's `body` is the handler's request body — handlers must keep accepting the bodies the
+//     previous builds produced (tests/queue-wire-golden.test.ts pins today's shapes: add a fixture
+//     for a new shape, never edit an old one);
+//   • a change that old code could MISREAD bumps JOB_SCHEMA_VERSION: a pump on an older build then
+//     refuses such a job (hands the lane to the current build) instead of running it wrong;
+//   • a pump whose build is no longer the newest one live finishes its job and hands its lane over
+//     (isSuperseded) — after an update the new code takes every lane within one job.
+
+/** Bump ONLY for a change in job documents that an older build could run wrongly. */
+export const JOB_SCHEMA_VERSION = 1;
+
+/** Why THIS build must not run the job: it was queued in a newer document shape, or its kind is not
+ *  one this build has a handler for (a kind added by a later build, then a rollback). Null = fine. */
+export function unsupportedReason(job: Pick<QueueJob, "kind" | "v">): "version" | "kind" | null {
+  if (Number(job.v ?? 1) > JOB_SCHEMA_VERSION) return "version";
+  if (!(QUEUE_KINDS as readonly string[]).includes(String(job.kind))) return "kind";
+  return null;
+}
+
+/** The "current build" beacon: the every-minute sweep of the PRODUCTION deployment writes its build
+ *  stamp; pumps read it. Build stamps are ISO build times (next.config NEXT_PUBLIC_BUILD_STAMP), so
+ *  "newer" is a plain string comparison. */
+export type BuildBeacon = { build: string; at: number };
+/** A beacon older than this proves nothing (the sweep is not running) — nobody yields on it. */
+export const BEACON_FRESH_MS = 3 * 60_000;
+
+/** True when a NEWER build than `mine` is the one being swept right now — this pump belongs to a
+ *  deployment that has been replaced and should hand its lane over. Never true toward an OLDER
+ *  build (a rollback, or the first minute of a new deployment before its own first sweep): yielding
+ *  "down" would bounce the lane between two builds. */
+export function isSuperseded(beacon: BuildBeacon | null, mine: string, now: number): boolean {
+  if (!beacon || !mine || !beacon.build) return false;
+  if (now - beacon.at > BEACON_FRESH_MS) return false;
+  return beacon.build > mine;
+}
 
 // ---- timing ----
 
-/** Lane lock lease / job lease: both are extended every HEARTBEAT_MS by the pump that holds them. */
-export const LANE_LEASE_MS = 120_000;
+/** Lane lock lease / job lease: both are extended every HEARTBEAT_MS by the pump that holds them.
+ *  The LANE lease must outlive a job's lease plus the reap grace (review find 08.10): a lane that
+ *  became free while its job was still validly "running" — the lane heartbeats failing for two
+ *  minutes while the job's own lease held — let a second pump start the NEXT job beside it, two
+ *  launches of one buyer at once (the pacing is the defence against profile blocks). With this order
+ *  a lane can only be taken over after its last job is already dead and reaped. The cost: after a
+ *  pump really dies, its lane resumes ~4.5 min later instead of 2. */
 export const JOB_LEASE_MS = 180_000;
+export const LANE_LEASE_MS = 260_000;
 export const HEARTBEAT_MS = 30_000;
 /** A pump invocation's own budget (the routes that host it export maxDuration = 800). */
 export const PUMP_BUDGET_MS = 770_000;
@@ -113,10 +164,16 @@ export const QUEUE_MAX_JOBS_PER_REQUEST = 40;
 export const QUEUE_MAX_BODY_BYTES = 200_000;
 
 /** The longest one run of this kind can take before its handler gives up on its own (the routes'
- *  internal deadlines: FB budget 240 s + bounded pause, TOOL 265–270 s, LION submit ≤ 60 s). The
- *  pump starts a job only while this much (+ margin) is left of its invocation. */
+ *  internal deadlines: FB budget 240 s + bounded pause, TOOL 265–270 s). The pump starts a job only
+ *  while this much (+ margin) is left of its invocation.
+ *  hs.lion used to be budgeted at 75 s ("the submit is ≤ 60 s") — but the route runs IN-PROCESS here,
+ *  without its own 60 s function limit, and before the submit it reads LION's catalog: profile data
+ *  and pixels, each up to 2 × 60 s when the 10-minute cache is cold. A job started 95 s before the
+ *  deadline could be cut by the platform during those reads and end as a non-retryable "interrupted"
+ *  although nothing had been sent (review find 08.10). Every kind now reserves the full window. */
 export function worstCaseMs(kind: QueueKind): number {
-  return kind === "hs.lion" ? 75_000 : 310_000;
+  void kind;
+  return 310_000;
 }
 
 export const laneOf = (scope: QueueScope, owner: string): string => `${scope}:${owner}`;
@@ -279,6 +336,44 @@ export const INTERRUPTED_MSG =
 /** A run that died with its function (lease ran out). Written only over a row that is still open. */
 export function reapedRow(job: Pick<QueueJob, "kind" | "partner">, now: number): RowPatch {
   return { ...SRV, retry: 0, partner: job.partner, status: isHs(job.kind) ? "interrupted" : "error", error: INTERRUPTED_MSG, finished_at: now };
+}
+
+/** What the launch-limit poll tells every tab about the queue's sweep. */
+export type QueueHealth = { sweptAt: number | null; oldestQueuedAt: number | null };
+/** Jobs waiting this long while the sweep has been silent this long = worth telling the buyers. */
+export const SWEEP_LATE_MS = 3 * 60_000;
+
+/**
+ * How late the every-minute sweep is, in whole minutes — or null when there is nothing to say: no
+ * job is waiting, the oldest one only just arrived, or the sweep ran recently. A job that is waiting
+ * behind a busy lane does not need the sweep, but a sweep that has stopped is the one failure that
+ * leaves a stranded lane waiting forever with nobody told — so it is said out loud.
+ */
+export function sweepLateMinutes(h: QueueHealth | null | undefined, now: number): number | null {
+  if (!h || h.oldestQueuedAt == null) return null;
+  if (now - h.oldestQueuedAt < SWEEP_LATE_MS) return null;
+  const since = h.sweptAt == null ? h.oldestQueuedAt : h.sweptAt;
+  const late = now - since;
+  return late >= SWEEP_LATE_MS ? Math.floor(late / 60_000) : null;
+}
+
+/** The verdict of a job the CURRENT build cannot run at all (unsupportedReason) — nothing was sent
+ *  anywhere, so it is a clean, retryable refusal: the buyer presses Retry once the right version is
+ *  live again. (A build that has been replaced never settles such a job — it hands the lane over.) */
+export function unsupportedOutcome(job: Pick<QueueJob, "partner">, why: "version" | "kind", now: number): JobOutcome {
+  const error =
+    why === "version"
+      ? "Queued by a newer version of Ad Launcher than the one running now — nothing was sent; press Retry after the update is back"
+      : "This kind of launch is not supported by the version running now — nothing was sent; press Retry after the update is back";
+  return {
+    status: "error",
+    retryable: true,
+    error,
+    result: null,
+    ambiguous: false,
+    openRow: null,
+    row: { ...SRV, retry: 1, partner: job.partner, status: "error", stage: "queued", error, finished_at: now },
+  };
 }
 
 // ---- the verdict of one run ----

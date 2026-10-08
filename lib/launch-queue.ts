@@ -10,13 +10,25 @@
 // still fits what is left of the invocation — when it does not, it hands the lane to a fresh
 // invocation instead of starting something a platform kill would cut in half.
 
-import { HEARTBEAT_MS, INTERRUPTED_MSG, JOB_GAP_MAX_MS, JOB_GAP_MIN_MS, PUMP_MARGIN_MS, worstCaseMs, type JobOutcome, type QueueJob } from "./launch-queue-types.ts";
+import {
+  HEARTBEAT_MS,
+  INTERRUPTED_MSG,
+  JOB_GAP_MAX_MS,
+  JOB_GAP_MIN_MS,
+  PUMP_MARGIN_MS,
+  unsupportedOutcome,
+  unsupportedReason,
+  worstCaseMs,
+  type JobOutcome,
+  type QueueJob,
+} from "./launch-queue-types.ts";
 
 /**
  *  busy     — another pump holds the lane; nothing was done here.
  *  drained  — the lane is empty and released.
- *  handoff  — jobs remain but the next one does not fit this invocation; the lane was released
- *             and a fresh invocation was asked for.
+ *  handoff  — jobs remain but this pump must not take the next one (it does not fit this invocation,
+ *             or a newer build is live and takes the lane over); the lane was released and — where
+ *             that cannot loop — a fresh invocation was asked for.
  *  lost     — the lane lease lapsed under us (or the store failed mid-loop): stop without touching
  *             the lane; whoever holds it now — or the sweeper — carries on.
  */
@@ -53,6 +65,11 @@ export type LaneDeps = {
   prewarm: (job: QueueJob) => void;
   /** Ask for a fresh invocation to continue this lane. */
   kick: () => Promise<void>;
+  /** This pump's build stamp (ISO build time; "" when unknown — then nothing is ever "newer"). */
+  build?: string;
+  /** True when a NEWER build than this pump's is the one being swept now (the owner shipped an
+   *  update): the pump finishes nothing more and hands its lane to that build. A throw = false. */
+  superseded?: () => Promise<boolean>;
   sleep: (ms: number) => Promise<void>;
   /** Run `fn` every `ms` until the returned stop() is called. */
   every: (ms: number, fn: () => void) => () => void;
@@ -62,6 +79,11 @@ export type LaneDeps = {
 
 /** How many upcoming jobs get a head start while one runs. */
 export const PREWARM_AHEAD = 2;
+
+/** A job this build cannot run that a NEWER build queued is left for that build for this long
+ *  (the first minutes after an update, while old pumps are still alive); past it nobody newer is
+ *  coming for it — a rollback — and the current build refuses it cleanly instead. */
+export const NEWER_BUILD_WAIT_MS = 5 * 60_000;
 
 /** The verdict of a run whose runner broke its contract and threw: unknown outcome, never retried. */
 export function crashedOutcome(job: Pick<QueueJob, "kind" | "partner">, error: unknown, now: number): JobOutcome {
@@ -82,7 +104,16 @@ export async function runLane(deps: LaneDeps): Promise<LaneExit> {
   if (!(await deps.acquireLane())) return "busy";
   let exit: LaneExit = "drained";
   let kickOnHandoff = true;
+  // Handing over to a newer build: only worth a fresh invocation when something is still queued.
+  let kickOnlyIfQueued = false;
   let ran = 0;
+  const superseded = async (): Promise<boolean> => {
+    try {
+      return (await deps.superseded?.()) === true;
+    } catch {
+      return false;
+    }
+  };
   try {
     for (;;) {
       // The breather sits BETWEEN jobs — never before the first, so a fresh wave starts at once.
@@ -93,8 +124,37 @@ export async function runLane(deps: LaneDeps): Promise<LaneExit> {
         exit = "lost";
         break;
       }
+      // An update went live while this pump was working: whatever it ran is settled, and the rest
+      // of the lane belongs to the new build — release, and let that build's pump take it.
+      if (await superseded()) {
+        deps.log?.("a newer build is live — handing the lane over");
+        exit = "handoff";
+        kickOnlyIfQueued = true;
+        break;
+      }
       const job = await deps.claim();
       if (!job) break;
+      // A job this build must not run (queued in a newer document shape, or of a kind it has no
+      // handler for). Nothing is sent for it here, ever.
+      const unsupported = unsupportedReason(job);
+      if (unsupported) {
+        const queuedByNewer = Boolean(deps.build && job.build && job.build > deps.build);
+        if (queuedByNewer && deps.now() - job.queued_at < NEWER_BUILD_WAIT_MS) {
+          // A newer build queued it — that build runs it. Give it back and step aside WITHOUT a
+          // kick: the kick would come straight back here while this build still answers the
+          // production address (the first minute of an update, or a rollback); the sweep of
+          // whichever build is current restarts the lane.
+          await deps.unclaim(job).catch((e) => deps.log?.(`unclaim ${job.job_id} failed: ${String(e)}`));
+          deps.log?.(`job ${job.job_id} needs a newer build (${unsupported}) — left for it`);
+          exit = "handoff";
+          kickOnHandoff = false;
+          break;
+        }
+        // Nobody newer is coming for it: refuse it cleanly (retryable — nothing was sent) and carry on.
+        deps.log?.(`job ${job.job_id} cannot run on this build (${unsupported}) — refused`);
+        await deps.settle(job, unsupportedOutcome(job, unsupported, deps.now())).catch((e) => deps.log?.(`settle ${job.job_id} failed: ${String(e)}`));
+        continue;
+      }
       // Does its worst case still fit this invocation? A job the platform kills mid-run skips every
       // error path (claims never released, campaign never paused) — far worse than a short wait.
       if (deps.now() + worstCaseMs(job.kind) + PUMP_MARGIN_MS > deps.deadlineAt) {
@@ -161,7 +221,10 @@ export async function runLane(deps: LaneDeps): Promise<LaneExit> {
   if (exit === "lost") return exit;
   await deps.releaseLane().catch(() => {});
   if (exit === "handoff") {
-    if (kickOnHandoff) await deps.kick().catch(() => {});
+    if (kickOnlyIfQueued) {
+      const waiting = await deps.peek(1).catch(() => [] as QueueJob[]);
+      if (waiting.length > 0) await deps.kick().catch(() => {});
+    } else if (kickOnHandoff) await deps.kick().catch(() => {});
     return exit;
   }
   // A wave can land between the last empty claim and the release — its own hand-off saw the lane

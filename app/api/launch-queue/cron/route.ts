@@ -35,7 +35,9 @@ export async function GET(req: Request): Promise<NextResponse> {
   }
   try {
     const origin = selfOrigin(req);
-    const { unkicked, ...counters } = await sweepQueue(origin);
+    // Only Vercel Cron's own tick announces this build as the current one (a manual "sweep now" with
+    // a session may be running on any deployment, and must not move the lanes).
+    const { unkicked, ...counters } = await sweepQueue(origin, { announce: cronOk });
     for (const lane of unkicked) after(() => pumpLane(lane, { origin, startedAt }));
     return NextResponse.json({ ok: true, now: Date.now(), ...counters, pumpedHere: unkicked.length });
   } catch (e) {

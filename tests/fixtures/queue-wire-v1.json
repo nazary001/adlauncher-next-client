@@ -1,0 +1,1566 @@
+{
+  "note": "Hand-off requests as the browser of 08.10.2026 (JOB_SCHEMA_VERSION 1) sends them. FROZEN: jobs of these shapes can still be in the queue when a later build goes live. Add a new file for a new shape — never edit this one.",
+  "cases": [
+    {
+      "name": "hs.lion — an HS launch through LION (a real hand-off of 08.10, two campaigns of one wave)",
+      "request": {
+        "scope": "hs",
+        "jobs": [
+          {
+            "taskId": "fc24223d-c423-46d0-8701-3fc3985a66e4muz8gtcv",
+            "kind": "hs.lion",
+            "account": "1000000000000001",
+            "row": {
+              "name": "[08/10] (GLO-01) API - (#ADX [HIGH]) - [US] - [EN] - CARS - Buyer - CREO - DIFFERENT",
+              "gcm": "launch",
+              "geo": "United States",
+              "budget": "50",
+              "bid": "ROAS 0,3"
+            },
+            "body": {
+              "campaign": {
+                "id": "c1",
+                "collapsed": false,
+                "namePrefix": "",
+                "name": "[EN] - CARS - Buyer - CREO - DIFFERENT",
+                "profile": "glo-01-41",
+                "account": "act_1000000000000001",
+                "page": "610000000000001",
+                "pixel": "1363973565348799",
+                "objective": "OUTCOME_SALES",
+                "bidStrategy": "LOWEST_COST_WITH_MIN_ROAS",
+                "conversionEvent": "PURCHASE",
+                "optimization": "conversions",
+                "budget": "50",
+                "bidCap": "0,30",
+                "title": "🟢 LEARN MORE →",
+                "copy": "✨ Take a closer look at the first option and discover what makes it worth exploring.",
+                "cta": "LEARN_MORE",
+                "link": "https://quick-flow.net/ht/captcha/cars/en/",
+                "landing": "",
+                "gcm": "",
+                "redirectType": "HIGH ADX",
+                "paramMode": "url_tags",
+                "headline": "",
+                "countries": [
+                  "US"
+                ],
+                "locales": [
+                  "1001"
+                ],
+                "category": "",
+                "placement": "FULL",
+                "platforms": "facebook",
+                "ageMin": "18",
+                "userOs": "all",
+                "files": [
+                  {
+                    "id": "f1791445609502-0",
+                    "name": "2.mp4",
+                    "size": 18484539,
+                    "kind": "video",
+                    "url": "blob:https://adlauncher.gcamazingtool.xyz/f8b8f578-fa3e-416d-8261-9e6e8d1323f8"
+                  }
+                ]
+              },
+              "creatives": [
+                "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f-18484539-72a875d2a8ed.mp4"
+              ]
+            }
+          },
+          {
+            "taskId": "d837aa81-ace5-4a07-b7e5-c99510cd0bb1muz8gtcv",
+            "kind": "hs.lion",
+            "account": "1000000000000003",
+            "row": {
+              "name": "[08/10] (GLO-01) API - (#ADX [HIGH]) - [US] - [EN] - CARS - Buyer - CREO - DIFFERENT",
+              "gcm": "launch",
+              "geo": "United States",
+              "budget": "50",
+              "bid": "ROAS 0,3"
+            },
+            "body": {
+              "campaign": {
+                "id": "c3",
+                "collapsed": false,
+                "namePrefix": "",
+                "name": "[EN] - CARS - Buyer - CREO - DIFFERENT",
+                "profile": "glo-01-41",
+                "account": "act_1000000000000003",
+                "page": "610000000000001",
+                "pixel": "1363973565348799",
+                "objective": "OUTCOME_SALES",
+                "bidStrategy": "LOWEST_COST_WITH_MIN_ROAS",
+                "conversionEvent": "PURCHASE",
+                "optimization": "conversions",
+                "budget": "50",
+                "bidCap": "0,30",
+                "title": "🟢 LEARN MORE →",
+                "copy": "✨ Take a closer look at the first option and discover what makes it worth exploring.",
+                "cta": "LEARN_MORE",
+                "link": "https://quick-flow.net/ht/captcha/cars/en/",
+                "landing": "",
+                "gcm": "",
+                "redirectType": "HIGH ADX",
+                "paramMode": "url_tags",
+                "headline": "",
+                "countries": [
+                  "US"
+                ],
+                "locales": [
+                  "1001"
+                ],
+                "category": "",
+                "placement": "FULL",
+                "platforms": "facebook",
+                "ageMin": "18",
+                "userOs": "all",
+                "files": [
+                  {
+                    "id": "f1791445609502-0",
+                    "name": "2.mp4",
+                    "size": 18484539,
+                    "kind": "video",
+                    "url": "blob:https://adlauncher.gcamazingtool.xyz/f8b8f578-fa3e-416d-8261-9e6e8d1323f8"
+                  }
+                ]
+              },
+              "creatives": [
+                "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f-18484539-72a875d2a8ed.mp4"
+              ]
+            }
+          }
+        ]
+      },
+      "expect": {
+        "value": {
+          "scope": "hs",
+          "jobs": [
+            {
+              "taskId": "fc24223d-c423-46d0-8701-3fc3985a66e4muz8gtcv",
+              "kind": "hs.lion",
+              "body": {
+                "campaign": {
+                  "id": "c1",
+                  "collapsed": false,
+                  "namePrefix": "",
+                  "name": "[EN] - CARS - Buyer - CREO - DIFFERENT",
+                  "profile": "glo-01-41",
+                  "account": "act_1000000000000001",
+                  "page": "610000000000001",
+                  "pixel": "1363973565348799",
+                  "objective": "OUTCOME_SALES",
+                  "bidStrategy": "LOWEST_COST_WITH_MIN_ROAS",
+                  "conversionEvent": "PURCHASE",
+                  "optimization": "conversions",
+                  "budget": "50",
+                  "bidCap": "0,30",
+                  "title": "🟢 LEARN MORE →",
+                  "copy": "✨ Take a closer look at the first option and discover what makes it worth exploring.",
+                  "cta": "LEARN_MORE",
+                  "link": "https://quick-flow.net/ht/captcha/cars/en/",
+                  "landing": "",
+                  "gcm": "",
+                  "redirectType": "HIGH ADX",
+                  "paramMode": "url_tags",
+                  "headline": "",
+                  "countries": [
+                    "US"
+                  ],
+                  "locales": [
+                    "1001"
+                  ],
+                  "category": "",
+                  "placement": "FULL",
+                  "platforms": "facebook",
+                  "ageMin": "18",
+                  "userOs": "all",
+                  "files": [
+                    {
+                      "id": "f1791445609502-0",
+                      "name": "2.mp4",
+                      "size": 18484539,
+                      "kind": "video",
+                      "url": "blob:https://adlauncher.gcamazingtool.xyz/f8b8f578-fa3e-416d-8261-9e6e8d1323f8"
+                    }
+                  ]
+                },
+                "creatives": [
+                  "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f-18484539-72a875d2a8ed.mp4"
+                ]
+              },
+              "row": {
+                "name": "[08/10] (GLO-01) API - (#ADX [HIGH]) - [US] - [EN] - CARS - Buyer - CREO - DIFFERENT",
+                "gcm": "launch",
+                "geo": "United States",
+                "budget": "50",
+                "bid": "ROAS 0,3"
+              },
+              "account": "1000000000000001"
+            },
+            {
+              "taskId": "d837aa81-ace5-4a07-b7e5-c99510cd0bb1muz8gtcv",
+              "kind": "hs.lion",
+              "body": {
+                "campaign": {
+                  "id": "c3",
+                  "collapsed": false,
+                  "namePrefix": "",
+                  "name": "[EN] - CARS - Buyer - CREO - DIFFERENT",
+                  "profile": "glo-01-41",
+                  "account": "act_1000000000000003",
+                  "page": "610000000000001",
+                  "pixel": "1363973565348799",
+                  "objective": "OUTCOME_SALES",
+                  "bidStrategy": "LOWEST_COST_WITH_MIN_ROAS",
+                  "conversionEvent": "PURCHASE",
+                  "optimization": "conversions",
+                  "budget": "50",
+                  "bidCap": "0,30",
+                  "title": "🟢 LEARN MORE →",
+                  "copy": "✨ Take a closer look at the first option and discover what makes it worth exploring.",
+                  "cta": "LEARN_MORE",
+                  "link": "https://quick-flow.net/ht/captcha/cars/en/",
+                  "landing": "",
+                  "gcm": "",
+                  "redirectType": "HIGH ADX",
+                  "paramMode": "url_tags",
+                  "headline": "",
+                  "countries": [
+                    "US"
+                  ],
+                  "locales": [
+                    "1001"
+                  ],
+                  "category": "",
+                  "placement": "FULL",
+                  "platforms": "facebook",
+                  "ageMin": "18",
+                  "userOs": "all",
+                  "files": [
+                    {
+                      "id": "f1791445609502-0",
+                      "name": "2.mp4",
+                      "size": 18484539,
+                      "kind": "video",
+                      "url": "blob:https://adlauncher.gcamazingtool.xyz/f8b8f578-fa3e-416d-8261-9e6e8d1323f8"
+                    }
+                  ]
+                },
+                "creatives": [
+                  "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f-18484539-72a875d2a8ed.mp4"
+                ]
+              },
+              "row": {
+                "name": "[08/10] (GLO-01) API - (#ADX [HIGH]) - [US] - [EN] - CARS - Buyer - CREO - DIFFERENT",
+                "gcm": "launch",
+                "geo": "United States",
+                "budget": "50",
+                "bid": "ROAS 0,3"
+              },
+              "account": "1000000000000003"
+            }
+          ]
+        },
+        "handlerBodies": [
+          {
+            "campaign": {
+              "id": "c1",
+              "collapsed": false,
+              "namePrefix": "",
+              "name": "[EN] - CARS - Buyer - CREO - DIFFERENT",
+              "profile": "glo-01-41",
+              "account": "act_1000000000000001",
+              "page": "610000000000001",
+              "pixel": "1363973565348799",
+              "objective": "OUTCOME_SALES",
+              "bidStrategy": "LOWEST_COST_WITH_MIN_ROAS",
+              "conversionEvent": "PURCHASE",
+              "optimization": "conversions",
+              "budget": "50",
+              "bidCap": "0,30",
+              "title": "🟢 LEARN MORE →",
+              "copy": "✨ Take a closer look at the first option and discover what makes it worth exploring.",
+              "cta": "LEARN_MORE",
+              "link": "https://quick-flow.net/ht/captcha/cars/en/",
+              "landing": "",
+              "gcm": "",
+              "redirectType": "HIGH ADX",
+              "paramMode": "url_tags",
+              "headline": "",
+              "countries": [
+                "US"
+              ],
+              "locales": [
+                "1001"
+              ],
+              "category": "",
+              "placement": "FULL",
+              "platforms": "facebook",
+              "ageMin": "18",
+              "userOs": "all",
+              "files": [
+                {
+                  "id": "f1791445609502-0",
+                  "name": "2.mp4",
+                  "size": 18484539,
+                  "kind": "video",
+                  "url": "blob:https://adlauncher.gcamazingtool.xyz/f8b8f578-fa3e-416d-8261-9e6e8d1323f8"
+                }
+              ]
+            },
+            "creatives": [
+              "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f-18484539-72a875d2a8ed.mp4"
+            ],
+            "taskId": "fc24223d-c423-46d0-8701-3fc3985a66e4muz8gtcv"
+          },
+          {
+            "campaign": {
+              "id": "c3",
+              "collapsed": false,
+              "namePrefix": "",
+              "name": "[EN] - CARS - Buyer - CREO - DIFFERENT",
+              "profile": "glo-01-41",
+              "account": "act_1000000000000003",
+              "page": "610000000000001",
+              "pixel": "1363973565348799",
+              "objective": "OUTCOME_SALES",
+              "bidStrategy": "LOWEST_COST_WITH_MIN_ROAS",
+              "conversionEvent": "PURCHASE",
+              "optimization": "conversions",
+              "budget": "50",
+              "bidCap": "0,30",
+              "title": "🟢 LEARN MORE →",
+              "copy": "✨ Take a closer look at the first option and discover what makes it worth exploring.",
+              "cta": "LEARN_MORE",
+              "link": "https://quick-flow.net/ht/captcha/cars/en/",
+              "landing": "",
+              "gcm": "",
+              "redirectType": "HIGH ADX",
+              "paramMode": "url_tags",
+              "headline": "",
+              "countries": [
+                "US"
+              ],
+              "locales": [
+                "1001"
+              ],
+              "category": "",
+              "placement": "FULL",
+              "platforms": "facebook",
+              "ageMin": "18",
+              "userOs": "all",
+              "files": [
+                {
+                  "id": "f1791445609502-0",
+                  "name": "2.mp4",
+                  "size": 18484539,
+                  "kind": "video",
+                  "url": "blob:https://adlauncher.gcamazingtool.xyz/f8b8f578-fa3e-416d-8261-9e6e8d1323f8"
+                }
+              ]
+            },
+            "creatives": [
+              "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f-18484539-72a875d2a8ed.mp4"
+            ],
+            "taskId": "d837aa81-ace5-4a07-b7e5-c99510cd0bb1muz8gtcv"
+          }
+        ],
+        "mediaUrls": [
+          [
+            "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f-18484539-72a875d2a8ed.mp4"
+          ],
+          [
+            "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f-18484539-72a875d2a8ed.mp4"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "hs.tool — an HS launch through TOOL (a real hand-off of 08.10): creatives are objects",
+      "request": {
+        "scope": "hs",
+        "jobs": [
+          {
+            "taskId": "2dceb173-6424-44f2-94cd-1eb538603ee8muz74yzq",
+            "kind": "hs.tool",
+            "account": "1000000000000001",
+            "row": {
+              "name": "[08/10] (GLO-01) API - (#ADX [HIGH]) - [WORLD] - GCL TOOL - Buyer TEST",
+              "gcm": "tool",
+              "geo": "World",
+              "budget": "7",
+              "bid": "auto"
+            },
+            "body": {
+              "campaign": {
+                "id": "c1",
+                "collapsed": false,
+                "namePrefix": "",
+                "name": "Buyer TEST",
+                "profile": "glo-01-41",
+                "account": "act_1000000000000001",
+                "page": "610000000000001",
+                "pixel": "1363973565348799",
+                "objective": "OUTCOME_SALES",
+                "bidStrategy": "LOWEST_COST_WITHOUT_CAP",
+                "conversionEvent": "PURCHASE",
+                "optimization": "conversions",
+                "budget": "7",
+                "bidCap": "",
+                "title": "TEST",
+                "copy": "TEST",
+                "cta": "LEARN_MORE",
+                "link": "https://fast-flow.org/ht/age-gate/digital-marketing/es/",
+                "landing": "",
+                "gcm": "",
+                "redirectType": "HIGH ADX",
+                "paramMode": "url_tags",
+                "headline": "",
+                "countries": [
+                  "WW"
+                ],
+                "locales": [
+                  "6"
+                ],
+                "category": "",
+                "placement": "FULL",
+                "platforms": "facebook",
+                "ageMin": "18",
+                "userOs": "all",
+                "files": [
+                  {
+                    "id": "f1791445609502-0",
+                    "name": "2.mp4",
+                    "size": 18484539,
+                    "kind": "video",
+                    "url": "blob:https://adlauncher.gcamazingtool.xyz/f8b8f578-fa3e-416d-8261-9e6e8d1323f8"
+                  }
+                ]
+              },
+              "creatives": [
+                {
+                  "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f-18484539-72a875d2a8ed.mp4",
+                  "kind": "video",
+                  "name": "clip.mp4"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "expect": {
+        "value": {
+          "scope": "hs",
+          "jobs": [
+            {
+              "taskId": "2dceb173-6424-44f2-94cd-1eb538603ee8muz74yzq",
+              "kind": "hs.tool",
+              "body": {
+                "campaign": {
+                  "id": "c1",
+                  "collapsed": false,
+                  "namePrefix": "",
+                  "name": "Buyer TEST",
+                  "profile": "glo-01-41",
+                  "account": "act_1000000000000001",
+                  "page": "610000000000001",
+                  "pixel": "1363973565348799",
+                  "objective": "OUTCOME_SALES",
+                  "bidStrategy": "LOWEST_COST_WITHOUT_CAP",
+                  "conversionEvent": "PURCHASE",
+                  "optimization": "conversions",
+                  "budget": "7",
+                  "bidCap": "",
+                  "title": "TEST",
+                  "copy": "TEST",
+                  "cta": "LEARN_MORE",
+                  "link": "https://fast-flow.org/ht/age-gate/digital-marketing/es/",
+                  "landing": "",
+                  "gcm": "",
+                  "redirectType": "HIGH ADX",
+                  "paramMode": "url_tags",
+                  "headline": "",
+                  "countries": [
+                    "WW"
+                  ],
+                  "locales": [
+                    "6"
+                  ],
+                  "category": "",
+                  "placement": "FULL",
+                  "platforms": "facebook",
+                  "ageMin": "18",
+                  "userOs": "all",
+                  "files": [
+                    {
+                      "id": "f1791445609502-0",
+                      "name": "2.mp4",
+                      "size": 18484539,
+                      "kind": "video",
+                      "url": "blob:https://adlauncher.gcamazingtool.xyz/f8b8f578-fa3e-416d-8261-9e6e8d1323f8"
+                    }
+                  ]
+                },
+                "creatives": [
+                  {
+                    "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f-18484539-72a875d2a8ed.mp4",
+                    "kind": "video",
+                    "name": "clip.mp4"
+                  }
+                ]
+              },
+              "row": {
+                "name": "[08/10] (GLO-01) API - (#ADX [HIGH]) - [WORLD] - GCL TOOL - Buyer TEST",
+                "gcm": "tool",
+                "geo": "World",
+                "budget": "7",
+                "bid": "auto"
+              },
+              "account": "1000000000000001"
+            }
+          ]
+        },
+        "handlerBodies": [
+          {
+            "campaign": {
+              "id": "c1",
+              "collapsed": false,
+              "namePrefix": "",
+              "name": "Buyer TEST",
+              "profile": "glo-01-41",
+              "account": "act_1000000000000001",
+              "page": "610000000000001",
+              "pixel": "1363973565348799",
+              "objective": "OUTCOME_SALES",
+              "bidStrategy": "LOWEST_COST_WITHOUT_CAP",
+              "conversionEvent": "PURCHASE",
+              "optimization": "conversions",
+              "budget": "7",
+              "bidCap": "",
+              "title": "TEST",
+              "copy": "TEST",
+              "cta": "LEARN_MORE",
+              "link": "https://fast-flow.org/ht/age-gate/digital-marketing/es/",
+              "landing": "",
+              "gcm": "",
+              "redirectType": "HIGH ADX",
+              "paramMode": "url_tags",
+              "headline": "",
+              "countries": [
+                "WW"
+              ],
+              "locales": [
+                "6"
+              ],
+              "category": "",
+              "placement": "FULL",
+              "platforms": "facebook",
+              "ageMin": "18",
+              "userOs": "all",
+              "files": [
+                {
+                  "id": "f1791445609502-0",
+                  "name": "2.mp4",
+                  "size": 18484539,
+                  "kind": "video",
+                  "url": "blob:https://adlauncher.gcamazingtool.xyz/f8b8f578-fa3e-416d-8261-9e6e8d1323f8"
+                }
+              ]
+            },
+            "creatives": [
+              {
+                "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f-18484539-72a875d2a8ed.mp4",
+                "kind": "video",
+                "name": "clip.mp4"
+              }
+            ],
+            "taskId": "2dceb173-6424-44f2-94cd-1eb538603ee8muz74yzq"
+          }
+        ],
+        "mediaUrls": [
+          [
+            "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f-18484539-72a875d2a8ed.mp4"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "hs.token — an HS launch on our FB token: creatives are objects, like TOOL",
+      "request": {
+        "scope": "hs",
+        "jobs": [
+          {
+            "taskId": "6fb86b12-c763-4db2-872f-7cd9d3da7e37muz8gtcv",
+            "kind": "hs.token",
+            "account": "1000000000000001",
+            "row": {
+              "name": "[08/10] (GLO-01) API - (#ADX [HIGH]) - [US] - TOKEN - Buyer",
+              "gcm": "token",
+              "geo": "United States",
+              "budget": "50",
+              "bid": "ROAS 0,3"
+            },
+            "body": {
+              "campaign": {
+                "id": "c1",
+                "collapsed": false,
+                "namePrefix": "",
+                "name": "[EN] - CARS - Buyer - CREO - DIFFERENT",
+                "profile": "glo-01-41",
+                "account": "act_1000000000000001",
+                "page": "610000000000001",
+                "pixel": "1363973565348799",
+                "objective": "OUTCOME_SALES",
+                "bidStrategy": "LOWEST_COST_WITH_MIN_ROAS",
+                "conversionEvent": "PURCHASE",
+                "optimization": "conversions",
+                "budget": "50",
+                "bidCap": "0,30",
+                "title": "🟢 LEARN MORE →",
+                "copy": "✨ Take a closer look at the first option and discover what makes it worth exploring.",
+                "cta": "LEARN_MORE",
+                "link": "https://quick-flow.net/ht/captcha/cars/en/",
+                "landing": "",
+                "gcm": "",
+                "redirectType": "HIGH ADX",
+                "paramMode": "url_tags",
+                "headline": "",
+                "countries": [
+                  "US"
+                ],
+                "locales": [
+                  "1001"
+                ],
+                "category": "",
+                "placement": "FULL",
+                "platforms": "facebook",
+                "ageMin": "18",
+                "userOs": "all",
+                "files": [
+                  {
+                    "id": "f1791445609502-0",
+                    "name": "2.mp4",
+                    "size": 18484539,
+                    "kind": "video",
+                    "url": "blob:https://adlauncher.gcamazingtool.xyz/f8b8f578-fa3e-416d-8261-9e6e8d1323f8"
+                  }
+                ]
+              },
+              "creatives": [
+                {
+                  "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f-18484539-72a875d2a8ed.mp4",
+                  "kind": "video",
+                  "name": "clip.mp4"
+                },
+                {
+                  "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                  "kind": "video",
+                  "name": "clip-2.mp4"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "expect": {
+        "value": {
+          "scope": "hs",
+          "jobs": [
+            {
+              "taskId": "6fb86b12-c763-4db2-872f-7cd9d3da7e37muz8gtcv",
+              "kind": "hs.token",
+              "body": {
+                "campaign": {
+                  "id": "c1",
+                  "collapsed": false,
+                  "namePrefix": "",
+                  "name": "[EN] - CARS - Buyer - CREO - DIFFERENT",
+                  "profile": "glo-01-41",
+                  "account": "act_1000000000000001",
+                  "page": "610000000000001",
+                  "pixel": "1363973565348799",
+                  "objective": "OUTCOME_SALES",
+                  "bidStrategy": "LOWEST_COST_WITH_MIN_ROAS",
+                  "conversionEvent": "PURCHASE",
+                  "optimization": "conversions",
+                  "budget": "50",
+                  "bidCap": "0,30",
+                  "title": "🟢 LEARN MORE →",
+                  "copy": "✨ Take a closer look at the first option and discover what makes it worth exploring.",
+                  "cta": "LEARN_MORE",
+                  "link": "https://quick-flow.net/ht/captcha/cars/en/",
+                  "landing": "",
+                  "gcm": "",
+                  "redirectType": "HIGH ADX",
+                  "paramMode": "url_tags",
+                  "headline": "",
+                  "countries": [
+                    "US"
+                  ],
+                  "locales": [
+                    "1001"
+                  ],
+                  "category": "",
+                  "placement": "FULL",
+                  "platforms": "facebook",
+                  "ageMin": "18",
+                  "userOs": "all",
+                  "files": [
+                    {
+                      "id": "f1791445609502-0",
+                      "name": "2.mp4",
+                      "size": 18484539,
+                      "kind": "video",
+                      "url": "blob:https://adlauncher.gcamazingtool.xyz/f8b8f578-fa3e-416d-8261-9e6e8d1323f8"
+                    }
+                  ]
+                },
+                "creatives": [
+                  {
+                    "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f-18484539-72a875d2a8ed.mp4",
+                    "kind": "video",
+                    "name": "clip.mp4"
+                  },
+                  {
+                    "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                    "kind": "video",
+                    "name": "clip-2.mp4"
+                  }
+                ]
+              },
+              "row": {
+                "name": "[08/10] (GLO-01) API - (#ADX [HIGH]) - [US] - TOKEN - Buyer",
+                "gcm": "token",
+                "geo": "United States",
+                "budget": "50",
+                "bid": "ROAS 0,3"
+              },
+              "account": "1000000000000001"
+            }
+          ]
+        },
+        "handlerBodies": [
+          {
+            "campaign": {
+              "id": "c1",
+              "collapsed": false,
+              "namePrefix": "",
+              "name": "[EN] - CARS - Buyer - CREO - DIFFERENT",
+              "profile": "glo-01-41",
+              "account": "act_1000000000000001",
+              "page": "610000000000001",
+              "pixel": "1363973565348799",
+              "objective": "OUTCOME_SALES",
+              "bidStrategy": "LOWEST_COST_WITH_MIN_ROAS",
+              "conversionEvent": "PURCHASE",
+              "optimization": "conversions",
+              "budget": "50",
+              "bidCap": "0,30",
+              "title": "🟢 LEARN MORE →",
+              "copy": "✨ Take a closer look at the first option and discover what makes it worth exploring.",
+              "cta": "LEARN_MORE",
+              "link": "https://quick-flow.net/ht/captcha/cars/en/",
+              "landing": "",
+              "gcm": "",
+              "redirectType": "HIGH ADX",
+              "paramMode": "url_tags",
+              "headline": "",
+              "countries": [
+                "US"
+              ],
+              "locales": [
+                "1001"
+              ],
+              "category": "",
+              "placement": "FULL",
+              "platforms": "facebook",
+              "ageMin": "18",
+              "userOs": "all",
+              "files": [
+                {
+                  "id": "f1791445609502-0",
+                  "name": "2.mp4",
+                  "size": 18484539,
+                  "kind": "video",
+                  "url": "blob:https://adlauncher.gcamazingtool.xyz/f8b8f578-fa3e-416d-8261-9e6e8d1323f8"
+                }
+              ]
+            },
+            "creatives": [
+              {
+                "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f-18484539-72a875d2a8ed.mp4",
+                "kind": "video",
+                "name": "clip.mp4"
+              },
+              {
+                "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                "kind": "video",
+                "name": "clip-2.mp4"
+              }
+            ],
+            "taskId": "6fb86b12-c763-4db2-872f-7cd9d3da7e37muz8gtcv"
+          }
+        ],
+        "mediaUrls": [
+          [
+            "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f-18484539-72a875d2a8ed.mp4",
+            "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "mo.launch — an MO launch (a real hand-off of the UI bench): medias + the legacy single-media fields",
+      "request": {
+        "scope": "mo",
+        "jobs": [
+          {
+            "taskId": "9149b8ba-42b9-4330-9997-0674df6930f7muz5rmfs",
+            "kind": "mo.launch",
+            "account": "1000000000000002",
+            "row": {
+              "name": "[08/10] (MO) - Auto | vd-01",
+              "gcm": "03",
+              "geo": "United States",
+              "budget": "7",
+              "bid": "auto"
+            },
+            "body": {
+              "partnerId": "in",
+              "campaign": {
+                "id": "c1",
+                "collapsed": false,
+                "namePrefix": "[08/10] (MO) - ",
+                "name": "Auto | vd-01",
+                "profile": "",
+                "account": "1000000000000002",
+                "page": "610000000000001",
+                "pixel": "1363973565348799",
+                "objective": "OUTCOME_SALES",
+                "bidStrategy": "LOWEST_COST_WITHOUT_CAP",
+                "conversionEvent": "PURCHASE",
+                "optimization": "conversions",
+                "budget": "7",
+                "bidCap": "",
+                "title": "Find a better job today",
+                "copy": "Thousands of openings near you. Take the 30-second quiz and see what fits.",
+                "cta": "LEARN_MORE",
+                "link": "",
+                "landing": "auto-financing-explained",
+                "gcm": "03",
+                "redirectType": "META ADX",
+                "paramMode": "url_tags",
+                "headline": "",
+                "countries": [
+                  "US"
+                ],
+                "locales": [],
+                "category": "",
+                "placement": "FULL",
+                "platforms": "facebook",
+                "ageMin": "18",
+                "userOs": "all",
+                "files": [
+                  {
+                    "id": "f1791441086702-0",
+                    "name": "clip.mp4",
+                    "size": 2848208,
+                    "kind": "video",
+                    "url": "blob:https://adlauncher.gcamazingtool.xyz/9bc6a42d-4056-48cd-bc09-963c5ee3d03b"
+                  }
+                ],
+                "autoPage": "610000000000001"
+              },
+              "medias": [
+                {
+                  "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                  "kind": "video"
+                }
+              ],
+              "mediaUrl": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+              "mediaKind": "video"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "value": {
+          "scope": "mo",
+          "jobs": [
+            {
+              "taskId": "9149b8ba-42b9-4330-9997-0674df6930f7muz5rmfs",
+              "kind": "mo.launch",
+              "body": {
+                "partnerId": "in",
+                "campaign": {
+                  "id": "c1",
+                  "collapsed": false,
+                  "namePrefix": "[08/10] (MO) - ",
+                  "name": "Auto | vd-01",
+                  "profile": "",
+                  "account": "1000000000000002",
+                  "page": "610000000000001",
+                  "pixel": "1363973565348799",
+                  "objective": "OUTCOME_SALES",
+                  "bidStrategy": "LOWEST_COST_WITHOUT_CAP",
+                  "conversionEvent": "PURCHASE",
+                  "optimization": "conversions",
+                  "budget": "7",
+                  "bidCap": "",
+                  "title": "Find a better job today",
+                  "copy": "Thousands of openings near you. Take the 30-second quiz and see what fits.",
+                  "cta": "LEARN_MORE",
+                  "link": "",
+                  "landing": "auto-financing-explained",
+                  "gcm": "03",
+                  "redirectType": "META ADX",
+                  "paramMode": "url_tags",
+                  "headline": "",
+                  "countries": [
+                    "US"
+                  ],
+                  "locales": [],
+                  "category": "",
+                  "placement": "FULL",
+                  "platforms": "facebook",
+                  "ageMin": "18",
+                  "userOs": "all",
+                  "files": [
+                    {
+                      "id": "f1791441086702-0",
+                      "name": "clip.mp4",
+                      "size": 2848208,
+                      "kind": "video",
+                      "url": "blob:https://adlauncher.gcamazingtool.xyz/9bc6a42d-4056-48cd-bc09-963c5ee3d03b"
+                    }
+                  ],
+                  "autoPage": "610000000000001"
+                },
+                "medias": [
+                  {
+                    "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                    "kind": "video"
+                  }
+                ],
+                "mediaUrl": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                "mediaKind": "video"
+              },
+              "row": {
+                "name": "[08/10] (MO) - Auto | vd-01",
+                "gcm": "03",
+                "geo": "United States",
+                "budget": "7",
+                "bid": "auto"
+              },
+              "account": "1000000000000002"
+            }
+          ]
+        },
+        "handlerBodies": [
+          {
+            "partnerId": "in",
+            "campaign": {
+              "id": "c1",
+              "collapsed": false,
+              "namePrefix": "[08/10] (MO) - ",
+              "name": "Auto | vd-01",
+              "profile": "",
+              "account": "1000000000000002",
+              "page": "610000000000001",
+              "pixel": "1363973565348799",
+              "objective": "OUTCOME_SALES",
+              "bidStrategy": "LOWEST_COST_WITHOUT_CAP",
+              "conversionEvent": "PURCHASE",
+              "optimization": "conversions",
+              "budget": "7",
+              "bidCap": "",
+              "title": "Find a better job today",
+              "copy": "Thousands of openings near you. Take the 30-second quiz and see what fits.",
+              "cta": "LEARN_MORE",
+              "link": "",
+              "landing": "auto-financing-explained",
+              "gcm": "03",
+              "redirectType": "META ADX",
+              "paramMode": "url_tags",
+              "headline": "",
+              "countries": [
+                "US"
+              ],
+              "locales": [],
+              "category": "",
+              "placement": "FULL",
+              "platforms": "facebook",
+              "ageMin": "18",
+              "userOs": "all",
+              "files": [
+                {
+                  "id": "f1791441086702-0",
+                  "name": "clip.mp4",
+                  "size": 2848208,
+                  "kind": "video",
+                  "url": "blob:https://adlauncher.gcamazingtool.xyz/9bc6a42d-4056-48cd-bc09-963c5ee3d03b"
+                }
+              ],
+              "autoPage": "610000000000001"
+            },
+            "medias": [
+              {
+                "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                "kind": "video"
+              }
+            ],
+            "mediaUrl": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+            "mediaKind": "video",
+            "taskId": "9149b8ba-42b9-4330-9997-0674df6930f7muz5rmfs"
+          }
+        ],
+        "mediaUrls": [
+          [
+            "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+            "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "aif.launch — an AIF launch (same body family as MO)",
+      "request": {
+        "scope": "aif",
+        "jobs": [
+          {
+            "taskId": "e3a9feff-208e-4039-8909-7dde9b42cbd2muz5rmfs",
+            "kind": "aif.launch",
+            "account": "1000000000000004",
+            "row": {
+              "name": "[08/10] (AIF) - test133",
+              "gcm": "test133",
+              "geo": "United States",
+              "budget": "10",
+              "bid": "auto"
+            },
+            "body": {
+              "partnerId": "us",
+              "campaign": {
+                "id": "c1",
+                "collapsed": false,
+                "namePrefix": "[08/10] (AIF) - ",
+                "name": "test133",
+                "profile": "",
+                "account": "1000000000000004",
+                "page": "610000000000001",
+                "pixel": "1363973565348799",
+                "objective": "OUTCOME_SALES",
+                "bidStrategy": "LOWEST_COST_WITHOUT_CAP",
+                "conversionEvent": "PURCHASE",
+                "optimization": "conversions",
+                "budget": "7",
+                "bidCap": "",
+                "title": "Find a better job today",
+                "copy": "Thousands of openings near you. Take the 30-second quiz and see what fits.",
+                "cta": "LEARN_MORE",
+                "link": "",
+                "landing": "best-cash-back-cards",
+                "gcm": "test133",
+                "redirectType": "META ADX",
+                "paramMode": "url_tags",
+                "headline": "",
+                "countries": [
+                  "US"
+                ],
+                "locales": [],
+                "category": "",
+                "placement": "FULL",
+                "platforms": "facebook",
+                "ageMin": "18",
+                "userOs": "all",
+                "files": [
+                  {
+                    "id": "f1791441086702-0",
+                    "name": "clip.mp4",
+                    "size": 2848208,
+                    "kind": "video",
+                    "url": "blob:https://adlauncher.gcamazingtool.xyz/9bc6a42d-4056-48cd-bc09-963c5ee3d03b"
+                  }
+                ],
+                "autoPage": "610000000000001"
+              },
+              "medias": [
+                {
+                  "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                  "kind": "video",
+                  "cover": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0-40211-2dd616c99094.jpg"
+                }
+              ],
+              "mediaUrl": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+              "mediaKind": "video",
+              "cover": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0-40211-2dd616c99094.jpg"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "value": {
+          "scope": "aif",
+          "jobs": [
+            {
+              "taskId": "e3a9feff-208e-4039-8909-7dde9b42cbd2muz5rmfs",
+              "kind": "aif.launch",
+              "body": {
+                "partnerId": "us",
+                "campaign": {
+                  "id": "c1",
+                  "collapsed": false,
+                  "namePrefix": "[08/10] (AIF) - ",
+                  "name": "test133",
+                  "profile": "",
+                  "account": "1000000000000004",
+                  "page": "610000000000001",
+                  "pixel": "1363973565348799",
+                  "objective": "OUTCOME_SALES",
+                  "bidStrategy": "LOWEST_COST_WITHOUT_CAP",
+                  "conversionEvent": "PURCHASE",
+                  "optimization": "conversions",
+                  "budget": "7",
+                  "bidCap": "",
+                  "title": "Find a better job today",
+                  "copy": "Thousands of openings near you. Take the 30-second quiz and see what fits.",
+                  "cta": "LEARN_MORE",
+                  "link": "",
+                  "landing": "best-cash-back-cards",
+                  "gcm": "test133",
+                  "redirectType": "META ADX",
+                  "paramMode": "url_tags",
+                  "headline": "",
+                  "countries": [
+                    "US"
+                  ],
+                  "locales": [],
+                  "category": "",
+                  "placement": "FULL",
+                  "platforms": "facebook",
+                  "ageMin": "18",
+                  "userOs": "all",
+                  "files": [
+                    {
+                      "id": "f1791441086702-0",
+                      "name": "clip.mp4",
+                      "size": 2848208,
+                      "kind": "video",
+                      "url": "blob:https://adlauncher.gcamazingtool.xyz/9bc6a42d-4056-48cd-bc09-963c5ee3d03b"
+                    }
+                  ],
+                  "autoPage": "610000000000001"
+                },
+                "medias": [
+                  {
+                    "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                    "kind": "video",
+                    "cover": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0-40211-2dd616c99094.jpg"
+                  }
+                ],
+                "mediaUrl": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                "mediaKind": "video",
+                "cover": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0-40211-2dd616c99094.jpg"
+              },
+              "row": {
+                "name": "[08/10] (AIF) - test133",
+                "gcm": "test133",
+                "geo": "United States",
+                "budget": "10",
+                "bid": "auto"
+              },
+              "account": "1000000000000004"
+            }
+          ]
+        },
+        "handlerBodies": [
+          {
+            "partnerId": "us",
+            "campaign": {
+              "id": "c1",
+              "collapsed": false,
+              "namePrefix": "[08/10] (AIF) - ",
+              "name": "test133",
+              "profile": "",
+              "account": "1000000000000004",
+              "page": "610000000000001",
+              "pixel": "1363973565348799",
+              "objective": "OUTCOME_SALES",
+              "bidStrategy": "LOWEST_COST_WITHOUT_CAP",
+              "conversionEvent": "PURCHASE",
+              "optimization": "conversions",
+              "budget": "7",
+              "bidCap": "",
+              "title": "Find a better job today",
+              "copy": "Thousands of openings near you. Take the 30-second quiz and see what fits.",
+              "cta": "LEARN_MORE",
+              "link": "",
+              "landing": "best-cash-back-cards",
+              "gcm": "test133",
+              "redirectType": "META ADX",
+              "paramMode": "url_tags",
+              "headline": "",
+              "countries": [
+                "US"
+              ],
+              "locales": [],
+              "category": "",
+              "placement": "FULL",
+              "platforms": "facebook",
+              "ageMin": "18",
+              "userOs": "all",
+              "files": [
+                {
+                  "id": "f1791441086702-0",
+                  "name": "clip.mp4",
+                  "size": 2848208,
+                  "kind": "video",
+                  "url": "blob:https://adlauncher.gcamazingtool.xyz/9bc6a42d-4056-48cd-bc09-963c5ee3d03b"
+                }
+              ],
+              "autoPage": "610000000000001"
+            },
+            "medias": [
+              {
+                "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                "kind": "video",
+                "cover": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0-40211-2dd616c99094.jpg"
+              }
+            ],
+            "mediaUrl": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+            "mediaKind": "video",
+            "cover": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0-40211-2dd616c99094.jpg",
+            "taskId": "e3a9feff-208e-4039-8909-7dde9b42cbd2muz5rmfs"
+          }
+        ],
+        "mediaUrls": [
+          [
+            "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+            "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "av.launch — an AV launch (always via TOOL)",
+      "request": {
+        "scope": "av",
+        "jobs": [
+          {
+            "taskId": "dd3bdab1-8207-427d-bf98-05353dda35d4muz5rmfs",
+            "kind": "av.launch",
+            "account": "1000000000000005",
+            "row": {
+              "name": "GCL TOOL - av017 - tail",
+              "gcm": "av017",
+              "geo": "United States",
+              "budget": "10",
+              "bid": "auto"
+            },
+            "body": {
+              "partnerId": "av",
+              "campaign": {
+                "id": "c1",
+                "collapsed": false,
+                "namePrefix": "",
+                "name": "tail",
+                "profile": "",
+                "account": "1000000000000005",
+                "page": "610000000000001",
+                "pixel": "1363973565348799",
+                "objective": "OUTCOME_SALES",
+                "bidStrategy": "LOWEST_COST_WITHOUT_CAP",
+                "conversionEvent": "PURCHASE",
+                "optimization": "conversions",
+                "budget": "7",
+                "bidCap": "",
+                "title": "Find a better job today",
+                "copy": "Thousands of openings near you. Take the 30-second quiz and see what fits.",
+                "cta": "LEARN_MORE",
+                "link": "",
+                "landing": "https://thecadrion.com/some-article/",
+                "gcm": "av017",
+                "redirectType": "META ADX",
+                "paramMode": "url_tags",
+                "headline": "",
+                "countries": [
+                  "US"
+                ],
+                "locales": [],
+                "category": "",
+                "placement": "FULL",
+                "platforms": "facebook",
+                "ageMin": "18",
+                "userOs": "all",
+                "files": [
+                  {
+                    "id": "f1791441086702-0",
+                    "name": "clip.mp4",
+                    "size": 2848208,
+                    "kind": "video",
+                    "url": "blob:https://adlauncher.gcamazingtool.xyz/9bc6a42d-4056-48cd-bc09-963c5ee3d03b"
+                  }
+                ],
+                "autoPage": "610000000000001"
+              },
+              "medias": [
+                {
+                  "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                  "kind": "video"
+                }
+              ],
+              "mediaUrl": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+              "mediaKind": "video",
+              "via": "tool",
+              "name": "GCL TOOL - av017 - tail"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "value": {
+          "scope": "av",
+          "jobs": [
+            {
+              "taskId": "dd3bdab1-8207-427d-bf98-05353dda35d4muz5rmfs",
+              "kind": "av.launch",
+              "body": {
+                "partnerId": "av",
+                "campaign": {
+                  "id": "c1",
+                  "collapsed": false,
+                  "namePrefix": "",
+                  "name": "tail",
+                  "profile": "",
+                  "account": "1000000000000005",
+                  "page": "610000000000001",
+                  "pixel": "1363973565348799",
+                  "objective": "OUTCOME_SALES",
+                  "bidStrategy": "LOWEST_COST_WITHOUT_CAP",
+                  "conversionEvent": "PURCHASE",
+                  "optimization": "conversions",
+                  "budget": "7",
+                  "bidCap": "",
+                  "title": "Find a better job today",
+                  "copy": "Thousands of openings near you. Take the 30-second quiz and see what fits.",
+                  "cta": "LEARN_MORE",
+                  "link": "",
+                  "landing": "https://thecadrion.com/some-article/",
+                  "gcm": "av017",
+                  "redirectType": "META ADX",
+                  "paramMode": "url_tags",
+                  "headline": "",
+                  "countries": [
+                    "US"
+                  ],
+                  "locales": [],
+                  "category": "",
+                  "placement": "FULL",
+                  "platforms": "facebook",
+                  "ageMin": "18",
+                  "userOs": "all",
+                  "files": [
+                    {
+                      "id": "f1791441086702-0",
+                      "name": "clip.mp4",
+                      "size": 2848208,
+                      "kind": "video",
+                      "url": "blob:https://adlauncher.gcamazingtool.xyz/9bc6a42d-4056-48cd-bc09-963c5ee3d03b"
+                    }
+                  ],
+                  "autoPage": "610000000000001"
+                },
+                "medias": [
+                  {
+                    "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                    "kind": "video"
+                  }
+                ],
+                "mediaUrl": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                "mediaKind": "video",
+                "via": "tool",
+                "name": "GCL TOOL - av017 - tail"
+              },
+              "row": {
+                "name": "GCL TOOL - av017 - tail",
+                "gcm": "av017",
+                "geo": "United States",
+                "budget": "10",
+                "bid": "auto"
+              },
+              "account": "1000000000000005"
+            }
+          ]
+        },
+        "handlerBodies": [
+          {
+            "partnerId": "av",
+            "campaign": {
+              "id": "c1",
+              "collapsed": false,
+              "namePrefix": "",
+              "name": "tail",
+              "profile": "",
+              "account": "1000000000000005",
+              "page": "610000000000001",
+              "pixel": "1363973565348799",
+              "objective": "OUTCOME_SALES",
+              "bidStrategy": "LOWEST_COST_WITHOUT_CAP",
+              "conversionEvent": "PURCHASE",
+              "optimization": "conversions",
+              "budget": "7",
+              "bidCap": "",
+              "title": "Find a better job today",
+              "copy": "Thousands of openings near you. Take the 30-second quiz and see what fits.",
+              "cta": "LEARN_MORE",
+              "link": "",
+              "landing": "https://thecadrion.com/some-article/",
+              "gcm": "av017",
+              "redirectType": "META ADX",
+              "paramMode": "url_tags",
+              "headline": "",
+              "countries": [
+                "US"
+              ],
+              "locales": [],
+              "category": "",
+              "placement": "FULL",
+              "platforms": "facebook",
+              "ageMin": "18",
+              "userOs": "all",
+              "files": [
+                {
+                  "id": "f1791441086702-0",
+                  "name": "clip.mp4",
+                  "size": 2848208,
+                  "kind": "video",
+                  "url": "blob:https://adlauncher.gcamazingtool.xyz/9bc6a42d-4056-48cd-bc09-963c5ee3d03b"
+                }
+              ],
+              "autoPage": "610000000000001"
+            },
+            "medias": [
+              {
+                "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                "kind": "video"
+              }
+            ],
+            "mediaUrl": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+            "mediaKind": "video",
+            "via": "tool",
+            "name": "GCL TOOL - av017 - tail",
+            "taskId": "dd3bdab1-8207-427d-bf98-05353dda35d4muz5rmfs"
+          }
+        ],
+        "mediaUrls": [
+          [
+            "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+            "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "fb.clone — an MO clone: no creatives of its own, the task id travels as taskIds[]",
+      "request": {
+        "scope": "mo",
+        "jobs": [
+          {
+            "taskId": "d1f730a5-daca-4c4f-8a4c-abb1824d32bfmuz5rmfs",
+            "kind": "fb.clone",
+            "account": "1000000000000002",
+            "row": {
+              "name": "[08/10] (MO) - CLONE Auto | vd-01",
+              "gcm": "",
+              "geo": "United States",
+              "budget": "50",
+              "bid": "ROAS 0,3"
+            },
+            "body": {
+              "partnerId": "in",
+              "edits": [
+                {
+                  "campaignId": "120200000000000001",
+                  "name": "[08/10] (MO) - CLONE Auto | vd-01",
+                  "budget": "50",
+                  "countries": [
+                    "US"
+                  ],
+                  "locales": [],
+                  "pageId": "610000000000001",
+                  "accountId": "1000000000000002",
+                  "pixelId": "1363973565348799",
+                  "copies": 1
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "expect": {
+        "value": {
+          "scope": "mo",
+          "jobs": [
+            {
+              "taskId": "d1f730a5-daca-4c4f-8a4c-abb1824d32bfmuz5rmfs",
+              "kind": "fb.clone",
+              "body": {
+                "partnerId": "in",
+                "edits": [
+                  {
+                    "campaignId": "120200000000000001",
+                    "name": "[08/10] (MO) - CLONE Auto | vd-01",
+                    "budget": "50",
+                    "countries": [
+                      "US"
+                    ],
+                    "locales": [],
+                    "pageId": "610000000000001",
+                    "accountId": "1000000000000002",
+                    "pixelId": "1363973565348799",
+                    "copies": 1
+                  }
+                ]
+              },
+              "row": {
+                "name": "[08/10] (MO) - CLONE Auto | vd-01",
+                "gcm": "",
+                "geo": "United States",
+                "budget": "50",
+                "bid": "ROAS 0,3"
+              },
+              "account": "1000000000000002"
+            }
+          ]
+        },
+        "handlerBodies": [
+          {
+            "partnerId": "in",
+            "edits": [
+              {
+                "campaignId": "120200000000000001",
+                "name": "[08/10] (MO) - CLONE Auto | vd-01",
+                "budget": "50",
+                "countries": [
+                  "US"
+                ],
+                "locales": [],
+                "pageId": "610000000000001",
+                "accountId": "1000000000000002",
+                "pixelId": "1363973565348799",
+                "copies": 1
+              }
+            ],
+            "taskIds": [
+              "d1f730a5-daca-4c4f-8a4c-abb1824d32bfmuz5rmfs"
+            ]
+          }
+        ],
+        "mediaUrls": [
+          []
+        ]
+      }
+    }
+  ]
+}

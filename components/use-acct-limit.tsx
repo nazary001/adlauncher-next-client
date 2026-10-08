@@ -13,6 +13,7 @@ import type { RichOption } from "@/lib/catalog";
 import { useAifTaskManager, useAvTaskManager, useTaskManager } from "./task-manager";
 import { useHsTaskManager } from "./hs-task-manager";
 import { useHandoffDemand, useHandoffItems } from "./launch-handoff";
+import { type QueueHealth, sweepLateMinutes } from "@/lib/launch-queue-types";
 
 // Client mirror of the per-account launch limit (5 campaigns / 30 min, window anchored at the
 // first launch — owner rule 2026-08-18). One provider (app layout) polls /api/acct-limit and
@@ -118,6 +119,8 @@ const FOCUS_THROTTLE_MS = 5_000;
 export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<State>({ limit: 5, windowMs: 30 * 60_000, accounts: {}, skew: 0, queued: {} });
   const [staleBuild, setStaleBuild] = useState(false);
+  // Whole minutes the server queue's sweep is late while jobs wait (null = nothing to say).
+  const [sweepLate, setSweepLate] = useState<number | null>(null);
   const lastFetch = useRef(0);
   const stopped401 = useRef(false); // logged-out tab — quiet until a focus retries
 
@@ -141,6 +144,7 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
         build?: string;
         accounts?: Record<string, AcctLimitInfo>;
         queued?: Record<string, number>;
+        queue?: QueueHealth | null;
       } | null;
       if (!d?.ok || typeof d.accounts !== "object") return null; // 502/registry blip — next tick retries
       stopped401.current = false;
@@ -158,6 +162,8 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
         queued: d.queued && typeof d.queued === "object" ? d.queued : {},
       };
       setState(next);
+      // Judged on the SERVER's clock (d.now), so a wrong clock in the tab cannot raise or hide it.
+      setSweepLate(sweepLateMinutes(d.queue ?? null, Number(d.now) || Date.now()));
       return { accounts: next.accounts, skew: next.skew, queued: next.queued };
     } catch {
       /* transient — the interval retries */
@@ -255,8 +261,30 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
   return (
     <Ctx.Provider value={value}>
       {staleBuild ? <StaleBuildBanner /> : null}
+      {sweepLate != null ? <SweepLateNotice minutes={sweepLate} /> : null}
       {children}
     </Ctx.Provider>
+  );
+}
+
+/** Small amber card (bottom-left, clear of the hand-off pill) while launches wait in the server
+ *  queue and its every-minute check has gone silent — the one failure that could leave a queued
+ *  launch waiting with nobody told. Running launches are not affected; it clears itself. */
+function SweepLateNotice({ minutes }: { minutes: number }) {
+  return (
+    <div
+      role="status"
+      className={
+        "fixed bottom-5 left-5 z-[80] flex max-w-[360px] items-start gap-2.5 rounded-xl border border-warn/40 " +
+        "bg-surface/95 px-3.5 py-3 text-[12px] leading-relaxed text-warn shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-md"
+      }
+    >
+      <span className="mt-1 h-2 w-2 shrink-0 animate-pulse rounded-full bg-warn" />
+      <span>
+        <span className="font-semibold">The server queue&apos;s check is {minutes} min late.</span> Launches that are
+        already running continue; queued ones may not start on their own. If this stays, tell the owner.
+      </span>
+    </div>
   );
 }
 

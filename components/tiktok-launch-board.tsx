@@ -230,7 +230,8 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
     const sig = JSON.stringify(ready.map((v) => tiktokCardSignature(v.card)));
     if (!waveRef.current || waveRef.current.sig !== sig) waveRef.current = { sig, id: crypto.randomUUID() };
     const waveId = waveRef.current.id;
-    const hid = (id: string) => `${waveId}:${id}`;
+    // One hand-off item per CARD, not per wave (see the Google / Snapchat boards).
+    const hid = (id: string) => `tt:${id}`;
 
     // Register every campaign of this Launch click on the hand-off screen (it owns the leave-page
     // guard now). Its sources are the card's avatar (local file or remembered https) and videos.

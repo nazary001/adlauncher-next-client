@@ -6,7 +6,7 @@
 // that lands late gets exactly one kick.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { PREWARM_AHEAD, crashedOutcome, runLane, type LaneDeps } from "../lib/launch-queue.ts";
+import { NEWER_BUILD_WAIT_MS, PREWARM_AHEAD, crashedOutcome, runLane, type LaneDeps } from "../lib/launch-queue.ts";
 import { JOB_GAP_MAX_MS, JOB_GAP_MIN_MS, PUMP_MARGIN_MS, worstCaseMs, type JobOutcome, type QueueJob } from "../lib/launch-queue-types.ts";
 
 type Call = [string, ...unknown[]];
@@ -355,4 +355,84 @@ test("an un-claim the store drops on the fit check does not strand the lane: sti
   assert.equal(w.of("begin").length, 0, "a job that does not fit is never marked begun — the sweeper may re-queue it");
   assert.equal(w.of("release").length, 1);
   assert.equal(w.of("kick").length, 1);
+});
+
+// ---- updates: a pump that has been replaced hands its lane over; jobs a build cannot run ----
+
+test("a newer build is live: the pump takes nothing more, releases the lane, and kicks only when work is waiting", async () => {
+  const w = world({ jobs: [qj("j1"), qj("j2")] });
+  w.deps.superseded = async () => true;
+  assert.equal(await runLane(w.deps), "handoff");
+  assert.equal(w.of("claim").length, 0, "nothing is claimed by a replaced build");
+  assert.equal(w.of("run").length, 0);
+  assert.equal(w.of("release").length, 1);
+  assert.equal(w.of("kick").length, 1, "jobs are waiting → the new build is asked to take the lane");
+
+  const empty = world({ jobs: [] });
+  empty.deps.superseded = async () => true;
+  assert.equal(await runLane(empty.deps), "handoff");
+  assert.equal(empty.of("release").length, 1);
+  assert.equal(empty.of("kick").length, 0, "nothing queued → no invocation is spent on it");
+});
+
+test("an update that lands mid-wave: the running job is finished and settled, the rest is left — in order — to the new build", async () => {
+  const w = world({ jobs: [qj("j1"), qj("j2"), qj("j3")] });
+  let live = false;
+  w.deps.superseded = async () => live;
+  w.deps.run = async (job) => {
+    w.calls.push(["run", job.job_id]);
+    live = true; // the owner ships while j1 is building
+    return okOutcome(job);
+  };
+  assert.equal(await runLane(w.deps), "handoff");
+  assert.deepEqual(w.of("run"), [["run", "j1"]]);
+  assert.deepEqual(w.settled.map((x) => x.job), ["j1"]);
+  assert.deepEqual(w.queue.map((j) => j.job_id), ["j2", "j3"], "still queued, in order");
+  assert.equal(w.of("release").length, 1);
+  assert.equal(w.of("kick").length, 1);
+});
+
+test("a beacon read that fails never stops a lane (yielding is an optimisation, never a duty)", async () => {
+  const w = world({ jobs: [qj("j1")] });
+  w.deps.superseded = async () => {
+    throw new Error("store timeout");
+  };
+  assert.equal(await runLane(w.deps), "drained");
+  assert.deepEqual(w.of("run"), [["run", "j1"]]);
+});
+
+test("a job a NEWER build queued in a shape this build does not know is given back and left for that build — no run, no verdict, no kick loop", async () => {
+  const start = 1_000_000_000;
+  const w = world({ jobs: [qj("j1", { v: 2, build: "2026-10-09T00:00:00.000Z", queued_at: start - 30_000 }), qj("j2")], start });
+  w.deps.build = "2026-10-08T00:00:00.000Z";
+  assert.equal(await runLane(w.deps), "handoff");
+  assert.equal(w.of("run").length, 0);
+  assert.equal(w.of("begin").length, 0);
+  assert.equal(w.settled.length, 0, "an older build never decides the fate of a newer build's job");
+  assert.deepEqual(w.of("unclaim"), [["unclaim", "j1"]]);
+  assert.equal(w.of("release").length, 1);
+  assert.equal(w.of("kick").length, 0, "a kick would land on this same build while it still answers production");
+  assert.deepEqual(w.queue.map((j) => j.job_id), ["j1", "j2"], "order kept");
+});
+
+test("a job no live build can run (a rollback): refused cleanly and retryably once nobody newer came for it — and the lane goes on", async () => {
+  const start = 1_000_000_000;
+  const cases: QueueJob[] = [
+    qj("waited", { v: 2, build: "2026-10-09T00:00:00.000Z", queued_at: start - NEWER_BUILD_WAIT_MS - 1 }),
+    qj("same-build", { v: 2, build: "2026-10-08T00:00:00.000Z", queued_at: start }),
+    qj("unknown-kind", { kind: "xx.future" as QueueJob["kind"], queued_at: start }),
+  ];
+  for (const job of cases) {
+    const w = world({ jobs: [job, qj("next")], start });
+    w.deps.build = "2026-10-08T00:00:00.000Z";
+    assert.equal(await runLane(w.deps), "drained", job.job_id);
+    assert.deepEqual(w.of("run"), [["run", "next"]], job.job_id + ": only the runnable job ran");
+    const refused = w.settled.find((x) => x.job === job.job_id)?.outcome;
+    assert.ok(refused, job.job_id + ": settled");
+    assert.deepEqual([refused.status, refused.retryable, refused.ambiguous], ["error", true, false], job.job_id);
+    assert.equal(refused.row.retry, 1);
+    assert.match(String(refused.error), /nothing was sent/);
+    assert.equal(w.of("begin").filter((c) => c[1] === job.job_id).length, 0, "never marked begun");
+    assert.equal(w.of("unclaim").length, 0);
+  }
 });

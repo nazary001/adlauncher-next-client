@@ -5,12 +5,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  BEACON_FRESH_MS,
   CANCELED_STAGE,
+  HEARTBEAT_MS,
+  JOB_LEASE_MS,
+  LANE_LEASE_MS,
+  REAP_GRACE_MS,
   INTERRUPTED_MSG,
+  JOB_SCHEMA_VERSION,
   SCOPE_PARTNER,
+  SWEEP_LATE_MS,
   canceledRow,
   firstStage,
   handlerBody,
+  isSuperseded,
   jobMediaUrls,
   laneOf,
   outcomeOf,
@@ -18,6 +26,9 @@ import {
   queuedRow,
   reapedRow,
   runningRow,
+  sweepLateMinutes,
+  unsupportedOutcome,
+  unsupportedReason,
   worstCaseMs,
   type EnqueueInput,
   type JobRow,
@@ -153,7 +164,7 @@ test("firstStage / worstCaseMs / laneOf", () => {
   assert.equal(firstStage("mo.launch"), "gcm");
   assert.equal(firstStage("aif.launch"), "gcm");
   assert.equal(firstStage("av.launch"), "gcm");
-  assert.equal(worstCaseMs("hs.lion"), 75_000);
+  assert.equal(worstCaseMs("hs.lion"), 310_000, "in-process the LION route can spend minutes on cold catalog reads before the submit");
   for (const k of ["mo.launch", "aif.launch", "av.launch", "fb.clone", "hs.token", "hs.tool"] as QueueKind[]) assert.equal(worstCaseMs(k), 310_000);
   assert.equal(laneOf("mo", "nazar"), "mo:nazar");
   assert.equal(laneOf("hs", "tima"), "hs:tima");
@@ -380,4 +391,59 @@ test("outcomeOf: EVERY outcome's row carries srv:1; ambiguous rows never carry a
       else assert.ok("status" in o.row, `${kind}: a settled row carries its status`);
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// updates: versions, the build beacon, the sweep-late notice
+// ---------------------------------------------------------------------------
+
+test("unsupportedReason: a newer document shape or an unknown kind; a document without v is version 1", () => {
+  assert.equal(unsupportedReason({ kind: "mo.launch" }), null);
+  assert.equal(unsupportedReason({ kind: "hs.tool", v: JOB_SCHEMA_VERSION }), null);
+  assert.equal(unsupportedReason({ kind: "mo.launch", v: JOB_SCHEMA_VERSION + 1 }), "version");
+  assert.equal(unsupportedReason({ kind: "xx.future" as QueueKind }), "kind");
+});
+
+test("unsupportedOutcome: a clean refusal — retryable, nothing ambiguous, the row says nothing was sent", () => {
+  const o = unsupportedOutcome({ partner: "br" }, "version", 123);
+  assert.deepEqual([o.status, o.retryable, o.ambiguous, o.openRow, o.result], ["error", true, false, null, null]);
+  assert.deepEqual(
+    { srv: o.row.srv, retry: o.row.retry, status: o.row.status, partner: o.row.partner, finished_at: o.row.finished_at },
+    { srv: 1, retry: 1, status: "error", partner: "br", finished_at: 123 },
+  );
+  assert.match(String(o.row.error), /newer version.*nothing was sent/);
+  assert.match(String(unsupportedOutcome({ partner: "in" }, "kind", 1).error), /not supported by the version running now/);
+});
+
+test("isSuperseded: only toward a NEWER build that is being swept right now", () => {
+  const now = 10_000_000;
+  const mine = "2026-10-08T06:36:00.000Z";
+  const newer = "2026-10-08T07:21:00.000Z";
+  const older = "2026-10-07T22:00:00.000Z";
+  assert.equal(isSuperseded({ build: newer, at: now - 20_000 }, mine, now), true);
+  assert.equal(isSuperseded({ build: mine, at: now - 20_000 }, mine, now), false, "the current build never yields");
+  assert.equal(isSuperseded({ build: older, at: now - 20_000 }, mine, now), false, "never down: a rollback, or this build's first minute");
+  assert.equal(isSuperseded({ build: newer, at: now - BEACON_FRESH_MS - 1 }, mine, now), false, "a stale beacon proves nothing");
+  assert.equal(isSuperseded(null, mine, now), false);
+  assert.equal(isSuperseded({ build: newer, at: now }, "", now), false, "a pump that does not know its build never yields");
+  assert.equal(isSuperseded({ build: "", at: now }, mine, now), false);
+});
+
+test("sweepLateMinutes: said only when a job has waited AND the sweep has been silent", () => {
+  const min = 60_000;
+  const now = 100 * min;
+  assert.equal(sweepLateMinutes(null, now), null);
+  assert.equal(sweepLateMinutes({ sweptAt: now - 30 * min, oldestQueuedAt: null }, now), null, "nothing waiting");
+  assert.equal(sweepLateMinutes({ sweptAt: now - 30 * min, oldestQueuedAt: now - 1 * min }, now), null, "the job only just arrived");
+  assert.equal(sweepLateMinutes({ sweptAt: now - 20_000, oldestQueuedAt: now - 30 * min }, now), null, "a long lane under a live sweep");
+  assert.equal(sweepLateMinutes({ sweptAt: now - 7 * min - 5_000, oldestQueuedAt: now - 9 * min }, now), 7);
+  assert.equal(sweepLateMinutes({ sweptAt: null, oldestQueuedAt: now - 4 * min }, now), 4, "never swept: late since the job arrived");
+  assert.equal(sweepLateMinutes({ sweptAt: now - SWEEP_LATE_MS, oldestQueuedAt: now - SWEEP_LATE_MS }, now), 3);
+});
+
+test("the lane lease outlives a job's lease plus the reap grace — a lane can only change hands after its job is dead", () => {
+  // The order is the guard: with the lane lease SHORTER, a lane whose heartbeats stalled became free
+  // while its job was still validly running, and a second pump started the next job beside it.
+  assert.ok(LANE_LEASE_MS >= JOB_LEASE_MS + REAP_GRACE_MS, "lane ≥ job + grace");
+  assert.ok(JOB_LEASE_MS >= 4 * HEARTBEAT_MS, "a job survives several missed heartbeats");
 });

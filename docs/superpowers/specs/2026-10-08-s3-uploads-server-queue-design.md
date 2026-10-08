@@ -192,6 +192,49 @@ token) and calls `uploadVideo` for the job's videos. Best-effort: any failure is
 job simply registers its own video as before. A video is an account-library asset — an ad that
 reuses its id is the same thing a duplicate / clone does.
 
+### 4.7 Updates: the queue outlives the build (owner ask 08.10)
+
+"если я делаю обновление то чтобы очередь не сбрасывалась а все дальше запускалось и работало."
+
+Jobs live in Mongo, so a deploy cannot lose them — what an update changes is WHICH CODE runs them: a
+job handed over under one deployment is routinely run by another (a 40-campaign wave is still queued
+when the owner ships, or a deploy is rolled back).
+
+* **What happens at a deploy.** A pump already running inside the old deployment keeps running (a
+  deployment is immutable; its in-flight invocation is not cut by a promote). The every-minute cron
+  moves to the new deployment with the promote. Hand-off kicks go to `ADL_SELF_ORIGIN` = the
+  production address = the new deployment.
+* **The beacon** (`launch_lanes` document `@beacon`, `writeBeacon` / `readBeacon`): every real cron
+  tick of the production deployment (`mayAnnounceBuild`: production, or not on Vercel — never a
+  preview) writes its build stamp (`NEXT_PUBLIC_BUILD_STAMP`, an ISO build time). Before each claim a
+  pump re-reads it (at most every 15 s): when a NEWER build is being swept (`isSuperseded`) the pump
+  takes nothing more, releases the lane and kicks — **the new build takes every lane over within one
+  job**. Never toward an older build (a rollback, or a new build's first minute before its own first
+  sweep) — yielding "down" would bounce the lane between two builds.
+* **Versions.** A job document carries `v` (`JOB_SCHEMA_VERSION`) and the `build` that queued it. A
+  pump never runs a job it does not understand (`unsupportedReason`: a newer `v`, or a kind it has
+  no handler for): a job a newer build queued is given back and left for that build for up to 5 min
+  (`NEWER_BUILD_WAIT_MS`; no kick — it would land on the same build); after that — a rollback —
+  the current build refuses it cleanly (`unsupportedOutcome`: retryable, "nothing was sent").
+* **The promise that makes this safe:** a job's `body` is its handler's request body, and handlers
+  must keep accepting the bodies previous builds produced. `tests/queue-wire-golden.test.ts` pins
+  today's hand-off requests (`tests/fixtures/queue-wire-v1.json`, real requests of 08.10): keep old
+  shapes working, add a new fixture for a new shape, bump `JOB_SCHEMA_VERSION` only when old code
+  could misread the new documents.
+* **If an instance dies mid-job** (the platform's doing, not a deploy's): the job that was running
+  is closed as interrupted once its lease runs out (never re-run — its outcome is unknown), a job
+  that was only claimed goes back to the queue, and the sweep restarts the lane on the current build.
+* **Nobody is left guessing.** `GET /api/acct-limit` (every tab polls it) carries `queue: { sweptAt,
+  oldestQueuedAt }`; when jobs have waited 3+ min and the sweep has been silent 3+ min
+  (`sweepLateMinutes`) every tab shows an amber notice. A stopped cron is the one failure that could
+  leave a stranded lane waiting with nobody told.
+* **What an update still costs a buyer:** the stale-build guard (owner rule 08-18) pauses launching
+  in tabs older than the deployment until they reload, and a reload empties the board — cards that
+  were prepared but not launched are lost. Everything already handed over is unaffected.
+
+Bench: `_e2e/_adl_queue_update.mts` runs two servers as two builds — U1 an update mid-wave (the old
+build hands over, the new one finishes, each job exactly once), U2 the old instance killed mid-job.
+
 ## 5. Client
 
 ### 5.1 Task managers (MO/AIF/AV `components/task-manager.tsx`, HS `components/hs-task-manager.tsx`)

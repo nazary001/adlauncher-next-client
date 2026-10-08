@@ -456,6 +456,10 @@ export function Dropzone({
           continue;
         }
       }
+      // A file past the card's limit is dropped below — do not upload it first: on a one-creative
+      // rail a multi-file drop used to start every upload, taking the slots (and the bandwidth) of the
+      // one file that is kept and leaving orphans in the bucket (review find 08.10).
+      if (maxFiles != null && latestFiles.current.length + ok.length >= maxFiles) continue;
       const url = URL.createObjectURL(f);
       // Content goes browser → our S3 bucket the moment it is attached (owner ask 08.10), so pressing
       // Launch is a hand-off, not a transfer. Only launchable media is uploaded — "other" files are not.

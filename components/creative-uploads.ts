@@ -215,7 +215,14 @@ export function uploadCreativeBlob(blob: Blob, meta: UploadMeta): Promise<string
   // An object URL so the source is keyed like every other creative (useCreativeUpload works on it)
   // and the pipeline can re-read the bytes; session-lived, like the Dropzone's own URLs.
   const src = URL.createObjectURL(blob);
-  return store().startBlob(src, blob, meta);
+  const done = store().startBlob(src, blob, meta);
+  // Once it is on the server only the remote URL is used — release the tab-local one. (Kept on a
+  // failure: a retry re-reads the bytes through it.)
+  void done.then(
+    () => URL.revokeObjectURL(src),
+    () => {},
+  );
+  return done;
 }
 
 // ---- React bindings ----

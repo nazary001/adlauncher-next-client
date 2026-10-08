@@ -10,8 +10,10 @@ import {
   computeInternalToken,
   computeSelfOrigin,
   laneNameValid,
+  mayAnnounceBuild,
   parseReplyLines,
   pumpBudgetMs,
+  queueBuild,
   timingEqual,
 } from "../lib/launch-queue-wire.ts";
 
@@ -144,4 +146,21 @@ test("pumpBudgetMs: the test override can only SHORTEN the budget, and never on 
   assert.equal(pumpBudgetMs({ ADL_QUEUE_BUDGET_MS: "9000000" }, 770_000), 770_000, "never longer than the real budget");
   assert.equal(pumpBudgetMs({ ADL_QUEUE_BUDGET_MS: "5000" }, 770_000), 770_000, "absurdly short → ignored");
   assert.equal(pumpBudgetMs({ ADL_QUEUE_BUDGET_MS: "abc" }, 770_000), 770_000);
+});
+
+// ---- which build is this, and may it announce itself ----
+
+test("queueBuild: the inlined build stamp; a bench stand-in only OFF production", () => {
+  assert.equal(queueBuild("2026-10-08T06:36:00.000Z", {}), "2026-10-08T06:36:00.000Z");
+  assert.equal(queueBuild(undefined, {}), "");
+  assert.equal(queueBuild("A", { ADL_QUEUE_BUILD: "B" }), "B");
+  assert.equal(queueBuild("A", { ADL_QUEUE_BUILD: "B", VERCEL_ENV: "preview" }), "B");
+  assert.equal(queueBuild("A", { ADL_QUEUE_BUILD: "B", VERCEL_ENV: "production" }), "A", "production never reads the stand-in");
+});
+
+test("mayAnnounceBuild: production, or not on Vercel at all — never a preview that shares the database", () => {
+  assert.equal(mayAnnounceBuild({ VERCEL: "1", VERCEL_ENV: "production" }), true);
+  assert.equal(mayAnnounceBuild({ VERCEL: "1", VERCEL_ENV: "preview" }), false);
+  assert.equal(mayAnnounceBuild({ VERCEL: "1", VERCEL_ENV: "development" }), false);
+  assert.equal(mayAnnounceBuild({}), true, "the local bench");
 });

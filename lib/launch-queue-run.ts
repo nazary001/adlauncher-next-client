@@ -27,9 +27,12 @@ import {
   type JobOutcome,
   type QueueJob,
   type QueueScope,
+  type BuildBeacon,
+  JOB_SCHEMA_VERSION,
   PUMP_BUDGET_MS,
   canceledRow,
   handlerBody,
+  isSuperseded,
   laneOf,
   outcomeOf,
   queuedRow,
@@ -52,13 +55,15 @@ import {
   lanesNeedingPump,
   markJobBegan,
   peekQueued,
+  readBeacon,
   reapExpiredJobs,
   releaseLane as storeReleaseLane,
   requeueJobs,
   unclaimJob,
+  writeBeacon,
 } from "@/lib/launch-queue-store";
-import { findTaskRow, storeConfigured, upsertTaskRow } from "@/lib/task-store";
-import { computeInternalToken, computeSelfOrigin, parseReplyLines, pumpBudgetMs, timingEqual } from "@/lib/launch-queue-wire";
+import { patchOpenTaskRow, storeConfigured, upsertTaskRow } from "@/lib/task-store";
+import { computeInternalToken, computeSelfOrigin, mayAnnounceBuild, parseReplyLines, pumpBudgetMs, queueBuild, timingEqual } from "@/lib/launch-queue-wire";
 import { POST as launchPOST } from "@/app/api/launch/route";
 import { POST as aifLaunchPOST } from "@/app/api/aif/launch/route";
 import { POST as avLaunchPOST } from "@/app/api/av/launch/route";
@@ -301,12 +306,24 @@ async function settleJob(job: QueueJob, outcome: JobOutcome, holder: string): Pr
   // say the same, or it would show a Retry button the server then refuses (review find 08.10).
   await upsertTaskRow(job.owner, job.job_id, ours ? outcome.row : { ...outcome.row, retry: 0 });
   // An AMBIGUOUS verdict's openRow is written only OVER a still-open row (queued/running) — never over
-  // a done/error/interrupted the handler itself already wrote (strict read: a store blip must not read
-  // as "absent" and clobber a terminal state).
-  if (outcome.ambiguous && outcome.openRow) {
-    const found = await findTaskRow(job.job_id, true);
-    if (found && (found.status === "queued" || found.status === "running")) {
-      await upsertTaskRow(job.owner, job.job_id, outcome.openRow);
+  // a done/error/interrupted the handler itself already wrote. One atomic conditional update (no read
+  // to go wrong), tried a few times: the job document is terminal by now, so nothing would ever come
+  // back for a row left "running" here.
+  if (outcome.ambiguous && outcome.openRow) await writeOverOpenRow(job.job_id, outcome.openRow);
+}
+
+/** patchOpenTaskRow with a short retry — the last word on a row whose job is already closed. */
+async function writeOverOpenRow(taskId: string, row: Record<string, unknown>): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await patchOpenTaskRow(taskId, row);
+      return;
+    } catch (e) {
+      if (attempt >= 3) {
+        log(`row ${taskId} could not be closed: ${errMsg(e)}`);
+        return;
+      }
+      await sleep(800 * attempt);
     }
   }
 }
@@ -320,6 +337,10 @@ async function settleJob(job: QueueJob, outcome: JobOutcome, holder: string): Pr
 export async function pumpLane(lane: string, opts: { origin: string; startedAt: number }): Promise<void> {
   const holder = crypto.randomUUID();
   const prewarmed = new Set<string>();
+  const build = thisBuild();
+  // The beacon is re-read at most every BEACON_RECHECK_MS — one small read per job at worst.
+  let beacon: BuildBeacon | null = null;
+  let beaconReadAt = 0;
   const deps: LaneDeps = {
     now: () => Date.now(),
     deadlineAt: opts.startedAt + pumpBudgetMs(process.env, PUMP_BUDGET_MS),
@@ -338,6 +359,20 @@ export async function pumpLane(lane: string, opts: { origin: string; startedAt: 
     settle: (job, outcome) => settleJob(job, outcome, holder),
     prewarm: (job) => prewarm(job, prewarmed),
     kick: async () => void (await kickLane(opts.origin, lane)),
+    build,
+    superseded: async () => {
+      if (!build) return false;
+      const now = Date.now();
+      if (now - beaconReadAt >= BEACON_RECHECK_MS) {
+        beaconReadAt = now;
+        try {
+          beacon = await readBeacon();
+        } catch {
+          /* a store blip: keep the last picture — yielding is an optimisation, never a duty */
+        }
+      }
+      return isSuperseded(beacon, build, now);
+    },
     sleep,
     every: (ms, fn) => {
       const iv = setInterval(fn, ms);
@@ -430,6 +465,8 @@ export async function acceptEnqueue(session: Session, input: EnqueueInput, origi
       continue;
     }
     const job: NewJob = {
+      v: JOB_SCHEMA_VERSION,
+      build: thisBuild() || null,
       job_id: j.taskId,
       owner,
       role,
@@ -485,8 +522,22 @@ export async function cancelJobs(
  *  kick every lane with queued work and no live lock (in parallel, at most 20). Never throws. */
 export async function sweepQueue(
   origin: string,
+  opts: { announce?: boolean } = {},
 ): Promise<{ reaped: number; requeued: number; kicked: number; lanesQueued: number; unkicked: string[] }> {
   const now = Date.now();
+  // Tell every pump which build is being swept (= which build is production right now): pumps of an
+  // OLDER build then hand their lanes over, so an update takes the queue over within one job. Only a
+  // real cron tick of the production deployment announces (the route decides) — never a preview.
+  if (opts.announce) {
+    const build = thisBuild();
+    if (build && mayAnnounceBuild(process.env)) {
+      try {
+        await writeBeacon(build, now);
+      } catch (e) {
+        log(`beacon write failed: ${errMsg(e)}`);
+      }
+    }
+  }
   let reaped = 0;
   let requeued = 0;
   try {
@@ -497,14 +548,7 @@ export async function sweepQueue(
     if (requeued) log(`re-queued ${requeued} claimed-but-never-run job(s): ${swept.requeued.map((j) => j.job_id).join(", ")}`);
     for (const job of swept.interrupted) {
       reaped++;
-      try {
-        const found = await findTaskRow(job.job_id, true);
-        if (found && (found.status === "queued" || found.status === "running")) {
-          await upsertTaskRow(job.owner, job.job_id, reapedRow({ kind: job.kind, partner: job.partner }, now));
-        }
-      } catch (e) {
-        log(`reap row ${job.job_id} failed: ${errMsg(e)}`);
-      }
+      await writeOverOpenRow(job.job_id, reapedRow({ kind: job.kind, partner: job.partner }, now));
     }
   } catch (e) {
     log(`reapExpiredJobs failed: ${errMsg(e)}`);
@@ -522,6 +566,17 @@ export async function sweepQueue(
   // self-call working. `kicked` counts only the kicks a pump really accepted.
   const unkicked = toKick.filter((_, i) => !answers[i]);
   return { reaped, requeued, kicked: toKick.length - unkicked.length, lanesQueued: lanes.length, unkicked };
+}
+
+// ---- which build is this ----
+
+/** How often a pump re-reads the beacon. */
+const BEACON_RECHECK_MS = 15_000;
+
+/** This deployment's build stamp (ISO build time). The env read is LITERAL on purpose: next.config
+ *  `env` values are build-time replacements, a dynamic lookup would find nothing at runtime. */
+export function thisBuild(): string {
+  return queueBuild(process.env.NEXT_PUBLIC_BUILD_STAMP, process.env);
 }
 
 // ---- the continuation kick + internal auth ----

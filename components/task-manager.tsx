@@ -27,9 +27,9 @@ import {
   ownerLastWrite,
 } from "@/lib/task-view";
 import type { QueueKind, QueueScope } from "@/lib/launch-queue-types";
-import { cancelQueued, retryQueued, sendToQueue } from "./launch-queue-client";
+import { cancelQueued, isHandoffUnconfirmed, retryQueued, sendToQueue } from "./launch-queue-client";
 import { ensureCreativeUploaded } from "./creative-uploads";
-import { handoffBegin, handoffPatch, useHandoffPending } from "./launch-handoff";
+import { handoffBegin, handoffPatch, useHandoffItems, useHandoffPending } from "./launch-handoff";
 import type { SessionUser } from "./user-menu";
 import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, XIcon } from "./icons";
 
@@ -335,8 +335,12 @@ function TaskManagerCore({
   // OPTIMISTIC_TTL_MS. State (not a ref) so the render can read it — the React-Compiler lint forbids
   // reading a ref during render, and a stale optimistic row could otherwise mask a real one.
   const [optimistic, setOptimistic] = useState<LaunchTask[]>([]);
+  // An optimistic row's lifetime counts from the moment it is ADDED (the server accepted it), not
+  // from the Launch click: after an upload longer than the TTL the row used to be born already
+  // expired and blink out of the drawer until the next poll (review find 08.10).
   const addOptimistic = useCallback((row: LaunchTask) => {
-    setOptimistic((rows) => (rows.some((r) => r.id === row.id) ? rows : [...rows, row]));
+    const stamped: LaunchTask = { ...row, optimisticAt: Date.now() };
+    setOptimistic((rows) => (rows.some((r) => r.id === row.id) ? rows : [...rows, stamped]));
   }, []);
 
   /** Pull the whole team's tasks and merge them in. Every row mirrors the fetch (so a teammate's
@@ -461,7 +465,7 @@ function TaskManagerCore({
       if (rows.length === 0) return rows;
       const have = new Set(tasks.map((t) => t.id));
       const cutoff = Date.now() - OPTIMISTIC_TTL_MS;
-      const next = rows.filter((r) => !have.has(r.id) && r.queuedAt >= cutoff);
+      const next = rows.filter((r) => !have.has(r.id) && (r.optimisticAt ?? r.queuedAt) >= cutoff);
       return next.length === rows.length ? rows : next;
     });
   }, [tasks, nowTick]);
@@ -478,6 +482,35 @@ function TaskManagerCore({
   }, [tasks, lsKey]);
 
   // ---- hand-off: enqueue / enqueueClone no longer run anything (spec §5.1) ----
+
+  // A hand-off this tab marked FAILED whose row the server nevertheless holds: the reply was lost
+  // on the way back, not the campaign. The server has it — clear the alarm, or the buyer is left
+  // looking at "not confirmed" for a launch that is in fact running (and tempted to fire it again).
+  const handoffItems = useHandoffItems();
+  useEffect(() => {
+    for (const it of handoffItems) {
+      if (it.scope !== scope.queueScope || it.phase !== "failed") continue;
+      const row = tasks.find((t) => t.id === it.id);
+      // "Not accepted by the queue" is the server's own marker for a job it could NOT store.
+      if (row?.srv && !(row.status === "error" && /^Not accepted by the queue/.test(row.error ?? ""))) {
+        handoffPatch(it.id, { phase: "accepted", error: null, retry: null });
+      }
+    }
+  }, [handoffItems, tasks, scope.queueScope]);
+
+  /** A failed hand-off: say why; when no verdict came back, look for the server's row now and again
+   *  once its short list cache has turned over. */
+  const failHandoff = useCallback(
+    (id: string, e: unknown, retry: () => void) => {
+      const unsure = isHandoffUnconfirmed(e);
+      handoffPatch(id, { phase: "failed", error: errMsg(e), retry, uncertain: unsure });
+      if (unsure) {
+        loadRemote();
+        window.setTimeout(loadRemote, 6_000);
+      }
+    },
+    [loadRemote],
+  );
 
   const enqueue = useCallback(
     (args: EnqueueArgs) => {
@@ -559,12 +592,12 @@ function TaskManagerCore({
           });
           loadRemote();
         } catch (e) {
-          handoffPatch(id, { phase: "failed", error: errMsg(e), retry: run });
+          failHandoff(id, e, run);
         }
       };
       void run();
     },
-    [me, scope.queueScope, loadRemote, addOptimistic],
+    [me, scope.queueScope, loadRemote, addOptimistic, failHandoff],
   );
 
   const enqueueClone = useCallback(
@@ -611,12 +644,12 @@ function TaskManagerCore({
           });
           loadRemote();
         } catch (e) {
-          handoffPatch(id, { phase: "failed", error: errMsg(e), retry: run });
+          failHandoff(id, e, run);
         }
       };
       void run();
     },
-    [me, scope.queueScope, loadRemote, addOptimistic],
+    [me, scope.queueScope, loadRemote, addOptimistic, failHandoff],
   );
 
   // Display statuses resolved against owner liveness (srv rows are never stale — the server owns
