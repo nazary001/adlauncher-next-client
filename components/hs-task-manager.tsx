@@ -32,8 +32,19 @@ import { cancelQueued, isHandoffUnconfirmed, retryQueued, sendToQueue } from "./
 import { UploadingNotice } from "./upload-guard";
 import { type Campaign, type FileItem, bidTag, moneyLabel } from "@/lib/types";
 import { CANCELED_STAGE, type QueueKind } from "@/lib/launch-queue-types";
+import { teamHas } from "@/lib/team";
 import type { SessionUser } from "./user-menu";
 import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, XIcon } from "./icons";
+
+// The rails this team launches HS on besides LION (lib/team) — the drawer names only the rails its
+// team has, so a LION-only team is not told about a FB token or a TOOL queue it cannot use.
+const DIRECT_RAILS = [teamHas("channel:token") ? "FB token" : "", teamHas("channel:tool") ? "TOOL" : ""].filter(Boolean);
+const QUEUE_RAILS_LABEL = ["LION", ...DIRECT_RAILS].join(" · ");
+const EMPTY_HINT =
+  "HS launches land here. They hand over to our server — close this tab once a row is queued. " +
+  (DIRECT_RAILS.length
+    ? `LION rail: a green row means LION accepted it — the build finishes on LION's side. ${DIRECT_RAILS.join(" & ")} ${DIRECT_RAILS.length > 1 ? "rails" : "rail"}: a green row means the campaign is already live on Facebook (delivery starts 30 min after create).`
+    : "A green row means LION accepted it — the build finishes on LION's side.");
 
 // ---------- model ----------
 
@@ -1349,7 +1360,7 @@ function HsTaskManagerPanel() {
             </span>
             <div className="leading-none">
               <h2 className="text-[14px] font-semibold text-ink">HS Task Manager</h2>
-              <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-faint">LION · FB token · TOOL launch queue</p>
+              <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-faint">{QUEUE_RAILS_LABEL} launch queue</p>
             </div>
           </div>
           <button
@@ -1416,12 +1427,7 @@ function HsTaskManagerPanel() {
                 <TasksIcon className="h-5 w-5" />
               </span>
               <p className="text-[13px] font-medium text-dim">Nothing here yet</p>
-              <p className="max-w-[250px] text-[11.5px] leading-relaxed text-faint">
-                HS launches land here. They hand over to our server — close this tab once a row is
-                queued. LION rail: a green row means LION accepted it — the build finishes on
-                LION&apos;s side. FB token &amp; TOOL rails: a green row means the campaign is already
-                live on Facebook (delivery starts 30 min after create).
-              </p>
+              <p className="max-w-[250px] text-[11.5px] leading-relaxed text-faint">{EMPTY_HINT}</p>
             </div>
           ) : (
             <div className="flex flex-col gap-2">
