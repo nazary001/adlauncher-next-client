@@ -171,6 +171,11 @@ const MKLEARN_LANDINGS: Landing[] = [
   { slug: "sol-luna-y-ascendente", title: "Sol, Luna y ascendente", lang: "ES", niche: "Self-Discovery" },
   { slug: "why-you-keep-seeing-11-11", title: "Why You Keep Seeing 11:11", lang: "EN", niche: "Self-Discovery" },
   { slug: "por-que-ves-11-11", title: "Por qué ves 11:11", lang: "ES", niche: "Self-Discovery" },
+  // Quiz landings (MK Learn <QuizFunnel />): a memory test whose Start / every round checkpoint /
+  // result / breakdown button is the partner's rewarded gate, with the inline banner below.
+  // Two lengths of the same format, like the reference funnel's A/B arms.
+  { slug: "memory-test-80-percent", title: "Memory Test – 10 Rounds, 70 Questions", lang: "EN", niche: "Quizzes" },
+  { slug: "quick-memory-test", title: "Quick Memory Test – 10 Questions", lang: "EN", niche: "Quizzes" },
 ];
 
 // The VD-C1 partner's value pixel «VD-C1-HS-11»: the ONE pixel the VD-C1 admin shares to every
