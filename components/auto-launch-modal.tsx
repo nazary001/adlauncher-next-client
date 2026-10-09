@@ -9,6 +9,7 @@
 // fire streamed /api/launch from this tab: closing it mid-build tore the launch down.)
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import type { Campaign } from "@/lib/types";
 import { fullName, limitMoney, parseMoney } from "@/lib/types";
 import { UploadingNotice, useUnloadGuard } from "./upload-guard";
@@ -314,9 +315,9 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
                 {result.ok ? (
                   <p className="mt-1 text-[11px] opacity-80">
                     Task <span className="font-mono">{result.taskId}</span> ·{" "}
-                    <a href="/?partner=in" className="underline">
+                    <Link href="/?partner=in" className="underline">
                       open the launcher to watch it
-                    </a>
+                    </Link>
                   </p>
                 ) : (
                   <p className="mt-1 text-[11px] opacity-80">
