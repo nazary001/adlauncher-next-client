@@ -9,6 +9,11 @@ import { useGoogleCustomers, type GwCustomer, type GoogleSourceInfo } from "./us
 import { GoogleSuspendedNote } from "./google-suspended-note";
 import { useGoogleTaskManager } from "./google-task-manager";
 import { makeGate } from "@/lib/launch-guards";
+import { useWaveHold } from "./wave-hold";
+import { WAVE_ACCEPTED_NOTE, WAVE_HELD_NOTE, WAVE_RELEASED_NOTE } from "./wave-hold-core";
+import { handoffBegin, handoffPatch } from "./launch-handoff";
+import { forgetWave, recallWave, rememberWave } from "./wave-memory";
+import { rememberedRowIds } from "./wave-memory-core";
 import { limitMoney, limitMoneyCents, moneyCentsLabel, moneyLabel, parseMoney } from "@/lib/types";
 import {
   GOOGLE_DEFAULT_BUDGET,
@@ -33,6 +38,10 @@ import type { SessionUser } from "./user-menu";
 
 const MAX_COPIES = 20;
 const MAX_SOURCES = 30;
+/** The wave this board last sent, kept across a reload (components/wave-memory). */
+const WAVE_MEMORY_KEY = "adlauncher.google.clone.wave";
+/** Hand-off item id of a row (unique across every rail's overlay items). */
+const hid = (id: string) => `ggc:${id}`;
 /** How long a source may sit "fetching" in the board poller before we call the snapshot stuck
  *  (the server pump has a far longer budget — this is only the board's status view). */
 const DATASET_POLL_TIMEOUT_MS = 4 * 60_000;
@@ -71,7 +80,10 @@ type Row = {
   pixel: string;
   /** Row's OWN number of copies ("" = the wave default). */
   copies: string;
-  state: "idle" | "sending" | "ok" | "error";
+  /** "unsure" = the row's wave got no answer and the server is being asked whether it took it
+   *  (components/wave-hold-core.ts) — not fireable until it answers. "ok" = queued: not fireable
+   *  until the buyer edits the row (Preview → Fire twice must never build the same copies twice). */
+  state: "idle" | "sending" | "ok" | "error" | "unsure";
   msg?: string;
 };
 
@@ -191,6 +203,7 @@ export function GoogleCloneBoard({
     setMode(m);
     setPreviewed(false);
     setFireNote(null);
+    reopenQueued();
     // The billing currency changes with the mode (CLONE = target account, JURO = the source's own):
     // machine-derived budgets/bids follow it; a buyer's own numbers stay.
     setRows((rs) =>
@@ -207,6 +220,61 @@ export function GoogleCloneBoard({
   };
 
   const patchRow = (id: string, p: Partial<Row>) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p } : r)));
+  /** A BUYER's edit: it makes a queued (or failed) row a fresh draft again. A row that was queued is
+   *  NOT fireable until this happens — Preview → Fire twice must never build the same copies twice
+   *  (the TikTok cloner's rule; audit find 09.10 for this board). A HELD row keeps its hold: the
+   *  fields change, but launching it again is exactly what the hold prevents. */
+  const editRow = (id: string, p: Partial<Row>) =>
+    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p, ...(r.state === "unsure" ? {} : { state: "idle" as const, msg: undefined }) } : r)));
+  /** A wave-level change (mode, target account, pixel, default copies) changes what EVERY row riding
+   *  the defaults would send — queued rows become drafts of that new wave. Held rows stay held. */
+  const reopenQueued = () =>
+    setRows((rs) => (rs.some((r) => r.state === "ok" || r.state === "error") ? rs.map((r) => (r.state === "ok" || r.state === "error" ? { ...r, state: "idle", msg: undefined } : r)) : rs));
+
+  // A wave whose request got NO answer is held until the server says whether it took it
+  // (components/wave-hold-core.ts): its rows are not fireable, and nothing is built twice.
+  const { hold } = useWaveHold({
+    rail: "google",
+    onAccepted: (w) => {
+      forgetWave(WAVE_MEMORY_KEY);
+      if (waveRef.current?.id === w.waveId) waveRef.current = null;
+      for (const id of w.cardIds) {
+        patchRow(id, { state: "ok", msg: WAVE_ACCEPTED_NOTE });
+        handoffPatch(hid(id), { phase: "accepted", error: null });
+      }
+      setFireNote("The wave whose answer was lost IS with the server — nothing needs to be fired again. See the Task Manager.");
+      refresh();
+      setOpen(true);
+    },
+    onReleased: (w) => {
+      forgetWave(WAVE_MEMORY_KEY);
+      for (const id of w.cardIds) {
+        patchRow(id, { state: "error", msg: WAVE_RELEASED_NOTE });
+        handoffPatch(hid(id), { phase: "failed", uncertain: null, error: "the server never received it — fire it again from the board" });
+      }
+      setFireNote("The server never received that wave — its rows can be fired again.");
+    },
+  });
+
+  // A wave sent before a reload whose answer never came back (components/wave-memory): hold its
+  // rows again instead of showing them idle and fireable under a new wave id.
+  useEffect(() => {
+    const m = recallWave(WAVE_MEMORY_KEY);
+    if (!m) return;
+    const ids = rememberedRowIds(rows, (r) => r.campaignId.trim(), m);
+    if (ids.length === 0) {
+      forgetWave(WAVE_MEMORY_KEY);
+      return;
+    }
+    waveRef.current = { sig: m.sig, id: m.id };
+    // Safe setState-in-effect: runs once on mount (sessionStorage is unreadable during SSR).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setRows((rs) => rs.map((r) => (ids.includes(r.id) ? { ...r, state: "unsure", msg: WAVE_HELD_NOTE } : r)));
+    hold(m.id, ids);
+    setFireNote("A wave sent before this reload got no answer — its rows are held while the server is asked whether it took it.");
+    // Mount only: the rows it reads are the ones the link seeded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const addSources = () => {
     const ids = [...new Set(draftId.split(/[\s,;]+/).map((x) => x.trim()).filter((x) => /^\d{5,}$/.test(x)))];
@@ -425,7 +493,8 @@ export function GoogleCloneBoard({
   const customersLoading = customers === null && !custError;
   const customersFailed = Boolean(custError);
   const datasetBad = (r: Row): boolean => r.info?.dataset.state === "missing" || r.info?.dataset.state === "error";
-  const candidateRows = rows.filter((r) => idOk(r) && parseMoney(r.budget) >= 1);
+  // A queued row ("ok") waits for an edit; a held row ("unsure") waits for the server's word.
+  const candidateRows = rows.filter((r) => idOk(r) && parseMoney(r.budget) >= 1 && r.state !== "ok" && r.state !== "unsure");
   const validRows = candidateRows.filter((r) => !datasetBad(r));
   const blockedDatasetRows = candidateRows.filter(datasetBad);
   const lowBudgetCount = rows.filter((r) => idOk(r) && parseMoney(r.budget) < 1).length;
@@ -471,9 +540,13 @@ export function GoogleCloneBoard({
     if (!fireGate.current.enter()) return;
     setFireNote(null);
     setFiring(true);
-    const shots = validRows.flatMap((r) => {
+    // One shot per copy; shotRow remembers the row each shot came from, so the server's
+    // "shot N: …" lands on ITS row even with the copies expanded (audit find 09.10: the old
+    // mapping indexed the un-expanded rows, so a refusal of a later shot flagged the wrong row).
+    const shots: Record<string, string>[] = [];
+    const shotRow: string[] = [];
+    for (const r of validRows) {
       const cid = r.campaignId.trim();
-      const n = rowCopies(r);
       const cur = rowCurrency(r);
       const shot = {
         campaignId: cid,
@@ -488,41 +561,101 @@ export function GoogleCloneBoard({
         ...(r.info?.accountId ? { sourceAccount: r.info.accountId } : {}),
         ...(cur ? { currency: cur } : {}),
       };
-      return Array.from({ length: n }, () => ({ ...shot }));
-    });
+      for (let k = 0; k < rowCopies(r); k++) {
+        shots.push({ ...shot });
+        shotRow.push(r.id);
+      }
+    }
     const waveCustomer = mode === "clone" ? customer : "";
     const sig = JSON.stringify({ mode, customer: waveCustomer, pixel: effWavePixel, shots });
-    if (!waveRef.current || waveRef.current.sig !== sig) waveRef.current = { sig, id: crypto.randomUUID() };
+    if (!waveRef.current || waveRef.current.sig !== sig) {
+      // The same content fired again after a reload re-uses the remembered id — the server's wave
+      // claim then makes the re-POST a no-op instead of a second build.
+      const remembered = recallWave(WAVE_MEMORY_KEY);
+      waveRef.current = { sig, id: remembered?.sig === sig ? remembered.id : crypto.randomUUID() };
+    }
+    const waveId = waveRef.current.id;
+    const sentRows = validRows.map((r) => r.id);
+    rememberWave(WAVE_MEMORY_KEY, { id: waveId, sig, keys: validRows.map((r) => r.campaignId.trim()), rail: "google" });
     validRows.forEach((r) => patchRow(r.id, { state: "sending", msg: "queuing on server…" }));
+    // The hand-off screen: nothing to upload on this board, every row goes straight to "sending".
+    handoffBegin(
+      validRows.map((r) => ({
+        id: hid(r.id),
+        scope: "gg" as const,
+        label: r.info?.name || `campaign ${r.campaignId.trim()}`,
+        sub: `${rowCopies(r)} ${rowCopies(r) === 1 ? "copy" : "copies"} · ${mode === "clone" ? "clone" : "JURO"}`,
+        sources: [],
+        phase: "sending" as const,
+      })),
+    );
+    // Set once a real verdict arrived — a throw after that is a UI error, not a lost answer.
+    let answered = false;
     try {
       const endpoint = mode === "clone" ? "/api/google/clone" : "/api/google/juro";
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          waveId: waveRef.current.id,
+          waveId,
           ...(waveCustomer ? { customer: waveCustomer } : {}),
           ...(effWavePixel ? { pixel: effWavePixel } : {}),
           shots,
         }),
       });
-      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; queued?: number; error?: string; availablePixels?: string[] };
-      if (d?.ok) {
+      const d = (await res.json().catch(() => null)) as { ok?: boolean; queued?: number; error?: string; availablePixels?: string[] } | null;
+      // An answer WITHOUT a verdict (a gateway's 502 / 504 page: the function may still be running
+      // and may yet take the wave) is no answer — it is handled below exactly like a dropped connection.
+      if (!d || typeof d.ok !== "boolean") throw new Error(`HTTP ${res.status} without a verdict`);
+      answered = true;
+      forgetWave(WAVE_MEMORY_KEY); // a real answer arrived — whatever it says, this wave is not "unanswered"
+      if (d.ok) {
         waveRef.current = null; // accepted — the next wave is a new wave
         setPreviewed(false);
-        validRows.forEach((r) =>
-          patchRow(r.id, { state: "ok", msg: `${rowCopies(r)}/${rowCopies(r)} queued — safe to close the tab (LION builds them server-side)` }),
-        );
+        validRows.forEach((r) => {
+          patchRow(r.id, {
+            state: "ok",
+            msg: `${rowCopies(r)}/${rowCopies(r)} queued — safe to close the tab (LION builds them server-side) · edit the row to fire it again`,
+          });
+          handoffPatch(hid(r.id), { phase: "accepted" });
+        });
         refresh(); // pull the pump-stamped rows now instead of waiting for the next poll tick
         setOpen(true); // the drawer mirrors the server's progress from the shared store
       } else {
-        const px = Array.isArray(d?.availablePixels) && d.availablePixels.length ? ` · available pixels: ${d.availablePixels.join(", ")}` : "";
-        const msg = (d?.error ?? `HTTP ${res.status}`) + px;
-        validRows.forEach((r) => patchRow(r.id, { state: "error", msg }));
+        const px = Array.isArray(d.availablePixels) && d.availablePixels.length ? ` · available pixels: ${d.availablePixels.join(", ")}` : "";
+        const msg = (d.error ?? `HTTP ${res.status}`) + px;
+        setFireNote(msg);
+        // "shot N: …" pins the failure to one row; otherwise every row of the wave carries it.
+        const m = /^shot (\d+):/.exec(String(d.error ?? ""));
+        const culprit = m ? shotRow[Number(m[1]) - 1] : null;
+        validRows.forEach((r) => {
+          const rowMsg = culprit && r.id !== culprit ? "wave refused — fix the flagged row" : msg;
+          patchRow(r.id, { state: "error", msg: rowMsg });
+          handoffPatch(hid(r.id), { phase: "failed", error: rowMsg });
+        });
       }
     } catch (e) {
       const msg = String((e as Error).message ?? e);
-      validRows.forEach((r) => patchRow(r.id, { state: "error", msg }));
+      if (!answered) {
+        // No ANSWER is not a refusal: the server may have taken the wave before the connection
+        // dropped. Its rows are HELD — not fireable — while the server is asked whether it has the
+        // wave (components/wave-hold). Painting them "error" left them fireable, and a second Fire
+        // minted a new wave id for campaigns already being built (audit find 09.10).
+        hold(waveId, sentRows);
+        validRows.forEach((r) => {
+          patchRow(r.id, { state: "unsure", msg: WAVE_HELD_NOTE });
+          handoffPatch(hid(r.id), { phase: "failed", uncertain: true, error: "no answer from the server — checking whether it took the wave; this clears by itself. Do not fire it again." });
+        });
+        setFireNote(`No answer from the server (${msg}) — the wave MAY have been accepted. Its rows are held while the server is asked; nothing will be built twice.`);
+        refresh();
+        setOpen(true);
+      } else {
+        setFireNote(msg);
+        validRows.forEach((r) => {
+          patchRow(r.id, { state: "error", msg });
+          handoffPatch(hid(r.id), { phase: "failed", error: msg });
+        });
+      }
     } finally {
       setFiring(false);
       fireGate.current.exit();
@@ -603,6 +736,7 @@ export function GoogleCloneBoard({
                       setCustomer(v);
                       setPixel("");
                       setPreviewed(false);
+                      reopenQueued();
                       // Rows riding the wave default re-derive their machine budget/bid for the new currency.
                       const cur = customerById.get(v)?.currency ?? "";
                       setRows((rs) => rs.map((r) => (r.customer ? r : { ...r, ...derivePrefill(r, cur, "clone") })));
@@ -644,6 +778,7 @@ export function GoogleCloneBoard({
                     onChange={(v) => {
                       setPixel(v);
                       setPreviewed(false);
+                      reopenQueued();
                     }}
                     options={pixelOptionsFor(waveTarget)}
                     placeholder="Search pixel"
@@ -661,6 +796,7 @@ export function GoogleCloneBoard({
                     const raw = e.target.value.replace(/\D/g, "").slice(0, 2);
                     setCopies(raw !== "" && Number(raw) > MAX_COPIES ? String(MAX_COPIES) : raw);
                     setPreviewed(false);
+                    reopenQueued();
                   }}
                   onBlur={() => {
                     if (copies === "" || Number(copies) < 1) setCopies("1");
@@ -880,7 +1016,7 @@ export function GoogleCloneBoard({
                         <AutoTextarea
                           value={r.suffix}
                           onChange={(v) => {
-                            patchRow(r.id, { suffix: v });
+                            editRow(r.id, { suffix: v });
                             setPreviewed(false);
                           }}
                           placeholder="note — appended to the team suffix"
@@ -1010,7 +1146,7 @@ export function GoogleCloneBoard({
                           <p
                             className={
                               "mt-1.5 break-words font-mono text-[10.5px] leading-snug " +
-                              (r.state === "error" ? "text-danger" : r.state === "ok" ? "text-launch2" : "text-[#9db8ff]")
+                              (r.state === "error" ? "text-danger" : r.state === "unsure" ? "text-warn" : r.state === "ok" ? "text-launch2" : "text-[#9db8ff]")
                             }
                           >
                             {r.state === "sending" ? "Submitting…" : r.msg ?? "—"}
@@ -1045,7 +1181,7 @@ export function GoogleCloneBoard({
                                     type="button"
                                     onClick={() => {
                                       const cur = customerById.get(customer)?.currency ?? "";
-                                      patchRow(r.id, { customer: "", pixel: "", ...derivePrefill(r, cur, "clone") });
+                                      editRow(r.id, { customer: "", pixel: "", ...derivePrefill(r, cur, "clone") });
                                       setPreviewed(false);
                                     }}
                                     aria-label="Back to the wave defaults"
@@ -1068,7 +1204,7 @@ export function GoogleCloneBoard({
                                 value={r.customer || customer}
                                 onChange={(v) => {
                                   const cur = customerById.get(v)?.currency ?? "";
-                                  patchRow(r.id, { customer: v, pixel: "", ...derivePrefill(r, cur, "clone") });
+                                  editRow(r.id, { customer: v, pixel: "", ...derivePrefill(r, cur, "clone") });
                                   setPreviewed(false);
                                 }}
                                 options={customerOptions}
@@ -1082,7 +1218,7 @@ export function GoogleCloneBoard({
                                 size="sm"
                                 value={rowEffPixel(r)}
                                 onChange={(v) => {
-                                  patchRow(r.id, { pixel: v });
+                                  editRow(r.id, { pixel: v });
                                   setPreviewed(false);
                                 }}
                                 options={pixelOptionsFor(rowT)}
@@ -1108,7 +1244,7 @@ export function GoogleCloneBoard({
                                 size="sm"
                                 value={rowEffPixel(r)}
                                 onChange={(v) => {
-                                  patchRow(r.id, { pixel: v });
+                                  editRow(r.id, { pixel: v });
                                   setPreviewed(false);
                                 }}
                                 options={pixelOptionsFor(srcAccount)}
@@ -1122,7 +1258,7 @@ export function GoogleCloneBoard({
                               <input
                                 value={r.pixel}
                                 onChange={(e) => {
-                                  patchRow(r.id, { pixel: e.target.value.trim() });
+                                  editRow(r.id, { pixel: e.target.value.trim() });
                                   setPreviewed(false);
                                 }}
                                 placeholder="Pixel id (optional)"
@@ -1146,7 +1282,7 @@ export function GoogleCloneBoard({
                                   const val = e.target.value;
                                   const prevKind = kind;
                                   const nextKind = val ? googleBidKind(val) : "unknown";
-                                  patchRow(r.id, { bidStrategy: val, bid: nextKind === prevKind ? r.bid : "", autoBid: nextKind === prevKind ? r.autoBid : false });
+                                  editRow(r.id, { bidStrategy: val, bid: nextKind === prevKind ? r.bid : "", autoBid: nextKind === prevKind ? r.autoBid : false });
                                   setPreviewed(false);
                                 }}
                                 disabled={badDataset}
@@ -1185,7 +1321,7 @@ export function GoogleCloneBoard({
                                   const digs = raw.replace(/\D/g, "").slice(0, 3);
                                   v = digs && Number(digs) > GOOGLE_ROAS_MAX ? String(GOOGLE_ROAS_MAX) : digs;
                                 } else v = limitMoney(raw, GOOGLE_CPA_MAX);
-                                patchRow(r.id, { bid: v, autoBid: false });
+                                editRow(r.id, { bid: v, autoBid: false });
                                 setPreviewed(false);
                               }}
                               disabled={badDataset || (mode === "clone" && kind === "none")}
@@ -1236,7 +1372,7 @@ export function GoogleCloneBoard({
                             <input
                               value={r.budget}
                               onChange={(e) => {
-                                patchRow(r.id, { budget: limitMoneyCents(e.target.value, GOOGLE_BUDGET_MAX), autoBudget: false });
+                                editRow(r.id, { budget: limitMoneyCents(e.target.value, GOOGLE_BUDGET_MAX), autoBudget: false });
                                 setPreviewed(false);
                               }}
                               disabled={badDataset}
@@ -1258,7 +1394,7 @@ export function GoogleCloneBoard({
                             <button
                               type="button"
                               onClick={() => {
-                                patchRow(r.id, { copies: String(Math.max(1, rowCopies(r) - 1)) });
+                                editRow(r.id, { copies: String(Math.max(1, rowCopies(r) - 1)) });
                                 setPreviewed(false);
                               }}
                               disabled={badDataset || rowCopies(r) <= 1}
@@ -1272,11 +1408,11 @@ export function GoogleCloneBoard({
                               value={r.copies}
                               onChange={(e) => {
                                 const raw = e.target.value.replace(/\D/g, "").slice(0, 2);
-                                patchRow(r.id, { copies: raw !== "" && Number(raw) > MAX_COPIES ? String(MAX_COPIES) : raw });
+                                editRow(r.id, { copies: raw !== "" && Number(raw) > MAX_COPIES ? String(MAX_COPIES) : raw });
                                 setPreviewed(false);
                               }}
                               onBlur={() => {
-                                if (r.copies !== "" && Number(r.copies) < 1) patchRow(r.id, { copies: "" });
+                                if (r.copies !== "" && Number(r.copies) < 1) editRow(r.id, { copies: "" });
                               }}
                               inputMode="numeric"
                               placeholder={String(copiesN)}
@@ -1290,7 +1426,7 @@ export function GoogleCloneBoard({
                             <button
                               type="button"
                               onClick={() => {
-                                patchRow(r.id, { copies: String(Math.min(MAX_COPIES, rowCopies(r) + 1)) });
+                                editRow(r.id, { copies: String(Math.min(MAX_COPIES, rowCopies(r) + 1)) });
                                 setPreviewed(false);
                               }}
                               disabled={badDataset || rowCopies(r) >= MAX_COPIES}

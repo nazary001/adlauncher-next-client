@@ -7,7 +7,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { type HeldWave, WAVE_HOLD_POLL_MS, type WaveVerdict, holdWave, settleHeldWaves, waveVerdictOf } from "./wave-hold-core";
 
-export type WaveRail = "google" | "snap" | "tiktok";
+/** The wave claims /api/wave-status can read: the three platform rails, the HS clone rails
+ *  (LION / token duplicates and JURO share `hs-wave:<id>`) and the HS TOOL duplicator. */
+export type WaveRail = "google" | "snap" | "tiktok" | "hs" | "hs-tool";
 
 async function askWave(rail: WaveRail, waveId: string): Promise<WaveVerdict> {
   try {

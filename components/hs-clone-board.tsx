@@ -15,6 +15,11 @@ import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from
 import { TOOL_MARK } from "@/lib/tool-launch";
 import { juroEnsureMark, juroLionStrategyAccepted } from "@/lib/juro";
 import { makeGate } from "@/lib/launch-guards";
+import { useWaveHold, type WaveRail } from "./wave-hold";
+import { WAVE_ACCEPTED_NOTE, WAVE_HELD_NOTE, WAVE_RELEASED_NOTE } from "./wave-hold-core";
+import { handoffBegin, handoffPatch } from "./launch-handoff";
+import { forgetWave, recallWave, rememberWave } from "./wave-memory";
+import { rememberedRowIds } from "./wave-memory-core";
 import { relabelNameGeo } from "@/lib/targeting-override";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import type { PartnerId } from "@/lib/partners";
@@ -40,6 +45,10 @@ import type { SessionUser } from "./user-menu";
 
 const MAX_COPIES = 20;
 const MAX_SOURCES = 30;
+/** The wave this board last sent, kept across a reload (components/wave-memory). */
+const WAVE_MEMORY_KEY = "adlauncher.hs.clone.wave";
+/** Hand-off item id of a row (unique across every rail's overlay items). */
+const hid = (id: string) => `hsc:${id}`;
 
 // Which HS launch channels this build's team has (lib/team). glo-01 carries all three; a lion-only
 // team (glo-02) has no FB-token or TOOL rail — those pollers park and the channel control hides.
@@ -92,7 +101,10 @@ type Row = {
    *  fetch effect hammering a dead LION every debounce tick. The row can still fire "blind"
    *  (the duplicate weapon re-reads the source itself). */
   failed?: boolean;
-  state: "idle" | "sending" | "ok" | "error";
+  /** "unsure" = the row's wave got no answer and the server is being asked whether it took it
+   *  (components/wave-hold-core.ts) — not fireable until it answers. "ok" = queued: not fireable
+   *  until the buyer edits the row (Preview → Fire twice must never duplicate the same copies twice). */
+  state: "idle" | "sending" | "ok" | "error" | "unsure";
   msg?: string;
 };
 
@@ -264,6 +276,7 @@ export function HsCloneBoard({
     setMode(m);
     setPreviewed(false);
     setFireNote(null);
+    reopenQueued();
     try {
       localStorage.setItem("adlauncher.hs.mode", m);
     } catch {
@@ -274,6 +287,7 @@ export function HsCloneBoard({
     setDupChannel(ch);
     setPreviewed(false);
     setFireNote(null);
+    reopenQueued();
     try {
       localStorage.setItem("adlauncher.hs.dupchannel", ch);
     } catch {
@@ -284,6 +298,7 @@ export function HsCloneBoard({
     setJuroChannel(ch);
     setPreviewed(false);
     setFireNote(null);
+    reopenQueued();
     try {
       localStorage.setItem("adlauncher.hs.jurochannel", ch);
     } catch {
@@ -412,12 +427,14 @@ export function HsCloneBoard({
     setPage("");
     setPixel("");
     setPreviewed(false);
+    reopenQueued();
     if (slug) hs.ensureProfile(slug);
   };
   const pickAccount = (id: string) => {
     setAccount(id);
     setPixel("");
     setPreviewed(false);
+    reopenQueued();
     if (profile && id) hs.ensurePixels(profile, id);
   };
 
@@ -426,6 +443,64 @@ export function HsCloneBoard({
   // manual-memoization) once the board gained the per-row destination effects.
   const patchRow = (id: string, p: Partial<Row>) =>
     setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p } : r)));
+  /** A BUYER's edit: it makes a queued (or failed) row a fresh draft again. A row that was queued is
+   *  NOT fireable until this happens — Preview → Duplicate twice must never build the same copies
+   *  twice (the TikTok cloner's rule; audit find 09.10 for this board). A HELD row keeps its hold:
+   *  the fields change, but launching it again is exactly what the hold prevents. */
+  const editRow = (id: string, p: Partial<Row>) =>
+    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p, ...(r.state === "unsure" ? {} : { state: "idle" as const, msg: undefined }) } : r)));
+  /** A wave-level change (mode, channel, Settings binds, default copies) changes what EVERY row
+   *  riding the defaults would send — queued rows become drafts of that new wave. Held rows stay held. */
+  const reopenQueued = () =>
+    setRows((rs) => (rs.some((r) => r.state === "ok" || r.state === "error") ? rs.map((r) => (r.state === "ok" || r.state === "error" ? { ...r, state: "idle", msg: undefined } : r)) : rs));
+
+  // A wave whose request got NO answer is held until the server says whether it took it
+  // (components/wave-hold-core.ts): its rows are not fireable, and nothing is duplicated twice.
+  // The rail the server is asked on follows the channel the wave went out on (TOOL has its own claim).
+  const [holdRail, setHoldRail] = useState<WaveRail>("hs");
+  const { hold } = useWaveHold({
+    rail: holdRail,
+    onAccepted: (w) => {
+      forgetWave(WAVE_MEMORY_KEY);
+      if (waveRef.current?.id === w.waveId) waveRef.current = null;
+      for (const id of w.cardIds) {
+        patchRow(id, { state: "ok", msg: WAVE_ACCEPTED_NOTE });
+        handoffPatch(hid(id), { phase: "accepted", error: null });
+      }
+      setFireNote({ text: "The wave whose answer was lost IS with the server — nothing needs to be fired again. See the Task Manager." });
+      setOpen(true);
+    },
+    onReleased: (w) => {
+      forgetWave(WAVE_MEMORY_KEY);
+      for (const id of w.cardIds) {
+        patchRow(id, { state: "error", msg: WAVE_RELEASED_NOTE });
+        handoffPatch(hid(id), { phase: "failed", uncertain: null, error: "the server never received it — fire it again from the board" });
+      }
+      setFireNote({ text: "The server never received that wave — its rows can be fired again." });
+    },
+  });
+
+  // A wave sent before a reload whose answer never came back (components/wave-memory): hold its
+  // rows again instead of showing them idle and fireable under a new wave id.
+  useEffect(() => {
+    const m = recallWave(WAVE_MEMORY_KEY);
+    if (!m) return;
+    const ids = rememberedRowIds(rows, (r) => r.campaignId.trim(), m);
+    if (ids.length === 0) {
+      forgetWave(WAVE_MEMORY_KEY);
+      return;
+    }
+    waveRef.current = { sig: m.sig, id: m.id };
+    // Safe setState-in-effect: runs once on mount (sessionStorage is unreadable during SSR).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setHoldRail(m.rail === "hs-tool" ? "hs-tool" : "hs");
+    setRows((rs) => rs.map((r) => (ids.includes(r.id) ? { ...r, state: "unsure", msg: WAVE_HELD_NOTE } : r)));
+    hold(m.id, ids);
+    setFireNote({ text: "A wave sent before this reload got no answer — its rows are held while the server is asked whether it took it." });
+    // Mount only: the rows it reads are the ones the link seeded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const addSources = () => {
     const ids = [...new Set(draftId.split(/[\s,;]+/).map((x) => x.trim()).filter((x) => /^\d{5,}$/.test(x)))];
     if (ids.length === 0) return;
@@ -606,7 +681,7 @@ export function HsCloneBoard({
    *  keeps riding the wave (rowBinds resolves it). Every field empty → back to the wave (null). */
   const patchRowDest = (r: Row, patch: Partial<HsRowDest>) => {
     const next = { ...(r.dest ?? emptyDest), ...patch };
-    patchRow(r.id, { dest: next.profile || next.account || next.page || next.pixel ? next : null });
+    editRow(r.id, { dest: next.profile || next.account || next.page || next.pixel ? next : null });
     setPreviewed(false);
     if (next.profile) hs.ensureProfile(next.profile);
   };
@@ -648,11 +723,14 @@ export function HsCloneBoard({
   // duplicate dies the same way (LION can't read it), so firing it only burns wave slots and the
   // account's 30-min window. Every wave number (totalClones, acct gate, fanka demand) counts the
   // SAME set; excluded rows are flagged in the table instead of silently diverging.
+  // A queued row ("ok") waits for an edit; a held row ("unsure") waits for the server's word.
   const validRows = rows.filter(
     (r) =>
       /^\d{5,}$/.test(r.campaignId.trim()) &&
       parseMoney(r.budget) >= 1 &&
-      r.info?.status !== "UNREADABLE",
+      r.info?.status !== "UNREADABLE" &&
+      r.state !== "ok" &&
+      r.state !== "unsure",
   );
   const unreadable = rows.filter((r) => r.info?.status === "UNREADABLE").length;
   /** Rows skipped ONLY for their sub-$1 budget (amber field + chip — otherwise they vanish silently). */
@@ -998,13 +1076,37 @@ export function HsCloneBoard({
     const waveBinds = defaultsReady
       ? { profile, account: effAccount, page: effPage, pixel: effectivePixel }
       : { profile: first.profile, account: first.account, page: first.page ?? "", pixel: first.pixel };
-    validRows.forEach((r) => patchRow(r.id, { state: "sending", msg: "queuing on server…" }));
     // The channel is part of the wave's identity — a LION wave retried on the token rail (or
     // vice versa) is a DIFFERENT wave and must not be swallowed by the idempotency claim.
     const sig = JSON.stringify({ channel: effDupChannel, ...waveBinds, shots });
     if (!waveRef.current || waveRef.current.sig !== sig) {
-      waveRef.current = { sig, id: crypto.randomUUID() };
+      // The same content fired again after a reload re-uses the remembered id — the server's wave
+      // claim then makes the re-POST a no-op instead of a second build.
+      const remembered = recallWave(WAVE_MEMORY_KEY);
+      waveRef.current = { sig, id: remembered?.sig === sig ? remembered.id : crypto.randomUUID() };
     }
+    const waveId = waveRef.current.id;
+    const rail: WaveRail = effDupChannel === "tool" ? "hs-tool" : "hs";
+    setHoldRail(rail);
+    const sentRows = validRows.map((r) => r.id);
+    rememberWave(WAVE_MEMORY_KEY, { id: waveId, sig, keys: validRows.map((r) => r.campaignId.trim()), rail });
+    validRows.forEach((r) => patchRow(r.id, { state: "sending", msg: "queuing on server…" }));
+    // The hand-off screen: nothing to upload on this board, every row goes straight to "sending".
+    const channelLabel =
+      effDupChannel === "tool" ? "TOOL" : effDupChannel === "token" ? "FB Token" : effDupChannel === "juro" ? "JURO" : effDupChannel === "juro-token" ? "JURO · FB Token" : "LION API";
+    handoffBegin(
+      validRows.map((r) => ({
+        id: hid(r.id),
+        scope: "hs" as const,
+        label: r.info?.name || `#${r.campaignId.trim()}`,
+        sub: `${rowCopies(r)} ${rowCopies(r) === 1 ? "copy" : "copies"} · ${channelLabel}`,
+        sources: [],
+        account: rowBinds(r).account.replace(/^act_/, "") || undefined,
+        phase: "sending" as const,
+      })),
+    );
+    // Set once a real verdict arrived — a throw after that is a UI error, not a lost answer.
+    let answered = false;
     try {
       const endpoint =
         effDupChannel === "tool"
@@ -1026,28 +1128,54 @@ export function HsCloneBoard({
           ...(needsPage ? { page: waveBinds.page } : {}),
           pixel: waveBinds.pixel,
           shots,
-          waveId: waveRef.current.id,
+          waveId,
         }),
       });
-      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; queued?: number; error?: string };
-      if (d?.ok) {
+      const d = (await res.json().catch(() => null)) as { ok?: boolean; queued?: number; error?: string } | null;
+      // An answer WITHOUT a verdict (a gateway's 502 / 504 page: the function may still be running
+      // and may yet take the wave) is no answer — it is handled below exactly like a dropped connection.
+      if (!d || typeof d.ok !== "boolean") throw new Error(`HTTP ${res.status} without a verdict`);
+      answered = true;
+      forgetWave(WAVE_MEMORY_KEY); // a real answer arrived — whatever it says, this wave is not "unanswered"
+      if (d.ok) {
         waveRef.current = null; // accepted — the next wave is a new wave
         // Re-arm the Preview step: a second click on the same button must not be a second,
         // identical wave (the MO board re-arms the same way — audit 09-09).
         setPreviewed(false);
         // Preflight answers now land on the task rows (shared store), not here — the drawer is
         // the place to watch; the board rows just confirm the hand-off.
-        validRows.forEach((r) =>
-          patchRow(r.id, { state: "ok", msg: `${rowCopies(r)}/${rowCopies(r)} queued — safe to close the tab` }),
-        );
+        validRows.forEach((r) => {
+          patchRow(r.id, { state: "ok", msg: `${rowCopies(r)}/${rowCopies(r)} queued — safe to close the tab · edit the row to fire it again` });
+          handoffPatch(hid(r.id), { phase: "accepted" });
+        });
         setOpen(true); // the drawer mirrors the server's progress from the shared store
       } else {
-        const msg = d?.error ?? `HTTP ${res.status}`;
-        validRows.forEach((r) => patchRow(r.id, { state: "error", msg }));
+        const msg = d.error ?? `HTTP ${res.status}`;
+        validRows.forEach((r) => {
+          patchRow(r.id, { state: "error", msg });
+          handoffPatch(hid(r.id), { phase: "failed", error: msg });
+        });
       }
     } catch (e) {
       const msg = String((e as Error).message ?? e);
-      validRows.forEach((r) => patchRow(r.id, { state: "error", msg }));
+      if (!answered) {
+        // No ANSWER is not a refusal: the server may have taken the wave before the connection
+        // dropped. Its rows are HELD — not fireable — while the server is asked whether it has the
+        // wave (components/wave-hold). Painting them "error" left them fireable, and a second
+        // Duplicate minted a new wave id for clones already being built (audit find 09.10).
+        hold(waveId, sentRows);
+        validRows.forEach((r) => {
+          patchRow(r.id, { state: "unsure", msg: WAVE_HELD_NOTE });
+          handoffPatch(hid(r.id), { phase: "failed", uncertain: true, error: "no answer from the server — checking whether it took the wave; this clears by itself. Do not fire it again." });
+        });
+        setFireNote({ text: `No answer from the server (${msg}) — the wave MAY have been accepted. Its rows are held while the server is asked; nothing will be duplicated twice.` });
+        setOpen(true);
+      } else {
+        validRows.forEach((r) => {
+          patchRow(r.id, { state: "error", msg });
+          handoffPatch(hid(r.id), { phase: "failed", error: msg });
+        });
+      }
     } finally {
       setFiring(false);
       fireGate.current.exit();
@@ -1293,6 +1421,7 @@ export function HsCloneBoard({
                     onChange={(v) => {
                       setPage(v);
                       setPreviewed(false);
+                      reopenQueued();
                     }}
                     options={data?.pages ?? []}
                     placeholder="Search page"
@@ -1377,6 +1506,7 @@ export function HsCloneBoard({
                   onChange={(v) => {
                     setPixel(v);
                     setPreviewed(false);
+                    reopenQueued();
                   }}
                   options={(pixels ?? []).map((p) => ({ value: p.id, label: p.name, meta: p.id }))}
                   placeholder="Search pixel"
@@ -1392,6 +1522,7 @@ export function HsCloneBoard({
                     const raw = e.target.value.replace(/\D/g, "").slice(0, 2);
                     setCopies(raw !== "" && Number(raw) > MAX_COPIES ? String(MAX_COPIES) : raw);
                     setPreviewed(false);
+                    reopenQueued();
                   }}
                   onBlur={() => {
                     if (copies === "" || Number(copies) < 1) setCopies("1");
@@ -1673,7 +1804,7 @@ export function HsCloneBoard({
                       )}
                       <AutoTextarea
                         value={r.suffix}
-                        onChange={(v) => patchRow(r.id, { suffix: v })}
+                        onChange={(v) => editRow(r.id, { suffix: v })}
                         placeholder="tail — edit to rename the clone"
                         ariaLabel="Name suffix"
                         maxLength={80}
@@ -1767,7 +1898,7 @@ export function HsCloneBoard({
                         <p
                           className={
                             "mt-1.5 break-words font-mono text-[10.5px] leading-snug " +
-                            (r.state === "error" ? "text-danger" : r.state === "ok" ? "text-launch2" : "text-[#9db8ff]")
+                            (r.state === "error" ? "text-danger" : r.state === "unsure" ? "text-warn" : r.state === "ok" ? "text-launch2" : "text-[#9db8ff]")
                           }
                         >
                           {r.state === "sending" ? "Submitting…" : (r.msg ?? "—")}
@@ -1831,7 +1962,7 @@ export function HsCloneBoard({
                             <button
                               type="button"
                               onClick={() => {
-                                patchRow(r.id, { dest: null });
+                                editRow(r.id, { dest: null });
                                 setPreviewed(false);
                               }}
                               aria-label="Back to the wave defaults"
@@ -1972,7 +2103,7 @@ export function HsCloneBoard({
                               // Owner rule 09-11: an untouched default budget follows the strategy
                               // ($50 on min ROAS, $10 otherwise); a typed budget stays.
                               const budget = moneyCentsLabel(budgetOnStrategyChange(strategy, bidStrategy, r.budget, CLONE_DEFAULT_BUDGET));
-                              patchRow(r.id, { bidStrategy, bid, budget });
+                              editRow(r.id, { bidStrategy, bid, budget });
                             }}
                             disabled={!r.info || unreadableRow}
                             aria-label="Clone bid strategy"
@@ -2022,7 +2153,7 @@ export function HsCloneBoard({
                             // digits fill hundredths from the right (34 → 0,34 · 120 → 1,20).
                             // HUMAN units — the routes scale to Meta-native wire units by the
                             // EFFECTIVE strategy. Empty inherits the source's own bid.
-                            onChange={(e) => patchRow(r.id, { bid: limitMoneyCents(e.target.value, kind === "roas" ? 100 : 1000) })}
+                            onChange={(e) => editRow(r.id, { bid: limitMoneyCents(e.target.value, kind === "roas" ? 100 : 1000) })}
                             disabled={unreadableRow || (Boolean(r.info) && kind === "none")}
                             placeholder={
                               switched && kind !== "none"
@@ -2070,7 +2201,7 @@ export function HsCloneBoard({
                             // Cash-register entry like the ROAS/bid field (owner ask 09-08): the
                             // cents are always visible and typed digits fill them from the right
                             // — 1000 → 10,00 · 1250 → 12,50. Cents ride to the wire as-is.
-                            onChange={(e) => patchRow(r.id, { budget: limitMoneyCents(e.target.value, 10000) })}
+                            onChange={(e) => editRow(r.id, { budget: limitMoneyCents(e.target.value, 10000) })}
                             disabled={unreadableRow}
                             inputMode="decimal"
                             placeholder="10,00"
@@ -2094,7 +2225,7 @@ export function HsCloneBoard({
                           <button
                             type="button"
                             onClick={() => {
-                              patchRow(r.id, { copies: String(Math.max(1, copiesEff - 1)) });
+                              editRow(r.id, { copies: String(Math.max(1, copiesEff - 1)) });
                               setPreviewed(false);
                             }}
                             disabled={unreadableRow || copiesEff <= 1}
@@ -2108,11 +2239,11 @@ export function HsCloneBoard({
                             value={r.copies}
                             onChange={(e) => {
                               const raw = e.target.value.replace(/\D/g, "").slice(0, 2);
-                              patchRow(r.id, { copies: raw !== "" && Number(raw) > MAX_COPIES ? String(MAX_COPIES) : raw });
+                              editRow(r.id, { copies: raw !== "" && Number(raw) > MAX_COPIES ? String(MAX_COPIES) : raw });
                               setPreviewed(false);
                             }}
                             onBlur={() => {
-                              if (r.copies !== "" && Number(r.copies) < 1) patchRow(r.id, { copies: "" });
+                              if (r.copies !== "" && Number(r.copies) < 1) editRow(r.id, { copies: "" });
                             }}
                             inputMode="numeric"
                             placeholder={String(copiesN)}
@@ -2126,7 +2257,7 @@ export function HsCloneBoard({
                           <button
                             type="button"
                             onClick={() => {
-                              patchRow(r.id, { copies: String(Math.min(MAX_COPIES, copiesEff + 1)) });
+                              editRow(r.id, { copies: String(Math.min(MAX_COPIES, copiesEff + 1)) });
                               setPreviewed(false);
                             }}
                             disabled={unreadableRow || copiesEff >= MAX_COPIES}
@@ -2273,7 +2404,7 @@ export function HsCloneBoard({
             localeOptions={locales}
             onClose={() => setTargetingRowId(null)}
             onApply={(patch) => {
-              patchRow(r.id, patch);
+              editRow(r.id, patch);
               setPreviewed(false); // the wave changed — re-preview before firing
             }}
           />
@@ -2299,7 +2430,7 @@ export function HsCloneBoard({
             rowCount={rows.length}
             onClose={() => setDestRowId(null)}
             onApply={(dest, c) => {
-              patchRow(r.id, { dest, copies: c });
+              editRow(r.id, { dest, copies: c });
               setPreviewed(false);
             }}
             onApplyAll={(dest, c) => {
@@ -2307,7 +2438,7 @@ export function HsCloneBoard({
               setPreviewed(false);
             }}
             onUseDefaults={() => {
-              patchRow(r.id, { dest: null, copies: "" });
+              editRow(r.id, { dest: null, copies: "" });
               setPreviewed(false);
             }}
           />

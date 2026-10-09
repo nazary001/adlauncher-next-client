@@ -66,6 +66,8 @@ const PLAN = {
     { key: { status: 1, lease_until: 1 } },
     { key: { owner: 1, status: 1 } },
     { key: { status: 1, account: 1 } },
+    // {group,status} serves failQueuedSiblings / findJobsByGroup (one wave's shots, 09.10).
+    { key: { group: 1, status: 1 } },
     { key: { expire_at: 1 }, expireAfterSeconds: 0 },
   ],
   // Lane locks have NO Strapi envelope (no id / documentId) — a unique index on a missing field would

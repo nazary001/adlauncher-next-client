@@ -24,9 +24,11 @@ import {
 } from "react";
 import { moneyLabel } from "@/lib/types";
 import { STALE_MS, ownerHue } from "@/lib/task-view";
+import { TT_FOLLOW_MAX_MS } from "@/lib/launch-queue-types";
 import { usePathname } from "next/navigation";
 import { TIKTOK_ENABLED } from "@/lib/partners";
-import { AlertIcon, CheckIcon, CopyIcon, RocketIcon, TikTokMark, XIcon } from "./icons";
+import { cancelQueued, retryQueued } from "./launch-queue-client";
+import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TikTokMark, XIcon } from "./icons";
 
 // ---------- model ----------
 
@@ -62,6 +64,12 @@ export type TiktokTask = {
   /** Server-side updatedAt (ms) of the Strapi row — the liveness signal behind `stale` AND the
    *  row's version: a copy already on screen is never replaced by an older snapshot. */
   updatedMs?: number;
+  /** The server launch queue owns this row (every TikTok shot is a queue job since 09.10): the
+   *  pump writes every stage, a follow-up job watches LION for the verdict, and the sweep reaps its
+   *  dead runs — never "stalled" for being quiet, never written by this tab. */
+  srv?: boolean;
+  /** The server marked this failed row safe to re-queue with one click (nothing was sent). */
+  retry?: boolean;
 };
 
 /** tiktok-weapon's live view of a task, as POST /api/tiktok/status answers it. */
@@ -87,6 +95,8 @@ type TiktokRemoteRow = {
   started_at: number | null;
   finished_at: number | null;
   updated_ms: number | null;
+  srv?: number | null;
+  retry?: number | null;
 };
 
 /** POST /api/tiktok/status answer row (verbatim wire contract). */
@@ -111,8 +121,8 @@ const SHARED_POLL_MAX_MS = 120_000;
 // pump is usually settling the same tasks, so one gentle batched read covers all of mine.
 const FINISH_MS = 15_000;
 const FINISH_MAX_MS = 120_000;
-/** /api/tiktok/status takes ≤60 tasks per call. */
-const FINISH_BATCH = 60;
+/** /api/tiktok/status takes ≤20 tasks per call (one bounded partner read each, inside its 60 s). */
+const FINISH_BATCH = 20;
 // A sent row LION still hasn't answered for after this long stops being asked about — the drawer
 // tells the buyer to check LION instead of polling a forever-wedged task.
 const FINISH_WINDOW_MS = 3 * 60 * 60_000;
@@ -160,6 +170,8 @@ function fromRemote(r: TiktokRemoteRow): TiktokTask {
     startedAt: n(r.started_at),
     finishedAt: n(r.finished_at),
     updatedMs: n(r.updated_ms),
+    srv: r.srv === 1 || undefined,
+    retry: r.retry === 1 || undefined,
   };
 }
 
@@ -216,7 +228,9 @@ const isTerminal = (st: TiktokTask["status"]) => st === "done" || st === "error"
  *  so a silent pump is just as dead for my rows — and with no client write path there is no 3 h
  *  age-out that would otherwise catch them. */
 function isStaleRow(t: TiktokTask, lastWriteByOwner: ReadonlyMap<string, number>, estServerNow: number): boolean {
-  if (isTerminal(t.status)) return false;
+  // A queue row is the server's: a quiet one is "waiting in the lane", never a dead pump — the
+  // queue's sweep reaps a dead run and closes the row itself.
+  if (t.srv || isTerminal(t.status)) return false;
   const last = t.owner ? lastWriteByOwner.get(t.owner) : undefined;
   if (!last) return true; // no liveness signal at all
   return estServerNow - last > STALE_MS;
@@ -287,7 +301,7 @@ function stageLabel(t: TiktokTask): string {
     case "dataset":
       return "Waiting for LION to fetch the source…";
     default:
-      return t.status === "queued" ? "Queued — safe to close the tab" : "Working…";
+      return t.status === "queued" ? "Queued on the server — safe to close the tab" : "Working…";
   }
 }
 
@@ -327,6 +341,10 @@ export type TiktokTaskManagerValue = {
   estServerNow: number;
   /** tiktok-weapon's live status of MY sent rows (row id → status), from the last finisher pass. */
   lionStatus: ReadonlyMap<string, TiktokLionStatus>;
+  /** Re-queue one of my failed server rows the server marked retryable (nothing was sent). */
+  retryTask: (id: string) => Promise<void>;
+  /** Cancel one of my still-queued server rows before its lane reaches it. */
+  cancelTask: (id: string) => Promise<void>;
 };
 
 const Ctx = createContext<TiktokTaskManagerValue | null>(null);
@@ -433,9 +451,12 @@ export function TiktokTaskManagerProvider({
     // orphan whose pump died never turns terminal, and must not keep every tab that once loaded it
     // polling for the row's whole 7-day window.
     const PUMP_LIFE_MS = 15 * 60_000;
+    // A queue row (srv) moves for as long as the queue keeps it open: a big wave waits in its lane
+    // far longer than one pump lives, and the sweep closes a dead run itself.
+    const QUEUE_LIFE_MS = 6 * 60 * 60_000;
     const moving = (t: TiktokTask) => {
       const estNow = Date.now() + skewRef.current;
-      if (t.status === "running" || t.status === "queued") return estNow - (t.startedAt ?? t.queuedAt) < PUMP_LIFE_MS;
+      if (t.status === "running" || t.status === "queued") return estNow - (t.startedAt ?? t.queuedAt) < (t.srv ? QUEUE_LIFE_MS : PUMP_LIFE_MS);
       return isSent(t) && !isUnconfirmed(t, estNow);
     };
     const watched = () => onPlatformRef.current || openRef.current || tasksRef.current.some(moving);
@@ -474,7 +495,12 @@ export function TiktokTaskManagerProvider({
   const finish = useCallback(async () => {
     if (!TIKTOK_ENABLED || !me || document.hidden || finishBusyRef.current) return;
     const estNow = Date.now() + skewRef.current;
-    const pending = tasksRef.current.filter((t) => t.owner === me && isSent(t) && !!t.lionTaskId && estNow - sentAt(t) < FINISH_WINDOW_MS);
+    // A queue row (srv) is finished by the server's own follow-up job for TT_FOLLOW_MAX_MS after the
+    // submit — asking LION from here too would only double the partner reads; this finisher takes
+    // over once that window has passed (LION slower than the server waited).
+    const pending = tasksRef.current.filter(
+      (t) => t.owner === me && isSent(t) && !!t.lionTaskId && estNow - sentAt(t) < FINISH_WINDOW_MS && !(t.srv && estNow - sentAt(t) < TT_FOLLOW_MAX_MS),
+    );
     if (pending.length === 0) return; // nothing to finish → no traffic
     finishBusyRef.current = true;
     const seen = new Map<string, TiktokLionStatus>();
@@ -577,6 +603,31 @@ export function TiktokTaskManagerProvider({
     return { active, done, failed, running, total: tasks.length };
   }, [tasks, estServerNow]);
 
+  // Retry / Cancel are SERVER actions on my queue rows (09.10): a failed shot the server marked
+  // retryable is re-queued at the back of my lane; a queued shot is canceled before it starts.
+  const retryTask = useCallback(
+    async (id: string) => {
+      try {
+        await retryQueued([id]);
+      } catch {
+        /* the drawer's next poll shows what the server did */
+      }
+      loadRemote();
+    },
+    [loadRemote],
+  );
+  const cancelTask = useCallback(
+    async (id: string) => {
+      try {
+        await cancelQueued({ taskIds: [id] });
+      } catch {
+        /* same */
+      }
+      loadRemote();
+    },
+    [loadRemote],
+  );
+
   const value: TiktokTaskManagerValue = {
     tasks,
     counts,
@@ -586,6 +637,8 @@ export function TiktokTaskManagerProvider({
     refresh: loadRemote,
     estServerNow,
     lionStatus,
+    retryTask,
+    cancelTask,
   };
 
   return (
@@ -648,7 +701,7 @@ export function TiktokTaskManagerButton() {
 type Filter = "all" | Bucket;
 
 function TiktokTaskManagerPanel() {
-  const { tasks, counts, me, open, setOpen, refresh, estServerNow, lionStatus } = useTiktokTaskManager();
+  const { tasks, counts, me, open, setOpen, refresh, estServerNow, lionStatus, retryTask, cancelTask } = useTiktokTaskManager();
   const [filter, setFilter] = useState<Filter>("all");
   const [mineOnly, setMineOnly] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -785,6 +838,8 @@ function TiktokTaskManagerPanel() {
                   unconfirmed={isUnconfirmed(t, estServerNow)}
                   live={lionStatus.get(t.id)}
                   now={now}
+                  onRetry={() => void retryTask(t.id)}
+                  onCancel={() => void cancelTask(t.id)}
                 />
               ))}
             </div>
@@ -812,6 +867,8 @@ function TiktokTaskRow({
   unconfirmed,
   live,
   now,
+  onRetry,
+  onCancel,
 }: {
   task: TiktokTask;
   mine: boolean;
@@ -820,18 +877,25 @@ function TiktokTaskRow({
   unconfirmed: boolean;
   live: TiktokLionStatus | undefined;
   now: number;
+  onRetry: () => void;
+  onCancel: () => void;
 }) {
   const sent = isSent(t);
   const created = t.status === "done" && !sent;
   const error = t.status === "error";
   const interrupted = t.status === "interrupted";
   const running = t.status === "running" && !stale;
+  // Server-queue actions, owner-only: a failed/interrupted row the server marked retryable shows
+  // Retry (re-queued at the back of my lane); a row still waiting in the lane shows Cancel.
+  const canRetry = (error || interrupted) && !!t.retry && mine;
+  const canCancel = t.status === "queued" && !!t.srv && mine;
   const end = t.finishedAt ?? now;
   const elapsed = t.startedAt ? Math.max(0, end - t.startedAt) : 0;
   const label = stale ? "The server run stopped before this shot finished — check LION before re-firing" : stageLabel(t);
   // Sent rows only: what LION says right now (my rows, from the finisher) — or, past the 3 h
-  // window, that nobody is asking any more.
-  const sub = !sent ? null : unconfirmed ? "not confirmed after 3 h — check LION" : lionLiveLabel(live);
+  // window, that nobody is asking any more. A queue row young enough is watched by the server's
+  // own follow-up job, which writes LION's verdict onto the row itself.
+  const sub = !sent ? null : unconfirmed ? "not confirmed after 3 h — check LION" : (lionLiveLabel(live) ?? (t.srv && building ? "the server is watching LION" : null));
   const subWarn = unconfirmed || live === "not_found" || live === "failed";
 
   return (
@@ -872,6 +936,27 @@ function TiktokTaskRow({
             </span>
           ) : null}
           <span className="font-mono text-[10.5px] tabular-nums text-faint">{fmtElapsed(elapsed)}</span>
+          {canRetry ? (
+            <button
+              type="button"
+              onClick={onRetry}
+              data-tip="Retry — re-queue this shot on the server"
+              aria-label="Retry"
+              className="tip flex h-6 w-6 items-center justify-center rounded-md text-faint transition-colors hover:bg-raise hover:text-[#9db8ff] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              <RetryIcon className="h-3.5 w-3.5" />
+            </button>
+          ) : canCancel ? (
+            <button
+              type="button"
+              onClick={onCancel}
+              data-tip="Cancel this queued shot"
+              aria-label="Cancel"
+              className="tip rounded-md border border-line px-1.5 py-0.5 text-[10.5px] font-medium text-faint transition-colors hover:border-warn/40 hover:text-warn focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              Cancel
+            </button>
+          ) : null}
         </div>
       </div>
 

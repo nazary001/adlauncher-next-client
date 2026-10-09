@@ -23,6 +23,11 @@ import { Select } from "./ui";
 import { SearchSelect } from "./search-select";
 import { MultiSelect } from "./multi-select";
 import { makeGate } from "@/lib/launch-guards";
+import { useWaveHold } from "./wave-hold";
+import { WAVE_ACCEPTED_NOTE, WAVE_HELD_NOTE, WAVE_RELEASED_NOTE } from "./wave-hold-core";
+import { handoffBegin, handoffPatch } from "./launch-handoff";
+import { forgetWave, recallWave, rememberWave } from "./wave-memory";
+import { rememberedRowIds } from "./wave-memory-core";
 import { limitMoneyCents, moneyLabel, parseMoney } from "@/lib/types";
 import type { RichOption } from "@/lib/catalog";
 import {
@@ -82,6 +87,10 @@ import type { SessionUser } from "./user-menu";
 
 /** How often the key registry is re-read while builds are in flight (the launch board's rhythm). */
 const KEYS_POLL_MS = 10_000;
+/** The wave this board last sent, kept across a reload (components/wave-memory). */
+const WAVE_MEMORY_KEY = "adlauncher.snap.clone.wave";
+/** Hand-off item id of a row (unique across every rail's overlay items). */
+const hid = (id: string) => `snc:${id}`;
 
 /** One source campaign: what Snapchat answered about it, the clone drafted from it, and the clone's
  *  editable fields. `card.adAccount` "" = the wave's destination (the source's own account by
@@ -263,6 +272,55 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
     const set = new Set(ids);
     setRows((rs) => rs.map((r) => (set.has(r.id) ? snapCloneSettle(r, outcome(r.id)) : r)));
   };
+  /** The rows of a wave whose answer was lost: HELD (not fireable) until the server says. An edit
+   *  made meanwhile is kept (snapCloneTouch marks it), so an accepted hold turns such a row into a
+   *  draft rather than a closed clone. */
+  const holdRows = (ids: Iterable<string>) => {
+    const set = new Set(ids);
+    setRows((rs) => rs.map((r) => (set.has(r.id) ? { ...r, card: { ...r.card, state: "unsure", msg: WAVE_HELD_NOTE } } : r)));
+  };
+
+  // A wave whose request got NO answer is held until the server says whether it took it
+  // (components/wave-hold-core.ts): its rows are not fireable, and nothing is built twice.
+  const { hold } = useWaveHold({
+    rail: "snap",
+    onAccepted: (w) => {
+      forgetWave(WAVE_MEMORY_KEY);
+      if (waveRef.current?.id === w.waveId) waveRef.current = null;
+      settleRows(w.cardIds, () => ({ state: "ok", msg: WAVE_ACCEPTED_NOTE }));
+      for (const id of w.cardIds) handoffPatch(hid(id), { phase: "accepted", error: null });
+      setFireNote("The wave whose answer was lost IS with the server — nothing needs to be fired again. See Snap tasks.");
+      refresh();
+      refreshKeys();
+      setOpen(true);
+    },
+    onReleased: (w) => {
+      forgetWave(WAVE_MEMORY_KEY);
+      settleRows(w.cardIds, () => ({ state: "error", msg: WAVE_RELEASED_NOTE }));
+      for (const id of w.cardIds) handoffPatch(hid(id), { phase: "failed", uncertain: null, error: "the server never received it — fire it again from the board" });
+      setFireNote("The server never received that wave — its rows can be fired again.");
+    },
+  });
+
+  // A wave sent before a reload whose answer never came back (components/wave-memory): hold its
+  // rows again instead of showing them idle and fireable under a new wave id.
+  useEffect(() => {
+    const m = recallWave(WAVE_MEMORY_KEY);
+    if (!m) return;
+    const ids = rememberedRowIds(rows, (r) => r.ref, m);
+    if (ids.length === 0) {
+      forgetWave(WAVE_MEMORY_KEY);
+      return;
+    }
+    waveRef.current = { sig: m.sig, id: m.id };
+    // Safe setState-in-effect: runs once on mount (sessionStorage is unreadable during SSR).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    holdRows(ids);
+    hold(m.id, ids);
+    setFireNote("A wave sent before this reload got no answer — its rows are held while the server is asked whether it took it.");
+    // Mount only: the rows it reads are the ones the link seeded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const addRefs = () => {
     const refs = snapCloneRefs(draftRefs);
     if (refs.length === 0) return;
@@ -318,7 +376,8 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
     const n = Math.min(SNAP_MAX_COPIES, Math.max(1, Math.round(Number(row.card.copies || copies) || 1)));
     const eff: SnapCard = { ...row.card, adAccount: acctId, pixel: effPixel, profileId, brandName: row.card.brandName || defaults?.brandName || "", startPaused, copies: String(n) };
     const refusal = src ? snapCardRefusal(eff, { pixelId: effPixel || undefined, profileId }) : null;
-    const queued = row.card.state === "ok" || row.card.state === "sending";
+    // "unsure" = held: the row's wave got no answer and the server is being asked whether it took it.
+    const queued = row.card.state === "ok" || row.card.state === "sending" || row.card.state === "unsure";
     const ready = Boolean(src && account && !pixelNeeded && !noPixel && !refusal && !queued);
     const why = row.loading
       ? "reading the source from Snapchat…"
@@ -340,9 +399,11 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
                     ? "pick a Snap Pixel"
                     : refusal
                       ? refusal
-                      : row.card.state === "ok"
-                        ? "queued — change the destination or any setting to clone it again"
-                        : "";
+                      : row.card.state === "unsure"
+                        ? "held — no answer from the server; it is being asked whether it took this wave"
+                        : row.card.state === "ok"
+                          ? "queued — change the destination or any setting to clone it again"
+                          : "";
     const rowKeys = ready ? freeKeys.slice(keyCursor, keyCursor + n) : [];
     if (ready) keyCursor += n;
     views.push({
@@ -390,7 +451,12 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
     setFiring(true);
     const ready = views.filter((v) => v.ready);
     const sig = JSON.stringify(ready.map((v) => [v.row.result?.campaignId, snapCardSignature(v.eff)]));
-    if (!waveRef.current || waveRef.current.sig !== sig) waveRef.current = { sig, id: crypto.randomUUID() };
+    if (!waveRef.current || waveRef.current.sig !== sig) {
+      // The same content fired again after a reload re-uses the remembered id — the server's wave
+      // claim then makes the re-POST a no-op instead of a second build.
+      const remembered = recallWave(WAVE_MEMORY_KEY);
+      waveRef.current = { sig, id: remembered?.sig === sig ? remembered.id : crypto.randomUUID() };
+    }
     const waveId = waveRef.current.id;
     const shots: ReturnType<typeof buildSnapShot>[] = [];
     const shotRow: string[] = [];
@@ -403,33 +469,70 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
       }
     }
     const sent = new Set(shotRow);
+    const sentRows = [...sent];
+    rememberWave(WAVE_MEMORY_KEY, { id: waveId, sig, keys: ready.filter((v) => sent.has(v.row.id)).map((v) => v.row.ref), rail: "snap" });
     setRows((rs) => rs.map((r) => (sent.has(r.id) ? snapCloneSend(r, "queuing on server…") : r)));
+    // The hand-off screen: nothing to upload on this board (the server re-hosts the source's media),
+    // every row goes straight to "sending".
+    handoffBegin(
+      ready
+        .filter((v) => sent.has(v.row.id))
+        .map((v) => ({
+          id: hid(v.row.id),
+          scope: "sn" as const,
+          label: v.row.result?.source?.name || `clone of ${v.row.ref}`,
+          sub: `${v.copies} ${v.copies === 1 ? "copy" : "copies"} · ${v.account?.name ?? "—"}`,
+          sources: [],
+          phase: "sending" as const,
+        })),
+    );
+    // Set once a real verdict arrived — a throw after that is a UI error, not a lost answer.
+    let answered = false;
     try {
       const res = await fetch("/api/snap/launch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ waveId, shots }) });
-      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; availablePixels?: string[] };
-      if (d?.ok) {
+      const d = (await res.json().catch(() => null)) as { ok?: boolean; error?: string; availablePixels?: string[] } | null;
+      // An answer WITHOUT a verdict (a gateway's 502 / 504 page: the function may still be running
+      // and may yet take the wave) is no answer — it is handled below exactly like a dropped connection.
+      if (!d || typeof d.ok !== "boolean") throw new Error(`HTTP ${res.status} without a verdict`);
+      answered = true;
+      forgetWave(WAVE_MEMORY_KEY); // a real answer arrived — whatever it says, this wave is not "unanswered"
+      if (d.ok) {
         waveRef.current = null;
         setPreviewed(false);
         settleRows(sent, () => ({ state: "ok", msg: "queued — safe to close the tab (the server builds it) · change the destination or any setting to clone it again" }));
+        for (const id of sentRows) handoffPatch(hid(id), { phase: "accepted" });
         refresh();
         refreshKeys();
         setOpen(true);
       } else {
-        const px = Array.isArray(d?.availablePixels) && d.availablePixels.length ? ` · available pixels: ${d.availablePixels.join(", ")}` : "";
-        const msg = (d?.error ?? `HTTP ${res.status}`) + px;
+        const px = Array.isArray(d.availablePixels) && d.availablePixels.length ? ` · available pixels: ${d.availablePixels.join(", ")}` : "";
+        const msg = (d.error ?? `HTTP ${res.status}`) + px;
         setFireNote(msg);
-        const m = /^shot (\d+):/.exec(String(d?.error ?? ""));
+        const m = /^shot (\d+):/.exec(String(d.error ?? ""));
         const culprit = m ? shotRow[Number(m[1]) - 1] : null;
-        settleRows(sent, (id) => ({ state: "error", msg: culprit && id !== culprit ? "wave refused — fix the flagged row" : msg }));
+        const rowMsg = (id: string) => (culprit && id !== culprit ? "wave refused — fix the flagged row" : msg);
+        settleRows(sent, (id) => ({ state: "error", msg: rowMsg(id) }));
+        for (const id of sentRows) handoffPatch(hid(id), { phase: "failed", error: rowMsg(id) });
         if (culprit) jumpTo(culprit);
       }
     } catch (e) {
-      // No answer: the wave may or may not be accepted — the same waveId makes a retry a no-op on
-      // the server if it was. The drawer tells which.
-      const msg = `no answer from the server (${String((e as Error).message ?? e)}) — check Snap tasks before firing again; a retry of the same wave is safe`;
-      setFireNote(msg);
-      settleRows(sent, () => ({ state: "error", msg }));
-      setOpen(true);
+      const msg = String((e as Error).message ?? e);
+      if (!answered) {
+        // No ANSWER is not a refusal: the server may have taken the wave before the connection
+        // dropped. Its rows are HELD — not fireable — while the server is asked whether it has the
+        // wave (components/wave-hold). Painting them "error" left them fireable, and a second Fire
+        // minted a new wave id for campaigns already being built (audit find 09.10).
+        hold(waveId, sentRows);
+        holdRows(sentRows);
+        for (const id of sentRows) handoffPatch(hid(id), { phase: "failed", uncertain: true, error: "no answer from the server — checking whether it took the wave; this clears by itself. Do not fire it again." });
+        setFireNote(`No answer from the server (${msg}) — the wave MAY have been accepted. Its rows are held while the server is asked; nothing will be built twice.`);
+        refresh();
+        setOpen(true);
+      } else {
+        setFireNote(msg);
+        settleRows(sent, () => ({ state: "error", msg }));
+        for (const id of sentRows) handoffPatch(hid(id), { phase: "failed", error: msg });
+      }
     } finally {
       setFiring(false);
       fireGate.current.exit();
@@ -441,7 +544,7 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
     window.location.assign(`/?partner=${id}`);
 
   const readFailed = views.filter((v) => v.row.failed || v.row.result?.error).length;
-  const notReady = views.filter((v) => !v.ready && v.row.result?.source && v.row.card.state !== "ok").length;
+  const notReady = views.filter((v) => !v.ready && v.row.result?.source && v.row.card.state !== "ok" && v.row.card.state !== "unsure").length;
 
   return (
     <>
@@ -741,7 +844,7 @@ function CloneRowPanel({
   const geoSet = new Set(card.geo);
   const presetActive = (codes: string[]) => codes.length === card.geo.length && codes.every((c) => geoSet.has(c));
   const direct = snapDirectLanding(card.landingUrl);
-  const stateTone = card.state === "error" ? "text-danger" : card.state === "ok" ? "text-launch2" : card.state === "sending" ? "text-[#9db8ff]" : "text-faint";
+  const stateTone = card.state === "error" ? "text-danger" : card.state === "unsure" ? "text-warn" : card.state === "ok" ? "text-launch2" : card.state === "sending" ? "text-[#9db8ff]" : "text-faint";
   const notes = draft?.notes ?? [];
   const remote = card.remote ?? [];
   const tooBigToMove = v.moves ? remote.filter((c) => c.on && ((c.sizeBytes ?? 0) > SNAP_MEDIA_MAX_BYTES || !c.url)) : [];

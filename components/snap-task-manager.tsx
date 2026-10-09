@@ -14,7 +14,8 @@ import { moneyLabel } from "@/lib/types";
 import { STALE_MS, ownerHue } from "@/lib/task-view";
 import { snapCurrencySymbol } from "@/lib/snap-launch";
 import { SNAP_ENABLED } from "@/lib/partners";
-import { AlertIcon, CheckIcon, CopyIcon, RocketIcon, SnapMark, TasksIcon, XIcon } from "./icons";
+import { cancelQueued, retryQueued } from "./launch-queue-client";
+import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, SnapMark, TasksIcon, XIcon } from "./icons";
 
 // ---------- model ----------
 
@@ -40,6 +41,12 @@ export type SnapTask = {
   startedAt?: number;
   finishedAt?: number;
   updatedMs?: number;
+  /** The server launch queue owns this row (every Snapchat shot is a queue job since 09.10): the
+   *  pump writes every stage and the sweep reaps its dead runs — never "session offline", never
+   *  aged out or written by this tab. */
+  srv?: boolean;
+  /** The server marked this failed row safe to re-queue with one click (nothing was created). */
+  retry?: boolean;
 };
 
 /** GET /api/snap-tasks row shape (verbatim wire contract). */
@@ -62,6 +69,8 @@ type SnapRemoteRow = {
   started_at: number | null;
   finished_at: number | null;
   updated_ms: number | null;
+  srv?: number | null;
+  retry?: number | null;
 };
 
 const SHARED_POLL_OPEN_MS = 6_000;
@@ -100,6 +109,8 @@ function fromRemote(r: SnapRemoteRow): SnapTask {
     startedAt: n(r.started_at),
     finishedAt: n(r.finished_at),
     updatedMs: n(r.updated_ms),
+    srv: r.srv === 1 || undefined,
+    retry: r.retry === 1 || undefined,
   };
 }
 
@@ -132,7 +143,8 @@ const isTerminal = (st: SnapTask["status"]) => st === "done" || st === "error" |
 
 function isStaleRow(t: SnapTask, me: string | null, lastWriteByOwner: ReadonlyMap<string, number>, estServerNow: number): boolean {
   const mine = !!me && t.owner === me;
-  if (mine || isTerminal(t.status)) return false;
+  // A queue row is the server's: a quiet one is "waiting in the lane", never a dead session.
+  if (mine || t.srv || isTerminal(t.status)) return false;
   const last = t.owner ? lastWriteByOwner.get(t.owner) : undefined;
   if (!last) return true;
   return estServerNow - last > STALE_MS;
@@ -170,7 +182,7 @@ export function snapStageLabel(t: SnapTask): string {
     case "activate":
       return "Activating the campaign…";
     default:
-      return t.status === "queued" ? "Queued — safe to close the tab" : "Working…";
+      return t.status === "queued" ? "Queued on the server — safe to close the tab" : "Working…";
   }
 }
 
@@ -184,6 +196,10 @@ export type SnapTaskManagerValue = {
   setOpen: (v: boolean) => void;
   refresh: () => void;
   estServerNow: number;
+  /** Re-queue one of my failed server rows the server marked retryable (nothing was created). */
+  retryTask: (id: string) => Promise<void>;
+  /** Cancel one of my still-queued server rows before its lane reaches it. */
+  cancelTask: (id: string) => Promise<void>;
 };
 
 const Ctx = createContext<SnapTaskManagerValue | null>(null);
@@ -286,7 +302,8 @@ export function SnapTaskManagerProvider({ children, user }: { children: React.Re
       loadRemote();
       const now = Date.now();
       for (const t of tasksRef.current) {
-        if (!isMine(t) || t.status !== "running") continue;
+        // Queue rows (srv) are never aged out here — the sweep reaps a dead run and closes the row.
+        if (!isMine(t) || t.srv || t.status !== "running") continue;
         const from = t.startedAt ?? t.queuedAt;
         if (from && now - from > AGE_OUT_MS) {
           const error = "Still not finished after 3 h — check Ads Manager and the key registry";
@@ -341,7 +358,32 @@ export function SnapTaskManagerProvider({ children, user }: { children: React.Re
     return { active, done, failed, running, total: tasks.length };
   }, [tasks, me, estServerNow]);
 
-  const value: SnapTaskManagerValue = { tasks, counts, me, open, setOpen, refresh: loadRemote, estServerNow };
+  // Retry / Cancel are SERVER actions on my queue rows (09.10): a failed shot the server marked
+  // retryable is re-queued at the back of my lane; a queued shot is canceled before it starts.
+  const retryTask = useCallback(
+    async (id: string) => {
+      try {
+        await retryQueued([id]);
+      } catch {
+        /* the drawer's next poll shows what the server did */
+      }
+      loadRemote();
+    },
+    [loadRemote],
+  );
+  const cancelTask = useCallback(
+    async (id: string) => {
+      try {
+        await cancelQueued({ taskIds: [id] });
+      } catch {
+        /* same */
+      }
+      loadRemote();
+    },
+    [loadRemote],
+  );
+
+  const value: SnapTaskManagerValue = { tasks, counts, me, open, setOpen, refresh: loadRemote, estServerNow, retryTask, cancelTask };
   return (
     <Ctx.Provider value={value}>
       {children}
@@ -387,7 +429,7 @@ export function SnapTaskManagerButton() {
 type Filter = "all" | "active" | "done" | "failed";
 
 function SnapTaskManagerPanel() {
-  const { tasks, counts, me, open, setOpen, refresh, estServerNow } = useSnapTaskManager();
+  const { tasks, counts, me, open, setOpen, refresh, estServerNow, retryTask, cancelTask } = useSnapTaskManager();
   const [filter, setFilter] = useState<Filter>("all");
   const [mineOnly, setMineOnly] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -472,7 +514,7 @@ function SnapTaskManagerPanel() {
           ) : (
             <div className="flex flex-col gap-2">
               {shown.map((t) => (
-                <SnapTaskRow key={t.id} task={t} mine={isMineRow(t)} stale={staleOf(t)} now={now} />
+                <SnapTaskRow key={t.id} task={t} mine={isMineRow(t)} stale={staleOf(t)} now={now} onRetry={() => void retryTask(t.id)} onCancel={() => void cancelTask(t.id)} />
               ))}
             </div>
           )}
@@ -494,11 +536,15 @@ function Stat({ label, n, tone }: { label: string; n: number; tone: string }) {
   );
 }
 
-function SnapTaskRow({ task: t, mine, stale, now }: { task: SnapTask; mine: boolean; stale: boolean; now: number }) {
+function SnapTaskRow({ task: t, mine, stale, now, onRetry, onCancel }: { task: SnapTask; mine: boolean; stale: boolean; now: number; onRetry: () => void; onCancel: () => void }) {
   const done = t.status === "done";
   const error = t.status === "error";
   const interrupted = t.status === "interrupted";
   const running = t.status === "running" && !stale;
+  // Server-queue actions, owner-only: a failed/interrupted row the server marked retryable shows
+  // Retry (re-queued at the back of my lane); a row still waiting in the lane shows Cancel.
+  const canRetry = (error || interrupted) && !!t.retry && mine;
+  const canCancel = t.status === "queued" && !!t.srv && mine;
   const end = t.finishedAt ?? now;
   const elapsed = t.startedAt ? Math.max(0, end - t.startedAt) : 0;
   const label = stale ? (t.error ?? "Session went offline before this run finished") : snapStageLabel(t);
@@ -523,6 +569,15 @@ function SnapTaskRow({ task: t, mine, stale, now }: { task: SnapTask; mine: bool
         <div className="flex shrink-0 items-center gap-1.5">
           {stale ? <span className="rounded-md border border-warn/25 bg-warn/5 px-1.5 py-0.5 text-[9.5px] font-medium text-warn">session offline</span> : null}
           <span className="font-mono text-[10.5px] tabular-nums text-faint">{fmtElapsed(elapsed)}</span>
+          {canRetry ? (
+            <button type="button" onClick={onRetry} data-tip="Retry — re-queue this shot on the server" aria-label="Retry" className="tip flex h-6 w-6 items-center justify-center rounded-md text-faint transition-colors hover:bg-raise hover:text-[#9db8ff] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">
+              <RetryIcon className="h-3.5 w-3.5" />
+            </button>
+          ) : canCancel ? (
+            <button type="button" onClick={onCancel} data-tip="Cancel this queued shot" aria-label="Cancel" className="tip rounded-md border border-line px-1.5 py-0.5 text-[10.5px] font-medium text-faint transition-colors hover:border-warn/40 hover:text-warn focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">
+              Cancel
+            </button>
+          ) : null}
         </div>
       </div>
       <div className="mt-2 flex items-center justify-between gap-2">

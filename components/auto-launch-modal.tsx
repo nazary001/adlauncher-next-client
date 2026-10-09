@@ -1,17 +1,19 @@
 "use client";
 
 // Confirm-and-fire dialog for the Auto-landings "Launch campaign" button (owner). It calls
-// prepare-launch (Gemini ad copy + a fresh creative staged to Blob + a ready MO Campaign), shows the
+// prepare-launch (Gemini ad copy + a fresh creative staged to S3 + a ready MO Campaign), shows the
 // buyer the EXACT campaign that will fire, shows the signer (the owner's /tokens pick), lets them
-// pick fanka / account / pixel (defaults pre-filled), and on Confirm streams the same /api/launch
-// pipeline the launcher uses.
+// pick fanka / account / pixel (defaults pre-filled), and on Confirm HANDS the campaign to the
+// durable server launch queue (the same hand-off the launcher boards use, 09.10) — the build runs
+// on the server, so the tab may be closed the moment the hand-off is accepted. (Until 09.10 the
+// fire streamed /api/launch from this tab: closing it mid-build tore the launch down.)
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { Campaign } from "@/lib/types";
-import { limitMoney, parseMoney } from "@/lib/types";
+import { fullName, limitMoney, parseMoney } from "@/lib/types";
 import { UploadingNotice, useUnloadGuard } from "./upload-guard";
 import type { AutoLandingJob } from "@/lib/auto-landings";
-import { drainNdjson, isLaunchStream, launchOutcome, parseEvent, type LaunchEvent } from "@/lib/launch-stream";
+import { isHandoffUnconfirmed, sendToQueue } from "./launch-queue-client";
 import { useSigners } from "./use-signers";
 import { SignerBadge } from "./signer-badge";
 
@@ -26,11 +28,6 @@ type Page = { id: string; name: string };
 type Pixel = { id: string; name: string };
 type Account = { id: string; name: string; pixels: Pixel[] };
 
-const FIRE_STAGES = ["gcm", "video", "processing", "campaign", "adset", "creative", "ad"] as const;
-const STAGE_LABEL: Record<string, string> = {
-  gcm: "Reserving code", video: "Uploading creative", processing: "Preparing creative", campaign: "Creating campaign",
-  adset: "Creating ad set", creative: "Building creative", ad: "Publishing ad",
-};
 const newTaskId = () => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
 export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose: () => void }) {
@@ -49,17 +46,17 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
   const [budget, setBudget] = useState("10");
   const [gcmNext, setGcmNext] = useState<string | null>(null);
 
+  // "firing" = the hand-off is in flight (seconds): the one moment the tab is still needed.
   const [firing, setFiring] = useState(false);
-  const [stage, setStage] = useState<string | null>(null);
-  // The launch streams from this tab — closing the window mid-way kills it (owner ask 09-09).
   useUnloadGuard(firing);
-  const [result, setResult] = useState<{ ok: boolean; text: string; retrySafe: boolean } | null>(null);
-  // The staged creative now lives in a content-addressed S3 object the launch route never deletes
-  // per run (the bucket lifecycle is the cleanup) — so a retry after a failed run reuses the SAME
-  // creative (just press Confirm again). "Regenerate" stays available when the buyer wants a fresh
-  // one, but it is no longer forced on them after a failure.
+  const [result, setResult] = useState<{ ok: boolean; text: string; retrySafe: boolean; taskId?: string } | null>(null);
+  // The staged creative lives in a content-addressed S3 object the launch route never deletes per
+  // run (the bucket lifecycle is the cleanup) — so a retry after a refused hand-off reuses the SAME
+  // creative (just press Confirm again). "Regenerate" stays available for a fresh one.
   const [prepNonce, setPrepNonce] = useState(0);
-  const abortRef = useRef<AbortController | null>(null);
+  // The task id of the campaign being handed over: the idempotency key — a retry of a hand-off
+  // that got no verdict re-sends the SAME id, so the server can never take it twice.
+  const [taskId, setTaskId] = useState(() => newTaskId());
 
   // 1) prepare (Gemini copy + creative). Runs once.
   useEffect(() => {
@@ -147,95 +144,75 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
 
   // parseMoney reads the board's comma money ("12,50") — Number() would read it as NaN and a
   // stripped "1250" as $1250 (audit 09-09).
-  // A failed attempt may be fired again with one click ONLY when it is certain it created nothing
-  // (result.retrySafe — lib/launch-stream). After an uncertain outcome the Confirm button stays
-  // disabled: the buyer checks Tasks / Ads Manager, and a deliberate Regenerate starts a new attempt.
-  const canFire = Boolean(
-    prep && signerReady && pageId && accountId && pixelId && parseMoney(budget) >= 1 && !firing && !result?.ok && (!result || result.retrySafe),
-  );
+  // A refused hand-off may be sent again with one click (nothing exists on the server); a hand-off
+  // that got NO verdict is re-sent under the SAME task id (safe: the server answers "accepted" for
+  // a job it already has). After an accepted hand-off the button is done — the queue owns it.
+  const canFire = Boolean(prep && signerReady && pageId && accountId && pixelId && parseMoney(budget) >= 1 && !firing && !result?.ok);
 
   const fire = useCallback(async () => {
     if (!prep || !canFire) return;
     setFiring(true);
     setResult(null);
-    setStage("gcm");
     // The launch route claims the gcm atomically; pass the previewed code as the DESIRED one so it
     // claims that (or the next free if a concurrent wave took it). Empty = let it pick from the pool.
     const campaign: Campaign = { ...prep.campaign, gcm: gcmNext ?? "", page: pageId, account: accountId, pixel: pixelId, budget };
+    // The exact mo.launch hand-off the launcher board sends (lib/launch-queue-types parseEnqueue):
+    // the route's own request body, minus the task id (the server stamps it).
     const body = {
       partnerId: "in",
       campaign,
       medias: [{ url: prep.media.url, kind: "image" as const }],
       mediaUrl: prep.media.url,
       mediaKind: "image" as const,
-      taskId: newTaskId(),
     };
-    const ac = new AbortController();
-    abortRef.current = ac;
     try {
-      const res = await fetch("/api/launch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: ac.signal,
+      await sendToQueue("mo", {
+        taskId,
+        kind: "mo.launch",
+        body,
+        row: { name: fullName(campaign), gcm: gcmNext ?? "", geo: campaign.countries.join(","), budget, bid: "" },
+        account: accountId.replace(/^act_/, ""),
       });
-      if (!res.body) throw new Error(`no stream (${res.status})`);
-      const streamed = isLaunchStream(res.headers.get("content-type"));
-      const reader = res.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      const acc: { final: LaunchEvent | null } = { final: null };
-      const take = (ev: LaunchEvent) => {
-        if (ev.stage && ev.ok === undefined) setStage(ev.stage);
-        if (ev.ok !== undefined) acc.final = ev;
-      };
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const { events, rest } = drainNdjson(buf);
-        buf = rest;
-        events.forEach(take);
-      }
-      // Flush the decoder and parse the unterminated tail: a pre-stream rejection is exactly one
-      // JSON object with no newline — dropping it here is what showed every 4xx as "stream ended".
-      buf += dec.decode();
-      const tail = parseEvent(buf);
-      if (tail) take(tail);
-      const outcome = launchOutcome({ status: res.status, streamed, final: acc.final });
-      setResult({ ok: outcome.ok, text: outcome.text, retrySafe: outcome.retrySafe });
+      setResult({ ok: true, text: "Handed to the server — the campaign is being built in the launch queue. You can close this window and the tab; follow it in the Facebook launcher's Tasks drawer.", retrySafe: false, taskId });
     } catch (e) {
-      // Thrown = the reply never completed (network cut, abort). The request may have REACHED the
-      // server and the run may be building right now — never a one-click re-fire.
-      setResult({
-        ok: false,
-        text: `${String((e as Error).message ?? e)} — the connection dropped; the launch may still be running on the server. Check the Tasks drawer / Ads Manager before launching again`,
-        retrySafe: false,
-      });
+      const msg = String((e as Error).message ?? e);
+      if (isHandoffUnconfirmed(e)) {
+        // No verdict: the server may already have it. Retry re-sends the SAME task id (idempotent).
+        setResult({ ok: false, text: msg, retrySafe: true, taskId });
+      } else {
+        // A clean refusal (a bad field, a creative not on the server, the queue unavailable): nothing
+        // exists on the server — a retry is a fresh hand-off of the same campaign.
+        setResult({ ok: false, text: msg, retrySafe: true, taskId });
+      }
     } finally {
       setFiring(false);
-      setStage(null);
     }
-  }, [prep, canFire, pageId, accountId, pixelId, budget, gcmNext]);
+  }, [prep, canFire, pageId, accountId, pixelId, budget, gcmNext, taskId]);
 
   // Fresh copy + creative for another attempt (optional now — a retry reuses the staged creative;
-  // this is for when the buyer wants a different one).
+  // this is for when the buyer wants a different one). A fresh attempt is a fresh task id.
   const regenerate = useCallback(() => {
     setResult(null);
     setPrep(null);
     setPrepErr(null);
     setGcmNext(null);
+    setTaskId(newTaskId());
     setPrepNonce((n) => n + 1);
   }, []);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  // While the hand-off is in flight the dialog cannot be dismissed in-app either (backdrop, ✕,
+  // Cancel): closing used to unmount and abort the launch (audit find 09.10). It is seconds.
+  const close = useCallback(() => {
+    if (firing) return;
+    onClose();
+  }, [firing, onClose]);
 
   const sel =
     "h-8 rounded-lg border border-line bg-surface2 px-2 text-[12px] text-ink outline-none focus:border-accent/60";
   const label = "text-[10.5px] font-semibold uppercase tracking-[0.06em] text-faint";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={close}>
       <div
         className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-line bg-surface p-5 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
@@ -247,7 +224,7 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
               {job.niche} · {job.lang.toUpperCase()} · <span className="truncate">{job.title}</span>
             </p>
           </div>
-          <button onClick={onClose} className="grid h-7 w-7 place-items-center rounded-lg border border-line bg-surface2 text-faint hover:text-ink">✕</button>
+          <button onClick={close} disabled={firing} className="grid h-7 w-7 place-items-center rounded-lg border border-line bg-surface2 text-faint hover:text-ink disabled:cursor-not-allowed disabled:opacity-40">✕</button>
         </div>
 
         {prepErr ? (
@@ -283,7 +260,7 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
                 {prep.linkPreview.replace("gcm=NN", `gcm=${gcmNext ?? "auto"}`).replace("https://", "")}
               </p>
               <p className="mt-0.5 px-1 text-[9.5px] text-faint">
-                gcm <span className="font-mono text-launch2">{gcmNext ?? "…"}</span> is reserved atomically the moment you launch (next free 01–200).
+                gcm <span className="font-mono text-launch2">{gcmNext ?? "…"}</span> is reserved atomically the moment the server launches (next free 01–200).
               </p>
             </div>
 
@@ -333,27 +310,32 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
 
             {result ? (
               <div className={`rounded-xl border px-3 py-2 text-[12px] ${result.ok ? "border-launch/40 bg-launch/10 text-launch2" : "border-danger/40 bg-danger/10 text-danger"}`}>
-                {result.ok ? "✅ Campaign is live. " : "❌ "}{result.text}
-                {!result.ok ? (
+                {result.ok ? "✅ " : "❌ "}{result.text}
+                {result.ok ? (
                   <p className="mt-1 text-[11px] opacity-80">
-                    {result.retrySafe
-                      ? "Nothing was created. The staged creative is kept — press Retry to launch it again, or Regenerate for a fresh one."
-                      : "This attempt may have created a campaign — check the Tasks drawer / Ads Manager first. To launch again anyway, press Regenerate: it prepares a new attempt."}
+                    Task <span className="font-mono">{result.taskId}</span> ·{" "}
+                    <a href="/?partner=in" className="underline">
+                      open the launcher to watch it
+                    </a>
                   </p>
-                ) : null}
+                ) : (
+                  <p className="mt-1 text-[11px] opacity-80">
+                    Press Retry to hand it over again (safe: the same task id can never be launched twice), or Regenerate for a fresh creative.
+                  </p>
+                )}
               </div>
             ) : firing ? (
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2 rounded-xl border border-accent/30 bg-accent/10 px-3 py-2 text-[12px] text-[#9db8ff]">
                   <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent/40 border-t-accent" />
-                  {FIRE_STAGES.indexOf((stage as (typeof FIRE_STAGES)[number]) ?? "gcm") + 1}/{FIRE_STAGES.length} · {STAGE_LABEL[stage ?? "gcm"] ?? stage}
+                  Handing the campaign to the server…
                 </div>
                 <UploadingNotice n={1} compact />
               </div>
             ) : null}
 
             <div className="mt-1 flex items-center justify-end gap-2">
-              <button onClick={onClose} className="h-9 rounded-lg border border-line bg-surface2 px-3 text-[12px] text-dim hover:text-ink">
+              <button onClick={close} disabled={firing} className="h-9 rounded-lg border border-line bg-surface2 px-3 text-[12px] text-dim hover:text-ink disabled:cursor-not-allowed disabled:opacity-40">
                 {result?.ok ? "Close" : "Cancel"}
               </button>
               {!result?.ok ? (
@@ -371,7 +353,7 @@ export function AutoLaunchModal({ job, onClose }: { job: AutoLandingJob; onClose
                     disabled={!canFire}
                     className="h-9 rounded-lg border border-launch/50 bg-launch/15 px-4 text-[12px] font-semibold text-launch2 transition-colors enabled:hover:bg-launch/25 disabled:opacity-40"
                   >
-                    {firing ? "Launching…" : result ? "Retry launch" : "Confirm & launch"}
+                    {firing ? "Handing over…" : result ? "Retry hand-off" : "Confirm & launch"}
                   </button>
                 </>
               ) : null}

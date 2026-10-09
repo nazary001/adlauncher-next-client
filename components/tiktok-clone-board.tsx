@@ -8,6 +8,11 @@ import { SearchSelect } from "./search-select";
 import { useTiktokAdvertisers, useTiktokConfigs, type TiktokSourceInfo, type TwAdvertiser, type TwConfig } from "./use-tiktok";
 import { useTiktokTaskManager } from "./tiktok-task-manager";
 import { makeGate } from "@/lib/launch-guards";
+import { useWaveHold } from "./wave-hold";
+import { WAVE_ACCEPTED_NOTE, WAVE_HELD_NOTE, WAVE_RELEASED_NOTE } from "./wave-hold-core";
+import { handoffBegin, handoffPatch } from "./launch-handoff";
+import { forgetWave, recallWave, rememberWave } from "./wave-memory";
+import { rememberedRowIds } from "./wave-memory-core";
 import { limitMoneyCents, moneyCentsLabel, moneyLabel, parseMoney } from "@/lib/types";
 import {
   TIKTOK_BID_MAX,
@@ -38,6 +43,10 @@ import type { SessionUser } from "./user-menu";
 
 const MAX_COPIES = 20;
 const MAX_SOURCES = 30;
+/** The wave this board last sent, kept across a reload (components/wave-memory). */
+const WAVE_MEMORY_KEY = "adlauncher.tiktok.clone.wave";
+/** Hand-off item id of a row (unique across every rail's overlay items). */
+const hid = (id: string) => `ttc:${id}`;
 
 /** The board's two modes — the partner's clone and JURO kinds (a fresh launch lives on /tiktok). */
 type BoardMode = Exclude<TiktokKind, "launch">;
@@ -72,7 +81,9 @@ type Row = {
   pixel: string;
   /** Row's OWN number of copies ("" = the wave default). */
   copies: string;
-  state: "idle" | "sending" | "ok" | "error";
+  /** "unsure" = the row's wave got no answer and the server is being asked whether it took it
+   *  (components/wave-hold-core.ts) — not fireable until it answers. */
+  state: "idle" | "sending" | "ok" | "error" | "unsure";
   msg?: string;
 };
 
@@ -252,10 +263,59 @@ export function TiktokCloneBoard({
   const patchRow = (id: string, p: Partial<Row>) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p } : r)));
   /** A BUYER's edit: it makes a queued (or failed) row a fresh draft again. A row that was queued is
    *  NOT fireable until this happens — Preview → Fire twice must never build the same copies twice. */
-  const editRow = (id: string, p: Partial<Row>) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p, state: "idle", msg: undefined } : r)));
+  // …except while the row's wave is HELD (its request got no answer and the server is being asked
+  // whether it took it): the fields change, but the row stays held — firing it again is exactly
+  // what the hold prevents.
+  const editRow = (id: string, p: Partial<Row>) =>
+    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p, ...(r.state === "unsure" ? {} : { state: "idle" as const, msg: undefined }) } : r)));
   /** A wave-level change (mode, target advertiser, pixel, default copies) changes what EVERY row
-   *  riding the defaults would send — queued rows become drafts of that new wave. */
+   *  riding the defaults would send — queued rows become drafts of that new wave. Held rows stay held. */
   const reopenQueued = () => setRows((rs) => (rs.some((r) => r.state === "ok" || r.state === "error") ? rs.map((r) => (r.state === "ok" || r.state === "error" ? { ...r, state: "idle", msg: undefined } : r)) : rs));
+
+  // A wave whose request got NO answer is held until the server says whether it took it
+  // (components/wave-hold-core.ts): its rows are not fireable, and nothing is built twice.
+  const { hold } = useWaveHold({
+    rail: "tiktok",
+    onAccepted: (w) => {
+      forgetWave(WAVE_MEMORY_KEY);
+      if (waveRef.current?.id === w.waveId) waveRef.current = null;
+      for (const id of w.cardIds) {
+        patchRow(id, { state: "ok", msg: WAVE_ACCEPTED_NOTE });
+        handoffPatch(hid(id), { phase: "accepted", error: null });
+      }
+      setFireNote("The wave whose answer was lost IS with the server — nothing needs to be fired again. See the Task Manager.");
+      refresh();
+      setOpen(true);
+    },
+    onReleased: (w) => {
+      forgetWave(WAVE_MEMORY_KEY);
+      for (const id of w.cardIds) {
+        patchRow(id, { state: "error", msg: WAVE_RELEASED_NOTE });
+        handoffPatch(hid(id), { phase: "failed", uncertain: null, error: "the server never received it — fire it again from the board" });
+      }
+      setFireNote("The server never received that wave — its rows can be fired again.");
+    },
+  });
+
+  // A wave sent before a reload whose answer never came back (components/wave-memory): hold its
+  // rows again instead of showing them idle and fireable under a new wave id.
+  useEffect(() => {
+    const m = recallWave(WAVE_MEMORY_KEY);
+    if (!m) return;
+    const ids = rememberedRowIds(rows, (r) => r.campaignId.trim(), m);
+    if (ids.length === 0) {
+      forgetWave(WAVE_MEMORY_KEY);
+      return;
+    }
+    waveRef.current = { sig: m.sig, id: m.id };
+    // Safe setState-in-effect: runs once on mount (sessionStorage is unreadable during SSR).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setRows((rs) => rs.map((r) => (ids.includes(r.id) ? { ...r, state: "unsure", msg: WAVE_HELD_NOTE } : r)));
+    hold(m.id, ids);
+    setFireNote("A wave sent before this reload got no answer — its rows are held while the server is asked whether it took it.");
+    // Mount only: the rows it reads are the ones the link seeded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const addSources = () => {
     const ids = [...new Set(draftId.split(/[\s,;]+/).map((x) => x.trim()).filter((x) => TIKTOK_CAMPAIGN_ID_RE.test(x)))];
@@ -435,6 +495,7 @@ export function TiktokCloneBoard({
    *  order: target → config → pixel → wire for a clone; the two JURO rules → wire for a JURO. */
   const rowPlan = (r: Row): RowPlan => {
     if (r.state === "ok") return { ready: false, at: "queued", why: "already queued — edit the row to fire it again" };
+    if (r.state === "unsure") return { ready: false, at: "queued", why: "held — no answer from the server; it is being asked whether it took this wave" };
     const shot = rowShot(r);
     const nameSuffix = rowSuffix(r);
     if (mode === "juro") {
@@ -477,7 +538,7 @@ export function TiktokCloneBoard({
   // A row that was QUEUED is out of the wave until the buyer edits it (or changes a wave default):
   // the counts, the totals and the fire set all read from here, so Preview → Fire a second time
   // can't rebuild what LION is already building.
-  const candidateRows = rows.filter((r) => idOk(r) && !lowBudget(r) && r.state !== "ok");
+  const candidateRows = rows.filter((r) => idOk(r) && !lowBudget(r) && r.state !== "ok" && r.state !== "unsure");
   const validRows = candidateRows.filter((r) => !datasetBad(r));
   const blockedDatasetRows = candidateRows.filter(datasetBad);
   const lowBudgetCount = rows.filter(lowBudget).length;
@@ -544,53 +605,100 @@ export function TiktokCloneBoard({
     const waveAdvertiser = mode === "clone" ? advertiser : "";
     const wavePixel = mode === "clone" ? effWavePixel : "";
     const sig = JSON.stringify({ mode, advertiser: waveAdvertiser, pixel: wavePixel, shots });
-    if (!waveRef.current || waveRef.current.sig !== sig) waveRef.current = { sig, id: crypto.randomUUID() };
+    if (!waveRef.current || waveRef.current.sig !== sig) {
+      // The same content fired again after a reload re-uses the remembered id — the server's wave
+      // claim then makes the re-POST a no-op instead of a second build.
+      const remembered = recallWave(WAVE_MEMORY_KEY);
+      waveRef.current = { sig, id: remembered?.sig === sig ? remembered.id : crypto.randomUUID() };
+    }
+    const waveId = waveRef.current.id;
+    const sentRows = validRows.map((r) => r.id);
+    rememberWave(WAVE_MEMORY_KEY, { id: waveId, sig, keys: validRows.map((r) => r.campaignId.trim()), rail: "tiktok" });
     validRows.forEach((r) => patchRow(r.id, { state: "sending", msg: "queuing on server…" }));
+    // The hand-off screen: nothing to upload on this board, every row goes straight to "sending".
+    handoffBegin(
+      validRows.map((r) => ({
+        id: hid(r.id),
+        scope: "tt" as const,
+        label: r.info?.name || `campaign ${r.campaignId.trim()}`,
+        sub: `${rowCopies(r)} ${rowCopies(r) === 1 ? "copy" : "copies"} · ${mode === "clone" ? "clone" : "JURO"}`,
+        sources: [],
+        phase: "sending" as const,
+      })),
+    );
+    // Set once a real verdict arrived — a throw after that is a UI error, not a lost answer.
+    let answered = false;
     try {
       const endpoint = mode === "clone" ? "/api/tiktok/clone" : "/api/tiktok/juro";
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          waveId: waveRef.current.id,
+          waveId,
           ...(waveAdvertiser ? { advertiser: waveAdvertiser } : {}),
           ...(wavePixel ? { pixel: wavePixel } : {}),
           shots,
         }),
       });
-      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; queued?: number; error?: string; availablePixels?: string[] };
-      if (d?.ok) {
+      const d = (await res.json().catch(() => null)) as { ok?: boolean; queued?: number; error?: string; availablePixels?: string[] } | null;
+      // An answer WITHOUT a verdict (a gateway's 502 / 504 page: the function may still be running
+      // and may yet take the wave) is no answer — it is handled below exactly like a dropped connection.
+      if (!d || typeof d.ok !== "boolean") throw new Error(`HTTP ${res.status} without a verdict`);
+      answered = true;
+      forgetWave(WAVE_MEMORY_KEY); // a real answer arrived — whatever it says, this wave is not "unanswered"
+      if (d.ok) {
         waveRef.current = null; // accepted — the next wave is a new wave
         setPreviewed(false);
-        validRows.forEach((r) =>
-          patchRow(r.id, { state: "ok", msg: `${rowCopies(r)}/${rowCopies(r)} queued — safe to close the tab (LION builds them server-side) · edit the row to fire it again` }),
-        );
+        validRows.forEach((r) => {
+          patchRow(r.id, { state: "ok", msg: `${rowCopies(r)}/${rowCopies(r)} queued — safe to close the tab (LION builds them server-side) · edit the row to fire it again` });
+          handoffPatch(hid(r.id), { phase: "accepted" });
+        });
         refresh(); // pull the pump-stamped rows now instead of waiting for the next poll tick
         setOpen(true); // the drawer mirrors the server's progress from the shared store
-      } else if (res.status === 403 && String(d?.error ?? "").startsWith("tiktok_live_launch_blocked")) {
+      } else if (res.status === 403 && String(d.error ?? "").startsWith("tiktok_live_launch_blocked")) {
         // Not a row's fault and nothing was sent: this instance may read the live partner but not
         // fire at it (the advertisers read said otherwise only if it is stale).
-        setFireNote("This instance isn't allowed to fire at the live partner (not production) — nothing was sent.");
-        validRows.forEach((r) => patchRow(r.id, { state: "idle", msg: undefined }));
+        const note = "This instance isn't allowed to fire at the live partner (not production) — nothing was sent.";
+        setFireNote(note);
+        validRows.forEach((r) => {
+          patchRow(r.id, { state: "idle", msg: undefined });
+          handoffPatch(hid(r.id), { phase: "failed", error: note });
+        });
       } else {
-        const px = Array.isArray(d?.availablePixels) && d.availablePixels.length ? ` · available pixels: ${d.availablePixels.join(", ")}` : "";
-        const msg = (d?.error ?? `HTTP ${res.status}`) + px;
+        const px = Array.isArray(d.availablePixels) && d.availablePixels.length ? ` · available pixels: ${d.availablePixels.join(", ")}` : "";
+        const msg = (d.error ?? `HTTP ${res.status}`) + px;
+        setFireNote(msg);
         // "shot N: …" pins the failure to one row; otherwise every row of the wave carries it.
-        const m = /^shot (\d+):/.exec(String(d?.error ?? ""));
+        const m = /^shot (\d+):/.exec(String(d.error ?? ""));
         const culprit = m ? shotRow[Number(m[1]) - 1] : null;
-        validRows.forEach((r) =>
-          patchRow(r.id, culprit && r.id !== culprit ? { state: "error", msg: "wave refused — fix the flagged row" } : { state: "error", msg }),
-        );
+        validRows.forEach((r) => {
+          const rowMsg = culprit && r.id !== culprit ? "wave refused — fix the flagged row" : msg;
+          patchRow(r.id, { state: "error", msg: rowMsg });
+          handoffPatch(hid(r.id), { phase: "failed", error: rowMsg });
+        });
       }
     } catch (e) {
-      // No ANSWER is not a refusal: the wave may have been accepted before the connection dropped.
-      // The same rows re-send the SAME wave id (the server answers "already accepted" instead of
-      // pumping twice) — an edit would mint a new id, so the drawer is the thing to look at first.
-      const msg = `No answer from the server (${String((e as Error).message ?? e)}) — the wave MAY have been accepted: check the Task Manager. Firing again WITHOUT edits is safe.`;
-      setFireNote(msg);
-      validRows.forEach((r) => patchRow(r.id, { state: "error", msg: "no answer — check the Task Manager before editing this row" }));
-      refresh();
-      setOpen(true);
+      const msg = String((e as Error).message ?? e);
+      if (!answered) {
+        // No ANSWER is not a refusal: the server may have taken the wave before the connection
+        // dropped. Its rows are HELD — not fireable — while the server is asked whether it has the
+        // wave (components/wave-hold). A note alone was not enough: the rows stayed editable and
+        // fireable, and an edit minted a new wave id for campaigns already being built (audit 09.10).
+        hold(waveId, sentRows);
+        validRows.forEach((r) => {
+          patchRow(r.id, { state: "unsure", msg: WAVE_HELD_NOTE });
+          handoffPatch(hid(r.id), { phase: "failed", uncertain: true, error: "no answer from the server — checking whether it took the wave; this clears by itself. Do not fire it again." });
+        });
+        setFireNote(`No answer from the server (${msg}) — the wave MAY have been accepted. Its rows are held while the server is asked; nothing will be built twice.`);
+        refresh();
+        setOpen(true);
+      } else {
+        setFireNote(msg);
+        validRows.forEach((r) => {
+          patchRow(r.id, { state: "error", msg });
+          handoffPatch(hid(r.id), { phase: "failed", error: msg });
+        });
+      }
     } finally {
       setFiring(false);
       fireGate.current.exit();
@@ -1151,7 +1259,7 @@ export function TiktokCloneBoard({
                           <p
                             className={
                               "mt-1.5 break-words font-mono text-[10.5px] leading-snug " +
-                              (r.state === "error" ? "text-danger" : r.state === "ok" ? "text-launch2" : "text-[#9db8ff]")
+                              (r.state === "error" ? "text-danger" : r.state === "unsure" ? "text-warn" : r.state === "ok" ? "text-launch2" : "text-[#9db8ff]")
                             }
                           >
                             {r.state === "sending" ? "Submitting…" : r.msg ?? "—"}

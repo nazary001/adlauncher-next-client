@@ -118,3 +118,23 @@ test("the whole loop: clone → another Destination → clone again → closed o
   rows = rows.map((r) => snapCloneSettle(r, { state: "ok", msg: "queued" }));
   assert.equal(rows[0].card.state, "ok");
 });
+
+test("09.10: a HELD row (its wave got no answer) is touched like a sending one — it stays held, and an accept after an edit makes it a draft, not a closed clone", () => {
+  type Held = { id: string; touched?: boolean; card: { state: "idle" | "sending" | "ok" | "error" | "unsure"; msg?: string; adAccount: string; copies: string } };
+  const held: Held = { id: "a", card: { state: "unsure", msg: "checking…", adAccount: "x", copies: "1" } };
+  const touched = snapCloneTouch({ ...held, card: { ...held.card, copies: "3" } });
+  assert.equal(touched.card.state, "unsure", "an edit never releases a held row");
+  assert.equal(touched.touched, true);
+  assert.equal(touched.card.copies, "3");
+  // the server says it HAS the wave → what went out is not what is on screen → a fresh draft
+  const accepted = snapCloneSettle(touched, { state: "ok", msg: "queued" });
+  assert.equal(accepted.card.state, "idle");
+  assert.equal(accepted.touched, false);
+  // untouched during the hold → closed as queued
+  const closed = snapCloneSettle(held, { state: "ok", msg: "queued" });
+  assert.equal(closed.card.state, "ok");
+  // the server never got it → the refusal shows, the row is fireable again
+  const released = snapCloneSettle(touched, { state: "error", msg: "launch it again" });
+  assert.equal(released.card.state, "error");
+  assert.equal(released.touched, false);
+});

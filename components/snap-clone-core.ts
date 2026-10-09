@@ -22,7 +22,10 @@ const draft = <R extends SnapCloneRowState>(row: R): R => ({ ...row, touched: fa
 export function snapCloneTouch<R extends SnapCloneRowState>(row: R): R {
   const state = row.card.state;
   if (state === "ok" || state === "error") return draft(row);
-  if (state === "sending" && !row.touched) return { ...row, touched: true };
+  // A HELD row ("unsure": its wave got no answer and the server is being asked — wave-hold-core)
+  // is touched like a sending one: it stays held, and if the server turns out to have the wave the
+  // edited row becomes a draft (what is on screen is not what went out), never a closed clone.
+  if ((state === "sending" || state === "unsure") && !row.touched) return { ...row, touched: true };
   return row;
 }
 
