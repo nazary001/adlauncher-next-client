@@ -173,9 +173,11 @@ const MKLEARN_LANDINGS: Landing[] = [
   { slug: "por-que-ves-11-11", title: "Por qué ves 11:11", lang: "ES", niche: "Self-Discovery" },
   // Quiz landings (MK Learn <QuizFunnel />): a memory test whose Start / every round checkpoint /
   // result / breakdown button is the partner's rewarded gate, with the inline banner below.
-  // Two lengths of the same format, like the reference funnel's A/B arms.
+  // Two lengths of our own design, like the reference funnel's A/B arms, plus the reference's
+  // own paper look 1:1 (memory-test-challenge — same gates, our questions and brand).
   { slug: "memory-test-80-percent", title: "Memory Test – 10 Rounds, 70 Questions", lang: "EN", niche: "Quizzes" },
   { slug: "quick-memory-test", title: "Quick Memory Test – 10 Questions", lang: "EN", niche: "Quizzes" },
+  { slug: "memory-test-challenge", title: "Memory Test Challenge – 10 Questions (paper style)", lang: "EN", niche: "Quizzes" },
 ];
 
 // The VD-C1 partner's value pixel «VD-C1-HS-11»: the ONE pixel the VD-C1 admin shares to every
