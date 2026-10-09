@@ -136,6 +136,12 @@ const MKLEARN_LANDINGS: Landing[] = [
   { slug: "hotel-jobs-in-dubai-ar", title: "وظائف الفنادق في دبي", lang: "AR", niche: "Jobs" },
   { slug: "cleaning-jobs-in-the-uae", title: "Cleaning Jobs in the UAE", lang: "EN", niche: "Jobs" },
   { slug: "cleaning-jobs-in-the-uae-ar", title: "وظائف التنظيف في الإمارات", lang: "AR", niche: "Jobs" },
+  // Swiss farm-work series (09.10) — the competitor's content-arb article layout 1:1: banners in
+  // the text, anchor, side rails, interstitial; numbered buttons (rewarded first) chain the four.
+  { slug: "farm-worker-jobs-switzerland", title: "Farm Worker Jobs in Switzerland (arb series, hub)", lang: "EN", niche: "Jobs" },
+  { slug: "swiss-work-permit-non-eu-farm-workers", title: "Swiss Work Permits for Non-EU Farm Workers (arb series)", lang: "EN", niche: "Jobs" },
+  { slug: "swiss-farm-jobs-with-accommodation", title: "Swiss Farm Jobs With Accommodation (arb series)", lang: "EN", niche: "Jobs" },
+  { slug: "swiss-farm-worker-pay-experience", title: "Swiss Farm Worker Pay by Experience (arb series)", lang: "EN", niche: "Jobs" },
   { slug: "paying-twice-for-netflix", title: "Paying Twice for Netflix", lang: "EN", niche: "Streaming" },
   { slug: "retiree-health-coverage", title: "Retiree Health Coverage", lang: "EN", niche: "Health" },
   { slug: "nighttime-habit-ruining-your-sleep", title: "Nighttime Habit Ruining Your Sleep", lang: "EN", niche: "Health" },
