@@ -101,6 +101,10 @@ function world(opts: { jobs?: QueueJob[]; busy?: boolean; deadlineAt?: number; s
       rec("settle", job.job_id, outcome.status);
       settled.push({ job: job.job_id, outcome });
     },
+    defer: async (job, notBefore, body) => {
+      rec("defer", job.job_id, notBefore, body);
+      queue.push({ ...job, not_before: notBefore, ...(body ? { body } : {}) });
+    },
     prewarm: (job) => {
       rec("prewarm", job.job_id);
     },
@@ -302,6 +306,38 @@ test("a run that throws is settled as the crashed outcome (ambiguous, non-retrya
   assert.equal(crashed.outcome.retryable, false);
   assert.deepEqual(crashed.outcome, crashedOutcome(qj("j1"), new Error("kaboom"), w.deps.now()));
   assert.equal(w.settled.find((s) => s.job === "j2")?.outcome.status, "done", "the wave went on");
+});
+
+test("a follow-up that answers a Defer is handed back for its next slice: no settle, the lane goes on; the deferred job carries the new body", async () => {
+  const w = world({ jobs: [qj("f1", { kind: "hs.dup.follow", idempotent: true, lane: "hs-follow:nazar" }), qj("j2")] });
+  let slices = 0;
+  w.deps.run = async (job) => {
+    w.calls.push(["run", job.job_id]);
+    if (job.job_id === "f1" && slices++ === 0) return { defer: { notBefore: 123_456, body: { waveId: "w", renamed: ["a"] } } };
+    return okOutcome(job);
+  };
+  // The fake defer puts the job back at the END of the queue (as the store's seq order would after
+  // its not_before passes), so the second slice runs after j2.
+  assert.equal(await runLane(w.deps), "drained");
+  assert.deepEqual(w.of("defer"), [["defer", "f1", 123_456, { waveId: "w", renamed: ["a"] }]]);
+  assert.deepEqual(w.of("run").map((c) => c[1]), ["f1", "j2", "f1"]);
+  assert.deepEqual(w.settled.map((s) => s.job), ["j2", "f1"], "the first slice was never settled");
+  assert.equal(w.of("begin").length, 3, "every slice is recorded as begun before it runs");
+});
+
+test("a defer the store drops does not stop the lane (the job stays running; the sweep re-queues an idempotent one)", async () => {
+  const w = world({ jobs: [qj("f1", { kind: "tt.follow", idempotent: true }), qj("j2")] });
+  w.deps.run = async (job) => {
+    w.calls.push(["run", job.job_id]);
+    return job.job_id === "f1" ? { defer: { notBefore: 1 } } : okOutcome(job);
+  };
+  w.deps.defer = async (job) => {
+    w.calls.push(["defer", job.job_id]);
+    throw new Error("defer 503");
+  };
+  assert.equal(await runLane(w.deps), "drained");
+  assert.deepEqual(w.of("run").map((c) => c[1]), ["f1", "j2"]);
+  assert.equal(w.settled.length, 1);
 });
 
 test("a settle that throws does not stop the lane", async () => {

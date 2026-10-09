@@ -815,3 +815,40 @@ test("a clone whose media are all reused is admitted with the short reserve near
   assert.equal(w2.last("t1").status, "error", "a re-host needs the long reserve");
   assert.match(String(w2.last("t1").error), /time budget/);
 });
+
+test("durable media reuse (09.10): a remembered upload of the same creative on the same account is reused when Snapchat still answers READY — a stale one is uploaded afresh; a fresh upload is remembered", async () => {
+  const w = world();
+  const memory = new Map<string, string>([["acct-a|https://blob/v.mp4", "media-old"]]);
+  const remembered: [string, string][] = [];
+  w.deps.lookupMedia = async (key) => memory.get(key) ?? null;
+  w.deps.rememberMedia = async (key, id) => void remembered.push([key, id]);
+  await runSnapPump("nazar", [pumpShot("t1")], 1_000_000 + 700_000, w.deps);
+  assert.equal(w.calls.filter((c) => c[0] === "createMedia").length, 0, "nothing uploaded — the remembered id was READY");
+  assert.deepEqual(w.calls.filter((c) => c[0] === "mediaReady").map((c) => c[1]), ["media-old"]);
+  assert.match(JSON.stringify(w.calls.find((c) => c[0] === "createCreative")), /media-old/);
+  assert.equal(w.last("t1").status, "done");
+  assert.deepEqual(remembered, [], "a reused id is not re-remembered");
+
+  // the remembered id is no longer READY (deleted on Snapchat): upload afresh, remember the new one
+  const stale = world();
+  stale.deps.mediaReady = async (id) => {
+    stale.calls.push(["mediaReady", id]);
+    return id !== "media-old";
+  };
+  const rem2: [string, string][] = [];
+  stale.deps.lookupMedia = async () => "media-old";
+  stale.deps.rememberMedia = async (key, id) => void rem2.push([key, id]);
+  await runSnapPump("nazar", [pumpShot("t1")], 1_000_000 + 700_000, stale.deps);
+  assert.equal(stale.calls.filter((c) => c[0] === "createMedia").length, 1);
+  assert.deepEqual(rem2, [["acct-a|https://blob/v.mp4", "media-1"]]);
+  assert.equal(stale.last("t1").status, "done");
+
+  // a lookup that throws is a miss, never a failed shot
+  const broken = world();
+  broken.deps.lookupMedia = async () => {
+    throw new Error("registry down");
+  };
+  await runSnapPump("nazar", [pumpShot("t1")], 1_000_000 + 700_000, broken.deps);
+  assert.equal(broken.last("t1").status, "done");
+  assert.equal(broken.calls.filter((c) => c[0] === "createMedia").length, 1);
+});

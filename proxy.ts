@@ -56,7 +56,7 @@ export const config = {
   //                              cron requests); a session passes too (same as token-cron).
   //   • api/blob-upload        — Blob's server-to-server "upload completed" callback carries no cookie;
   //                              the route enforces auth in onBeforeGenerateToken instead.
-  //   • api/hs/token-cron      — Vercel Cron's 30-min token-pool sweep authenticates with the
+  //   • api/hs/token-cron      — Vercel Cron's 10-min token-pool sweep authenticates with the
   //                              CRON_SECRET bearer (no cookie on cron requests); sessions pass too.
   // `api/launch(?![\w-])` keeps /api/launch-tasks AND /api/launch-queue proxied (the `-` is excluded
   // from the lookahead, so "launch-…" never matches that exclusion) — only the two sub-routes named

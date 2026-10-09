@@ -301,7 +301,7 @@ export async function twTask(taskId: string, opts: TwReadOpts = {}): Promise<TwT
 /** Read many tasks (≤ `limit` in flight). A per-id failure never sinks the batch — that task
  *  comes back as status "unknown" with the error text (404 = the id belongs to another user or
  *  never existed → "not_found", the caller decides). */
-export async function twTasks(taskIds: string[], limit = 5): Promise<TwTask[]> {
+export async function twTasks(taskIds: string[], limit = 5, opts: TwReadOpts = {}): Promise<TwTask[]> {
   const out: TwTask[] = new Array(taskIds.length);
   let next = 0;
   const worker = async () => {
@@ -309,7 +309,7 @@ export async function twTasks(taskIds: string[], limit = 5): Promise<TwTask[]> {
       const i = next++;
       const id = taskIds[i];
       try {
-        out[i] = await twTask(id);
+        out[i] = await twTask(id, opts);
       } catch (e) {
         const err = e instanceof TiktokWeaponError ? e : null;
         out[i] = {

@@ -15,29 +15,65 @@
 //      handlers the browser called (in-process, as the job's owner) and reads the very same replies.
 // Relative `.ts` imports only (node --test loads this straight from disk).
 
-export const QUEUE_SCOPES = ["mo", "aif", "av", "hs"] as const;
-/** One drawer / one task-manager instance on the client. */
+export const QUEUE_SCOPES = ["mo", "aif", "av", "hs", "gg", "sn", "tt"] as const;
+/** One drawer / one task-manager instance on the client (gg / sn / tt = the Google / Snapchat /
+ *  TikTok platform drawers — their waves are queued by their ROUTES, never by the browser). */
 export type QueueScope = (typeof QUEUE_SCOPES)[number];
 
-export const QUEUE_KINDS = ["mo.launch", "aif.launch", "av.launch", "fb.clone", "hs.lion", "hs.token", "hs.tool"] as const;
-/** Which handler runs the job:
+/** Kinds the BROWSER hands over (POST /api/launch-queue). The pump runs each by calling the launch
+ *  ROUTE HANDLER in-process and reading its reply:
  *   mo.launch → POST /api/launch · aif.launch → /api/aif/launch · av.launch → /api/av/launch
  *   fb.clone → /api/clone/run (MO / AIF / AV — the body's partnerId picks the rail)
  *   hs.lion → /api/hs/launch · hs.token → /api/hs/token-launch · hs.tool → /api/hs/tool-launch */
+export const HANDLER_KINDS = ["mo.launch", "aif.launch", "av.launch", "fb.clone", "hs.lion", "hs.token", "hs.tool"] as const;
+/** Kinds a wave ROUTE enqueues itself, one job per validated shot (09.10: every rail on the queue).
+ *  A RUNNER (lib/launch-queue-runners.ts) feeds the rail's own pump core ONE shot:
+ *   sn.launch → lib/snap-pump-core (a clone is a shot with cloneOf) · gg.* → lib/google-pump
+ *   tt.* → lib/tiktok-pump-core (submit only; tt.follow settles) · hs.dup / hs.jurar → the LION
+ *   duplicate / JURO submit (lib/hs-dup-shot, lib/hs-jurar-shot; *.follow polls + activates)
+ *   hs.tokendup / hs.tokenjurar → one Graph tree (lib/hs-token-dup-shot, lib/hs-token-jurar-shot)
+ *   hs.tooldup → one TOOL duplicate submit + a first look (tool.follow finishes a pending one) */
+export const RUNNER_KINDS = ["sn.launch", "gg.launch", "gg.clone", "gg.juro", "tt.launch", "tt.clone", "tt.juro", "hs.dup", "hs.jurar", "hs.tokendup", "hs.tokenjurar", "hs.tooldup"] as const;
+/** The long tail AFTER a submit, as its own job: polling LION / tiktok-weapon / TOOL and finishing
+ *  the rows (activating born-PAUSED clones). IDEMPOTENT by construction — it reads and repeats
+ *  idempotent writes — so a lost lease re-queues it; it runs in slices (FOLLOW_SLICE_MS) in the
+ *  scope's follow lane and never holds a submit lane. One per wave (hs.*.follow, tt.follow) or one
+ *  per TOOL job still working past its handler's window (tool.follow). It has NO task row of its own. */
+export const FOLLOW_KINDS = ["hs.dup.follow", "hs.jurar.follow", "tt.follow", "tool.follow"] as const;
+export const QUEUE_KINDS = [...HANDLER_KINDS, ...RUNNER_KINDS, ...FOLLOW_KINDS] as const;
 export type QueueKind = (typeof QUEUE_KINDS)[number];
+export type HandlerKind = (typeof HANDLER_KINDS)[number];
+
+export const isHandlerKind = (kind: string): kind is HandlerKind => (HANDLER_KINDS as readonly string[]).includes(kind);
+export const isFollowKind = (kind: string): boolean => (FOLLOW_KINDS as readonly string[]).includes(kind);
 
 export const SCOPE_KINDS: Record<QueueScope, readonly QueueKind[]> = {
-  mo: ["mo.launch", "fb.clone"],
-  aif: ["aif.launch", "fb.clone"],
-  av: ["av.launch", "fb.clone"],
-  hs: ["hs.lion", "hs.token", "hs.tool"],
+  mo: ["mo.launch", "fb.clone", "tool.follow"],
+  aif: ["aif.launch", "fb.clone", "tool.follow"],
+  av: ["av.launch", "fb.clone", "tool.follow"],
+  hs: ["hs.lion", "hs.token", "hs.tool", "hs.dup", "hs.jurar", "hs.tokendup", "hs.tokenjurar", "hs.tooldup", "hs.dup.follow", "hs.jurar.follow", "tool.follow"],
+  gg: ["gg.launch", "gg.clone", "gg.juro"],
+  sn: ["sn.launch"],
+  tt: ["tt.launch", "tt.clone", "tt.juro", "tt.follow"],
 };
 
 /** The `partner` every row of a scope carries (what the drawers' list filters key on). */
-export const SCOPE_PARTNER: Record<QueueScope, string> = { mo: "in", aif: "us", av: "av", hs: "br" };
+export const SCOPE_PARTNER: Record<QueueScope, string> = { mo: "in", aif: "us", av: "av", hs: "br", gg: "gg", sn: "sn", tt: "tt" };
 
-/** HS rows keep their kind in the reused `gcm` column (see /api/hs-tasks). */
-const HS_KIND_TAG: Partial<Record<QueueKind, string>> = { "hs.lion": "launch", "hs.token": "token", "hs.tool": "tool" };
+/** HS rows keep their kind in the reused `gcm` column (see /api/hs-tasks). Every clone rail is
+ *  "duplicate" there — what the HS drawer polled and activated before the server follow-up did. */
+const HS_KIND_TAG: Partial<Record<QueueKind, string>> = {
+  "hs.lion": "launch",
+  "hs.token": "token",
+  "hs.tool": "tool",
+  "hs.dup": "duplicate",
+  "hs.jurar": "duplicate",
+  "hs.tokendup": "duplicate",
+  "hs.tokenjurar": "duplicate",
+  "hs.tooldup": "duplicate",
+};
+/** The tag a scope's rows carry in `gcm` for a kind (HS only — the other rails put their own tags there). */
+export const hsKindTag = (kind: QueueKind): string | undefined => HS_KIND_TAG[kind];
 
 export type JobStatus = "queued" | "running" | "done" | "error" | "canceled";
 
@@ -51,7 +87,20 @@ export type JobResult = {
   gcm?: string;
   link?: string;
   name?: string;
+  /** A TOOL job still working when the handler's window closed (outcomeOf's pending branch): the
+   *  pump queues a tool.follow for it, which finishes the row once TOOL is done. */
+  tool_job_id?: string;
+  /** Which ad account the TOOL job builds on (tool.follow needs it for the failure text). */
+  account?: string;
+  /** A verdict's side note the follow-up must honour (an HS duplicate's bid read-back mismatch:
+   *  the clone is parked PAUSED instead of activated). */
+  note?: string;
 };
+
+/** What a runner (lib/launch-queue-runners.ts) gets besides the job: the moment by which its
+ *  work must be over (the smaller of the invocation's budget and the kind's worst case). */
+export type RunnerCtx = { deadlineAt: number; now: () => number; log: (msg: string) => void };
+export type JobRunner = (job: QueueJob, ctx: RunnerCtx) => Promise<JobOutcome | Defer>;
 
 /** One stored job (collection `launch_jobs`). `job_id` IS the task row's `task_id`. */
 export type QueueJob = {
@@ -93,7 +142,26 @@ export type QueueJob = {
   v?: number;
   /** Build stamp of the deployment that accepted the hand-off (diagnostics only). */
   build?: string | null;
+  /** The wave (one Launch click) this job belongs to — siblings share it: a wave's follow-up finds
+   *  its submits by it, and a refusal that is a fact of the SOURCE fails the queued siblings without
+   *  sending them (failQueuedSiblings). Null on the browser hand-off kinds. */
+  group?: string | null;
+  /** True = re-running this job is SAFE (a poller / activator whose every write is idempotent): a
+   *  lost lease RE-QUEUES it instead of closing it as interrupted. Never true on a job that submits. */
+  idempotent?: boolean;
+  /** Claimable only once the clock passes it (a follow-up's next slice). Null / absent = at once. */
+  not_before?: number | null;
+  /** Rail display columns stamped on the queued row beside `row` (Google: adset_id = customer,
+   *  ad_id = currency; TikTok the same; Snapchat: gcm = the key the board previewed) and never
+   *  nulled by the pump's own patches. */
+  row_extra?: Record<string, string> | null;
 };
+
+/** What a runner answers INSTEAD of a verdict when its job is a follow-up with work still pending:
+ *  the pump puts the job back in the queue for `notBefore` (lease cleared, attempts kept) and may
+ *  patch its body (the follow-up's own progress note). The row is not touched. */
+export type Defer = { defer: { notBefore: number; body?: Record<string, unknown> } };
+export const isDefer = (x: unknown): x is Defer => !!x && typeof x === "object" && "defer" in (x as object) && !!(x as Defer).defer;
 
 // ---- updates: jobs outlive the build that queued them ----
 //
@@ -170,29 +238,125 @@ export const JOB_GAP_MAX_MS = 3_000;
 export const QUEUE_MAX_JOBS_PER_REQUEST = 40;
 export const QUEUE_MAX_BODY_BYTES = 200_000;
 
-/** The longest one run of this kind can take before its handler gives up on its own (the routes'
- *  internal deadlines: FB budget 240 s + bounded pause, TOOL 265–270 s). The pump starts a job only
- *  while this much (+ margin) is left of its invocation.
- *  hs.lion used to be budgeted at 75 s ("the submit is ≤ 60 s") — but the route runs IN-PROCESS here,
- *  without its own 60 s function limit, and before the submit it reads LION's catalog: profile data
- *  and pixels, each up to 2 × 60 s when the 10-minute cache is cold. A job started 95 s before the
- *  deadline could be cut by the platform during those reads and end as a non-retryable "interrupted"
- *  although nothing had been sent (review find 08.10). Every kind now reserves the full window. */
-export function worstCaseMs(kind: QueueKind): number {
-  void kind;
-  return 310_000;
+/** A follow-up works this long per slice, then hands the lane back and asks for its next slice. */
+export const FOLLOW_SLICE_MS = 4 * 60_000;
+/** How long a follow-up waits between two slices while something is still pending. */
+export const FOLLOW_DEFER_MS = 20_000;
+/** A follow-up re-queued by the sweep after a lost lease waits this long first (the dead
+ *  invocation's last writes may still be landing). */
+export const FOLLOW_REQUEUE_DELAY_MS = 30_000;
+/** The sweep re-queues an idempotent job at most this many times; past it the job is closed. */
+export const IDEMPOTENT_MAX_ATTEMPTS = 60;
+/** How long a wave's follow-up keeps asking LION about a clone before it closes the row with the
+ *  drawer's old sentence ("Still not finished on LION after 3 h") — LION under load can chew on a
+ *  task for hours (owner call 08-14), so the cap only exists to end a forever-wedged task. */
+export const LION_FOLLOW_MAX_MS = 3 * 60 * 60_000;
+/** TikTok's settle and a TOOL job past its window are over far sooner. */
+export const TT_FOLLOW_MAX_MS = 40 * 60_000;
+export const TOOL_FOLLOW_MAX_MS = 40 * 60_000;
+
+/**
+ * The longest one run of this kind can take before its handler / runner gives up on its own (the
+ * routes' internal deadlines: FB budget 240 s + bounded pause, TOOL 265–270 s, LION 2 × 60 s a read).
+ * The pump starts a job only while this much (+ margin) is left of its invocation — so a job the
+ * platform could cut mid-run is never started (every error path of a run must get to run).
+ *   • hs.lion used to be budgeted at 75 s — but the route runs IN-PROCESS here and reads LION's
+ *     catalog first (profile data + pixels, 2 × 60 s each when the 10-minute cache is cold).
+ *   • hs.token / hs.tool do those same cold reads AND THEN a full 240 s FB build / 270 s TOOL
+ *     stream — a flat 310 s let the fit check start one with ~330 s left and the platform cut it
+ *     mid-stream into a non-retryable "interrupted" (audit find 09.10). They reserve ~520–560 s now.
+ *   • a Snapchat shot grows with its creatives (3 upload at a time, each up to 120 s of READY wait);
+ *     one that no invocation could hold is admitted at the budget's edge — the core self-limits past
+ *     its deadline and says what it left out, exactly as the wave pump did.
+ */
+export function worstCaseMs(kind: QueueKind, body?: Record<string, unknown> | null): number {
+  switch (kind) {
+    case "hs.token":
+      return 520_000;
+    case "hs.tool":
+      return 560_000;
+    case "sn.launch":
+      return snapWorstCaseMs(body);
+    case "gg.launch":
+      return 120_000;
+    case "gg.clone":
+    case "gg.juro":
+      return 300_000; // dataset fetch → poll (≤ 180 s) + the submit (≤ 60 s)
+    case "tt.launch":
+      return 160_000; // the submit (≤ 60 s) past the pump core's own 100 s deadline margin
+    case "tt.clone":
+    case "tt.juro":
+      return 420_000; // submit + a cold source's probe / refetch cycle (giveUpMs 270 s)
+    case "hs.tooldup":
+      return 180_000; // bind-free submit + a 60 s first look at the child job
+    case "hs.dup.follow":
+    case "hs.jurar.follow":
+    case "tt.follow":
+    case "tool.follow":
+      return FOLLOW_SLICE_MS + 60_000;
+    default:
+      return 310_000; // mo / aif / av / fb.clone / hs.lion / hs.dup / hs.jurar / hs.tokendup / hs.tokenjurar
+  }
+}
+
+/** One Snapchat shot: the base chain (key, campaign, ad squad, creative + ad, activate — each a
+ *  bounded 60 s call) plus one upload batch (3 creatives: download + upload + READY wait ≤ 120 s)
+ *  per three creatives on the card. Capped so a card of any size still fits an invocation. */
+export const SNAP_SHOT_BASE_MS = 180_000;
+export const SNAP_SHOT_BATCH_MS = 150_000;
+export const SNAP_SHOT_MAX_MS = 740_000;
+function snapWorstCaseMs(body?: Record<string, unknown> | null): number {
+  const shot = body && typeof body.shot === "object" && body.shot ? (body.shot as Record<string, unknown>) : null;
+  const media = shot && Array.isArray(shot.media) ? shot.media.length : 1;
+  const batches = Math.max(1, Math.ceil(media / 3));
+  return Math.min(SNAP_SHOT_BASE_MS + batches * SNAP_SHOT_BATCH_MS, SNAP_SHOT_MAX_MS);
 }
 
 export const laneOf = (scope: QueueScope, owner: string): string => `${scope}:${owner}`;
+/** The lane a scope's follow-ups run in — apart from its submits, so a poll never holds a launch back. */
+export const followLaneOf = (scope: QueueScope, owner: string): string => `${scope}-follow:${owner}`;
 
-/** The stage a row shows the moment its run starts (the handlers take over from there). */
+/** The stage a row shows the moment its run starts (the handlers / cores take over from there). */
 export function firstStage(kind: QueueKind): string {
-  if (kind === "fb.clone") return "source";
-  if (kind === "hs.lion" || kind === "hs.token" || kind === "hs.tool") return "submit";
-  return "gcm";
+  switch (kind) {
+    case "fb.clone":
+      return "source";
+    case "hs.lion":
+    case "hs.token":
+    case "hs.tool":
+    case "hs.dup":
+    case "hs.jurar":
+      return "submit";
+    case "hs.tokendup":
+    case "hs.tokenjurar":
+    case "hs.tooldup":
+      return "queue";
+    case "sn.launch":
+      return "key";
+    case "gg.clone":
+    case "gg.juro":
+      return "dataset";
+    case "gg.launch":
+    case "tt.launch":
+    case "tt.clone":
+    case "tt.juro":
+      return "submit";
+    default:
+      return "gcm"; // mo / aif / av (a follow-up never writes a row of its own)
+  }
 }
 
-const isHs = (kind: QueueKind): boolean => kind === "hs.lion" || kind === "hs.token" || kind === "hs.tool";
+const isHs = (kind: QueueKind): boolean => kind.startsWith("hs.");
+/** Drawers that model a dead run as "interrupted" (HS, Google, Snapchat, TikTok); the MO/AIF/AV
+ *  drawer reads it as an error anyway (lib/task-view fromRemote). */
+const interruptedStatus = (kind: QueueKind): string => (isHs(kind) || kind.startsWith("sn.") || kind.startsWith("gg.") || kind.startsWith("tt.") ? "interrupted" : "error");
+/** A submit of this kind is "done" when the PARTNER accepted it, while its row stays open for the
+ *  wave's follow-up to finish (poll + activate): the sweep must not close such a row off the done
+ *  job — the follow-up closes it, or the row check does once the follow-up's own cap has passed. */
+export const hasFollowUp = (kind: QueueKind): boolean => kind === "hs.dup" || kind === "hs.jurar";
+/** How long a row of a kind with a follow-up may stay open after it was queued before the row check
+ *  closes it as "not finished" (the follow-up's cap plus an hour of slack). */
+export const FOLLOWED_ROW_MAX_OPEN_MS = LION_FOLLOW_MAX_MS + 60 * 60_000;
 
 // ---- enqueue validation ----
 
@@ -256,8 +420,13 @@ export function parseEnqueue(raw: unknown): { ok: true; value: EnqueueInput } | 
     if (seen.has(taskId)) return { ok: false, error: `${at}: duplicate_task_id` };
     seen.add(taskId);
     const kind = j.kind as QueueKind;
-    if (!SCOPE_KINDS[scope].includes(kind)) return { ok: false, error: `${at}: bad_kind` };
+    // A browser hands over handler kinds only: the wave routes queue their own kinds themselves
+    // (after validating the wave), and a follow-up is never anybody's to hand over.
+    if (!isHandlerKind(kind) || !SCOPE_KINDS[scope].includes(kind)) return { ok: false, error: `${at}: bad_kind` };
     if (!isObj(j.body)) return { ok: false, error: `${at}: bad_body` };
+    // One clone per job: the pump aligns the job's task id with edits[0] (handlerBody), so a body
+    // carrying more edits would create every clone on Facebook and record only the first one's row.
+    if (kind === "fb.clone" && (!Array.isArray(j.body.edits) || j.body.edits.length !== 1)) return { ok: false, error: `${at}: clone_one_edit_per_job` };
     // The pump stamps the task id itself — a body may not bring its own (or another task's).
     const { taskId: _t, taskIds: _ts, ...body } = j.body;
     void _t;
@@ -302,8 +471,8 @@ type RowPatch = Record<string, unknown>;
  *  it stale, never "settles" it, and its own writes to it are ignored (lib/task-store). */
 const SRV = { srv: 1 } as const;
 
-/** The row a job is born with. */
-export function queuedRow(job: Pick<QueueJob, "kind" | "partner" | "row" | "queued_at">): RowPatch {
+/** The row a job is born with. A rail's display columns (`row_extra`) land on top of the nulls. */
+export function queuedRow(job: Pick<QueueJob, "kind" | "partner" | "row" | "queued_at"> & Pick<QueueJob, "row_extra">): RowPatch {
   return {
     ...SRV,
     retry: 0,
@@ -314,7 +483,7 @@ export function queuedRow(job: Pick<QueueJob, "kind" | "partner" | "row" | "queu
     budget: job.row.budget,
     ...(job.row.bid ? { bid: job.row.bid } : {}),
     status: "queued",
-    stage: isHs(job.kind) ? "submit" : null,
+    stage: isHs(job.kind) ? firstStage(job.kind) : null,
     campaign_id: null,
     adset_id: null,
     ad_id: null,
@@ -323,6 +492,7 @@ export function queuedRow(job: Pick<QueueJob, "kind" | "partner" | "row" | "queu
     queued_at: job.queued_at,
     started_at: null,
     finished_at: null,
+    ...(job.row_extra ?? {}),
   };
 }
 
@@ -342,14 +512,35 @@ export const INTERRUPTED_MSG =
 
 /** A run that died with its function (lease ran out). Written only over a row that is still open. */
 export function reapedRow(job: Pick<QueueJob, "kind" | "partner">, now: number): RowPatch {
-  return { ...SRV, retry: 0, partner: job.partner, status: isHs(job.kind) ? "interrupted" : "error", error: INTERRUPTED_MSG, finished_at: now };
+  return { ...SRV, retry: 0, partner: job.partner, status: interruptedStatus(job.kind), error: INTERRUPTED_MSG, finished_at: now };
 }
 
 /** What the row check needs to know of a job. */
 export type JobForRow = Pick<QueueJob, "kind" | "partner" | "status" | "retryable" | "error" | "result" | "finished_at">;
 
-/** The stage a finished row shows — the one each rail's own terminal write uses (outcomeOf). */
-const doneStage = (kind: QueueKind): string => (kind === "hs.lion" ? "queue" : isHs(kind) ? "ads" : "ad");
+/** The stage a finished row shows — the one each rail's own terminal write uses. */
+export function doneStage(kind: QueueKind): string {
+  switch (kind) {
+    case "hs.lion":
+    case "hs.dup":
+    case "hs.jurar":
+      return "queue"; // accepted by LION (the follow-up moves a clone on to "ads")
+    case "sn.launch":
+      return "live";
+    case "gg.launch":
+    case "gg.clone":
+    case "gg.juro":
+    case "tt.launch":
+    case "tt.clone":
+    case "tt.juro":
+      return "sent";
+    default:
+      return isHs(kind) ? "ads" : "ad";
+  }
+}
+
+/** The sentence the row check writes over a followed row nobody finished inside the cap. */
+export const FOLLOW_GAVE_UP_MSG = "Still not finished on LION after 3 h — check the LION dashboard";
 
 /** A server-owned row untouched for this long is checked against its job by the sweep. Longer than
  *  any run's quietest stretch (a handler may sit in one stage for minutes) plus the pump's margin. */
@@ -369,6 +560,9 @@ export function closingRowFor(
   job: JobForRow | null,
   rowPartner: string,
   now: number,
+  /** When the row was queued — a row of a kind with a follow-up is the follow-up's to close until
+   *  its cap has passed; only then does the row check step in. */
+  rowQueuedAt?: number | null,
 ): RowPatch | null {
   if (!job) {
     return { ...SRV, retry: 0, partner: rowPartner, status: "error", stage: "queue", error: "Not accepted by the queue — nothing was sent; launch this campaign again", finished_at: now };
@@ -380,6 +574,13 @@ export function closingRowFor(
     const v = job.result?.[k];
     if (v) ids[k] = v;
   }
+  if (job.status === "done" && hasFollowUp(job.kind)) {
+    // Accepted by the partner; the wave's follow-up polls it to the end and closes the row. Left
+    // alone until the follow-up's own cap (plus slack) has passed — then nobody is coming for it.
+    const since = rowQueuedAt ?? at;
+    if (now - since < FOLLOWED_ROW_MAX_OPEN_MS) return null;
+    return { ...SRV, retry: 0, partner: job.partner, status: interruptedStatus(job.kind), error: FOLLOW_GAVE_UP_MSG, finished_at: now, ...ids };
+  }
   if (job.status === "done") return { ...SRV, retry: 0, partner: job.partner, status: "done", stage: doneStage(job.kind), error: null, finished_at: at, ...ids };
   if (job.status === "canceled") return canceledRow(job, at);
   const retry = job.retryable ? 1 : 0;
@@ -387,28 +588,34 @@ export function closingRowFor(
     ...SRV,
     retry,
     partner: job.partner,
-    status: !retry && isHs(job.kind) ? "interrupted" : "error",
+    status: !retry ? interruptedStatus(job.kind) : "error",
     error: job.error || INTERRUPTED_MSG,
     finished_at: at,
     ...ids,
   };
 }
 
-/** What the launch-limit poll tells every tab about the queue's sweep. */
-export type QueueHealth = { sweptAt: number | null; oldestQueuedAt: number | null };
+/** What the launch-limit poll tells every tab about the queue's sweep: when it last ran, since when
+ *  the oldest job waits, and since when the oldest RUNNING job has been overdue for reaping (a run
+ *  whose pump died and whose lease nobody reaps — the one stranded job no queued backlog shows). */
+export type QueueHealth = { sweptAt: number | null; oldestQueuedAt: number | null; oldestOverdueRunningAt?: number | null };
 /** Jobs waiting this long while the sweep has been silent this long = worth telling the buyers. */
 export const SWEEP_LATE_MS = 3 * 60_000;
 
 /**
  * How late the every-minute sweep is, in whole minutes — or null when there is nothing to say: no
- * job is waiting, the oldest one only just arrived, or the sweep ran recently. A job that is waiting
- * behind a busy lane does not need the sweep, but a sweep that has stopped is the one failure that
- * leaves a stranded lane waiting forever with nobody told — so it is said out loud.
+ * job is waiting or overdue, the oldest one only just arrived, or the sweep ran recently. A job that
+ * is waiting behind a busy lane does not need the sweep, but a sweep that has stopped is the one
+ * failure that leaves a stranded lane (or a dead run) waiting forever with nobody told — so it is
+ * said out loud.
  */
 export function sweepLateMinutes(h: QueueHealth | null | undefined, now: number): number | null {
-  if (!h || h.oldestQueuedAt == null) return null;
-  if (now - h.oldestQueuedAt < SWEEP_LATE_MS) return null;
-  const since = h.sweptAt == null ? h.oldestQueuedAt : h.sweptAt;
+  if (!h) return null;
+  const waits = [h.oldestQueuedAt, h.oldestOverdueRunningAt].filter((v): v is number => typeof v === "number" && v > 0);
+  if (waits.length === 0) return null;
+  const oldest = Math.min(...waits);
+  if (now - oldest < SWEEP_LATE_MS) return null;
+  const since = h.sweptAt == null ? oldest : h.sweptAt;
   const late = now - since;
   return late >= SWEEP_LATE_MS ? Math.floor(late / 60_000) : null;
 }
@@ -597,14 +804,19 @@ export function outcomeOf(job: Pick<QueueJob, "kind" | "partner" | "body">, repl
   }
 
   // TOOL is still finishing the job past the handler's window: the campaign may yet be born. The
-  // handler already wrote the pending row (claims kept) — nothing to add, nothing to retry.
+  // handler already wrote the pending row (claims kept) — nothing to retry. The TOOL job id rides
+  // in the result: the pump queues a tool.follow for it, which finishes the row from TOOL's own
+  // verdict (done → the campaign ids; failed → the reason) once TOOL is through.
   if (f && f.pending === true) {
     const msg = s(f.error) || "TOOL is still finishing this launch — this row updates from the server; check Ads Manager before re-firing";
+    const toolJob = s(f.tool_job_id);
+    const created = isObj(f.created) ? f.created : {};
+    const campaign = s(created.campaign_id) ?? s(f.campaign_id);
     return {
       status: "error",
       retryable: false,
       error: msg,
-      result: null,
+      result: toolJob ? { tool_job_id: toolJob, ...(campaign ? { campaign_id: campaign } : {}) } : null,
       ambiguous: true,
       row: { ...base, retry: 0 },
       openRow: { ...base, retry: 0, status: hs ? "interrupted" : "error", stage, error: msg, finished_at: now },

@@ -8,7 +8,7 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 /**
- * GET /api/hs/token-cron — the scheduled token-pool health sweep (vercel.json cron, every 30
+ * GET /api/hs/token-cron — the scheduled token-pool health sweep (vercel.json cron, every 10
  * minutes; owner ask 08-20). Rate limits lift on their own schedule, so a probe pass has to run
  * even when nobody has a tab open: it re-checks every bearer raw, CLEARS the marks of tokens
  * whose limit already lifted (launches switch back to them — T1 first by priority) and

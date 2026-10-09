@@ -17,7 +17,10 @@ import {
 import { fullLandingUrl, partnerConfig } from "@/lib/partners";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+// Gemini's worst case: the ad copy (≤ 45 s) and then the creative — two image models × two attempts,
+// each bounded at 90 s (lib/gemini). 120 s used to cut the FIRST attempt short, so the fallback
+// model never got its turn and the owner saw a platform 504 (audit find 09.10).
+export const maxDuration = 420;
 
 /**
  * POST /api/auto-landings/{id}/prepare-launch — OWNER only.

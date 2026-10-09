@@ -24,16 +24,27 @@ import { partnerConfig, type PartnerId } from "@/lib/partners";
 import { TEAM, teamAllowsJob } from "@/lib/team";
 import {
   SCOPE_PARTNER,
+  type Defer,
   type EnqueueInput,
+  type HandlerKind,
   type JobOutcome,
+  type JobRow,
   type QueueJob,
+  type QueueKind,
   type QueueScope,
   type BuildBeacon,
+  FOLLOW_DEFER_MS,
   JOB_SCHEMA_VERSION,
   PUMP_BUDGET_MS,
   ROW_STALE_MS,
+  TOOL_FOLLOW_MAX_MS,
   canceledRow,
+  followLaneOf,
   handlerBody,
+  hasFollowUp,
+  hsKindTag,
+  isFollowKind,
+  isHandlerKind,
   isNewerBuild,
   isSuperseded,
   laneOf,
@@ -45,13 +56,14 @@ import {
   worstCaseMs,
   type RunReply,
 } from "@/lib/launch-queue-types";
-import { type LaneDeps, reconcileOpenRows, runLane } from "@/lib/launch-queue";
+import { type LaneDeps, crashedOutcome, reconcileOpenRows, runLane } from "@/lib/launch-queue";
 import {
   type NewJob,
   acquireLane as storeAcquireLane,
   beatJob,
   cancelQueuedJobs,
   claimNextJob,
+  deferJob,
   existingJobIds,
   extendLane as storeExtendLane,
   findJobsBrief,
@@ -63,11 +75,14 @@ import {
   readBeacon,
   reapExpiredJobs,
   releaseLane as storeReleaseLane,
+  reopenJob,
   requeueJobs,
   unclaimJob,
   writeBeacon,
 } from "@/lib/launch-queue-store";
 import { patchOpenTaskRow, staleOpenServerRows, storeConfigured, upsertTaskRow } from "@/lib/task-store";
+import { enqueueFollowUp, type FollowUpSpec } from "@/lib/launch-queue-ops";
+import { RUNNERS } from "@/lib/launch-queue-runners";
 import { computeInternalToken, computeSelfOrigin, mayAnnounceBuild, parseReplyLines, pumpBudgetMs, queueBuild, timingEqual } from "@/lib/launch-queue-wire";
 import { POST as launchPOST } from "@/app/api/launch/route";
 import { POST as aifLaunchPOST } from "@/app/api/aif/launch/route";
@@ -92,7 +107,7 @@ const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(
 
 /** kind → the exported route handler the browser used to POST to (spec §4.1). NextResponse (hs.lion)
  *  is a Response subclass, so a Promise<NextResponse> handler fits Promise<Response>. */
-const HANDLERS: Record<QueueJob["kind"], (req: Request) => Promise<Response>> = {
+const HANDLERS: Record<HandlerKind, (req: Request) => Promise<Response>> = {
   "mo.launch": launchPOST,
   "aif.launch": aifLaunchPOST,
   "av.launch": avLaunchPOST,
@@ -178,7 +193,7 @@ async function invokeHandler(job: QueueJob): Promise<RunReply> {
   }
   let res: Response;
   try {
-    res = await HANDLERS[job.kind](req);
+    res = await HANDLERS[job.kind as HandlerKind](req);
   } catch (e) {
     return { thrown: errMsg(e), httpStatus: 0, streamed: false, final: null, lastStage: null };
   }
@@ -193,15 +208,29 @@ async function invokeHandler(job: QueueJob): Promise<RunReply> {
   return { httpStatus, streamed: true, final, lastStage };
 }
 
-/** Run a job to its verdict. Must never throw (runLane treats a throw as a crash). */
-export async function runJob(job: QueueJob): Promise<JobOutcome> {
+/** Run a job to its verdict (or, a follow-up, to its next slice). Must never throw (runLane treats
+ *  a throw as a crash). The browser hand-off kinds run their route handler in-process; every other
+ *  kind has a RUNNER (lib/launch-queue-runners) that feeds the rail's pump core one shot, bounded by
+ *  the smaller of the invocation's budget and the kind's worst case. */
+export async function runJob(job: QueueJob, opts: { deadlineAt: number }): Promise<JobOutcome | Defer> {
   // The handlers run in-process here, past proxy.ts — so the queue is its own team gate (lib/team):
   // a kind this team's launcher does not have is never dispatched. Nothing is sent for it.
   if (!teamAllowsJob(job.scope, job.kind)) {
     return refusedOutcome(job, `This launcher (${TEAM.label}) does not run ${job.kind} launches — nothing was sent`, Date.now());
   }
-  const reply = await invokeHandler(job);
-  return outcomeOf(job, reply, Date.now());
+  if (isHandlerKind(job.kind)) {
+    const reply = await invokeHandler(job);
+    return outcomeOf(job, reply, Date.now());
+  }
+  const runner = RUNNERS[job.kind];
+  if (!runner) return refusedOutcome(job, `This version of Ad Launcher has no runner for ${job.kind} — nothing was sent`, Date.now());
+  const now = Date.now();
+  const deadlineAt = Math.min(opts.deadlineAt, now + worstCaseMs(job.kind, job.body));
+  try {
+    return await runner(job, { deadlineAt, now: () => Date.now(), log: (msg) => log(`${job.kind} ${job.job_id}: ${msg}`) });
+  } catch (e) {
+    return crashedOutcome(job, e, Date.now());
+  }
 }
 
 // ---- head start: register a soon-to-run job's videos so Meta processes them early (spec §4.6) ----
@@ -293,7 +322,7 @@ export function prewarm(job: QueueJob, seen?: Set<string>): void {
 
 // ---- persisting a verdict (job document + task row) ----
 
-async function settleJob(job: QueueJob, outcome: JobOutcome, holder: string): Promise<void> {
+async function settleJob(job: QueueJob, outcome: JobOutcome, holder: string, origin: string): Promise<void> {
   const now = Date.now();
   // The job document first: finishJob flips running → done/error under our lease (false = the sweeper
   // already closed it — then nothing is written, and the row is handled below either way). A store
@@ -309,17 +338,39 @@ async function settleJob(job: QueueJob, outcome: JobOutcome, holder: string): Pr
     log(`finishJob ${job.job_id} failed: ${errMsg(e)}`);
     return false;
   });
-  // The terminal row ALWAYS (the handler already wrote its own; this repeats/completes it — the same
-  // write the browser's task manager added on top). srv:1 rides via the patch. One exception to the
-  // patch as computed: when the job document was NOT ours to finish (the sweeper closed it under a
-  // run that was still alive, or the write failed) the document says "not retryable" — the row must
-  // say the same, or it would show a Retry button the server then refuses (review find 08.10).
-  await upsertTaskRow(job.owner, job.job_id, ours ? outcome.row : { ...outcome.row, retry: 0 });
-  // An AMBIGUOUS verdict's openRow is written only OVER a still-open row (queued/running) — never over
-  // a done/error/interrupted the handler itself already wrote. One atomic conditional update (no read
-  // to go wrong), tried a few times: the job document is terminal by now, so nothing would ever come
-  // back for a row left "running" here.
-  if (outcome.ambiguous && outcome.openRow) await writeOverOpenRow(job.job_id, outcome.openRow);
+  // A follow-up has no row of its own (it finishes the submits' rows) — nothing to write here.
+  if (!isFollowKind(job.kind)) {
+    // The terminal row ALWAYS (the handler already wrote its own; this repeats/completes it — the same
+    // write the browser's task manager added on top). srv:1 rides via the patch. One exception to the
+    // patch as computed: when the job document was NOT ours to finish (the sweeper closed it under a
+    // run that was still alive, or the write failed) the document says "not retryable" — the row must
+    // say the same, or it would show a Retry button the server then refuses (review find 08.10).
+    await upsertTaskRow(job.owner, job.job_id, ours ? outcome.row : { ...outcome.row, retry: 0 });
+    // An AMBIGUOUS verdict's openRow is written only OVER a still-open row (queued/running) — never over
+    // a done/error/interrupted the handler itself already wrote. One atomic conditional update (no read
+    // to go wrong), tried a few times: the job document is terminal by now, so nothing would ever come
+    // back for a row left "running" here.
+    if (outcome.ambiguous && outcome.openRow) await writeOverOpenRow(job.job_id, outcome.openRow);
+  }
+  // A TOOL job still working past its handler's window (the verdict carries its id): a tool.follow
+  // finishes the row from TOOL's own verdict once TOOL is through — nobody's tab needed.
+  const toolJob = Number(outcome.result?.tool_job_id);
+  if (ours && toolJob > 0 && !isFollowKind(job.kind)) {
+    const lane = await enqueueFollowUp(
+      job,
+      {
+        jobId: `tf-${job.job_id}`,
+        scope: job.scope,
+        kind: "tool.follow",
+        group: job.group ?? null,
+        body: { taskId: job.job_id, toolJobId: toolJob, account: outcome.result?.account ?? "", until: now + TOOL_FOLLOW_MAX_MS, hs: job.scope === "hs" },
+        notBefore: now + FOLLOW_DEFER_MS,
+      },
+      now,
+      log,
+    );
+    if (lane) void kickLane(origin, lane);
+  }
 }
 
 /** patchOpenTaskRow with a short retry — the last word on a row whose job is already closed. */
@@ -361,13 +412,18 @@ export async function pumpLane(lane: string, opts: { origin: string; startedAt: 
     claim: () => claimNextJob(lane, holder, Date.now()),
     unclaim: (job) => unclaimJob(job.job_id, holder),
     begin: (job) => markJobBegan(job.job_id, holder, Date.now()),
-    peek: (n) => peekQueued(lane, n),
+    peek: (n) => peekQueued(lane, n, Date.now()),
     beat: (job) => beatJob(job.job_id, holder, Date.now()),
     start: async (job) => {
+      // A follow-up has no row of its own.
+      if (isFollowKind(job.kind)) return;
       await upsertTaskRow(job.owner, job.job_id, runningRow(job, Date.now()));
     },
-    run: (job) => runJob(job),
-    settle: (job, outcome) => settleJob(job, outcome, holder),
+    run: (job) => runJob(job, { deadlineAt: deps.deadlineAt }),
+    settle: (job, outcome) => settleJob(job, outcome, holder, opts.origin),
+    defer: async (job, notBefore, body) => {
+      await deferJob(job.job_id, holder, notBefore, body);
+    },
     prewarm: (job) => prewarm(job, prewarmed),
     kick: async () => void (await kickLane(opts.origin, lane)),
     build,
@@ -509,14 +565,120 @@ export async function acceptEnqueue(session: Session, input: EnqueueInput, origi
 }
 
 /** Re-queue the owner's retryable jobs and write each row back to queued (keeping the fresh queued_at
- *  the store stamped). Returns the ids actually re-queued and the lanes to pump. */
+ *  the store stamped). A re-queued submit of a kind with a follow-up (an HS duplicate / JURO) gets
+ *  its wave's follow-up back too, should it have finished already. Returns the ids actually
+ *  re-queued and the lanes to pump. */
 export async function retryJobs(session: Session, taskIds: string[]): Promise<{ taskIds: string[]; lanes: string[] }> {
   const owner = String(session.username);
-  const jobs = await requeueJobs(owner, taskIds, Date.now());
+  const now = Date.now();
+  const jobs = await requeueJobs(owner, taskIds, now);
+  const lanes = new Set<string>();
   for (const job of jobs) {
-    await upsertTaskRow(owner, job.job_id, queuedRow({ kind: job.kind, partner: job.partner, row: job.row, queued_at: job.queued_at }));
+    lanes.add(job.lane);
+    await upsertTaskRow(owner, job.job_id, queuedRow({ kind: job.kind, partner: job.partner, row: job.row, queued_at: job.queued_at, row_extra: job.row_extra ?? null }));
+    if (hasFollowUp(job.kind) && job.group) {
+      const reopened = await reopenJob(`fol-${job.group}`, now + FOLLOW_DEFER_MS).catch((e) => {
+        log(`follow-up of ${job.group} could not be re-opened: ${errMsg(e)}`);
+        return false;
+      });
+      if (reopened) lanes.add(followLaneOf(job.scope, owner));
+    }
   }
-  return { taskIds: jobs.map((j) => j.job_id), lanes: [...new Set(jobs.map((j) => j.lane))] };
+  return { taskIds: jobs.map((j) => j.job_id), lanes: [...lanes] };
+}
+
+// ---- the routes' own hand-off: one job per validated shot of a wave (09.10) ----
+
+export type ServerJobInput = {
+  taskId: string;
+  kind: QueueKind;
+  body: Record<string, unknown>;
+  row: JobRow;
+  /** Rail display columns stamped on the queued row (see QueueJob.row_extra). */
+  rowExtra?: Record<string, string> | null;
+  /** Numeric FB ad account id the job lands on (launch-limit demand) — null for the platform rails. */
+  account?: string | null;
+};
+
+export type ServerAcceptResult = { ok: true; accepted: string[]; failed: Array<{ taskId: string; error: string }>; lanes: string[] } | { ok: false; error: string; status: number };
+
+/**
+ * A wave ROUTE hands its validated shots to the queue (replacing its after() pump): one job per
+ * shot, all in the owner's submit lane under one `group` (the wave id), plus — when the rail has one
+ * — the wave's FOLLOW-UP job in the follow lane. Same contract as the browser hand-off
+ * (acceptEnqueue): ids that already exist are reported accepted and never re-stamped (a re-POST of a
+ * wave meets its own ids), rows are stamped BEFORE the inserts, the store being down refuses the
+ * whole wave (503 — the route answers `…_wave_not_fired`), and the team gate is asked per kind.
+ */
+export async function acceptServerJobs(
+  owner: { username: string; role: string | null; sub: string | number },
+  scope: QueueScope,
+  group: string,
+  jobs: ServerJobInput[],
+  follow?: { kind: QueueKind; body: Record<string, unknown> },
+): Promise<ServerAcceptResult> {
+  if (!storeConfigured()) return { ok: false, error: "queue_store_not_configured", status: 503 };
+  const foreign = jobs.find((j) => !teamAllowsJob(scope, j.kind));
+  if (foreign) return { ok: false, error: `not_available: ${foreign.kind}`, status: 403 };
+  const partner = SCOPE_PARTNER[scope];
+  const lane = laneOf(scope, owner.username);
+  const now = Date.now();
+  let existing: Set<string>;
+  try {
+    existing = await existingJobIds(jobs.map((j) => j.taskId));
+  } catch (e) {
+    return { ok: false, error: `queue_store_unavailable: ${errMsg(e)}`, status: 503 };
+  }
+  const accepted: string[] = [];
+  const failed: Array<{ taskId: string; error: string }> = [];
+  for (let i = 0; i < jobs.length; i++) {
+    const j = jobs[i];
+    if (existing.has(j.taskId)) {
+      accepted.push(j.taskId);
+      continue;
+    }
+    const row: JobRow = { ...j.row, gcm: hsKindTag(j.kind) ?? j.row.gcm };
+    const stamped = await upsertTaskRow(owner.username, j.taskId, queuedRow({ kind: j.kind, partner, row, queued_at: now, row_extra: j.rowExtra ?? null }));
+    if (!stamped.ok) {
+      failed.push({ taskId: j.taskId, error: stamped.reason === "forbidden" ? "task_id_in_use" : `not_accepted: ${stamped.detail ?? stamped.reason}` });
+      continue;
+    }
+    const job: NewJob = {
+      v: JOB_SCHEMA_VERSION,
+      build: thisBuild() || null,
+      job_id: j.taskId,
+      owner: owner.username,
+      role: owner.role,
+      sub: owner.sub,
+      scope,
+      kind: j.kind,
+      lane,
+      partner,
+      account: j.account && /^\d{5,}$/.test(j.account) ? j.account : null,
+      body: j.body,
+      row,
+      seq: now * 1000 + i,
+      queued_at: now,
+      group,
+      idempotent: false,
+      not_before: null,
+      row_extra: j.rowExtra ?? null,
+    };
+    try {
+      await insertJob(job);
+      accepted.push(j.taskId);
+    } catch (e) {
+      await upsertTaskRow(owner.username, j.taskId, notAcceptedRow(partner, now));
+      failed.push({ taskId: j.taskId, error: `not_accepted: ${errMsg(e)}` });
+    }
+  }
+  const lanes: string[] = accepted.length > 0 ? [lane] : [];
+  if (follow && accepted.length > 0) {
+    const spec: FollowUpSpec = { jobId: `fol-${group}`, scope, kind: follow.kind, group, body: follow.body, notBefore: now + FOLLOW_DEFER_MS };
+    const followLane = await enqueueFollowUp({ owner: owner.username, role: owner.role, sub: owner.sub }, spec, now, log);
+    if (followLane) lanes.push(followLane);
+  }
+  return { ok: true, accepted, failed, lanes };
 }
 
 /** Cancel the owner's queued jobs (listed ids, or every queued job of a scope) and mark each row
@@ -576,7 +738,8 @@ export async function sweepQueue(
   } catch (e) {
     log(`lanesNeedingPump failed: ${errMsg(e)}`);
   }
-  const toKick = lanes.slice(0, 20);
+  const toKick = lanes.slice(0, KICK_MAX);
+  if (lanes.length > KICK_MAX) log(`${lanes.length - KICK_MAX} lane(s) wait for the next sweep (kick cap ${KICK_MAX})`);
   const answers = await Promise.all(toKick.map((lane) => kickLane(origin, lane)));
   // A lane whose kick was NOT accepted (the deployment could not reach itself over HTTP) is handed
   // back to the caller: the cron route pumps it in its own invocation, so a wave never depends on the
@@ -609,6 +772,9 @@ export async function sweepQueue(
  *  may close. A long wave that is legitimately queued is only looked at — it costs no writes. */
 const RECONCILE_SCAN = 1000;
 const RECONCILE_MAX = 40;
+/** Lanes one sweep restarts (each kick a 10 s-bounded POST, all in parallel): a deploy that
+ *  strands every buyer's lane at once — submits AND follow-ups — is restarted in one tick. */
+const KICK_MAX = 60;
 
 // ---- which build is this ----
 

@@ -16,8 +16,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  HANDLER_KINDS,
   JOB_SCHEMA_VERSION,
-  QUEUE_KINDS,
   handlerBody,
   jobMediaUrls,
   parseEnqueue,
@@ -34,9 +34,9 @@ type Case = {
 const golden = JSON.parse(readFileSync(new URL("./fixtures/queue-wire-v1.json", import.meta.url), "utf8")) as { cases: Case[] };
 const ENV = { CREATIVES_S3_BUCKET: "gc-adlauncher-creatives", CREATIVES_S3_REGION: "eu-central-1" };
 
-test("the fixture covers every job kind this build can run", () => {
+test("the fixture covers every job kind a BROWSER hands over (the wave routes queue the other kinds themselves — their bodies never cross the wire)", () => {
   const kinds = new Set(golden.cases.flatMap((c) => c.expect.value.jobs.map((j) => j.kind)));
-  assert.deepEqual([...kinds].sort(), [...QUEUE_KINDS].sort());
+  assert.deepEqual([...kinds].sort(), [...HANDLER_KINDS].sort());
 });
 
 for (const c of golden.cases) {

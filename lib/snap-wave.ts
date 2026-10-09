@@ -7,9 +7,10 @@
 // — its rows are `snc-…`, tagged "clone", and its name ends in CLONE_FROM=<source>.
 
 import { NextResponse, after } from "next/server";
-import { sessionFromCookieHeader } from "./session";
+import { type Session, sessionFromCookieHeader } from "./session";
 import { readAppCache, writeAppCache } from "./app-cache";
-import { storeConfigured, upsertTaskRow } from "./task-store";
+import { storeConfigured } from "./task-store";
+import { acceptServerJobs, pumpLane, selfOrigin } from "./launch-queue-run";
 import {
   SNAP_MAX_SHOTS,
   SNAP_WAVE_ID_RE,
@@ -28,8 +29,7 @@ import {
   type SnapLaunchShotIn,
 } from "./snap-launch";
 import { SnapApiError, snapAdAccounts, snapConfigured, snapDefaults, snapPixels, snapRailEnabled, type SnapAdAccount, type SnapPixel } from "./snap-api";
-import { SNAP_PARTNER, pumpSnapWave } from "./snap-pump";
-import { SNAP_PUMP_BUDGET_MS, type SnapPumpShot } from "./snap-pump-core";
+import type { SnapPumpShot } from "./snap-pump-core";
 
 export type SnapLaunchWaveBody = { waveId?: string; shots?: SnapLaunchShotIn[] };
 
@@ -188,15 +188,19 @@ export async function handleSnapLaunch(req: Request): Promise<NextResponse> {
       },
     });
   }
-  return acceptSnapWave(user, waveId, resolved, t0);
+  return acceptSnapWave(session, waveId, resolved, t0, selfOrigin(req));
 }
 
 /**
- * Idempotency (same-instance set + app-cache claim), stamp rows BEFORE the claim and the answer
- * (the team sees queued rows even if the browser dies now), claim (fail CLOSED when unwritable —
- * a retry could otherwise pump twice), after(pump), answer.
+ * Idempotency (same-instance set + app-cache claim), then the hand-off to the DURABLE queue (09.10):
+ * one job per shot in the buyer's Snapchat lane — rows stamped "queued" before the inserts, a task
+ * id that already exists reported accepted and never re-stamped (a re-POST of a wave meets its own
+ * jobs), the store being down refusing the whole wave (fail CLOSED — nothing half-accepted). The
+ * wave claim is written after the jobs (it is what /api/wave-status answers a board whose answer
+ * was lost; the jobs are the durable record). The lane pump's first window runs in after().
  */
-async function acceptSnapWave(user: string, waveId: string, resolved: ResolvedShot[], t0: number): Promise<NextResponse> {
+async function acceptSnapWave(session: Session, waveId: string, resolved: ResolvedShot[], t0: number, origin: string): Promise<NextResponse> {
+  const user = String(session.username);
   const waveKey = `snap-wave:${waveId}`;
   const alreadyAccepted = () => NextResponse.json({ ok: true, queued: resolved.length, rows: resolved.map((r) => ({ taskId: r.taskId })), alreadyAccepted: true });
   if (claimedWaves.has(waveId)) return alreadyAccepted();
@@ -205,43 +209,23 @@ async function acceptSnapWave(user: string, waveId: string, resolved: ResolvedSh
     if (prior) return alreadyAccepted();
   }
   if (!storeConfigured()) return bad("task_store_not_configured_wave_not_fired", 503);
-  const now = Date.now();
-  await Promise.all(
-    resolved.map((r) =>
-      upsertTaskRow(user, r.taskId, {
-        partner: SNAP_PARTNER,
-        name: r.row.name,
-        geo: r.row.geo,
-        budget: r.row.budget,
-        status: "running",
-        stage: "key",
-        gcm: r.row.key,
-        adset_id: "",
-        ad_id: "",
-        campaign_id: "",
-        link: "",
-        error: "",
-        ...(r.row.bid ? { bid: r.row.bid } : {}),
-        queued_at: now,
-        started_at: now,
-      }),
-    ),
+  const res = await acceptServerJobs(
+    { username: user, role: session.role ?? null, sub: session.sub },
+    "sn",
+    waveId,
+    resolved.map((r) => ({
+      taskId: r.taskId,
+      kind: "sn.launch" as const,
+      body: { shot: r.pump.shot, ctx: r.pump.ctx, waveId },
+      // The key the board previewed rides in `gcm` until the job claims one (the core overwrites it).
+      row: { name: r.row.name, gcm: r.row.key, geo: r.row.geo, budget: r.row.budget, bid: r.row.bid },
+      account: null,
+    })),
   );
-  const claim = await writeAppCache(waveKey, { user, at: now });
-  if (!claim) {
-    // A null write is the store being down OR the unique-ckey race lost to another instance that
-    // accepted this same wave (a re-POST): re-read to tell them apart — a row present means the
-    // wave IS running there, so the answer is the alreadyAccepted shape, not a 503.
-    const winner = await readAppCache<{ user: string; at: number }>(waveKey);
-    if (winner) return alreadyAccepted();
-    // Nothing will ever finish the rows stamped above: fail them now instead of leaving them
-    // `running` in the team drawer for 3 h. Best-effort — the store just refused a write.
-    await Promise.all(resolved.map((r) => upsertTaskRow(user, r.taskId, { status: "error", stage: "failed", error: "wave not fired — task store unavailable", finished_at: Date.now() }).catch(() => undefined)));
-    return bad("task_store_unavailable_wave_not_fired", 503);
-  }
+  if (!res.ok) return bad(res.status === 503 ? "task_store_unavailable_wave_not_fired" : res.error, res.status);
+  await writeAppCache(waveKey, { user, at: Date.now() });
   rememberWave(waveId);
-  const shots = resolved.map((r) => r.pump);
-  // The budget runs from the request's first instant (t0), not from the stamping — see handleSnapLaunch.
-  after(() => pumpSnapWave(user, shots, t0 + SNAP_PUMP_BUDGET_MS));
-  return NextResponse.json({ ok: true, queued: resolved.length, rows: resolved.map((r) => ({ taskId: r.taskId })) });
+  // The pump's budget runs from the request's first instant (t0) — see handleSnapLaunch.
+  for (const lane of res.lanes) after(() => pumpLane(lane, { origin, startedAt: t0 }));
+  return NextResponse.json({ ok: true, queued: res.accepted.length, rows: resolved.map((r) => ({ taskId: r.taskId })), ...(res.failed.length ? { failed: res.failed } : {}) });
 }

@@ -7,18 +7,36 @@ import assert from "node:assert/strict";
 import {
   BEACON_FRESH_MS,
   CANCELED_STAGE,
+  FOLLOWED_ROW_MAX_OPEN_MS,
+  FOLLOW_GAVE_UP_MSG,
+  FOLLOW_SLICE_MS,
+  HANDLER_KINDS,
   HEARTBEAT_MS,
   JOB_LEASE_MS,
   LANE_LEASE_MS,
+  PUMP_BUDGET_MS,
+  PUMP_MARGIN_MS,
+  QUEUE_KINDS,
+  QUEUE_SCOPES,
   REAP_GRACE_MS,
   INTERRUPTED_MSG,
   JOB_SCHEMA_VERSION,
+  SCOPE_KINDS,
   SCOPE_PARTNER,
+  SNAP_SHOT_BASE_MS,
+  SNAP_SHOT_BATCH_MS,
+  SNAP_SHOT_MAX_MS,
   SWEEP_LATE_MS,
   canceledRow,
   closingRowFor,
   firstStage,
+  followLaneOf,
   handlerBody,
+  hasFollowUp,
+  hsKindTag,
+  isDefer,
+  isFollowKind,
+  isHandlerKind,
   isNewerBuild,
   isSuperseded,
   jobMediaUrls,
@@ -137,12 +155,33 @@ test("parseEnqueue: the 40-job cap admits exactly 40", () => {
   assert.equal(v.jobs.length, 40);
 });
 
-test("parseEnqueue: fb.clone needs no media", () => {
+test("parseEnqueue: fb.clone needs no media — but exactly ONE edit per job", () => {
   const v = ok({ scope: "mo", jobs: [{ taskId: "task-clone1", kind: "fb.clone", body: { edits: [{ budget: "10" }] }, row: row(), account: "123456789" }] });
   assert.equal(v.jobs[0].kind, "fb.clone");
   // and even a clone with a bad media url is NOT refused on media grounds (it carries none)
-  const v2 = ok({ scope: "mo", jobs: [{ taskId: "task-clone2", kind: "fb.clone", body: {}, row: row(), account: null }] });
+  const v2 = ok({ scope: "mo", jobs: [{ taskId: "task-clone2", kind: "fb.clone", body: { edits: [{}] }, row: row(), account: null }] });
   assert.equal(v2.jobs[0].account, null);
+  // The pump aligns the job's task id with edits[0]: a body carrying two edits would create both
+  // clones on Facebook and record only the first one's row — refused at the hand-off (audit 09.10).
+  const two = parseEnqueue({ scope: "mo", jobs: [{ taskId: "task-clone3", kind: "fb.clone", body: { edits: [{}, {}] }, row: row(), account: null }] });
+  assert.deepEqual(two, { ok: false, error: "job 1: clone_one_edit_per_job" });
+  const none = parseEnqueue({ scope: "mo", jobs: [{ taskId: "task-clone4", kind: "fb.clone", body: {}, row: row(), account: null }] });
+  assert.deepEqual(none, { ok: false, error: "job 1: clone_one_edit_per_job" });
+});
+
+test("parseEnqueue: a browser hands over handler kinds only — the wave routes' kinds and the follow-ups are refused", () => {
+  for (const [scope, kind] of [
+    ["sn", "sn.launch"],
+    ["gg", "gg.clone"],
+    ["tt", "tt.launch"],
+    ["hs", "hs.dup"],
+    ["hs", "hs.jurar"],
+    ["hs", "hs.dup.follow"],
+    ["mo", "tool.follow"],
+  ] as const) {
+    const r = parseEnqueue({ scope, jobs: [{ taskId: "task-000009", kind, body: { shot: {} }, row: row(), account: null }] });
+    assert.deepEqual(r, { ok: false, error: "job 1: bad_kind" }, `${scope}/${kind}`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -164,13 +203,51 @@ test("firstStage / worstCaseMs / laneOf", () => {
   assert.equal(firstStage("hs.lion"), "submit");
   assert.equal(firstStage("hs.token"), "submit");
   assert.equal(firstStage("hs.tool"), "submit");
+  assert.equal(firstStage("hs.dup"), "submit");
+  assert.equal(firstStage("hs.jurar"), "submit");
+  assert.equal(firstStage("hs.tokendup"), "queue");
+  assert.equal(firstStage("hs.tooldup"), "queue");
+  assert.equal(firstStage("sn.launch"), "key");
+  assert.equal(firstStage("gg.clone"), "dataset");
+  assert.equal(firstStage("gg.launch"), "submit");
+  assert.equal(firstStage("tt.juro"), "submit");
   assert.equal(firstStage("mo.launch"), "gcm");
   assert.equal(firstStage("aif.launch"), "gcm");
   assert.equal(firstStage("av.launch"), "gcm");
   assert.equal(worstCaseMs("hs.lion"), 310_000, "in-process the LION route can spend minutes on cold catalog reads before the submit");
-  for (const k of ["mo.launch", "aif.launch", "av.launch", "fb.clone", "hs.token", "hs.tool"] as QueueKind[]) assert.equal(worstCaseMs(k), 310_000);
+  for (const k of ["mo.launch", "aif.launch", "av.launch", "fb.clone", "hs.dup", "hs.jurar", "hs.tokendup", "hs.tokenjurar"] as QueueKind[]) assert.equal(worstCaseMs(k), 310_000, k);
+  // The token / TOOL launch handlers do the cold LION reads AND a full 240 s / 270 s build stream
+  // after them — a flat 310 s let the fit check start one the platform then cut mid-stream (audit 09.10).
+  assert.equal(worstCaseMs("hs.token"), 520_000);
+  assert.equal(worstCaseMs("hs.tool"), 560_000);
+  assert.ok(worstCaseMs("hs.tool") + PUMP_MARGIN_MS < PUMP_BUDGET_MS, "the longest kind still fits a fresh invocation");
+  // A Snapchat shot grows with its creatives (three upload at a time), capped so any card fits an invocation.
+  assert.equal(worstCaseMs("sn.launch"), SNAP_SHOT_BASE_MS + SNAP_SHOT_BATCH_MS);
+  assert.equal(worstCaseMs("sn.launch", { shot: { media: [1, 2, 3] } }), SNAP_SHOT_BASE_MS + SNAP_SHOT_BATCH_MS);
+  assert.equal(worstCaseMs("sn.launch", { shot: { media: [1, 2, 3, 4] } }), SNAP_SHOT_BASE_MS + 2 * SNAP_SHOT_BATCH_MS);
+  assert.equal(worstCaseMs("sn.launch", { shot: { media: new Array(60).fill(1) } }), SNAP_SHOT_MAX_MS);
+  assert.ok(SNAP_SHOT_MAX_MS + PUMP_MARGIN_MS <= PUMP_BUDGET_MS, "the biggest Snapchat card still fits a fresh invocation");
+  for (const k of ["hs.dup.follow", "hs.jurar.follow", "tt.follow", "tool.follow"] as QueueKind[]) assert.equal(worstCaseMs(k), FOLLOW_SLICE_MS + 60_000, k);
   assert.equal(laneOf("mo", "nazar"), "mo:nazar");
   assert.equal(laneOf("hs", "tima"), "hs:tima");
+  assert.equal(followLaneOf("hs", "tima"), "hs-follow:tima");
+  assert.equal(followLaneOf("tt", "tima"), "tt-follow:tima");
+});
+
+test("kinds: the browser's handler kinds, the routes' runner kinds and the follow-ups never overlap; every scope lists its kinds", () => {
+  assert.deepEqual([...HANDLER_KINDS], ["mo.launch", "aif.launch", "av.launch", "fb.clone", "hs.lion", "hs.token", "hs.tool"]);
+  for (const k of HANDLER_KINDS) assert.equal(isHandlerKind(k), true);
+  for (const k of ["sn.launch", "hs.dup", "tt.follow"]) assert.equal(isHandlerKind(k), false);
+  for (const k of ["hs.dup.follow", "hs.jurar.follow", "tt.follow", "tool.follow"]) assert.equal(isFollowKind(k), true);
+  for (const k of ["hs.dup", "sn.launch", "mo.launch"]) assert.equal(isFollowKind(k), false);
+  for (const scope of QUEUE_SCOPES) for (const k of SCOPE_KINDS[scope]) assert.ok(QUEUE_KINDS.includes(k), `${scope}: ${k}`);
+  assert.equal(hasFollowUp("hs.dup"), true);
+  assert.equal(hasFollowUp("hs.jurar"), true);
+  for (const k of ["hs.lion", "hs.tokendup", "hs.tooldup", "sn.launch", "tt.launch", "gg.clone"] as QueueKind[]) assert.equal(hasFollowUp(k), false, k);
+  assert.equal(hsKindTag("hs.dup"), "duplicate");
+  assert.equal(hsKindTag("hs.tokenjurar"), "duplicate");
+  assert.equal(hsKindTag("hs.lion"), "launch");
+  assert.equal(hsKindTag("sn.launch"), undefined);
 });
 
 test("handlerBody: clones get taskIds, everything else gets taskId", () => {
@@ -221,7 +298,7 @@ test("runningRow / canceledRow / reapedRow", () => {
 });
 
 test("SCOPE_PARTNER mapping", () => {
-  assert.deepEqual(SCOPE_PARTNER, { mo: "in", aif: "us", av: "av", hs: "br" });
+  assert.deepEqual(SCOPE_PARTNER, { mo: "in", aif: "us", av: "av", hs: "br", gg: "gg", sn: "sn", tt: "tt" });
 });
 
 // ---------------------------------------------------------------------------
@@ -519,4 +596,87 @@ test("closingRowFor: a done row lands exactly where the rail's own verdict would
       if (verdict.row[k] != null) assert.equal(closed?.[k], verdict.row[k], `${kind}: ${k}`);
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// 09.10: every rail on the queue — follow-ups, the rails' rows, the sweep's overdue signal
+// ---------------------------------------------------------------------------
+
+test("closingRowFor: a done submit of a kind WITH a follow-up (hs.dup / hs.jurar) leaves its row open for the follow-up — until the follow-up's cap has passed", () => {
+  const base = { kind: "hs.dup" as QueueKind, partner: "br", retryable: false, error: null, result: { link: "lion-1" }, finished_at: 5000 };
+  const now = 1_000_000;
+  assert.equal(closingRowFor({ ...base, status: "done" }, "br", now, now - 60_000), null, "the follow-up polls LION and closes it");
+  assert.equal(closingRowFor({ ...base, status: "done" }, "br", now, null), null, "no queued_at known: judged by the job's end — still fresh");
+  const gaveUp = closingRowFor({ ...base, status: "done" }, "br", now, now - FOLLOWED_ROW_MAX_OPEN_MS - 1);
+  assert.deepEqual([gaveUp?.status, gaveUp?.error, gaveUp?.link, gaveUp?.retry, gaveUp?.srv], ["interrupted", FOLLOW_GAVE_UP_MSG, "lion-1", 0, 1]);
+  assert.equal(closingRowFor({ ...base, kind: "hs.jurar", status: "done" }, "br", now, now - 1000), null);
+  // a refused submit (error) closes at once, as before
+  const err = closingRowFor({ ...base, status: "error", retryable: true, error: "window full" }, "br", now, now - 1000);
+  assert.deepEqual([err?.status, err?.retry], ["error", 1]);
+  // kinds WITHOUT a follow-up close at their rail's done stage at once
+  for (const [kind, stage] of [
+    ["sn.launch", "live"],
+    ["gg.clone", "sent"],
+    ["tt.launch", "sent"],
+    ["hs.tokendup", "ads"],
+    ["hs.tooldup", "ads"],
+    ["hs.lion", "queue"],
+    ["mo.launch", "ad"],
+  ] as const) {
+    const done = closingRowFor({ ...base, kind, status: "done", result: { campaign_id: "c1" } }, "x", now, now - 1000);
+    assert.deepEqual([done?.status, done?.stage, done?.campaign_id], ["done", stage, "c1"], kind);
+  }
+  // a dead run of a platform rail reads "interrupted" on its drawer (those drawers model it), MO/AIF/AV "error"
+  for (const kind of ["sn.launch", "gg.juro", "tt.clone", "hs.dup", "hs.tokenjurar"] as QueueKind[]) {
+    assert.equal(closingRowFor({ ...base, kind, status: "error", retryable: false, error: "x" }, "p", now, null)?.status, "interrupted", kind);
+    assert.equal(reapedRow({ kind, partner: "p" }, now).status, "interrupted", kind);
+  }
+  for (const kind of ["mo.launch", "av.launch", "fb.clone"] as QueueKind[]) {
+    assert.equal(closingRowFor({ ...base, kind, status: "error", retryable: false, error: "x" }, "p", now, null)?.status, "error", kind);
+    assert.equal(reapedRow({ kind, partner: "p" }, now).status, "error", kind);
+  }
+});
+
+test("queuedRow: a rail's display columns (row_extra) land on top of the nulls; the queued stage is the kind's first stage for HS", () => {
+  const gg = queuedRow(jobOf({ kind: "gg.clone", partner: "gg", row: row({ gcm: "g-clone" }), queued_at: 7, row_extra: { adset_id: "1234567890", ad_id: "BRL" } }));
+  assert.equal(gg.adset_id, "1234567890");
+  assert.equal(gg.ad_id, "BRL");
+  assert.equal(gg.campaign_id, null);
+  assert.equal(gg.stage, null, "a platform row shows no stage while queued");
+  assert.equal(gg.gcm, "g-clone");
+  const sn = queuedRow(jobOf({ kind: "sn.launch", partner: "sn", row: row({ gcm: "glo-snp_007" }), row_extra: null }));
+  assert.equal(sn.gcm, "glo-snp_007", "the key the board previewed rides in gcm");
+  assert.equal(queuedRow(jobOf({ kind: "hs.dup", partner: "br" })).stage, "submit");
+  assert.equal(queuedRow(jobOf({ kind: "hs.tokendup", partner: "br" })).stage, "queue");
+  assert.equal(queuedRow(jobOf({ kind: "hs.tooldup", partner: "br" })).stage, "queue");
+  assert.equal(runningRow(jobOf({ kind: "sn.launch", partner: "sn" }), 1).stage, "key");
+  assert.equal(runningRow(jobOf({ kind: "gg.juro", partner: "gg" }), 1).stage, "dataset");
+});
+
+test("outcomeOf: a TOOL pending verdict carries the TOOL job id (and any campaign TOOL already reported) — what the pump queues a tool.follow for", () => {
+  const o = outcomeOf(jb("av.launch"), reply({ final: { ok: false, pending: true, via: "tool", tool_job_id: 4711, error: "TOOL is still working past the deadline" }, lastStage: "campaign" }), NOW);
+  assert.equal(o.ambiguous, true);
+  assert.equal(o.retryable, false);
+  assert.deepEqual(o.result, { tool_job_id: "4711" });
+  const withCampaign = outcomeOf(jb("hs.tool"), reply({ final: { ok: false, pending: true, tool_job_id: 12, created: { campaign_id: "c9" }, error: "x" } }), NOW);
+  assert.deepEqual(withCampaign.result, { tool_job_id: "12", campaign_id: "c9" });
+  const noJob = outcomeOf(jb("mo.launch"), reply({ final: { ok: false, pending: true, error: "x" } }), NOW);
+  assert.equal(noJob.result, null, "no job id → nothing to follow");
+});
+
+test("sweepLateMinutes: a RUNNING job nobody reaped counts like a waiting one (the stranded single launch under a stopped sweep)", () => {
+  const min = 60_000;
+  const now = 100 * min;
+  assert.equal(sweepLateMinutes({ sweptAt: now - 30 * min, oldestQueuedAt: null, oldestOverdueRunningAt: null }, now), null);
+  assert.equal(sweepLateMinutes({ sweptAt: now - 8 * min, oldestQueuedAt: null, oldestOverdueRunningAt: now - 10 * min }, now), 8, "overdue running, sweep silent 8 min");
+  assert.equal(sweepLateMinutes({ sweptAt: now - 20_000, oldestQueuedAt: null, oldestOverdueRunningAt: now - 10 * min }, now), null, "the sweep is alive — it reaps on its next tick");
+  assert.equal(sweepLateMinutes({ sweptAt: null, oldestQueuedAt: null, oldestOverdueRunningAt: now - 5 * min }, now), 5);
+});
+
+test("isDefer: the one shape a runner answers instead of a verdict", () => {
+  assert.equal(isDefer({ defer: { notBefore: 1 } }), true);
+  assert.equal(isDefer({ defer: { notBefore: 1, body: {} } }), true);
+  assert.equal(isDefer({ status: "done" }), false);
+  assert.equal(isDefer(null), false);
+  assert.equal(isDefer({ defer: null }), false);
 });

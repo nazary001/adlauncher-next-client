@@ -103,7 +103,8 @@ export function timingEqual(a: string, b: string): boolean {
 // letters) — the lane is only ever a Mongo filter VALUE, so the shape check is about bounds and
 // control characters, not about an alphabet. A lane this refused could never be continued by a
 // self-kick or restarted by the cron (it would run only inside its hand-off's own invocation).
-const LANE_RE = /^(mo|aif|av|hs):[^\u0000-\u001f\u007f]{1,160}$/;
+// A scope's submit lane (`hs:<user>`) or its follow-up lane (`hs-follow:<user>`, lib/launch-queue-types followLaneOf).
+const LANE_RE = /^(mo|aif|av|hs|gg|sn|tt)(-follow)?:[^\u0000-\u001f\u007f]{1,160}$/;
 
 /** A lane the pump route will act on: `<scope>:<username>`, bounded, no control characters. */
 export function laneNameValid(lane: unknown): lane is string {

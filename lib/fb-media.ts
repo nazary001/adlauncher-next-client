@@ -140,7 +140,10 @@ function imageDims(buf: Buffer): { w: number; h: number } | null {
 /** Fetch + validate the image BEFORE anything is claimed or created: caught here it costs
  *  nothing; caught at adimages it has already burned a claim round-trip and 20s of wave. */
 export async function fetchValidatedImage(fileUrl: string): Promise<Buffer> {
-  const res = await fetch(fileUrl, { cache: "no-store" });
+  // Bounded like every Graph call: a creative store that accepts the connection and then stalls
+  // (a CDN hiccup) used to pin the launch function to its maxDuration — undici's default body
+  // timeout equals it — and the platform killed it with no error path run (audit find 09.10).
+  const res = await fetch(fileUrl, { cache: "no-store", signal: AbortSignal.timeout(60_000) });
   if (!res.ok) throw new FbError(`image fetch failed (HTTP ${res.status})`, { fileUrl });
   const buf = Buffer.from(await res.arrayBuffer());
   if (buf.byteLength === 0) throw new FbError("image is empty", { fileUrl });

@@ -739,10 +739,12 @@ export type ToolJobOutcome =
 
 /**
  * What a polled job means (spec §1 line 75). Not terminal → pending. done → the created ids +
- * whether TOOL activated (read defensively from result.activated — TOOL has NOT confirmed an
- * `activated` flag on publish, so default false: the row reports PAUSED until proven ACTIVE,
- * mirroring LION's park-on-mismatch, risk in spec §4). partial/error/unknown/canceled → failed,
- * carrying whatever result.created holds.
+ * whether TOOL reported activating (read defensively from result.activated — TOOL has NOT confirmed
+ * an `activated` flag on publish, so it defaults to false and NOBODY acts on it: the server asks TOOL
+ * to activate through options.activate, and a done job with a campaign id is settled as a launch.
+ * A park-on-mismatch over this flag would mislabel every successful live launch as PAUSED should
+ * TOOL simply omit it — it is only recorded here until TOOL documents the flag; risk in spec §4).
+ * partial/error/unknown/canceled → failed, carrying whatever result.created holds.
  */
 export function toolJobOutcome(job: unknown): ToolJobOutcome {
   const j = rec(job);

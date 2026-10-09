@@ -3,9 +3,11 @@
 // stamp rows into the shared store → claim the wave (idempotency) → after(pump) → answer at once.
 
 import { NextResponse, after } from "next/server";
-import { sessionFromCookieHeader } from "./session";
-import { readAppCacheAll, readAppCacheDetailed, writeAppCache } from "./app-cache";
-import { storeConfigured, upsertTaskRow } from "./task-store";
+import { type Session, sessionFromCookieHeader } from "./session";
+import { readAppCacheDetailed, writeAppCache } from "./app-cache";
+import { storeConfigured } from "./task-store";
+import { acceptServerJobs, pumpLane, selfOrigin } from "./launch-queue-run";
+import { TT_FOLLOW_MAX_MS, type QueueKind } from "./launch-queue-types";
 import { LION_ACR, lionTokenConfigured } from "./lion";
 import { lionTiktokFindCampaigns } from "./lion-tiktok";
 import { parseTiktokName, type LionTiktokRow } from "./tiktok-source";
@@ -14,7 +16,6 @@ import {
   TIKTOK_CAMPAIGN_ID_RE,
   TIKTOK_WAVE_ID_RE,
   isTiktokLaunchAccount,
-  tiktokClaimVerdict,
   tiktokCloneWire,
   tiktokGeoLabel,
   tiktokJuroWire,
@@ -42,8 +43,6 @@ import {
   type TwAdvertiser,
   type TwConfig,
 } from "./tiktok-weapon";
-import { TIKTOK_PARTNER, TIKTOK_PUMP_BUDGET_MS, pumpTiktokWave, type TiktokPumpShot } from "./tiktok-pump";
-
 export const TIKTOK_MAX_SHOTS = 45;
 const CONFIG_CONCURRENCY = 5;
 
@@ -65,14 +64,14 @@ export async function tiktokLaunchableAdvertisers(): Promise<TwAdvertiser[]> {
 }
 
 /** Session + the rail's gates, in the order every TikTok launch route shares. */
-function gate(req: Request): { user: string } | NextResponse {
+function gate(req: Request): { user: string; session: Session } | NextResponse {
   const session = sessionFromCookieHeader(req.headers.get("cookie"));
   if (!session?.username) return bad("unauthorized", 401);
   if (!tiktokRailEnabled()) return bad("tiktok_rail_disabled", 404);
   if (!tiktokWeaponConfigured()) return bad("tiktok_weapon_not_configured", 500);
   // Refused before a single row is stamped: this instance must not fire at the live partner.
   if (!tiktokLiveLaunchAllowed()) return bad(TIKTOK_LIVE_LAUNCH_BLOCKED, 403);
-  return { user: String(session.username) };
+  return { user: String(session.username), session };
 }
 
 /** Configs of the distinct target advertisers, ≤5 reads in flight; a failed read is kept as its
@@ -112,27 +111,25 @@ const KIND_TAG: Record<TiktokKind, string> = { launch: "t-launch", clone: "t-clo
 type WaveClaim = { user: string; at: number; nonce: string; n: number };
 
 /** Waves being accepted by THIS instance right now — taken synchronously, before the first await,
- *  so a twin request can never stamp over rows the first one's pump has already advanced. */
+ *  so a twin request can never queue the same wave twice on one instance (the queue's own unique
+ *  job ids make the second attempt a no-op anyway). */
 const inflightWaves = new Set<string>();
 
-/** Rows are stamped this many at a time — one burst of 45 parallel upserts (≈3 store calls each)
- *  right before the claim is how a claim write times out. */
-const STAMP_BATCH = 8;
+const KIND_QUEUE: Record<TiktokKind, QueueKind> = { launch: "tt.launch", clone: "tt.clone", juro: "tt.juro" };
 
 /**
  * The accepted-wave tail every TikTok launch shares. In order:
  *  1. idempotency — this instance's memory, then the claim row in the shared store. A store that
- *     can't be READ refuses the wave BEFORE anything is stamped (a blip must not read as "never
- *     accepted" and let a retry stamp over a wave another instance is pumping);
- *  2. stamp the rows (the team sees them even if the browser dies now; a crash before the claim
- *     re-stamps the SAME task ids on retry) — no row stamped = nothing fired;
- *  3. claim — a POST of a unique key carrying OUR nonce, then a read of every row under the key:
- *     the OLDEST row is the one winner (lib/tiktok-launch tiktokClaimVerdict). That read is what
- *     tells "my write landed after its timeout" (→ pump) from "a twin won" (→ alreadyAccepted),
- *     and what closes Strapi's unique-key TOCTOU window, where both racers' POSTs succeed;
- *  4. after(pump), answer.
+ *     can't be READ refuses the wave BEFORE anything is queued (a blip must not read as "never
+ *     accepted" and let a retry re-queue a wave); a re-POST with another shot count is refused;
+ *  2. the hand-off to the DURABLE queue (09.10): one job per shot in the buyer's TikTok lane —
+ *     rows stamped "queued" before the inserts, a task id that already exists reported accepted
+ *     (the queue's unique job ids are the per-shot exactly-once), the store being down refusing
+ *     the whole wave (fail CLOSED) — plus the wave's tt.follow job (the settle pass);
+ *  3. the claim row (what /api/wave-status answers a board whose answer was lost), after(pump), answer.
  */
-async function acceptTiktokWave(user: string, waveId: string, resolved: ResolvedShot[], startedAt: number): Promise<NextResponse> {
+async function acceptTiktokWave(session: Session, waveId: string, resolved: ResolvedShot[], startedAt: number, origin: string): Promise<NextResponse> {
+  const user = String(session.username);
   const waveKey = `tiktok-wave:${waveId}`;
   const rows = resolved.map((r) => ({ taskId: r.taskId, campaignId: r.campaignId }));
   const alreadyAccepted = () => NextResponse.json({ ok: true, queued: resolved.length, rows, alreadyAccepted: true });
@@ -155,65 +152,28 @@ async function acceptTiktokWave(user: string, waveId: string, resolved: Resolved
     }
 
     const now = Date.now();
-    let stamped = 0;
-    for (let i = 0; i < resolved.length; i += STAMP_BATCH) {
-      const results = await Promise.all(
-        resolved.slice(i, i + STAMP_BATCH).map((r) =>
-          upsertTaskRow(user, r.taskId, {
-            partner: TIKTOK_PARTNER,
-            name: r.row.name,
-            geo: r.row.geo,
-            budget: r.row.budget,
-            status: "running",
-            stage: "submit",
-            gcm: KIND_TAG[r.kind],
-            adset_id: r.row.advertiser,
-            ad_id: r.row.currency,
-            campaign_id: "",
-            link: "",
-            error: "",
-            ...(r.row.bid ? { bid: r.row.bid } : {}),
-            queued_at: now,
-            started_at: now,
-          }),
-        ),
-      );
-      stamped += results.filter((x) => x.ok).length;
-    }
-    // A wave nobody could see must not fire: its campaigns would exist with no row to find them by.
-    if (stamped === 0) return bad("task_store_unavailable_wave_not_fired: no task row could be written — nothing was sent; try again in a moment", 503);
-
-    const nonce = crypto.randomUUID();
-    const posted = Boolean(await writeAppCache<WaveClaim>(waveKey, { user, at: now, nonce, n: resolved.length }));
-    const seen = await readAppCacheAll<WaveClaim>(waveKey);
-    const verdict = tiktokClaimVerdict({ posted, readOk: seen.ok, nonces: seen.rows.map((r) => String(r.value?.nonce ?? "")), nonce });
-    // A twin request won the claim (a double submit, a retry that overlapped): it is pumping these
-    // very task ids — answer like any other repeat.
-    if (verdict === "twin") return alreadyAccepted();
-    if (verdict === "refused") {
-      // The store took no claim from anyone: nothing will pump the rows stamped above, so they must
-      // not sit "running" for the team to wonder about (a stuck row invites a blind re-fire).
-      for (let i = 0; i < resolved.length; i += STAMP_BATCH) {
-        await Promise.all(
-          resolved.slice(i, i + STAMP_BATCH).map((r) =>
-            upsertTaskRow(user, r.taskId, { partner: TIKTOK_PARTNER, status: "error", stage: "submit", error: "Not fired — the task store refused the wave claim; nothing was sent to LION. Fire the wave again.", finished_at: Date.now() }),
-          ),
-        );
-      }
-      return bad("task_store_unavailable_wave_not_fired", 503);
-    }
-    // Neither the claim nor its read-back got through: the claim may be ours, a twin's, or nobody's.
-    // Nothing is sent and the rows are left alone — writing "not fired" over rows a twin may be
-    // pumping would invite exactly the duplicate this claim exists to prevent.
-    if (verdict === "unknown") return bad("task_store_unavailable: the wave's claim could not be confirmed — nothing was sent from this request; check the Task Manager before firing again", 503);
+    const res = await acceptServerJobs(
+      { username: user, role: session.role ?? null, sub: session.sub },
+      "tt",
+      waveId,
+      resolved.map((r) => ({
+        taskId: r.taskId,
+        kind: KIND_QUEUE[r.kind],
+        body: { kind: r.kind, campaignId: r.campaignId, wire: r.wire, rowKey: r.rowKey, waveId },
+        row: { name: r.row.name, gcm: KIND_TAG[r.kind], geo: r.row.geo, budget: r.row.budget, bid: r.row.bid },
+        // TikTok-specific display columns: the target advertiser id in adset_id, its currency in ad_id.
+        rowExtra: { adset_id: r.row.advertiser, ad_id: r.row.currency },
+        account: null,
+      })),
+      { kind: "tt.follow", body: { waveId, until: now + TT_FOLLOW_MAX_MS } },
+    );
+    if (!res.ok) return bad(res.status === 503 ? "task_store_unavailable_wave_not_fired: nothing was sent; try again in a moment" : res.error, res.status);
+    await writeAppCache<WaveClaim>(waveKey, { user, at: now, nonce: crypto.randomUUID(), n: resolved.length });
     rememberWave(waveId, resolved.length);
+    // The pump's budget is anchored at the REQUEST (validation already spent part of it).
+    for (const lane of res.lanes) after(() => pumpLane(lane, { origin, startedAt }));
 
-    const shots: TiktokPumpShot[] = resolved.map((r) => ({ taskId: r.taskId, kind: r.kind, campaignId: r.campaignId, body: r.wire, rowKey: r.rowKey }));
-    // The budget is anchored at the REQUEST (validation + stamping already spent part of it).
-    const deadline = startedAt + TIKTOK_PUMP_BUDGET_MS;
-    after(() => pumpTiktokWave(user, shots, deadline));
-
-    return NextResponse.json({ ok: true, queued: resolved.length, rows });
+    return NextResponse.json({ ok: true, queued: res.accepted.length, rows, ...(res.failed.length ? { failed: res.failed } : {}) });
   } finally {
     inflightWaves.delete(waveId);
   }
@@ -236,7 +196,7 @@ export async function handleTiktokLaunch(req: Request): Promise<NextResponse> {
   const startedAt = Date.now();
   const g = gate(req);
   if (g instanceof NextResponse) return g;
-  const { user } = g;
+  const { user, session } = g;
 
   let body: TiktokLaunchWaveBody;
   try {
@@ -304,7 +264,7 @@ export async function handleTiktokLaunch(req: Request): Promise<NextResponse> {
       },
     });
   }
-  return acceptTiktokWave(user, waveId, resolved, startedAt);
+  return acceptTiktokWave(session, waveId, resolved, startedAt, selfOrigin(req));
 }
 
 // ---------- clone / JURO ----------
@@ -333,7 +293,7 @@ export async function handleTiktokWave(req: Request, kind: "clone" | "juro"): Pr
   const startedAt = Date.now();
   const g = gate(req);
   if (g instanceof NextResponse) return g;
-  const { user } = g;
+  const { user, session } = g;
 
   let body: TiktokCloneWaveBody;
   try {
@@ -441,5 +401,5 @@ export async function handleTiktokWave(req: Request, kind: "clone" | "juro"): Pr
       },
     });
   }
-  return acceptTiktokWave(user, waveId, resolved, startedAt);
+  return acceptTiktokWave(session, waveId, resolved, startedAt, selfOrigin(req));
 }

@@ -78,6 +78,13 @@ export type SnapPumpDeps = {
   maxMediaBytes: number;
   mediaPollMs: number;
   mediaWaitMs: number;
+  /** Optional DURABLE media reuse across runs (09.10: one shot = one queue job, so copies of a card
+   *  no longer share this run's map): the Snap media id an earlier run uploaded for this (account,
+   *  creative), or null. A hit is still checked with mediaReady before it is trusted. Never throws
+   *  through (a failure reads as a miss). */
+  lookupMedia?(cacheKey: string): Promise<string | null>;
+  /** Remember an upload for later runs (best effort). */
+  rememberMedia?(cacheKey: string, mediaId: string): Promise<void>;
 };
 
 /** HTTP 4xx = a deterministic refusal (Snap's sentence); anything else is ambiguous. */
@@ -142,6 +149,19 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
     return id;
   };
 
+  /** An earlier run's upload of the same creative on the same account, if the registry remembers one
+   *  and Snapchat still answers READY for it — else null (upload fresh). Best effort throughout. */
+  const durableMedia = async (cacheKey: string): Promise<string | null> => {
+    if (!deps.lookupMedia) return null;
+    try {
+      const id = await deps.lookupMedia(cacheKey);
+      if (!id) return null;
+      return (await deps.mediaReady(id)) ? id : null;
+    } catch {
+      return null;
+    }
+  };
+
   const ensureMedia = (adAccountId: string, m: SnapShotMedia): Promise<string> => {
     if (reusable(adAccountId, m)) return Promise.resolve(m.snapMediaId as string);
     if (!m.url) return Promise.reject(Object.assign(new Error("Snapchat gave no download link for this creative — it can only be cloned on its own ad account"), { status: 400 }));
@@ -151,7 +171,14 @@ export async function runSnapPump(user: string, shots: SnapPumpShot[], deadline:
     if (mediaRefused.has(cacheKey)) return Promise.reject(mediaRefused.get(cacheKey));
     const running = mediaInFlight.get(cacheKey);
     if (running) return running;
-    const p = uploadMedia(adAccountId, m)
+    const p = durableMedia(cacheKey)
+      .then((known) => {
+        if (known) return known;
+        return uploadMedia(adAccountId, m).then(async (id) => {
+          if (deps.rememberMedia) await deps.rememberMedia(cacheKey, id).catch(() => undefined);
+          return id;
+        });
+      })
       .then(
         (id) => {
           mediaByKey.set(cacheKey, id);

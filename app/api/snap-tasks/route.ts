@@ -42,6 +42,10 @@ function toClient(r: Row): Row {
     link: r.link ?? null,
     bid: r.bid ?? null,
     error: r.error ?? null,
+    // Server-launch-queue flags (same meaning as /api/launch-tasks): srv=1 the queue owns the row
+    // (every Snapchat shot is a queue job since 09.10), retry=1 the owner may re-queue it.
+    srv: r.srv === 1 || r.srv === true ? 1 : 0,
+    retry: r.retry === 1 || r.retry === true ? 1 : 0,
     queued_at: num(r.queued_at) ?? null,
     started_at: num(r.started_at) ?? null,
     finished_at: num(r.finished_at) ?? null,
@@ -111,8 +115,9 @@ export async function POST(req: Request) {
             if (existing?.status === "done") return { ok: true as const };
           }
           // partner:"sn" is forced here — the wire never sets it, so a Snap row can't masquerade
-          // as MO/HS/AIF/Google (nor the reverse).
-          return upsertTaskRow(user, String(item.task_id), { ...fields, partner: SNAP_PARTNER });
+          // as MO/HS/AIF/Google (nor the reverse). { client: true }: the server flags are stripped
+          // and a write to a queue-owned row is ignored (the queue is its single writer).
+          return upsertTaskRow(user, String(item.task_id), { ...fields, partner: SNAP_PARTNER }, { client: true });
         }),
       );
       for (const r of results) {

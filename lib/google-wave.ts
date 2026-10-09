@@ -3,9 +3,10 @@
 // the shared store → claim the wave (idempotency) → after(pump) → answer at once.
 
 import { NextResponse, after } from "next/server";
-import { sessionFromCookieHeader } from "./session";
+import { type Session, sessionFromCookieHeader } from "./session";
 import { readAppCache, writeAppCache } from "./app-cache";
-import { storeConfigured, upsertTaskRow } from "./task-store";
+import { storeConfigured } from "./task-store";
+import { acceptServerJobs, pumpLane, selfOrigin } from "./launch-queue-run";
 import {
   GOOGLE_CAMPAIGN_ID_RE,
   GOOGLE_CUSTOMER_ID_RE,
@@ -25,7 +26,7 @@ import { googleGeoFromName, splitGoogleName } from "./google-source";
 import { googleRailEnabled, googleWeaponConfigured, gwLaunchCatalog, type GwCloneBody, type GwCustomer, type GwJuroBody, type GwLaunchBody, type GwSuspendedCustomer } from "./google-weapon";
 import { lionConfigured } from "./lion";
 import { lionGoogleFindCampaigns } from "./lion-google";
-import { GOOGLE_PARTNER, GOOGLE_PUMP_BUDGET_MS, pumpGoogleWave, type GooglePumpShot } from "./google-pump";
+import type { QueueKind } from "./launch-queue-types";
 
 export const GOOGLE_MAX_SHOTS = 45;
 
@@ -87,6 +88,7 @@ function resolvePixel(target: GwCustomer | null, picked: string): { pixel?: stri
 }
 
 export async function handleGoogleWave(req: Request, mode: GoogleMode): Promise<NextResponse> {
+  const startedAt = Date.now();
   const session = sessionFromCookieHeader(req.headers.get("cookie"));
   if (!session?.username) return bad("unauthorized", 401);
   if (!googleRailEnabled()) return bad("google_rail_disabled", 404);
@@ -204,10 +206,10 @@ export async function handleGoogleWave(req: Request, mode: GoogleMode): Promise<
     });
   }
 
-  return acceptGoogleWave(user, mode, waveId, resolved);
+  return acceptGoogleWave(session, mode, waveId, resolved, startedAt, selfOrigin(req));
 }
 
-/** One resolved shot, ready to stamp + pump (shared by the clone/JURO and the launch handlers). */
+/** One resolved shot, ready to queue (shared by the clone/JURO and the launch handlers). */
 type ResolvedShot = {
   taskId: string;
   campaignId: string;
@@ -218,11 +220,14 @@ type ResolvedShot = {
 
 /**
  * The accepted-wave tail every Google launch shares: idempotency (same-instance set + app-cache
- * claim), stamp rows BEFORE the claim and the answer (the team sees queued rows even if the
- * browser dies now; a crash before the claim re-stamps the SAME task ids on retry), claim
- * (fail CLOSED when unwritable — a retry could otherwise pump twice), after(pump), answer.
+ * claim), then the hand-off to the DURABLE queue (09.10) — one job per shot in the buyer's Google
+ * lane, rows stamped "queued" before the inserts, a task id that already exists reported accepted
+ * (a re-POST of a wave meets its own jobs), the store being down refusing the whole wave (fail
+ * CLOSED). The wave claim is written after the jobs (what /api/wave-status answers a board whose
+ * answer was lost). The lane pump's first window runs in after().
  */
-async function acceptGoogleWave(user: string, mode: GoogleMode, waveId: string, resolved: ResolvedShot[]): Promise<NextResponse> {
+async function acceptGoogleWave(session: Session, mode: GoogleMode, waveId: string, resolved: ResolvedShot[], startedAt: number, origin: string): Promise<NextResponse> {
+  const user = String(session.username);
   const waveKey = `google-wave:${waveId}`;
   const alreadyAccepted = () =>
     NextResponse.json({ ok: true, queued: resolved.length, rows: resolved.map((r) => ({ taskId: r.taskId, campaignId: r.campaignId })), alreadyAccepted: true });
@@ -232,37 +237,28 @@ async function acceptGoogleWave(user: string, mode: GoogleMode, waveId: string, 
     if (prior) return alreadyAccepted();
   }
   if (!storeConfigured()) return bad("task_store_not_configured_wave_not_fired", 503);
-  const now = Date.now();
-  await Promise.all(
-    resolved.map((r) =>
-      upsertTaskRow(user, r.taskId, {
-        partner: GOOGLE_PARTNER,
-        name: r.row.name,
-        geo: r.row.geo,
-        budget: r.row.budget,
-        status: "running",
-        stage: mode === "launch" ? "submit" : "dataset",
-        gcm: mode === "clone" ? "g-clone" : mode === "juro" ? "g-juro" : "g-launch",
-        adset_id: r.row.customer,
-        ad_id: r.row.currency,
-        campaign_id: "",
-        link: "",
-        error: "",
-        ...(r.row.bid ? { bid: r.row.bid } : {}),
-        queued_at: now,
-        started_at: now,
-      }),
-    ),
+  const kind: QueueKind = mode === "clone" ? "gg.clone" : mode === "juro" ? "gg.juro" : "gg.launch";
+  const tag = mode === "clone" ? "g-clone" : mode === "juro" ? "g-juro" : "g-launch";
+  const res = await acceptServerJobs(
+    { username: user, role: session.role ?? null, sub: session.sub },
+    "gg",
+    waveId,
+    resolved.map((r) => ({
+      taskId: r.taskId,
+      kind,
+      body: { mode, campaignId: r.campaignId, wire: r.wire, rowKey: r.rowKey, waveId },
+      row: { name: r.row.name, gcm: tag, geo: r.row.geo, budget: r.row.budget, bid: r.row.bid },
+      // Google-specific display columns: the target customer id in adset_id, its currency in ad_id.
+      rowExtra: { adset_id: r.row.customer, ad_id: r.row.currency },
+      account: null,
+    })),
   );
-  const claim = await writeAppCache(waveKey, { user, at: now });
-  if (!claim) return bad("task_store_unavailable_wave_not_fired", 503);
+  if (!res.ok) return bad(res.status === 503 ? "task_store_unavailable_wave_not_fired" : res.error, res.status);
+  await writeAppCache(waveKey, { user, at: Date.now() });
   rememberWave(waveId);
+  for (const lane of res.lanes) after(() => pumpLane(lane, { origin, startedAt }));
 
-  const shots: GooglePumpShot[] = resolved.map((r) => ({ taskId: r.taskId, mode, campaignId: r.campaignId, body: r.wire, rowKey: r.rowKey }));
-  const deadline = now + GOOGLE_PUMP_BUDGET_MS;
-  after(() => pumpGoogleWave(user, shots, deadline));
-
-  return NextResponse.json({ ok: true, queued: resolved.length, rows: resolved.map((r) => ({ taskId: r.taskId, campaignId: r.campaignId })) });
+  return NextResponse.json({ ok: true, queued: res.accepted.length, rows: resolved.map((r) => ({ taskId: r.taskId, campaignId: r.campaignId })), ...(res.failed.length ? { failed: res.failed } : {}) });
 }
 
 export type GoogleLaunchWaveBody = { waveId?: string; shots?: GoogleLaunchShotIn[] };
@@ -274,6 +270,7 @@ export type GoogleLaunchWaveBody = { waveId?: string; shots?: GoogleLaunchShotIn
  * pixel are validated against the live customers list exactly like clones.
  */
 export async function handleGoogleLaunch(req: Request): Promise<NextResponse> {
+  const startedAt = Date.now();
   const session = sessionFromCookieHeader(req.headers.get("cookie"));
   if (!session?.username) return bad("unauthorized", 401);
   if (!googleRailEnabled()) return bad("google_rail_disabled", 404);
@@ -334,6 +331,6 @@ export async function handleGoogleLaunch(req: Request): Promise<NextResponse> {
       },
     });
   }
-  return acceptGoogleWave(user, "launch", waveId, resolved);
+  return acceptGoogleWave(session, "launch", waveId, resolved, startedAt, selfOrigin(req));
 }
 

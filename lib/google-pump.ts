@@ -70,6 +70,12 @@ export async function pumpGoogleWave(
     campaignLaunch?: typeof gwCampaignLaunch;
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
+    /** The row writer to use instead of a fresh task-store writer per task (the queue runner's observed one). */
+    write?: (taskId: string, fields: Record<string, unknown>) => void;
+    flush?: () => Promise<void>;
+    /** A deterministic partner refusal of a board row's wire (identical copies would be refused
+     *  identically) — the queue runner settles the queued copies without sending them. */
+    onRowRefusal?: (rowKey: string, message: string) => void;
   } = {},
 ): Promise<void> {
   const ensureDataset = deps.ensureDataset ?? gwEnsureDataset;
@@ -88,10 +94,12 @@ export async function pumpGoogleWave(
     }
     return w;
   };
-  const write = (taskId: string, fields: TaskRowData) => writerOf(taskId).write(fields);
-  const flushAll = async () => {
-    await Promise.all([...writers.values()].map((w) => w.flush()));
-  };
+  const write = deps.write ?? ((taskId: string, fields: TaskRowData) => writerOf(taskId).write(fields));
+  const flushAll =
+    deps.flush ??
+    (async () => {
+      await Promise.all([...writers.values()].map((w) => w.flush()));
+    });
 
   const failed = new Set<string>();
   const fail = (shot: GooglePumpShot, stage: string, error: string, status: "error" | "interrupted" = "error") => {
@@ -150,6 +158,7 @@ export async function pumpGoogleWave(
         // Deterministic partner refusal: identical copies would be refused identically.
         const msg = `${err.message} · sent: ${digest}`;
         rowRefusal.set(shot.rowKey, msg);
+        deps.onRowRefusal?.(shot.rowKey, msg);
         fail(shot, "submit", msg);
       } else {
         const msg = e instanceof Error ? e.message : String(e);

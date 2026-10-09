@@ -49,6 +49,9 @@ export type TiktokPumpDeps = {
   sleep(ms: number): Promise<void>;
   now(): number;
   jitter?(): number;
+  /** A deterministic partner refusal of a board row's wire (identical copies would be refused
+   *  identically) — on the queue the runner settles the queued copies without sending them. */
+  onRowRefusal?(rowKey: string, message: string): void;
 };
 
 export type TiktokPumpOpts = {
@@ -181,6 +184,7 @@ export async function runTiktokPump(shots: TiktokPumpShot[], deadline: number, d
         // Deterministic partner refusal: identical copies would be refused identically.
         const msg = messageOf(e);
         rowRefusal.set(shot.rowKey, msg);
+        deps.onRowRefusal?.(shot.rowKey, msg);
         fail(shot, "submit", msg);
         return "failed";
       }

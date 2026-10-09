@@ -3,10 +3,12 @@
 // real unique indexes: the AT-MOST-ONCE claim under concurrency, the lane lock, requeue/cancel rules,
 // the reaper's grace, and the demand aggregate. Import ./_mongo.ts FIRST (it pins MONGODB_DB=gc_test);
 // every row carries the per-run marker and is wiped in finally; the whole file skips without a store.
-import { HAVE_DB, RUN, closeDb, ensureTestIndexes, wipe } from "./_mongo.ts";
+import { HAVE_DB, RUN, closeDb, col, ensureTestIndexes, wipe } from "./_mongo.ts";
 import { after, before, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  FOLLOW_REQUEUE_DELAY_MS,
+  IDEMPOTENT_MAX_ATTEMPTS,
   JOB_LEASE_MS,
   LANE_LEASE_MS,
   REAP_GRACE_MS,
@@ -388,6 +390,136 @@ test("findJobsBrief: the jobs of many ids in one read, without their bodies; unk
   assert.equal(m.get(jid("b1"))?.partner, "in");
   assert.deepEqual(m.get(jid("b1"))?.body, {}, "bodies are not read");
   assert.equal((await S.findJobsBrief([])).size, 0);
+});
+
+// ---- 09.10: not_before, defer, siblings, idempotent reap, reopen, groups, overdue running ----
+
+test("not_before: a job due later is invisible to claim / peek / lanesNeedingPump until its time", live, async () => {
+  const L = lane("due");
+  const now = Date.now();
+  await S.insertJob(newJob({ job_id: jid("d1"), lane: L, seq: 1, not_before: now + 60_000 }));
+  await S.insertJob(newJob({ job_id: jid("d2"), lane: L, seq: 2 }));
+  assert.equal((await S.claimNextJob(L, "A", now))?.job_id, jid("d2"), "the due job is claimed even behind an earlier seq");
+  assert.equal(await S.claimNextJob(L, "A", now), null, "nothing else is due");
+  assert.deepEqual((await S.peekQueued(L, 5, now)).map((j) => j.job_id), []);
+  assert.ok(!(await S.lanesNeedingPump(now)).includes(L), "a lane whose only queued job is not due needs no pump");
+  assert.ok((await S.lanesNeedingPump(now + 61_000)).includes(L));
+  assert.deepEqual((await S.peekQueued(L, 5, now + 61_000)).map((j) => j.job_id), [jid("d1")]);
+  const late = await S.claimNextJob(L, "A", now + 61_000);
+  assert.equal(late?.job_id, jid("d1"));
+  assert.equal(late?.not_before, now + 60_000);
+});
+
+test("deferJob: a running follow-up hands itself back — queued from not_before, body replaced, attempts kept, began reset, holder only", live, async () => {
+  const L = lane("defer");
+  const now = Date.now();
+  await S.insertJob(newJob({ job_id: jid("df1"), lane: L, seq: 1, kind: "hs.dup.follow", idempotent: true, body: { waveId: "w" } }));
+  const claimed = await S.claimNextJob(L, "A", now);
+  assert.equal(claimed?.attempts, 1);
+  assert.equal(await S.markJobBegan(jid("df1"), "A", now), true);
+  assert.equal(await S.deferJob(jid("df1"), "B", now + 20_000, { waveId: "w", renamed: ["x"] }), false, "not the holder");
+  assert.equal(await S.deferJob(jid("df1"), "A", now + 20_000, { waveId: "w", renamed: ["x"] }), true);
+  const j = await S.findJob(jid("df1"));
+  assert.equal(j?.status, "queued");
+  assert.equal(j?.not_before, now + 20_000);
+  assert.equal(j?.attempts, 1, "attempts are kept — the sweep's re-queue cap counts every slice");
+  assert.equal(j?.began, false);
+  assert.equal(j?.runner, null);
+  assert.deepEqual(j?.body, { waveId: "w", renamed: ["x"] });
+  assert.equal(await S.claimNextJob(L, "C", now + 10_000), null, "not due yet");
+  assert.equal((await S.claimNextJob(L, "C", now + 21_000))?.job_id, jid("df1"));
+});
+
+test("failQueuedSiblings: the QUEUED siblings of a group whose body matches the fact are settled — never a running one, never another group, never the job itself", live, async () => {
+  const L = lane("sib");
+  const now = Date.now();
+  const G = `wave-${RUN}`;
+  await S.insertJob(newJob({ job_id: jid("s0"), lane: L, seq: 1, group: G, body: { shot: { campaignId: "111", binds: { account: "a1" } } } }));
+  await S.insertJob(newJob({ job_id: jid("s1"), lane: L, seq: 2, group: G, body: { shot: { campaignId: "111", binds: { account: "a1" } } } }));
+  await S.insertJob(newJob({ job_id: jid("s2"), lane: L, seq: 3, group: G, body: { shot: { campaignId: "222", binds: { account: "a1" } } } }));
+  await S.insertJob(newJob({ job_id: jid("s3"), lane: L, seq: 4, group: G, body: { shot: { campaignId: "111", binds: { account: "a2" } } } }));
+  await S.insertJob(newJob({ job_id: jid("s4"), lane: L, seq: 5, group: `other-${RUN}`, body: { shot: { campaignId: "111", binds: { account: "a1" } } } }));
+  const running = await S.claimNextJob(L, "A", now); // s0 is running — the job that learned the refusal
+  assert.equal(running?.job_id, jid("s0"));
+  const closed = await S.failQueuedSiblings(L, G, { "body.shot.campaignId": "111" }, { error: "LION rejected the family", retryable: false, now, except: jid("s0") });
+  assert.deepEqual(closed.map((j) => j.job_id).sort(), [jid("s1"), jid("s3")].sort());
+  for (const j of closed) {
+    assert.equal(j.status, "error");
+    assert.equal(j.retryable, false);
+    assert.equal(j.error, "LION rejected the family");
+    assert.equal(j.finished_at, now);
+  }
+  assert.equal((await S.findJob(jid("s2")))?.status, "queued", "another source is untouched");
+  assert.equal((await S.findJob(jid("s4")))?.status, "queued", "another wave is untouched");
+  assert.equal((await S.findJob(jid("s0")))?.status, "running", "the job itself is the caller's to settle");
+  // the account-window rule: by destination account, retryable (the window reopens)
+  const byAcct = await S.failQueuedSiblings(L, G, { "body.shot.binds.account": "a1" }, { error: "window full", retryable: true, now });
+  assert.deepEqual(byAcct.map((j) => j.job_id), [jid("s2")]);
+  assert.equal(byAcct[0].retryable, true);
+  assert.deepEqual(await S.failQueuedSiblings(L, "", {}, { error: "x", retryable: false, now }), [], "no group → nothing");
+});
+
+test("reap: an IDEMPOTENT run that began and lost its lease is re-queued a little later — until its attempt cap, then interrupted like any other", live, async () => {
+  const L = lane("reapidem");
+  const now = Date.now();
+  await S.insertJob(newJob({ job_id: jid("ri1"), lane: L, seq: 1, kind: "tt.follow", idempotent: true }));
+  await S.claimNextJob(L, "A", now);
+  assert.equal(await S.markJobBegan(jid("ri1"), "A", now), true);
+  const t = now + JOB_LEASE_MS + REAP_GRACE_MS + 1000;
+  const swept = await S.reapExpiredJobs(t);
+  assert.equal(swept.interrupted.filter((j) => j.job_id === jid("ri1")).length, 0, "a follow-up is never closed as interrupted while it may run again");
+  const back = swept.requeued.filter((j) => j.job_id === jid("ri1"));
+  assert.equal(back.length, 1);
+  assert.equal(back[0].status, "queued");
+  assert.equal(back[0].attempts, 1, "the slice that died still counts toward the cap");
+  assert.equal(back[0].not_before, t + FOLLOW_REQUEUE_DELAY_MS);
+  assert.equal(await S.claimNextJob(L, "B", t), null, "not due before the delay");
+  assert.equal((await S.claimNextJob(L, "B", t + FOLLOW_REQUEUE_DELAY_MS + 1))?.job_id, jid("ri1"));
+  // at the cap: closed as interrupted
+  const c = await col("launch_jobs");
+  await c.updateOne({ job_id: jid("ri1") }, { $set: { attempts: IDEMPOTENT_MAX_ATTEMPTS } });
+  assert.equal(await S.markJobBegan(jid("ri1"), "B", t + FOLLOW_REQUEUE_DELAY_MS + 2), true);
+  const t2 = t + FOLLOW_REQUEUE_DELAY_MS + JOB_LEASE_MS + REAP_GRACE_MS + 2000;
+  const swept2 = await S.reapExpiredJobs(t2);
+  assert.equal(swept2.interrupted.filter((j) => j.job_id === jid("ri1")).length, 1);
+  assert.equal(swept2.requeued.filter((j) => j.job_id === jid("ri1")).length, 0);
+});
+
+test("reopenJob: a finished follow-up comes back queued for its time; a submit (not idempotent) and an open job never", live, async () => {
+  const L = lane("reopen");
+  const now = Date.now();
+  await S.insertJob(newJob({ job_id: jid("ro1"), lane: L, seq: 1, kind: "hs.dup.follow", idempotent: true }));
+  await S.insertJob(newJob({ job_id: jid("ro2"), lane: L, seq: 2 }));
+  assert.equal(await S.reopenJob(jid("ro1"), now + 5000), false, "still queued — nothing to reopen");
+  await S.claimNextJob(L, "A", now);
+  await S.finishJob(jid("ro1"), "A", { status: "done", retryable: false, error: null, result: null, finished_at: now });
+  assert.equal(await S.reopenJob(jid("ro1"), now + 5000), true);
+  const j = await S.findJob(jid("ro1"));
+  assert.equal(j?.status, "queued");
+  assert.equal(j?.not_before, now + 5000);
+  assert.equal(j?.finished_at, null);
+  await S.claimNextJob(L, "A", now + 6000); // ro1
+  await S.claimNextJob(L, "A", now + 6000); // ro2 (not due-gated)
+  await S.finishJob(jid("ro2"), "A", { status: "error", retryable: true, error: "x", result: null, finished_at: now });
+  assert.equal(await S.reopenJob(jid("ro2"), now + 7000), false, "a submit is never re-opened this way — Retry is the owner's");
+});
+
+test("findJobsByGroup: the jobs of a wave in seq order, by kind; queueHealth sees a running job nobody reaped", live, async () => {
+  const L = lane("group");
+  const now = Date.now();
+  const G = `wave2-${RUN}`;
+  await S.insertJob(newJob({ job_id: jid("g1"), lane: L, seq: 2, group: G, kind: "tt.launch" }));
+  await S.insertJob(newJob({ job_id: jid("g2"), lane: L, seq: 1, group: G, kind: "tt.clone" }));
+  await S.insertJob(newJob({ job_id: jid("g3"), lane: `${L}-follow`, seq: 3, group: G, kind: "tt.follow", idempotent: true }));
+  assert.deepEqual((await S.findJobsByGroup(G)).map((j) => j.job_id), [jid("g2"), jid("g1"), jid("g3")]);
+  assert.deepEqual((await S.findJobsByGroup(G, ["tt.launch", "tt.clone"])).map((j) => j.job_id), [jid("g2"), jid("g1")]);
+  assert.deepEqual(await S.findJobsByGroup(""), []);
+  // a running job whose lease ran out past the grace — the stranded run no queued backlog shows
+  const c = await col("launch_jobs");
+  await S.claimNextJob(L, "A", now);
+  await c.updateOne({ job_id: jid("g2") }, { $set: { lease_until: now - REAP_GRACE_MS - 120_000 } });
+  const h = await S.queueHealth();
+  assert.ok(h.oldestOverdueRunningAt !== null && h.oldestOverdueRunningAt <= now - REAP_GRACE_MS - 120_000, "this run's overdue job, or an older leftover");
 });
 
 after(async () => {

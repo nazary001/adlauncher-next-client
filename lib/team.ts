@@ -220,15 +220,50 @@ export function teamAllowsPath(pathname: string, team: TeamConfig = TEAM): boole
 // ---- the launch queue --------------------------------------------------------------------------
 
 const SCOPE_PARTNER: Record<string, TeamPartner> = { hs: "br", mo: "in", aif: "us", av: "av" };
-const HS_KIND_CHANNEL: Record<string, HsChannel> = { "hs.lion": "lion", "hs.token": "token", "hs.tool": "tool" };
+/** The platform drawers' scopes (lib/launch-queue-types QUEUE_SCOPES gg / sn / tt). */
+const SCOPE_PLATFORM: Record<string, TeamPlatform> = { gg: "google", sn: "snap", tt: "tiktok" };
+/** Which HS launch channel a queue kind rides: the LION weapons (launch, duplicate, JURO and their
+ *  follow-ups), our FB tokens, or the TOOL sessions (a TOOL job's follow-up needs the channel too). */
+const HS_KIND_CHANNEL: Record<string, HsChannel> = {
+  "hs.lion": "lion",
+  "hs.dup": "lion",
+  "hs.jurar": "lion",
+  "hs.dup.follow": "lion",
+  "hs.jurar.follow": "lion",
+  "hs.token": "token",
+  "hs.tokendup": "token",
+  "hs.tokenjurar": "token",
+  "hs.tool": "tool",
+  "hs.tooldup": "tool",
+  "tool.follow": "tool",
+};
+/** What a Graph partner's scope (mo / aif / av) may queue: its launch, an FB clone, and the
+ *  follow-up of a TOOL job (MO / AIF / AV launch or clone through TOOL — a channel these rails only
+ *  have where HS has it). */
+const GRAPH_SCOPE_KINDS: Record<string, readonly string[]> = {
+  mo: ["mo.launch", "fb.clone", "tool.follow"],
+  aif: ["aif.launch", "fb.clone", "tool.follow"],
+  av: ["av.launch", "fb.clone", "tool.follow"],
+};
+const PLATFORM_SCOPE_KINDS: Record<string, readonly string[]> = {
+  gg: ["gg.launch", "gg.clone", "gg.juro"],
+  sn: ["sn.launch"],
+  tt: ["tt.launch", "tt.clone", "tt.juro", "tt.follow"],
+};
 
 /** May this team hand over / run a queue job of this scope and kind? The runner calls the launch
  *  handlers IN-PROCESS (no HTTP hop → proxy.ts never sees a queued launch), so the queue asks here
- *  itself, at enqueue and again before dispatch. Unknown scope or an HS kind without a channel = no. */
+ *  itself, at enqueue and again before dispatch. Unknown scope / kind, an HS kind without a
+ *  channel, a platform the team was not given = no. */
 export function teamAllowsJob(scope: string, kind: string, team: TeamConfig = TEAM): boolean {
+  const platform = SCOPE_PLATFORM[scope];
+  if (platform) return team.platforms.includes(platform) && (PLATFORM_SCOPE_KINDS[scope] ?? []).includes(kind);
   const partner = SCOPE_PARTNER[scope];
   if (!partner || !team.partners.includes(partner)) return false;
-  if (scope !== "hs") return !kind.startsWith("hs.");
+  if (scope !== "hs") {
+    if (!(GRAPH_SCOPE_KINDS[scope] ?? []).includes(kind)) return false;
+    return kind === "tool.follow" ? team.hsChannels.includes("tool") : true;
+  }
   const channel = HS_KIND_CHANNEL[kind];
   return Boolean(channel) && team.hsChannels.includes(channel);
 }

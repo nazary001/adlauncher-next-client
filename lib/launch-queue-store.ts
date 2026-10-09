@@ -13,6 +13,8 @@ import type { Document, Filter } from "mongodb";
 import { coll, isDupKey } from "./mongo.ts";
 import { STORE_TIMEOUT_MS, bounded, dupKeyOn, insertFresh } from "./store.ts";
 import {
+  FOLLOW_REQUEUE_DELAY_MS,
+  IDEMPOTENT_MAX_ATTEMPTS,
   INTERRUPTED_MSG,
   JOB_LEASE_MS,
   JOB_TTL_MS,
@@ -34,7 +36,11 @@ const REAP_MAX = 50;
 /** What a new job needs; the store adds status "queued", attempts 0, the leases, timestamps, the
  *  Strapi-style envelope (lib/store.ts insertFresh) and `expire_at` (JOB_TTL_MS, TTL index). */
 export type NewJob = Pick<QueueJob, "job_id" | "owner" | "role" | "sub" | "scope" | "kind" | "lane" | "partner" | "account" | "body" | "row" | "seq" | "queued_at"> &
-  Partial<Pick<QueueJob, "v" | "build">>;
+  Partial<Pick<QueueJob, "v" | "build" | "group" | "idempotent" | "not_before" | "row_extra">>;
+
+/** A queued job is claimable only once its `not_before` (a follow-up's next slice) has passed;
+ *  a job without one — every submit — is due at once. `null` matches an absent field too. */
+const due = (now: number) => ({ $or: [{ not_before: null }, { not_before: { $lte: now } }] });
 
 // The two UNIQUE indexes the queue's safety RESTS on: without `job_id` unique a hand-off POSTed twice
 // at the same instant inserts the job twice (→ a campaign launched twice); without `lane` unique two
@@ -51,6 +57,13 @@ export function ensureQueueIndexes(): Promise<void> {
       const lanes = await coll(LAUNCH_LANES);
       await bounded(jobs.createIndex({ job_id: 1 }, { unique: true }), "launch-jobs unique index", 20_000);
       await bounded(lanes.createIndex({ lane: 1 }, { unique: true }), "launch-lanes unique index", 20_000);
+      // The rest of the plan (scripts/ensure-indexes.mjs) is ensured here too — idempotent, and a
+      // second team's database must not depend on someone remembering the script: without the TTL
+      // the collection grows for ever, without the claim index every claim scans the lane.
+      await bounded(jobs.createIndex({ expire_at: 1 }, { expireAfterSeconds: 0 }), "launch-jobs ttl index", 20_000).catch(() => {});
+      await bounded(jobs.createIndex({ lane: 1, status: 1, seq: 1 }), "launch-jobs lane index", 20_000).catch(() => {});
+      await bounded(jobs.createIndex({ status: 1, lease_until: 1 }), "launch-jobs lease index", 20_000).catch(() => {});
+      await bounded(jobs.createIndex({ group: 1, status: 1 }), "launch-jobs group index", 20_000).catch(() => {});
     })();
     // A failed attempt is not remembered — the next call tries again.
     queueIndexes.catch(() => {
@@ -90,6 +103,10 @@ function toJob(doc: Document): QueueJob {
     // Documents written before versions existed carry no `v` — they are version 1.
     v: Number(doc.v) > 0 ? Number(doc.v) : 1,
     build: doc.build == null ? null : String(doc.build),
+    group: doc.group == null ? null : String(doc.group),
+    idempotent: doc.idempotent === true,
+    not_before: doc.not_before == null ? null : Number(doc.not_before),
+    row_extra: doc.row_extra && typeof doc.row_extra === "object" ? (doc.row_extra as Record<string, string>) : null,
   };
 }
 
@@ -136,6 +153,10 @@ export async function insertJob(job: NewJob): Promise<"inserted" | "duplicate"> 
       result: null,
       v: Number(job.v) > 0 ? Number(job.v) : 1,
       build: job.build ?? null,
+      group: job.group ?? null,
+      idempotent: job.idempotent === true,
+      not_before: job.not_before ?? null,
+      row_extra: job.row_extra ?? null,
       // TTL: documents age out JOB_TTL_MS after they were queued (index on expire_at).
       expire_at: new Date(job.queued_at + JOB_TTL_MS),
     });
@@ -177,13 +198,94 @@ export async function claimNextJob(lane: string, runner: string, now: number): P
   const c = await coll(LAUNCH_JOBS);
   const doc = await bounded(
     c.findOneAndUpdate(
-      { lane, status: "queued" },
+      { lane, status: "queued", ...due(now) },
       { $set: { status: "running", runner, lease_until: now + JOB_LEASE_MS, started_at: now, began: false, updatedAt: new Date() }, $inc: { attempts: 1 } },
       { sort: { seq: 1 }, returnDocument: "after" },
     ),
     "launch-jobs claim",
   );
   return doc ? toJob(doc) : null;
+}
+
+/**
+ * A follow-up hands its job back for its next slice: running (held by `runner`) → queued, claimable
+ * from `notBefore`, lease and runner cleared, `began` reset (nothing a re-run could double), attempts
+ * KEPT (the sweep's re-queue cap counts every slice), and the body replaced when the follow-up
+ * recorded progress. Only while still ours. True = handed back.
+ */
+export async function deferJob(jobId: string, runner: string, notBefore: number, body?: Record<string, unknown>): Promise<boolean> {
+  const c = await coll(LAUNCH_JOBS);
+  const r = await bounded(
+    c.updateOne(
+      { job_id: jobId, runner, status: "running" },
+      { $set: { status: "queued", runner: null, lease_until: null, started_at: null, began: false, not_before: notBefore, updatedAt: new Date(), ...(body ? { body } : {}) } },
+    ),
+    "launch-jobs defer",
+  );
+  return r.matchedCount > 0;
+}
+
+/**
+ * A refusal that is a fact of the SOURCE (LION rejected the family, the account's window is full,
+ * the partner refused the wire every copy shares) settles the identical QUEUED siblings of a job
+ * without sending them — the wave pumps' `familyFailed` / `rowRefusal` rules, made durable. Only
+ * queued jobs of the same lane and group whose body matches `match` (dot paths) move; a sibling that
+ * already began is never touched. Atomic per job; returns the jobs it closed (their rows are the
+ * caller's to write). Throws on a store failure — then the siblings simply run and learn the
+ * refusal themselves.
+ */
+export async function failQueuedSiblings(
+  lane: string,
+  group: string,
+  match: Record<string, unknown>,
+  verdict: { error: string; retryable: boolean; now: number; except?: string },
+): Promise<QueueJob[]> {
+  if (!group) return [];
+  const c = await coll(LAUNCH_JOBS);
+  const filter: Filter<Document> = { lane, group, status: "queued", ...match };
+  if (verdict.except) filter.job_id = { $ne: verdict.except };
+  const docs = await bounded(c.find(filter, { projection: { _id: 0, job_id: 1 }, maxTimeMS: STORE_TIMEOUT_MS }).toArray(), "launch-jobs siblings scan");
+  const out: QueueJob[] = [];
+  for (const d of docs) {
+    const doc = await bounded(
+      c.findOneAndUpdate(
+        { job_id: String(d.job_id), status: "queued" },
+        { $set: { status: "error", retryable: verdict.retryable, error: verdict.error, finished_at: verdict.now, runner: null, lease_until: null, updatedAt: new Date() } },
+        { returnDocument: "after" },
+      ),
+      "launch-jobs sibling fail",
+    );
+    if (doc) out.push(toJob(doc));
+  }
+  return out;
+}
+
+/**
+ * Re-open a finished IDEMPOTENT job (a wave's follow-up that had already declared the wave done)
+ * for `notBefore`: done / error → queued. A retried submit of a kind with a follow-up needs its
+ * wave's follow-up back. False = no such job, or it is still open. Throws on a store failure.
+ */
+export async function reopenJob(jobId: string, notBefore: number): Promise<boolean> {
+  const c = await coll(LAUNCH_JOBS);
+  const r = await bounded(
+    c.updateOne(
+      { job_id: jobId, idempotent: true, status: { $in: ["done", "error"] } },
+      { $set: { status: "queued", retryable: false, error: null, result: null, started_at: null, finished_at: null, runner: null, lease_until: null, began: false, not_before: notBefore, updatedAt: new Date() } },
+    ),
+    "launch-jobs reopen",
+  );
+  return r.matchedCount > 0;
+}
+
+/** The jobs of one wave (`group`), oldest first — a follow-up reads its submits this way (bodies and
+ *  results included). Throws on a store failure. */
+export async function findJobsByGroup(group: string, kinds?: readonly string[]): Promise<QueueJob[]> {
+  if (!group) return [];
+  const c = await coll(LAUNCH_JOBS);
+  const filter: Filter<Document> = { group };
+  if (kinds && kinds.length) filter.kind = { $in: [...kinds] };
+  const docs = await bounded(c.find(filter, { sort: { seq: 1 }, limit: 200, maxTimeMS: STORE_TIMEOUT_MS }).toArray(), "launch-jobs group");
+  return docs.map(toJob);
 }
 
 /** Undo a claim that never started (the job did not fit the invocation): running → queued, only
@@ -216,11 +318,11 @@ export async function markJobBegan(jobId: string, runner: string, now: number): 
 }
 
 /** The lane's next `n` QUEUED jobs in `seq` order, without claiming. */
-export async function peekQueued(lane: string, n: number): Promise<QueueJob[]> {
+export async function peekQueued(lane: string, n: number, now: number = Date.now()): Promise<QueueJob[]> {
   if (n <= 0) return [];
   const c = await coll(LAUNCH_JOBS);
   const docs = await bounded(
-    c.find({ lane, status: "queued" }, { sort: { seq: 1 }, limit: n, maxTimeMS: STORE_TIMEOUT_MS }).toArray(),
+    c.find({ lane, status: "queued", ...due(now) }, { sort: { seq: 1 }, limit: n, maxTimeMS: STORE_TIMEOUT_MS }).toArray(),
     "launch-jobs peek",
   );
   return docs.map(toJob);
@@ -374,6 +476,21 @@ export async function reapExpiredJobs(now: number): Promise<{ interrupted: Queue
       requeued.push(toJob(back));
       continue;
     }
+    // An IDEMPOTENT job (a follow-up: it only reads and repeats idempotent writes) that began and
+    // died is simply run again, a little later — bounded by its attempt count so a follow-up that
+    // keeps dying cannot spin for ever. Attempts are kept (the claim incremented them).
+    const again = await bounded(
+      c.findOneAndUpdate(
+        { job_id: id, status: "running", lease_until: { $lt: cutoff }, began: true, idempotent: true, attempts: { $lt: IDEMPOTENT_MAX_ATTEMPTS } },
+        { $set: { status: "queued", runner: null, lease_until: null, started_at: null, began: false, not_before: now + FOLLOW_REQUEUE_DELAY_MS, updatedAt: new Date() } },
+        { returnDocument: "after" },
+      ),
+      "launch-jobs reap requeue idempotent",
+    );
+    if (again) {
+      requeued.push(toJob(again));
+      continue;
+    }
     const doc = await bounded(
       c.findOneAndUpdate(
         { job_id: id, status: "running", lease_until: { $lt: cutoff }, began: true },
@@ -434,7 +551,8 @@ export async function releaseLane(lane: string, holder: string): Promise<void> {
  *  the lanes the sweeper must restart. */
 export async function lanesNeedingPump(now: number): Promise<string[]> {
   const jobsC = await coll(LAUNCH_JOBS);
-  const queuedLanes = (await bounded(jobsC.distinct("lane", { status: "queued" }), "launch-jobs lanes")) as string[];
+  // Only a lane with a DUE job: a follow-up waiting for its next slice needs no pump yet.
+  const queuedLanes = (await bounded(jobsC.distinct("lane", { status: "queued", ...due(now) }), "launch-jobs lanes")) as string[];
   if (queuedLanes.length === 0) return [];
   const lanesC = await coll(LAUNCH_LANES);
   const locked = await bounded(
@@ -499,11 +617,22 @@ export async function readBeacon(): Promise<BuildBeacon | null> {
 
 /** What the buyers' tabs need to notice a queue nobody is sweeping: when the sweep last ran, and
  *  since when the oldest job has been waiting. */
-export async function queueHealth(): Promise<{ sweptAt: number | null; oldestQueuedAt: number | null }> {
+export async function queueHealth(): Promise<{ sweptAt: number | null; oldestQueuedAt: number | null; oldestOverdueRunningAt: number | null }> {
   const jobs = await coll(LAUNCH_JOBS);
-  const [beacon, oldest] = await Promise.all([
+  const now = Date.now();
+  const [beacon, oldest, overdue] = await Promise.all([
     readBeacon(),
     bounded(jobs.find({ status: "queued" }, { projection: { _id: 0, queued_at: 1 }, sort: { queued_at: 1 }, limit: 1, maxTimeMS: STORE_TIMEOUT_MS }).toArray(), "launch-jobs oldest queued"),
+    // A running job whose lease ran out past the reap grace and that nobody reaped: the one stranded
+    // job a queued backlog never shows (a single launch whose pump died while the sweep is down).
+    bounded(
+      jobs.find({ status: "running", lease_until: { $lt: now - REAP_GRACE_MS } }, { projection: { _id: 0, lease_until: 1 }, sort: { lease_until: 1 }, limit: 1, maxTimeMS: STORE_TIMEOUT_MS }).toArray(),
+      "launch-jobs oldest overdue",
+    ),
   ]);
-  return { sweptAt: beacon ? beacon.at : null, oldestQueuedAt: oldest.length ? Number(oldest[0].queued_at) || null : null };
+  return {
+    sweptAt: beacon ? beacon.at : null,
+    oldestQueuedAt: oldest.length ? Number(oldest[0].queued_at) || null : null,
+    oldestOverdueRunningAt: overdue.length ? Number(overdue[0].lease_until) || null : null,
+  };
 }

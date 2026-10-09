@@ -1,9 +1,8 @@
 import { NextResponse, after } from "next/server";
-import { bidKind, bidTag, normalizeRoasGoal, parseMoney } from "@/lib/types";
+import { bidKind, bidTag, parseMoney } from "@/lib/types";
 import { LION_NAME_SUFFIX_MAX } from "@/lib/hs-clone-name";
 import { SUPPORTED_BID_STRATEGIES } from "@/lib/fb-launch";
 import { hsWireBid } from "@/lib/hs-launch";
-import { dupBidPlan, dupBiddingMismatch, lionRoasWall } from "@/lib/lion-dup-bid";
 import { hsPageRefusal, reportPagesUsed } from "@/lib/hs-pages";
 import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import { sessionFromCookieHeader } from "@/lib/session";
@@ -17,42 +16,24 @@ import {
   claimAcctSlot,
   releaseAcctSlot,
 } from "@/lib/acct-limit";
-import { stampHsTaskRow, upsertTaskRow } from "@/lib/task-store";
-import {
-  LionError,
-  lionAccountPixels,
-  lionActivateWithRetry,
-  lionCampaignAds,
-  lionCampaignRefusal,
-  lionConfigured,
-  lionCreationStatus,
-  lionDuplicate,
-  lionProfileData,
-  lionSetCampaignStatus,
-  lionSourceBidFacts,
-  lionSourceTeam,
-} from "@/lib/lion";
-import { hsRenameCampaign } from "@/lib/hs-token-launch";
-import { teamHas, teamMayUseCampaign } from "@/lib/team";
-import { isTransientGraphError } from "@/lib/graph-retry";
-import { type ShotBinds, acctLimitRefusal, bindsKey, demandByAccount, distinctBy, resolveShotBinds } from "@/lib/hs-shot-binds";
-import { type GeoOverride, lionDuplicateTargeting, parseGeoOverride } from "@/lib/targeting-override";
+import { stampHsTaskRow } from "@/lib/task-store";
+import { LionError, lionAccountPixels, lionCampaignAds, lionConfigured, lionDuplicate, lionProfileData, lionSourceBidFacts } from "@/lib/lion";
+import { acctLimitRefusal, bindsKey, demandByAccount, distinctBy, resolveShotBinds } from "@/lib/hs-shot-binds";
+import { parseGeoOverride } from "@/lib/targeting-override";
 import type { LionLocale } from "@/lib/lion";
+import type { HsDupShot } from "@/lib/hs-dup-shot";
+import { LION_FOLLOW_MAX_MS } from "@/lib/launch-queue-types";
+import { acceptServerJobs, pumpLane, selfOrigin } from "@/lib/launch-queue-run";
 
 export const runtime = "nodejs";
-// The batch path keeps working AFTER the response (`after()` pump: jittered submits + status
-// polling + clone activation) — the route's maxDuration is that pump's whole time budget.
-// 800s = the Fluid-compute ceiling (fluid confirmed ON for this project 08-14): submits for a
-// full 45-shot wave take ~4 min, the rest is polling headroom for LION's slow days.
+// The batch shape queues one durable job per shot (09.10) and the hand-off answers at once — but
+// the SAME invocation hosts the lane pump's first budget window (after(pumpLane)), so maxDuration is
+// the pump's, not the hand-off's. 800s = the Fluid-compute ceiling.
 export const maxDuration = 800;
 
 const MAX_COPIES = 20;
-// Batch cap: ~5s per shot (jitter + LION latency) must fit the pump's window with room for the
-// poll/activate phase. Above it the board asks the buyer to fire in two waves.
+// Batch cap kept from the wave pump days: the board asks the buyer to fire above it in two waves.
 const MAX_SHOTS = 45;
-// Stop the pump this many ms after the request started — headroom under maxDuration so the last
-// row writes land before the platform freezes the function.
-const PUMP_BUDGET_MS = 770_000;
 
 const bad = (error: string, status = 400) => NextResponse.json({ ok: false, error }, { status });
 
@@ -65,9 +46,6 @@ function rememberWave(waveId: string): void {
   if (claimedWaves.size > 1000) claimedWaves.clear();
   claimedWaves.add(waveId);
 }
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const jitter = () => 1000 + Math.random() * 2000;
 
 /** Shared bind validation against LION's own catalog (cached 10 min) — a shot into a disabled
  *  account or a foreign page dies invisibly on the weapon side, so it is refused here with a
@@ -107,62 +85,18 @@ async function validateBinds(
   return { currency: acct.currency || "USD", accountName: acct.name || "", pageName: pageRow.name || "", locales: data.locales };
 }
 
-type BatchShot = {
-  campaignId: string;
-  budget: number;
-  budgetRaw: string;
-  bid: number | null;
-  bidStrategy: string;
-  /** Per-row strategy switch ("" = the source's) — LION duplicate v2 takes bid_strategy. */
-  bidStrategyOverride: string;
-  /** Display-only "what it bids on" tag (bidTag), computed client-side and forwarded verbatim to
-   *  the task row so the monitor card shows the clone's bid/ROAS. */
-  bidLabel: string;
-  /** Destination account currency (LION catalog, filled by validation) — the currency the
-   *  wire's monetary values are in, and the cross-currency inherit guard's other half. */
-  currency: string;
-  /** LION's resolved `bidding` differed from what we asked (dupBiddingMismatch) — the clone is
-   *  parked PAUSED at finalize with this reason instead of being activated. */
-  biddingMismatch?: string;
-  /** The board's exact `name` landed on the clone (campaign-level Graph write) — or the rename
-   *  hit a final wall and was given up (LION's own name stays). Once per shot. */
-  renamed?: boolean;
-  name: string;
-  /** LION `name_suffix` for this shot (see the wire type above). */
-  suffix: string;
-  geo: string;
-  label: string;
-  taskId: string;
-  /** This shot's OWN destination (owner ask 09-08: rows may bind different profiles / accounts
-   *  / pages / pixels in one wave) — the shot's fields over the wave-level ones, validated
-   *  against LION's catalog like any bind. */
-  binds: ShotBinds;
-  /** Catalog facts of `binds` (filled by validation): the account's name for the launch-limit
-   *  ledger, the page's name, the profile's FB locale list (a targeting override's locale ids
-   *  ride to LION as { name, id } pairs resolved from it). */
-  accountName: string;
-  pageName: string;
-  profileLocales: LionLocale[];
-  /** Geo/locales override (Targeting modal) — rides ON LION's duplicate wire as
-   *  `country_codes` / `locales` (partner note 22.09): the clone is BORN on the new targeting and
-   *  LION names it after the new country list. (Until 22.09 duplicate/ ignored these and the
-   *  pump patched the born clone through the Graph behind a "geo-gate" — gone.) */
-  override: GeoOverride | null;
-  lionTaskId?: string;
-  cloneId?: string;
-  settled?: boolean;
-};
+type BatchShot = HsDupShot & { taskId: string };
 
 /**
  * Clone existing LION campaigns into the picked binds (the playbook-proven duplicate weapon).
  *
  * Two shapes:
- * - `{shots: […]}` — the WHOLE wave in one call (fire-and-forget, owner ask 08-14): every shot's
- *   row is stamped into the shared store immediately, the response returns at once, and an
- *   `after()` pump keeps working server-side — jittered single-copy submits (the anti-profile-
- *   block pacing), then creation-status polling + the campaign reality check, activating each
- *   born-PAUSED clone and finishing its row. The buyer may close the tab right after the click;
- *   whatever the pump doesn't settle inside its window is picked up by any later tab's poller.
+ * - `{shots: […]}` — the WHOLE wave in one call: every shot is validated here (binds against
+ *   LION's catalog, assignments, the launch-limit precheck), then handed to the durable server
+ *   queue as ONE JOB PER SHOT (09.10 — lib/hs-dup-shot runs the submit, lib/hs-follow-core polls
+ *   LION and activates the born-PAUSED clone), plus the wave's follow-up job. The response returns
+ *   at once; leases, the every-minute sweep and server Retry take it from there — the buyer may
+ *   close the tab right after the click, and nothing a tab did (polling, activation) is needed.
  * - legacy single-shot body — kept for in-flight clients from the previous build.
  */
 export async function POST(req: Request): Promise<NextResponse> {
@@ -182,9 +116,9 @@ export async function POST(req: Request): Promise<NextResponse> {
     shots?: {
       campaignId?: string;
       budget?: string;
-      /** Optional bid override in HUMAN units — scaled to the wire in the pump by the clone's
-       *  EFFECTIVE strategy (the source's re-read one, or the row's switch; the client's
-       *  bidStrategy is only the unreadable-source fallback). */
+      /** Optional bid override in HUMAN units — scaled to the wire by the clone's EFFECTIVE
+       *  strategy (the source's re-read one, or the row's switch; the client's bidStrategy is
+       *  only the unreadable-source fallback). */
       bid?: string;
       bidStrategy?: string;
       /** Per-row strategy switch (owner ask 09-09, LION duplicate v2): any of the four
@@ -193,8 +127,8 @@ export async function POST(req: Request): Promise<NextResponse> {
       bidStrategyOverride?: string;
       /** Display-only bid/ROAS tag (bidTag) for the monitor card — forwarded verbatim to the row. */
       bidLabel?: string;
-      /** Full clone name (fixed grammar prefix + edited tail) — the row title and the geo-override
-       *  Graph rename. LION's duplicate/ never reads it (not in its contract). */
+      /** Full clone name (fixed grammar prefix + edited tail) — the row title and the Graph rename.
+       *  LION's duplicate/ never reads it (not in its contract). */
       name?: string;
       /** The buyer's addition beyond the source's tail (lib/hs-clone-name) — the ONLY naming input
        *  LION's duplicate/ honours, appended verbatim as `name_suffix`. */
@@ -235,15 +169,14 @@ export async function POST(req: Request): Promise<NextResponse> {
   // binds of the legacy shape — each shape checks completeness where it resolves them.
   const waveBinds = { profile, account, page, pixel };
 
-  // ================= batch (fire-and-forget) =================
+  // ================= batch (queued, one job per shot) =================
   if (Array.isArray(body.shots)) {
     if (body.shots.length === 0) return bad("shots_required");
     if (body.shots.length > MAX_SHOTS) return bad(`too_many_shots_max_${MAX_SHOTS}`);
     // Wave idempotency: the board keeps ONE waveId per prepared wave and re-sends it on a
-    // retry-click after a lost answer. A claimed wave NEVER pumps twice — the re-POST just
-    // points back at the rows already stamped. Shot task ids derive from it for the same reason
-    // (a re-stamp upserts, it can't mint duplicate rows). Absent waveId (curl, older tab) mints
-    // a random one — no idempotency, but nothing breaks.
+    // retry-click after a lost answer. Shot task ids derive from it — the queue's job ids — so a
+    // re-POST meets its own jobs and answers accepted without a second submit. Absent waveId
+    // (curl, older tab) mints a random one — no idempotency, but nothing breaks.
     const waveIdRaw = String((body as { waveId?: unknown }).waveId ?? "").trim();
     if (waveIdRaw && !/^[a-zA-Z0-9-]{8,64}$/.test(waveIdRaw)) return bad("wave_id_invalid");
     const waveId = waveIdRaw || crypto.randomUUID();
@@ -332,10 +265,10 @@ export async function POST(req: Request): Promise<NextResponse> {
 
     // ---- account launch-limit precheck (5 campaigns / 30 min per ad account, owner rule
     // 2026-08-18): EVERY account the wave targets must take its share (per-row destinations,
-    // 09-08), else the wave is refused up front with the countdown instead of stamping rows
-    // destined to fail. Runs AFTER the wave-idempotency checks (a re-POST of an already-pumped
+    // 09-08), else the wave is refused up front with the countdown instead of queuing jobs
+    // destined to fail. Runs AFTER the wave-idempotency checks (a re-POST of an already-queued
     // wave must answer alreadyAccepted, not 429 off its own consumed slots). The per-shot claim
-    // in the pump stays the authority.
+    // in the job stays the authority.
     {
       let snap;
       try {
@@ -352,54 +285,38 @@ export async function POST(req: Request): Promise<NextResponse> {
       if (refusal) return bad(refusal.error, refusal.status);
     }
 
-    // Rows land in the shared store BEFORE the claim and the response: the team (and this
-    // buyer's next tab) sees the wave as queued even if the browser closes on the very next
-    // tick, and a crash between stamping and claiming stays retryable (the re-POST re-stamps
-    // the SAME wave-derived ids — pure upserts — and then claims and pumps normally).
-    await Promise.all(
-      shots.map((s) =>
-        stampHsTaskRow(session.username, {
-          taskId: s.taskId,
-          name: s.name || s.label || `Clone of ${s.campaignId}`,
-          geo: s.geo,
-          budget: s.budgetRaw,
-          ...(s.bidLabel ? { bid: s.bidLabel } : {}),
-          lionTaskId: "", // pending — the pump fills it as each shot lands on LION
-          kind: "duplicate",
-        }),
-      ),
-    );
-
-    // Claim the wave — the ONE gate before the pump. An already-claimed wave means another POST
-    // (whose answer the client may have lost) already started this exact pump — starting a second
-    // one would double every campaign, so the re-POST answers success and stops. Best-effort by
-    // design (app-cache degrades to null on outages): the human retry-click this guards against
-    // comes seconds later, well inside the read path.
-    const claimed = await writeAppCache(waveKey, { at: Date.now(), n: shots.length });
-    if (claimed === null) {
-      // Lost the unique-ckey race → someone else claimed this wave between read and write.
-      const winner = await readAppCache<{ at: number }>(waveKey);
-      if (winner?.value?.at) {
-        rememberWave(waveId);
-        return alreadyAccepted();
-      }
-      // Store unavailable → FAIL CLOSED (review 08-14): without a persisted claim, a retry of
-      // this wave could pump twice and double every campaign. Money invariant beats
-      // availability — the buyer just re-fires when the store is back. (The stamped rows, if
-      // any landed, are harmless upserts of the same ids.)
-      return bad("task_store_unavailable_wave_not_fired", 503);
-    }
-    rememberWave(waveId);
-
+    // The hand-off to the durable queue: rows are stamped and one job per shot inserted (a task id
+    // that already exists is reported accepted, never re-stamped), plus the wave's follow-up (poll
+    // LION + activate), in the owner's lanes. Fail CLOSED: a store that cannot take the wave refuses
+    // it — nothing half-accepted, the buyer re-fires when the store is back.
     const user = session.username;
-    const deadline = startedAt + PUMP_BUDGET_MS;
-    after(() => pumpBatch(user, shots, deadline));
+    const res = await acceptServerJobs(
+      { username: user, role: session.role ?? null, sub: session.sub },
+      "hs",
+      waveId,
+      shots.map(({ taskId, ...shot }) => ({
+        taskId,
+        kind: "hs.dup" as const,
+        body: { shot, waveId },
+        row: { name: shot.name || shot.label || `Clone of ${shot.campaignId}`, gcm: "duplicate", geo: shot.geo, budget: shot.budgetRaw, bid: shot.bidLabel },
+        account: shot.binds.account,
+      })),
+      { kind: "hs.dup.follow", body: { waveId, until: Date.now() + LION_FOLLOW_MAX_MS } },
+    );
+    if (!res.ok) return bad(res.status === 503 ? "task_store_unavailable_wave_not_fired" : res.error, res.status);
+    // The wave claim — what /api/wave-status answers a board whose answer was lost, and the fast
+    // path of a re-POST. Best-effort now: the jobs ARE the durable record (a re-POST meets its ids).
+    await writeAppCache(waveKey, { at: Date.now(), n: shots.length });
+    rememberWave(waveId);
+    const origin = selfOrigin(req);
+    for (const lane of res.lanes) after(() => pumpLane(lane, { origin, startedAt }));
 
     return NextResponse.json({
       ok: true,
-      queued: shots.length,
+      queued: res.accepted.length,
       rows: shots.map((s) => ({ taskId: s.taskId })),
       currency,
+      ...(res.failed.length ? { failed: res.failed } : {}),
     });
   }
 
@@ -434,9 +351,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   // LION forwards starting_bid to the Graph verbatim (hsWireBid doc), so the human decimal must
   // be scaled by the SOURCE's strategy: ROAS × 10000, cap $ × 100. The strategy is re-read from
   // LION here (authoritative); the board's snapshot only covers the "source unreadable right
-  // now" lag. No resolvable strategy, or a lowest-cost source → refuse rather than guess: an
-  // unscaled/mis-scaled bid creates a wedged CREATING_ADSET task (live 08-10) or a silently
-  // absurd bid, and "clear the Bid to inherit" is always available.
+  // now" lag. No resolvable strategy, or a lowest-cost source → refuse rather than guess.
   let startingBid: number | undefined;
   if (bid != null) {
     const clientStrategy = String(body.bidStrategy ?? "").trim();
@@ -544,374 +459,5 @@ async function sourceAdsCount(campaignId: string): Promise<number> {
     return Math.max((await lionCampaignAds([campaignId]))[campaignId]?.adsCount ?? 0, 1);
   } catch {
     return 1;
-  }
-}
-
-/** Best-effort row update — the pump must never die on a Strapi hiccup (the client-side pollers
- *  are the fallback truth-writers, done rows are server-side sticky). */
-const rowWrite = (user: string, taskId: string, fields: Record<string, unknown>) =>
-  upsertTaskRow(user, taskId, { ...fields, partner: "br" }).then(
-    () => undefined,
-    () => undefined,
-  );
-
-/**
- * The fire-and-forget worker behind the batch shape. Runs after the response:
- * 1) submits the shots ONE AT A TIME with a random 1–3s gap (firing a wave at once is what gets
- *    the executor profile temporarily blocked — playbook pacing, same as the old client pump);
- *    a preflight rejection kills the source's remaining copies instantly, like the board did;
- * 2) then polls creation-status every ~10s, cross-checking reality (details/) every ~40s, and
- *    ACTIVATEs every finished clone (born PAUSED) before marking its row done.
- * Whatever is still unsettled at the deadline stays `submitted` in the store — any later
- * adlauncher tab's poller (or a retried wave) finishes the bookkeeping; the campaigns themselves
- * are safe on LION either way.
- */
-async function pumpBatch(user: string, shots: BatchShot[], deadline: number): Promise<void> {
-  try {
-    const factsCache = new Map<string, { bidStrategy: string; currency: string; bid: number | null }>();
-    const adsCountCache = new Map<string, number>();
-    const familyFailed = new Map<string, string>();
-
-    // ---- phase 1: jittered submits ----
-    for (let i = 0; i < shots.length; i++) {
-      // Window exhausted mid-wave (LION crawling — each call may burn up to its 60s timeout):
-      // mark every not-yet-fired shot explicitly instead of leaving silent "running" rows the
-      // platform kill would strand (review 08-14), then stop. Re-firing is the buyer's call.
-      if (Date.now() > deadline - 30_000) {
-        for (let j = i; j < shots.length; j++) {
-          const rest = shots[j];
-          if (rest.settled || rest.lionTaskId) continue;
-          rest.settled = true;
-          await rowWrite(user, rest.taskId, {
-            status: "error",
-            error: "Not submitted — the wave's server window closed before this shot (LION was slow). Re-fire it in the duplicator.",
-            finished_at: Date.now(),
-          });
-        }
-        break;
-      }
-      const s = shots[i];
-      if (familyFailed.has(s.campaignId)) {
-        s.settled = true;
-        await rowWrite(user, s.taskId, {
-          status: "error",
-          error: familyFailed.get(s.campaignId),
-          finished_at: Date.now(),
-        });
-        continue;
-      }
-      let slotDoc: string | null = null;
-      try {
-        // ---- bidding (LION duplicate v2, partner docs 09-09) ----
-        // The SOURCE's strategy + account currency are re-read from LION (authoritative; the
-        // board's snapshot only covers the "source unreadable right now" lag), then the plan
-        // decides what rides: a per-row switch (explicit bid_strategy + a typed value + the
-        // re-paired event), a typed value alone (strategy omitted = the source's), or nothing
-        // (inherit). ROAS values ride as `roas_goal` (multiplier), NEVER as starting_bid — with
-        // an explicit ROAS strategy LION reads starting_bid as a decimal multiplier, so the old
-        // ×100 wire would land as 90×. Cap values are Meta account units of the DESTINATION.
-        let facts = factsCache.get(s.campaignId);
-        if (facts === undefined) {
-          facts = await lionSourceBidFacts(s.campaignId);
-          factsCache.set(s.campaignId, facts);
-        }
-        // LION would duplicate ANY campaign of the company (lib/lion "whose campaign is it") — a
-        // source that is not this team's to work on kills its whole family here: no slot, no call.
-        const sourceTeam = await lionSourceTeam(s.campaignId);
-        if (!teamMayUseCampaign(sourceTeam)) {
-          const reason = lionCampaignRefusal(s.campaignId, sourceTeam);
-          if (sourceTeam === "foreign") familyFailed.set(s.campaignId, reason);
-          s.settled = true;
-          await rowWrite(user, s.taskId, { status: "error", error: reason, finished_at: Date.now() });
-          continue;
-        }
-        const plan = dupBidPlan({
-          sourceStrategy: facts.bidStrategy || s.bidStrategy,
-          override: s.bidStrategyOverride,
-          typedBid: s.bid,
-          sourceBid: facts.bid,
-          sourceCurrency: facts.currency,
-          destCurrency: s.currency,
-        });
-        if ("refusal" in plan) {
-          // A bid/currency refusal is a fact of this source × this destination — settled here
-          // without a LION call or a slot (rows bound elsewhere may still be fine).
-          s.settled = true;
-          await rowWrite(user, s.taskId, { status: "error", error: plan.refusal, finished_at: Date.now() });
-          continue;
-        }
-        let startingBid: number | undefined;
-        let roasGoal: number | undefined;
-        if (plan.human != null) {
-          if (plan.kind === "roas") {
-            // Percent-form / ×10-slip entries normalize to the real goal (30 → 0,30); the
-            // ambiguous 10–20 band is refused like on every other wire.
-            const goal = normalizeRoasGoal(plan.human);
-            if (goal == null) {
-              s.settled = true;
-              await rowWrite(user, s.taskId, {
-                status: "error",
-                error: "roas goal ambiguous — type the decimal goal (0,30 = 30%)",
-                finished_at: Date.now(),
-              });
-              continue;
-            }
-            roasGoal = goal;
-          } else {
-            startingBid = Math.round(plan.human * 100);
-          }
-        }
-        // Targeting override → LION's own wire (22.09): the ISO codes (or WORLD) and the { name, id }
-        // locales of the picked profile. A locale id the profile does not list settles the row
-        // here, before any slot or call.
-        const targeting = s.override ? lionDuplicateTargeting(s.override, s.profileLocales) : {};
-        if ("refusal" in targeting) {
-          s.settled = true;
-          await rowWrite(user, s.taskId, { status: "error", error: targeting.refusal, finished_at: Date.now() });
-          continue;
-        }
-        // Account launch slot (5 campaigns / 30 min per ad account) — claimed right before the
-        // submit; released on a clean preflight rejection below, KEPT on ambiguous outcomes
-        // (the clone may exist on LION). A full window stops the whole wave in the catch.
-        slotDoc = (
-          await claimAcctSlot(acctKey(s.binds.account), {
-            user,
-            partner: "br",
-            channel: "hs-dup",
-            name: s.name || s.label || `Clone of ${s.campaignId}`,
-            accountName: s.accountName || "",
-          })
-        ).documentId;
-        const result = await lionDuplicate({
-          profile_slug: s.binds.profile,
-          account_id: s.binds.account,
-          page_id: s.binds.page,
-          pixel_id: s.binds.pixel,
-          campaign_id: s.campaignId,
-          starting_budget: Math.round(s.budget * 100),
-          number_of_copies: 1, // single-copy shots → controllable pacing, gentler on the profile
-          // The ONLY naming input LION's duplicate/ honours (partner docs 09-08): the buyer's
-          // addition beyond the source tail, appended after LION's own "<family> <lang> <random5>".
-          // The composed `name` stays on the row and lands through the Graph rename below — LION
-          // never read it, which is how every clone 08-14→09-08 lost its "- <buyer>" tail.
-          name_suffix: s.suffix,
-          ...(plan.wireStrategy ? { bid_strategy: plan.wireStrategy } : {}),
-          ...(startingBid != null ? { starting_bid: startingBid } : {}),
-          ...(roasGoal != null ? { roas_goal: roasGoal } : {}),
-          ...(plan.conversionEvent ? { conversion_event: plan.conversionEvent } : {}),
-          ...targeting,
-        });
-        const lionTaskId = (result.task_ids ?? []).map(String).filter(Boolean)[0];
-        if (lionTaskId) {
-          s.lionTaskId = lionTaskId;
-          // Read back LION's RESOLVED bidding (v2): a unit slip or a strategy LION quietly
-          // changed must never reach an ACTIVE clone — a mismatch parks the clone PAUSED at
-          // finalize with the difference named. Advisories (value/currency on ROAS) only log.
-          const mismatch = dupBiddingMismatch(
-            { strategy: plan.wireStrategy ?? (plan.human != null ? plan.strategy : undefined), roasGoal, startingBid },
-            result.bidding,
-          );
-          if (mismatch) {
-            s.biddingMismatch = mismatch;
-            // Park the row on the BID GATE right now, not at finalize: the owner's open tab polls
-            // the same LION task and would activate the clone on COMPLETED (and the pump may die
-            // at its deadline before finalize) — an error row with stage "bid-gate" is neither
-            // polled nor activated by the client, /api/hs/activate refuses it, and /api/hs-tasks
-            // keeps it (audit 09-09). finalize adds the campaign id and re-pauses the clone.
-            await rowWrite(user, s.taskId, {
-              status: "error",
-              stage: "bid-gate",
-              error: `${mismatch} — the clone will be left PAUSED; verify its bidding in LION / Ads Manager before activating`,
-              finished_at: Date.now(),
-            });
-          }
-          if (result.warnings?.length) {
-            console.warn(`[hs-duplicate] LION warnings for ${s.campaignId} (${lionTaskId}): ${result.warnings.join(" | ")}`);
-          }
-          // started_at = the REAL submit moment (rows are stamped minutes earlier): the drawer's
-          // elapsed timer and the 3h cap then measure time ON LION, not time in our queue.
-          await rowWrite(user, s.taskId, { link: lionTaskId, started_at: Date.now() });
-          // Registry ledger, optimistically at submit: this copy re-creates every source ad on
-          // the bind fanka (fire-safe; failed LION tasks reconcile on the box's next sweep).
-          let srcAds = adsCountCache.get(s.campaignId);
-          if (srcAds === undefined) {
-            srcAds = await sourceAdsCount(s.campaignId);
-            adsCountCache.set(s.campaignId, srcAds);
-          }
-          await reportPagesUsed("br", [{ pageId: s.binds.page, delta: srcAds }]);
-        } else {
-          // Preflight rejection kills the whole family (object-story creatives, dead source…).
-          // No clone was created → the account slot goes back to the pool.
-          await releaseAcctSlot(slotDoc);
-          const reason = result.reason || `LION rejected the duplicate (${result.result ?? "no result"})`;
-          familyFailed.set(s.campaignId, reason);
-          s.settled = true;
-          await rowWrite(user, s.taskId, { status: "error", error: reason, finished_at: Date.now() });
-        }
-      } catch (e) {
-        // Account window full: every later shot into the SAME account hits it too (the pump's
-        // whole budget fits inside one 30-min window), so those settle with the countdown and
-        // are skipped — other accounts' shots keep going (per-row destinations, 09-08). A
-        // registry outage settles the whole rest of the wave.
-        if (e instanceof AcctLimitedError || /acct_limit_unavailable/.test(String((e as Error).message ?? ""))) {
-          const msg = (e as Error).message ?? String(e);
-          const registryDown = !(e instanceof AcctLimitedError);
-          if (registryDown) {
-            for (let j = i; j < shots.length; j++) {
-              const rest = shots[j];
-              if (rest.settled || rest.lionTaskId) continue;
-              rest.settled = true;
-              await rowWrite(user, rest.taskId, { status: "error", error: msg, finished_at: Date.now() });
-            }
-            break;
-          }
-          s.settled = true;
-          await rowWrite(user, s.taskId, { status: "error", error: msg, finished_at: Date.now() });
-          for (let j = i + 1; j < shots.length; j++) {
-            const rest = shots[j];
-            if (rest.settled || rest.lionTaskId || acctKey(rest.binds.account) !== acctKey(s.binds.account)) continue;
-            rest.settled = true;
-            await rowWrite(user, rest.taskId, { status: "error", error: msg, finished_at: Date.now() });
-          }
-          if (i < shots.length - 1) await sleep(jitter());
-          continue;
-        }
-        const msg = `lion_duplicate_failed: ${(e as Error).message ?? e}`;
-        // 4xx = LION-side semantic answer (page/pixel not in account data…) — deterministic for
-        // the family (and no clone was created → the slot goes back); 5xx/transport may be
-        // transient AND ambiguous, so only this shot is marked and the slot stays consumed.
-        if (e instanceof LionError && e.status && e.status < 500) {
-          familyFailed.set(s.campaignId, msg);
-          await releaseAcctSlot(slotDoc);
-        }
-        s.settled = true;
-        await rowWrite(user, s.taskId, { status: "error", error: msg, finished_at: Date.now() });
-      }
-      if (i < shots.length - 1) await sleep(jitter());
-    }
-
-    // ---- phase 2: poll + activate + finish rows ----
-    const activated = new Set<string>();
-    const finalize = async (s: BatchShot, cloneId: string, adCount: number) => {
-      s.settled = true;
-      if (s.biddingMismatch) {
-        // LION resolved other bidding than requested (read back at submit): the clone stays
-        // PAUSED (its birth status) and the row names the difference — the buyer verifies the
-        // ad set in LION / Ads Manager before activating by hand. Never activated from here.
-        await lionSetCampaignStatus(cloneId, "PAUSED").catch(() => {});
-        await rowWrite(user, s.taskId, {
-          status: "error",
-          error: `${s.biddingMismatch} — clone left PAUSED; verify its bidding in LION / Ads Manager before activating`,
-          campaign_id: cloneId,
-          ad_id: String(adCount),
-          finished_at: Date.now(),
-        });
-        return;
-      }
-      if (!activated.has(cloneId)) {
-        activated.add(cloneId);
-        // "does not have permission" = already active = success (playbook) — helper handles it.
-        // "Campaign not found" = LION's store hasn't synced the newborn yet (the 09-08 activate
-        // race) — retried by the helper so a born-PAUSED clone can't stay paused under a green row.
-        const act = await lionActivateWithRetry(cloneId).catch((e) => ({ ok: false, message: String((e as Error).message ?? e), attempts: 0 }));
-        if (!act.ok) console.warn(`[hs-duplicate] activate ${cloneId} failed after ${act.attempts} attempt(s): ${act.message ?? ""}`);
-      }
-      await rowWrite(user, s.taskId, {
-        status: "done",
-        stage: "ads",
-        campaign_id: cloneId,
-        ad_id: String(adCount),
-        finished_at: Date.now(),
-      });
-    };
-
-    let lastReality = 0;
-    while (Date.now() < deadline) {
-      const pending = shots.filter((s) => s.lionTaskId && !s.settled);
-      if (pending.length === 0) break;
-      try {
-        const tasks = await lionCreationStatus([...new Set(pending.map((s) => s.lionTaskId as string))]);
-        const byId = new Map(tasks.map((t) => [String(t.task_id ?? ""), t]));
-        for (const s of pending) {
-          const r = byId.get(s.lionTaskId as string);
-          if (!r) continue;
-          if (r.campaign_id && !s.cloneId) {
-            s.cloneId = String(r.campaign_id);
-            // Persist the clone id the moment it exists: if LION then takes HOURS (congestion)
-            // and prunes the finished record before anyone watches again, a later tab can still
-            // find the campaign via the reality check and activate it — without this the clone
-            // could sit PAUSED unnoticed.
-            await rowWrite(user, s.taskId, { campaign_id: s.cloneId });
-          }
-          // The board's EXACT name onto the born clone (owner ask 09-09: LION rebuilds the name
-          // from its own registry and drops the source tail's tags). A campaign-level Graph
-          // write — allowed under the VD-C1 ad-set ward, verified live 09-08/09-09 — signed by
-          // whichever bearer sees the account; LION syncs it into its lists within ~15-20 min.
-          // An override row's name already carries the new geo (the board relabels the [CODES]
-          // group), so it renames like any other. Transient misses retry next tick, final walls
-          // give up quietly.
-          // (A team without our FB tokens — lib/team — keeps LION's own name: nothing could sign it.)
-          if (s.cloneId && s.name && !s.renamed && teamHas("channel:token")) {
-            try {
-              await hsRenameCampaign(s.cloneId, s.name, s.binds.account);
-              s.renamed = true;
-            } catch (e) {
-              const msg = String((e as Error).message ?? e);
-              if (!isTransientGraphError(msg)) {
-                s.renamed = true;
-                console.warn(`[hs-duplicate] rename ${s.cloneId} kept LION's name: ${msg.slice(0, 160)}`);
-              }
-            }
-          }
-          // Meta's min-ROAS eligibility rejection (code 100 / subcode 2446671, partner docs
-          // 09-09): LION retries the requested strategy forever and never launches another —
-          // settle now with the reason; a born shell stays PAUSED (best-effort pause rides along).
-          // (A COMPLETED task may still carry its LAST error text — only an in-progress task is a
-          // wall; the COMPLETED branch below wins, as in the JURO pump.)
-          const wall = r.status === "COMPLETED" ? null : lionRoasWall(r.error?.message);
-          if (wall) {
-            s.settled = true;
-            if (s.cloneId) await lionSetCampaignStatus(s.cloneId, "PAUSED").catch(() => {});
-            await rowWrite(user, s.taskId, {
-              status: "error",
-              error: wall,
-              ...(s.cloneId ? { campaign_id: s.cloneId } : {}),
-              finished_at: Date.now(),
-            });
-            continue;
-          }
-          if (r.status === "COMPLETED" && r.campaign_id) {
-            await finalize(s, String(r.campaign_id), (r.ad_ids ?? []).length || 1);
-          } else if (r.status === "NO_COUNTRIES_LEFT") {
-            s.settled = true;
-            await rowWrite(user, s.taskId, {
-              status: "error",
-              error: "LION: no eligible countries left for this campaign",
-              finished_at: Date.now(),
-            });
-          }
-          // NOT_FOUND / CREATING_*: the reality check below settles them (task records wedge
-          // and prune — live 08-13); anything left rides the store for a later tab.
-        }
-        if (Date.now() - lastReality > 40_000) {
-          lastReality = Date.now();
-          const ids = [...new Set(shots.filter((s) => !s.settled && s.cloneId).map((s) => s.cloneId as string))];
-          if (ids.length > 0) {
-            const real = await lionCampaignAds(ids).catch(() => ({}) as Record<string, never>);
-            for (const s of shots.filter((x) => !x.settled && x.cloneId)) {
-              const c = (real as Record<string, { status: string; adsCount: number } | undefined>)[s.cloneId as string];
-              if (c && c.adsCount > 0) await finalize(s, s.cloneId as string, c.adsCount);
-            }
-          }
-        }
-      } catch {
-        /* transient LION/store blip — next tick retries */
-      }
-      if (Date.now() >= deadline) break;
-      await sleep(10_000);
-    }
-
-  } catch {
-    /* the pump must never throw into the runtime — rows left running are picked up later */
   }
 }

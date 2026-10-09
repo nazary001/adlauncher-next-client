@@ -11,7 +11,11 @@ export const runtime = "nodejs";
 // Bounded read of tiktok-weapon task records (≤5 in flight) + at most one store write per id.
 export const maxDuration = 60;
 
-const MAX_IDS = 60;
+// Per call: 20 ids, 5 in flight, each read ONE attempt bounded at 12 s → ≤ 48 s of reads before
+// the writes, inside maxDuration even when the partner hangs (60 ids × the default 2 × 60 s used
+// to let a single slow batch outlive the function — audit find 09.10). The client batches.
+const MAX_IDS = 20;
+const READ_OPTS = { attempts: 1, timeoutMs: 12_000 } as const;
 
 /** The three facts that decide whether a row may be finished here: whose it is, where it stands,
  *  and WHICH partner task it was sent as. null = absent or unreadable (either way: don't write). */
@@ -60,7 +64,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   if (asked.length === 0) return bad("tasks_required");
 
   try {
-    const partner = await twTasks(asked.map((t) => t.lionTaskId));
+    const partner = await twTasks(asked.map((t) => t.lionTaskId), 5, READ_OPTS);
     const out = [];
     for (let i = 0; i < asked.length; i++) {
       const p = partner[i];

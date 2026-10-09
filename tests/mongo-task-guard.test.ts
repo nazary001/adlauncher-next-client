@@ -105,13 +105,18 @@ test("live: staleOpenServerRows finds only rows that are server-owned, still ope
     await c.updateMany({ task_id: { $in: [ids.stale, ids.closed, ids.client] } }, { $set: { updatedAt: new Date("2001-01-01T00:00:00Z") } });
     await c.updateOne({ task_id: ids.stale2 }, { $set: { updatedAt: new Date("2001-01-02T00:00:00Z") } });
     const found = (await ts.staleOpenServerRows(Date.now(), 7 * 60_000, 1000)).filter((r) => mine.includes(r.task_id));
-    assert.deepEqual(found, [
-      { task_id: ids.stale, partner: "br" },
-      { task_id: ids.stale2, partner: "in" },
-    ]);
+    // queued_at rides along (a row a follow-up still owns is judged by its age) — a number for a row
+    // the store stamped, never a string.
+    assert.deepEqual(
+      found.map((r) => ({ task_id: r.task_id, partner: r.partner, queuedAtIsNumber: typeof r.queued_at === "number" })),
+      [
+        { task_id: ids.stale, partner: "br", queuedAtIsNumber: true },
+        { task_id: ids.stale2, partner: "in", queuedAtIsNumber: true },
+      ],
+    );
     // the limit cuts from the OLDEST end
     const first = await ts.staleOpenServerRows(Date.now(), 7 * 60_000, 1);
-    assert.deepEqual(first, [{ task_id: ids.stale, partner: "br" }]);
+    assert.deepEqual(first.map((r) => ({ task_id: r.task_id, partner: r.partner })), [{ task_id: ids.stale, partner: "br" }]);
     // and the same rows are simply not stale to a longer patience
     const patient = (await ts.staleOpenServerRows(new Date("2001-01-01T00:05:00Z").getTime(), 7 * 60_000, 1000)).filter((r) => mine.includes(r.task_id));
     assert.deepEqual(patient, []);

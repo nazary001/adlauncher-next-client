@@ -17,10 +17,12 @@ import {
   JOB_GAP_MIN_MS,
   PUMP_MARGIN_MS,
   closingRowFor,
+  isDefer,
   isNewerBuild,
   unsupportedOutcome,
   unsupportedReason,
   worstCaseMs,
+  type Defer,
   type JobForRow,
   type JobOutcome,
   type QueueJob,
@@ -59,10 +61,15 @@ export type LaneDeps = {
   beat: (job: QueueJob) => Promise<void>;
   /** Mark the job's row running (before the handler takes over the row). */
   start: (job: QueueJob) => Promise<void>;
-  /** Run the job to its verdict. Must not throw — a throw is treated as an unknown outcome. */
-  run: (job: QueueJob) => Promise<JobOutcome>;
+  /** Run the job to its verdict — or, for a follow-up with work still pending, to a Defer (the job
+   *  goes back in the queue for its next slice). Must not throw — a throw is treated as an unknown
+   *  outcome. */
+  run: (job: QueueJob) => Promise<JobOutcome | Defer>;
   /** Persist the verdict (job document + task row). */
   settle: (job: QueueJob, outcome: JobOutcome) => Promise<void>;
+  /** Hand a follow-up back to the queue for its next slice (running → queued, claimable from
+   *  `notBefore`, body replaced when given). The row is not touched. */
+  defer: (job: QueueJob, notBefore: number, body?: Record<string, unknown>) => Promise<void>;
   /** Best-effort head start for a job that will run soon (e.g. register its videos so the
    *  platform processes them while the current job builds). Must never throw. */
   prewarm: (job: QueueJob) => void;
@@ -160,7 +167,7 @@ export async function runLane(deps: LaneDeps): Promise<LaneExit> {
       }
       // Does its worst case still fit this invocation? A job the platform kills mid-run skips every
       // error path (claims never released, campaign never paused) — far worse than a short wait.
-      if (deps.now() + worstCaseMs(job.kind) + PUMP_MARGIN_MS > deps.deadlineAt) {
+      if (deps.now() + worstCaseMs(job.kind, job.body) + PUMP_MARGIN_MS > deps.deadlineAt) {
         // The un-claim is best-effort: if the store drops it, the job stays "running" WITHOUT its
         // began mark, and the sweeper puts it back in the queue once its lease runs out — late, but
         // never lost and never mislabelled (review find 08.10: an unguarded throw here stranded a
@@ -200,13 +207,20 @@ export async function runLane(deps: LaneDeps): Promise<LaneExit> {
         void deps.beat(job).catch(() => {});
         void deps.extendLane().catch(() => {});
       });
-      let outcome: JobOutcome;
+      let outcome: JobOutcome | Defer;
       try {
         outcome = await deps.run(job);
       } catch (e) {
         outcome = crashedOutcome(job, e, deps.now());
       } finally {
         stop();
+      }
+      // A follow-up with work still pending goes back to the queue for its next slice. A defer the
+      // store drops leaves the job "running" until its lease runs out; being idempotent, it is then
+      // re-queued by the sweep — nothing is lost, the next slice just comes later.
+      if (isDefer(outcome)) {
+        await deps.defer(job, outcome.defer.notBefore, outcome.defer.body).catch((e) => deps.log?.(`defer ${job.job_id} failed: ${String(e)}`));
+        continue;
       }
       // A verdict that cannot be stored leaves the job "running" until its lease runs out; the
       // sweeper then closes it as interrupted — never re-run, and never over a row the handler
@@ -251,8 +265,8 @@ export async function runLane(deps: LaneDeps): Promise<LaneExit> {
 
 export type ReconcileDeps = {
   /** Server-owned rows that are still open (queued / running) and have been silent for a while,
-   *  oldest first. */
-  staleRows: () => Promise<Array<{ task_id: string; partner: string }>>;
+   *  oldest first — with when each was queued (a row a follow-up still owns is judged by its age). */
+  staleRows: () => Promise<Array<{ task_id: string; partner: string; queued_at?: number | null }>>;
   /** The jobs behind these ids, in one read. An id that has no job is simply absent. */
   jobs: (ids: string[]) => Promise<ReadonlyMap<string, JobForRow>>;
   /** Write `row` over the task row ONLY while it is still open. True = it was written. */
@@ -279,8 +293,8 @@ export async function reconcileOpenRows(deps: ReconcileDeps, now: number): Promi
   let closed = 0;
   for (const r of rows) {
     const job = jobs.get(r.task_id) ?? null;
-    const patch = closingRowFor(job, r.partner, now);
-    if (!patch) continue; // its job is still queued / running — the row is right to be open
+    const patch = closingRowFor(job, r.partner, now, r.queued_at ?? null);
+    if (!patch) continue; // its job is still queued / running (or a follow-up's to finish) — the row is right to be open
     if (closed >= deps.max) {
       deps.log?.(`row check: ${deps.max} rows closed in this pass — the rest wait for the next sweep`);
       break;

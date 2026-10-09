@@ -216,6 +216,50 @@ test("launch queue: glo-02 may only hand over and run hs.lion", () => {
   assert.equal(teamAllowsJob("hs", "mo.launch", GLO1), false);
 });
 
+test("launch queue, the 09.10 kinds: glo-02 runs the LION duplicate / JURO submits and their follow-ups — never the token / TOOL clone rails, a TOOL follow-up or a platform; glo-01 everything, each scope its own kinds", () => {
+  for (const kind of ["hs.dup", "hs.jurar", "hs.dup.follow", "hs.jurar.follow"]) assert.equal(teamAllowsJob("hs", kind, GLO2), true, `glo-02 hs/${kind}`);
+  for (const kind of ["hs.tokendup", "hs.tokenjurar", "hs.tooldup", "tool.follow"]) assert.equal(teamAllowsJob("hs", kind, GLO2), false, `glo-02 hs/${kind}`);
+  for (const [scope, kind] of [
+    ["sn", "sn.launch"],
+    ["gg", "gg.clone"],
+    ["gg", "gg.launch"],
+    ["tt", "tt.launch"],
+    ["tt", "tt.follow"],
+    ["mo", "tool.follow"],
+  ] as const) {
+    assert.equal(teamAllowsJob(scope, kind, GLO2), false, `glo-02 ${scope}/${kind}`);
+  }
+  for (const [scope, kind] of [
+    ["hs", "hs.dup"],
+    ["hs", "hs.jurar"],
+    ["hs", "hs.tokendup"],
+    ["hs", "hs.tokenjurar"],
+    ["hs", "hs.tooldup"],
+    ["hs", "hs.dup.follow"],
+    ["hs", "hs.jurar.follow"],
+    ["hs", "tool.follow"],
+    ["mo", "tool.follow"],
+    ["aif", "tool.follow"],
+    ["av", "tool.follow"],
+    ["sn", "sn.launch"],
+    ["gg", "gg.launch"],
+    ["gg", "gg.clone"],
+    ["gg", "gg.juro"],
+    ["tt", "tt.launch"],
+    ["tt", "tt.clone"],
+    ["tt", "tt.juro"],
+    ["tt", "tt.follow"],
+  ] as const) {
+    assert.equal(teamAllowsJob(scope, kind, GLO1), true, `glo-01 ${scope}/${kind}`);
+  }
+  // a scope admits its own kinds only — a kind can never ride another scope's lane
+  assert.equal(teamAllowsJob("sn", "gg.clone", GLO1), false);
+  assert.equal(teamAllowsJob("gg", "hs.dup", GLO1), false);
+  assert.equal(teamAllowsJob("mo", "tt.follow", GLO1), false);
+  assert.equal(teamAllowsJob("tt", "sn.launch", GLO1), false);
+  assert.equal(teamAllowsJob("mo", "sn.launch", GLO1), false);
+});
+
 test("LION profiles: each team owns its own prefix, the un-prefixed pools stay with glo-01", () => {
   // the company-wide list both keys returned on 08.10
   const live = [

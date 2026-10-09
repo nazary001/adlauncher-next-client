@@ -300,18 +300,69 @@ export async function patchOpenTaskRow(taskId: string, fields: TaskRowData): Pro
  *  The {status, createdAt} index narrows the read to the open rows (the live ones plus a few hundred
  *  old browser-run rows nobody ever closed — measured on production 08.10: 439 documents, 4 ms).
  *  Throws on a store failure. */
-export async function staleOpenServerRows(now: number, staleMs: number, limit: number): Promise<Array<{ task_id: string; partner: string }>> {
+export async function staleOpenServerRows(now: number, staleMs: number, limit: number): Promise<Array<{ task_id: string; partner: string; queued_at: number | null }>> {
   const c = await coll(LAUNCH_TASKS);
   const docs = await bounded(
     c
       .find(
         { status: { $in: ["queued", "running"] }, srv: 1, updatedAt: { $lt: new Date(now - staleMs) } },
-        { projection: { _id: 0, task_id: 1, partner: 1 }, sort: { updatedAt: 1 }, limit, maxTimeMS: STORE_TIMEOUT_MS },
+        { projection: { _id: 0, task_id: 1, partner: 1, queued_at: 1 }, sort: { updatedAt: 1 }, limit, maxTimeMS: STORE_TIMEOUT_MS },
       )
       .toArray(),
     "launch-task stale open rows",
   );
-  return docs.filter((d) => typeof d.task_id === "string" && d.task_id).map((d) => ({ task_id: String(d.task_id), partner: String(d.partner ?? "") }));
+  return docs
+    .filter((d) => typeof d.task_id === "string" && d.task_id)
+    .map((d) => ({ task_id: String(d.task_id), partner: String(d.partner ?? ""), queued_at: Number.isFinite(Number(d.queued_at)) && d.queued_at != null ? Number(d.queued_at) : null }));
+}
+
+/** What a follow-up reads of its wave's rows in ONE query: where each stands and the ids it carries.
+ *  Throws on a store failure (a slice that cannot read must not write). */
+export type TaskRowBrief = { task_id: string; status: string; stage: string; campaign_id: string; adset_id: string; ad_id: string; link: string; name: string; error: string; queued_at: number | null };
+export async function readTaskRowsBrief(taskIds: string[]): Promise<Map<string, TaskRowBrief>> {
+  const out = new Map<string, TaskRowBrief>();
+  if (taskIds.length === 0) return out;
+  const c = await coll(LAUNCH_TASKS);
+  const docs = await bounded(
+    c
+      .find(
+        { task_id: { $in: taskIds } },
+        { projection: { _id: 0, task_id: 1, status: 1, stage: 1, campaign_id: 1, adset_id: 1, ad_id: 1, link: 1, name: 1, error: 1, queued_at: 1 }, maxTimeMS: STORE_TIMEOUT_MS },
+      )
+      .toArray(),
+    "launch-task brief read",
+  );
+  const s = (v: unknown): string => (v == null ? "" : String(v));
+  for (const d of docs) {
+    const id = s(d.task_id);
+    if (!id) continue;
+    out.set(id, {
+      task_id: id,
+      status: s(d.status),
+      stage: s(d.stage),
+      campaign_id: s(d.campaign_id),
+      adset_id: s(d.adset_id),
+      ad_id: s(d.ad_id),
+      link: s(d.link),
+      name: s(d.name),
+      error: s(d.error),
+      queued_at: d.queued_at == null ? null : Number(d.queued_at) || null,
+    });
+  }
+  return out;
+}
+
+/**
+ * Write `fields` over a row ONLY while it still matches `where` (one atomic conditional update) —
+ * the follow-ups' way to upgrade a TERMINAL row the submit already closed ("done · Sent to LION"
+ * → the campaign LION really built), without ever rewriting a row somebody else settled since.
+ * True = written. Throws on a store failure.
+ */
+export async function patchTaskRowWhere(taskId: string, where: Record<string, unknown>, fields: TaskRowData): Promise<boolean> {
+  const data: TaskRowData = typeTaskFields(pickTaskFields({ ...fields }));
+  const c = await coll(LAUNCH_TASKS);
+  const r = await bounded(c.updateOne({ task_id: taskId, ...where }, { $set: { ...data, updatedAt: new Date() } }), "launch-task conditional patch");
+  return r.matchedCount > 0;
 }
 
 /** Delete one row by its documentId (the routes' owner-checked DELETE). True when a row went away;

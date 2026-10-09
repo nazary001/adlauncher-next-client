@@ -44,6 +44,10 @@ function toClient(r: Row): Row {
     currency: r.ad_id ?? null,
     bid: r.bid ?? null,
     error: r.error ?? null,
+    // Server-launch-queue flags (same meaning as /api/launch-tasks): srv=1 the queue owns the row
+    // (every TikTok shot is a queue job since 09.10), retry=1 the owner may re-queue it.
+    srv: r.srv === 1 || r.srv === true ? 1 : 0,
+    retry: r.retry === 1 || r.retry === true ? 1 : 0,
     queued_at: num(r.queued_at) ?? null,
     started_at: num(r.started_at) ?? null,
     finished_at: num(r.finished_at) ?? null,

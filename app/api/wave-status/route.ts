@@ -5,8 +5,9 @@ import { readAppCacheDetailed } from "@/lib/app-cache";
 export const runtime = "nodejs";
 
 /** rail → the prefix of its wave claim in app_caches (lib/google-wave, lib/snap-wave, lib/tiktok-wave
- *  each write `<prefix>:<waveId>` the moment they accept a wave — before they answer). */
-const CLAIM_PREFIX: Record<string, string> = { google: "google-wave", snap: "snap-wave", tiktok: "tiktok-wave" };
+ *  and the HS clone routes each write `<prefix>:<waveId>` the moment they accept a wave — before
+ *  they answer; `hs` = LION / token duplicates and JURO, `hs-tool` = the TOOL duplicator). */
+const CLAIM_PREFIX: Record<string, string> = { google: "google-wave", snap: "snap-wave", tiktok: "tiktok-wave", hs: "hs-wave", "hs-tool": "hs-tool-wave" };
 /** The one shape every rail's wave id has (GOOGLE_/SNAP_/TIKTOK_WAVE_ID_RE). */
 const WAVE_ID_RE = /^[a-zA-Z0-9-]{8,64}$/;
 
