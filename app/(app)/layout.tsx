@@ -8,6 +8,7 @@ import { SnapTaskManagerProvider } from "@/components/snap-task-manager";
 import { TiktokTaskManagerProvider } from "@/components/tiktok-task-manager";
 import { AcctLimitProvider } from "@/components/use-acct-limit";
 import { LaunchHandoffHost } from "@/components/launch-handoff";
+import { SessionWatch } from "@/components/session-watch";
 
 /**
  * Shared shell for the authenticated app (launcher + clone board). The Task Manager provider is
@@ -38,6 +39,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                   {/* The hand-off overlay / pill — mounted ONCE here, inside every task-manager
                       provider, so it can open any drawer and survives navigating between boards. */}
                   <LaunchHandoffHost />
+                  {/* Starts the tab over when the browser turns out to be signed in as somebody else. */}
+                  <SessionWatch username={session.username} />
                 </TiktokTaskManagerProvider>
               </SnapTaskManagerProvider>
             </GoogleTaskManagerProvider>

@@ -10,6 +10,7 @@ import { UploadingNotice } from "./upload-guard";
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
 import { CLONE_DEFAULT_BUDGET, bidKind, bidTag, budgetOnStrategyChange, limitMoneyCents, moneyCentsLabel, moneyLabel, parseMoney } from "@/lib/types";
 import { lionWireSuffix } from "@/lib/hs-clone-name";
+import { carriesOwnName } from "@/lib/own-name";
 import { BID_STRATEGIES, geoSummary } from "@/lib/catalog";
 import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { TOOL_MARK } from "@/lib/tool-launch";
@@ -151,12 +152,13 @@ function splitLionName(sourceName: string, ddmm: string): { prefix: string; tail
 
 /** Default tail = the source's old tail + " - <owner>" (the buyer duplicating it), matching the
  *  historical LION naming ("… Cars en Alex Nazar"). Editable afterwards; skips the append when
- *  the tail already ends with the owner name so a re-fetch can't double it. */
+ *  the tail already ends with the owner name (a re-fetch can't double it) or carries it as a segment
+ *  (duplicating your own campaign doesn't print your name twice). */
 function withOwner(tail: string, owner: string): string {
   const o = owner.trim();
   if (!o) return tail;
   if (!tail) return o;
-  return tail.toLowerCase().endsWith(o.toLowerCase()) ? tail : `${tail} - ${o}`;
+  return tail.toLowerCase().endsWith(o.toLowerCase()) || carriesOwnName(tail, o) ? tail : `${tail} - ${o}`;
 }
 
 /** Geo from the NAME's grammar (the `[CODES]` group after the redirect label) — the display

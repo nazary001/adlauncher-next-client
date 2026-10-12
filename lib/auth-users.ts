@@ -95,14 +95,33 @@ function userOf(doc: Document | null): AppUser | null {
 }
 
 /** Strapi's users-permissions lookup: `identifier` is the e-mail (compared lower-cased) OR the exact
- *  username. Throws on a store failure. */
+ *  username. A login the owner renamed (scripts/rename-user keeps the old name in `former_usernames`)
+ *  still signs in under the name its buyer has always typed — and lands in the session under the
+ *  CURRENT one; a live username always wins over somebody's former one. Throws on a store failure. */
 export async function findUserByIdentifier(identifier: string): Promise<AppUser | null> {
   const c = await coll(UP_USERS);
-  const doc = await bounded(
-    c.findOne({ $or: [{ email: identifier.toLowerCase() }, { username: identifier }] }, { projection: USER_PROJECTION, maxTimeMS: STORE_TIMEOUT_MS }),
-    "user read",
-  );
-  return userOf(doc);
+  const opts = { projection: USER_PROJECTION, maxTimeMS: STORE_TIMEOUT_MS };
+  const doc = await bounded(c.findOne({ $or: [{ email: identifier.toLowerCase() }, { username: identifier }] }, opts), "user read");
+  if (doc) return userOf(doc);
+  return userOf(await bounded(c.findOne({ former_usernames: identifier }, opts), "user read"));
+}
+
+/**
+ * What the directory calls the login behind a session NOW — null when it cannot say (a session whose
+ * `sub` is not a directory id, a user that is gone, the store unreachable or not configured). The
+ * cookie carries the name as it was at sign-in for up to 30 days; this is how a rename reaches it.
+ */
+export async function currentUsernameOf(sub: string | number): Promise<string | null> {
+  const id = typeof sub === "number" ? sub : /^\d+$/.test(sub) ? Number(sub) : NaN;
+  if (!Number.isSafeInteger(id) || !storeConfigured()) return null;
+  try {
+    const c = await coll(UP_USERS);
+    const doc = await bounded(c.findOne({ id }, { projection: { _id: 0, username: 1 }, maxTimeMS: STORE_TIMEOUT_MS }), "user read");
+    const name = typeof doc?.username === "string" ? doc.username.trim() : "";
+    return name || null;
+  } catch {
+    return null;
+  }
 }
 
 async function storeUserHash(user: AppUser, hashed: string): Promise<void> {

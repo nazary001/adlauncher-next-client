@@ -65,6 +65,21 @@ Usernames are exact and case-sensitive. A blocked or re-passworded user stays si
 cookie runs out (7 days, renewed while they work) — to cut everyone off at once, change the team's
 `AUTH_SECRET` and redeploy.
 
+### Renaming a login (either team)
+
+The console writes the login into campaign names, so a login should be the name the team calls its
+buyer by. Run from the team's own folder:
+
+```bash
+npm run rename-user -- <old> <new>            # dry run: what would change
+npm run rename-user -- <old> <new> --apply
+```
+
+The account assignments, the keys and wave claims the login holds and the owner of its task rows
+move with it; names of campaigns already launched are not rewritten. The buyer can still sign in
+under the old name (and lands under the new one), and an open tab switches by itself within minutes.
+Refused while the login has launches in the queue.
+
 ## Shipping an update to both launchers
 
 The second launcher's repo is the first one's history plus nothing of its own — keep it that way.

@@ -5,6 +5,7 @@
 // is the single seam the real `/api/clone/sources` fetch drops into later. Kept free of `Date`
 // so it stays pure/testable; callers pass today's DD.MM in.
 
+import { carriesOwnName } from "./own-name.ts";
 import type { PartnerId } from "./partners";
 
 /** Money/goal text in the board's cash-register spelling ("1,2" | "1.2" | 1.2 → "1,20"); empty or
@@ -202,15 +203,14 @@ export function ownerTag(username?: string | null): string {
 
 /**
  * Append " - <Username>" to a clone's editable name so it defaults to whoever is making the clone.
- * Skips if the name already ends with that exact tag, so re-cloning your own clone doesn't stack
- * "- Nazar - Nazar".
+ * Skips if the name already carries that tag as a segment, so cloning your OWN campaign (or your own
+ * clone) doesn't print the name twice — "… - Katya - CREO - GIRLS - Katya", "- Nazar - Nazar".
  */
 export function withOwner(name: string, username?: string | null): string {
   const tag = ownerTag(username);
   const base = (name ?? "").trim();
   if (!tag) return base;
-  const suffix = ` - ${tag}`;
-  return base.toLowerCase().endsWith(suffix.toLowerCase()) ? base : `${base}${suffix}`;
+  return carriesOwnName(base, tag) ? base : `${base} - ${tag}`;
 }
 
 /** Build an editable clone row from a fetched source, prefilled with the source's own values. The

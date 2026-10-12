@@ -6,6 +6,8 @@
 // locales, the ONE fresh-launch validator, the clone / JURO wires, the row disposition of a
 // partner task); the routes/boards own the I/O around them.
 
+import { dropOwnName } from "./own-name.ts";
+
 export type TiktokKind = "launch" | "clone" | "juro";
 
 /** What a mode takes as its value: bid = `conversion_bid_price` (USD) · roas = `roas_bid`
@@ -192,12 +194,13 @@ export function todaySaoPauloDotDDMM(now: Date = new Date()): string {
  * Our `name_suffix`, in the team's own shape (live names 17–18.09: `… | 17.09 - Katya - CREO -
  * APRUV`): `DD.MM - <user> - GC-Launcher[ - <tail>]`. LION writes the ` | ` separator, the
  * `(CLONE_FROM=…)` marker and the `Smart+` tag itself, so the suffix carries none of them; a pipe
- * typed in the tail is replaced so it can't fake a segment. Only the tail is trimmed by the cap.
+ * typed in the tail is replaced so it can't fake a segment. Only the tail is trimmed by the cap,
+ * and it never repeats the buyer's own name (lib/own-name): the head already carries it.
  */
 export function tiktokNameSuffix(a: { user: string; ddmm: string; tail?: string }): string {
   const user = squash(a.user) || "buyer";
   const head = `${a.ddmm} - ${user} - ${TIKTOK_NAME_MARK}`;
-  let tail = squash(String(a.tail ?? "").replace(/\|/g, "/"));
+  let tail = dropOwnName(squash(String(a.tail ?? "").replace(/\|/g, "/")), user);
   const room = TIKTOK_NAME_SUFFIX_MAX - head.length - 3;
   if (tail && tail.length > room) tail = room > 0 ? tail.slice(0, room).trim() : "";
   return `${head}${tail ? ` - ${tail}` : ""}`;

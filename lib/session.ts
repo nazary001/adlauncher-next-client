@@ -77,6 +77,16 @@ export function renewedSessionToken(s: Session, now = nowSec(), team: TeamConfig
   return { token: signPayload({ sub, username, email, role, team: team.id, iat: loginAt, exp }), maxAge: exp - now };
 }
 
+/**
+ * The SAME session under another username: a login the owner renamed (scripts/rename-user) keeps its
+ * sign-in time and its expiry, only the name it launches under changes. Used by /api/auth/session,
+ * which is where an open tab learns that its login is called something else now.
+ */
+export function renamedSessionToken(s: Session, username: string, now = nowSec(), team: TeamConfig = TEAM): { token: string; maxAge: number } {
+  const { sub, email, role, iat, exp } = s;
+  return { token: signPayload({ sub, username, email, role, team: team.id, iat, exp }), maxAge: Math.max(1, exp - now) };
+}
+
 /** Read + verify the session straight from a request's Cookie header. Used by routes that are
  *  excluded from the proxy (e.g. the large-body /api/launch upload) so they gate themselves. */
 export function sessionFromCookieHeader(cookieHeader: string | null): Session | null {

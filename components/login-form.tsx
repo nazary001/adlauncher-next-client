@@ -4,6 +4,7 @@ import { useState } from "react";
 import { RocketIcon } from "./icons";
 import { TeamBadge } from "./team-badge";
 import { TEAM } from "@/lib/team";
+import { noteSignedIn } from "./account-switch";
 
 function Spinner() {
   return (
@@ -31,8 +32,10 @@ export function LoginForm() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: username.trim(), password }),
       });
-      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; user?: { username?: string } };
       if (res.ok && d.ok) {
+        // A different account than this browser's last one starts clean (components/account-switch).
+        if (d.user?.username) noteSignedIn(d.user.username);
         window.location.href = "/"; // full nav so the server re-reads the new session cookie
         return;
       }

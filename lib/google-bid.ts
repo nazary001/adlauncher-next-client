@@ -5,6 +5,8 @@
 // module carries the DECISIONS (strategy vocabulary, bid/budget parsing, the wire plan, the
 // team naming pattern, error wording); the routes/board own the I/O around them.
 
+import { dropOwnName } from "./own-name.ts";
+
 export type GoogleMode = "clone" | "juro" | "launch";
 
 /** What a Google bidding strategy takes as its `bid_value`:
@@ -200,7 +202,8 @@ export function todaySaoPauloDotDDMM(now: Date = new Date()): string {
  * BARE suffix `11.09 Taras`. Sending the pipes/marker ourselves doubled them
  * (`… | | 14.09 x | CLONE_FROM=… | CLONE_FROM=…`). So: `DD.MM <user>[ <tail>]`, no pipes, no
  * marker; a pipe typed in the tail is replaced so it can't fake a segment. Capped so the whole
- * suffix stays under GOOGLE_NAME_SUFFIX_MAX. Shape: `DD.MM <user> GC-Launcher[ <tail>]`.
+ * suffix stays under GOOGLE_NAME_SUFFIX_MAX. Shape: `DD.MM <user> GC-Launcher[ <tail>]`. The tail
+ * never repeats the buyer's own name (lib/own-name): the head already carries it.
  */
 /** Owner rule 2026-09-14: every campaign born through this console carries a HARDCODED
  *  "GC-Launcher" marker in its name (same idea as the FB auto-landing "GC-Launcher Auto-landing"),
@@ -210,7 +213,7 @@ export const GOOGLE_NAME_MARK = "GC-Launcher";
 export function googleNameSuffix(args: { mode: GoogleMode; sourceId?: string; user: string; ddmm: string; tail?: string }): string {
   const user = squash(args.user) || "buyer";
   const head = `${args.ddmm} ${user} ${GOOGLE_NAME_MARK}`;
-  let tail = squash(args.tail ?? "").replace(/\|/g, "/");
+  let tail = dropOwnName(squash(args.tail ?? "").replace(/\|/g, "/"), user);
   const room = GOOGLE_NAME_SUFFIX_MAX - head.length - 1;
   if (tail && tail.length > room) tail = room > 0 ? tail.slice(0, room).trim() : "";
   return `${head}${tail ? ` ${tail}` : ""}`;

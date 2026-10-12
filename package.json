@@ -10,7 +10,8 @@
     "test": "node --test \"tests/**/*.test.ts\"",
     "ensure-indexes": "node scripts/ensure-indexes.mjs",
     "set-password": "node scripts/set-password.mjs",
-    "add-user": "node scripts/add-user.mjs"
+    "add-user": "node scripts/add-user.mjs",
+    "rename-user": "node scripts/rename-user.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1147.0",

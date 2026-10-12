@@ -1,10 +1,12 @@
 // Snapchat rail — pure decisions (docs/superpowers/specs/2026-09-16-snapchat-rail-design.md).
-// Deliberately dependency-free (no "@/" imports, no relative runtime imports — `import type` only)
+// Deliberately dependency-free (no "@/" imports, no extensionless runtime imports — `import type`,
+// plus the equally pure lib/own-name)
 // so `node --test` runs it straight off Node's type stripping. Part 1: the PARTNER contract — the
 // fixed revenue keys, the landings, the exact link shape, the console name. Part 2: the launch
 // vocabulary and `snapLaunchWire`, the ONE validator the board dry-runs and the pump runs. Part 3:
 // the CLONER — the link's refs, the console name read back, and the draft a live campaign gives.
 
+import { dropOwnName } from "./own-name.ts";
 import type { SnapCloneSource } from "./snap-source";
 
 // ---------- partner keys ----------
@@ -149,7 +151,8 @@ export const SNAP_CLONE_MARK = "CLONE_FROM";
  * `[DD.MM] (SNP) <niche> - <GEO> - <key> - <user> - GC-Launcher[ - <tail>][ - CLONE_FROM=<source>]`.
  * The key inside the name makes LION's per-key report readable from Ads Manager; pipes are replaced
  * so a tail can't fake a segment; the tail is trimmed first when the whole thing would pass
- * SNAP_NAME_MAX (a clone's marker always stays).
+ * SNAP_NAME_MAX (a clone's marker always stays). The tail never repeats the buyer's own name
+ * (lib/own-name): the head already carries it.
  */
 export function snapCampaignName(args: { ddmm: string; niche: string; geoLabel: string; key: string; user: string; tail?: string; cloneOf?: string }): string {
   const user = noPipes(squash(args.user)) || "buyer";
@@ -158,7 +161,7 @@ export function snapCampaignName(args: { ddmm: string; niche: string; geoLabel: 
   const head = `[${args.ddmm}] (SNP) ${niche} - ${geo} - ${args.key} - ${user} - ${SNAP_NAME_MARK}`;
   const mark = noPipes(squash(args.cloneOf ?? "")).replace(/\s+/g, "");
   const end = mark ? ` - ${SNAP_CLONE_MARK}=${mark}` : "";
-  let tail = noPipes(squash(args.tail ?? ""));
+  let tail = dropOwnName(noPipes(squash(args.tail ?? "")), user);
   const room = SNAP_NAME_MAX - head.length - end.length - 3; // " - " between head and tail
   if (tail && tail.length > room) tail = room > 0 ? tail.slice(0, room).trim() : "";
   return `${head}${tail ? ` - ${tail}` : ""}${end}`;
