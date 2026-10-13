@@ -92,6 +92,7 @@ export function SearchSelect({
   metaWhenClosed,
   warn,
   facets,
+  tagQuery,
   size,
   accent,
   ariaLabel,
@@ -111,6 +112,10 @@ export function SearchSelect({
    *  distinct `tag` (language) with counts — built for catalogs that will keep growing. Chip
    *  filters compose with the typed query. */
   facets?: boolean;
+  /** A typed query that IS one of the tags filters by that tag alone ("pt" → the Portuguese rows).
+   *  For a list whose tag is a language and whose labels would match it by accident — "Captcha"
+   *  holds "pt". Off by default: every other list keeps matching such a query everywhere. */
+  tagQuery?: boolean;
   /** "sm" = the dense table/grid variant (h-8, 12px) — the clone board's inline row pickers. */
   size?: "sm";
   /** Accent border: the value is the row's OWN pick (vs an inherited default). */
@@ -186,16 +191,19 @@ export function SearchSelect({
   // Searchable by label, meta, value (fanpages: the page id), group (landing niche) and the
   // exact tag ("es" → Spanish landings without also matching every label containing "es").
   // Facet chips (group / tag) compose with the typed query.
+  const tagOnly = Boolean(tagQuery) && q !== "" && opts.some((o) => o.tag?.toLowerCase() === q);
   const filtered = opts.filter(
     (o) =>
       (!groupFilter || o.group === groupFilter) &&
       (!tagFilter || o.tag === tagFilter) &&
       (!q ||
-        o.label.toLowerCase().includes(q) ||
-        o.meta?.toLowerCase().includes(q) ||
-        o.value.toLowerCase().includes(q) ||
-        o.group?.toLowerCase().includes(q) ||
-        o.tag?.toLowerCase() === q),
+        (tagOnly
+          ? o.tag?.toLowerCase() === q
+          : o.label.toLowerCase().includes(q) ||
+            o.meta?.toLowerCase().includes(q) ||
+            o.value.toLowerCase().includes(q) ||
+            o.group?.toLowerCase().includes(q) ||
+            o.tag?.toLowerCase() === q)),
   );
 
   // Facet inventories with counts — stable totals so chips don't jump around while filtering.

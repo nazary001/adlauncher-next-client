@@ -1368,6 +1368,7 @@ function CampaignCardBase({
                               emptyHint="No ready landings match"
                               ariaLabel="Ready landing"
                               facets
+                              tagQuery
                             />
                           </div>
                         ) : null}
