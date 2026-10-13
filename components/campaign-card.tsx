@@ -1428,7 +1428,7 @@ function CampaignCardBase({
                 <Field
                   label="Creatives"
                   className="col-span-12 lg:col-span-5"
-                  hint={hsMode ? "one ad per creative (LION)" : undefined}
+                  hint={hsMode && TEAM.hsCreativesNote ? "one ad per creative (LION)" : undefined}
                 >
                   <div className="flex flex-col gap-2">
                     <Dropzone

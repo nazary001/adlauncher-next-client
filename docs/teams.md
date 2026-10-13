@@ -122,6 +122,9 @@ The list is `lib/hs-ready-links.ts` (read off the builder 13.10, pinned by
 `tests/hs-ready-links.test.ts`) — another template, niche or language is one more row there. To offer
 it to GLO-01 as well, set `hsReadyLinks: true` in its entry in `lib/team.ts`.
 
+The Creatives field of the GLO-02 card carries no "one ad per creative (LION)" note
+(`hsCreativesNote: false`, owner ask 13.10); GLO-01 keeps it.
+
 ## Business accounts only (GLO-02)
 
 LION lists, next to the team's business ad accounts, the personal ad account of each profile's

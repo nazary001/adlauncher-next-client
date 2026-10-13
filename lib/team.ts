@@ -47,6 +47,9 @@ export type TeamConfig = {
    *  Builder hands a buyer) as a pick above the link field. The link stays free text either way;
    *  without this it is only ever pasted, as it always was on the first team. */
   hsReadyLinks: boolean;
+  /** The HS card's Creatives field carries the note "one ad per creative (LION)", as it always did
+   *  on the first team. false — the field carries no note. */
+  hsCreativesNote: boolean;
   /** A LION profile lists its persona's own PERSONAL ad account next to the team's business ones
    *  (isPersonalAccount). true — it is part of the bind space, as it always was on the first team.
    *  false — it is left out at the source (lib/lion lionProfileData): no picker offers it and no
@@ -79,6 +82,7 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     ownerTools: ["accounts", "autoLandings", "tokens", "sessions", "avKeys"],
     pagesRegistry: true,
     hsReadyLinks: false,
+    hsCreativesNote: true,
     personalAccounts: true,
     sharedPools: true,
     toolsDirectory: true,
@@ -98,6 +102,8 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     pagesRegistry: false,
     // Owner ask 13.10: the team picks the partner's Cars / MKD landings from a list on the card.
     hsReadyLinks: true,
+    // Owner ask 13.10: "one ad per creative (LION) вот эту надпись убери с лаунчера для команды гло 2".
+    hsCreativesNote: false,
     // Owner ask 13.10: "из списка акаунтов убери личку … чтобы были только норм аки".
     personalAccounts: false,
     sharedPools: false,

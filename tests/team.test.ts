@@ -45,6 +45,8 @@ test("glo-01 keeps everything it had; glo-02 is HS through LION on Facebook only
   assert.deepEqual([...GLO2.ownerTools], ["accounts"]);
   assert.equal(GLO2.pagesRegistry, false);
   assert.equal(GLO2.toolsDirectory, false);
+  assert.equal(GLO2.hsCreativesNote, false);
+  assert.equal(GLO1.hsCreativesNote, true);
   assert.equal(teamHas("graph", GLO2), false);
   assert.equal(teamHas("fbTokens", GLO2), false);
   assert.equal(teamHas("platform:any", GLO2), false);
