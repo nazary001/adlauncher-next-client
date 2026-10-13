@@ -170,13 +170,15 @@ const stageIndex = (stage: string): number => {
  *  can't land until it lifts, so the advice is to wait or switch to another profile.
  *  "Enter the person or organization being promoted…" is Meta's EU-DSA beneficiary check on
  *  WORLD-targeted shots — transient: LION's executor fills it in on retry (verified live 08-13,
- *  self-healed in ~35s), so it reads as normal progress, not as a scary Meta error. */
+ *  self-healed in ~35s), so it reads as normal progress, not as a scary Meta error. Meta now words
+ *  the same check "Facebook needs an advertiser name for this ad set" (the first three GLO-02
+ *  launches, WORLD, 13.10 — each answered it and each finished with its ad ACTIVE). */
 function humaniseLionNote(raw: string): string {
   const s = raw.toLowerCase();
   if (/temporarily blocked|been blocked|restricted/.test(s)) {
     return "Facebook temporarily blocked this profile — pause a bit, or duplicate through another profile";
   }
-  if (/person or organization being promoted/.test(s)) {
+  if (/person or organization being promoted|needs an advertiser name/.test(s)) {
     return "LION is launching the campaign — waiting for it to finish";
   }
   return raw;
