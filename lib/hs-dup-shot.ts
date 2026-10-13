@@ -117,7 +117,10 @@ export async function runHsDupShot(s: HsDupShot, deps: HsDupShotDeps): Promise<H
     // that is not this team's to work on kills its whole family here: no slot, no call.
     const sourceTeam = await lionSourceTeam(s.campaignId);
     if (!teamMayUseCampaign(sourceTeam)) {
-      return refuse(lionCampaignRefusal(s.campaignId, sourceTeam), { family: sourceTeam === "foreign" });
+      // Another team's campaign is final. "unknown" (a strict team, and LION does not show the source
+      // right now — its own newborn lags in details/) says "try again in a minute": nothing was sent
+      // and no slot was claimed, so that copy can be retried.
+      return refuse(lionCampaignRefusal(s.campaignId, sourceTeam), { family: sourceTeam === "foreign", retryable: sourceTeam !== "foreign" });
     }
     const plan = dupBidPlan({
       sourceStrategy: facts.bidStrategy || s.bidStrategy,

@@ -24,7 +24,7 @@ import { rememberedRowIds } from "./wave-memory-core";
 import { relabelNameGeo } from "@/lib/targeting-override";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import type { PartnerId } from "@/lib/partners";
-import { teamHas } from "@/lib/team";
+import { TEAM, teamHas } from "@/lib/team";
 import {
   ChevronDownIcon,
   CopyIcon,
@@ -67,6 +67,8 @@ type Row = {
   info: {
     name: string;
     status: string;
+    /** An UNREADABLE source that is another team's campaign — said as such, not as "LION can't read". */
+    foreign: boolean;
     countries: string[];
     budget: number | null; // MAJOR $ (LION reads are major)
     bid: number | null;
@@ -558,6 +560,7 @@ export function HsCloneBoard({
               campaignId: string;
               name: string;
               status: string;
+              foreign?: boolean;
               countries: string[];
               budget: number | null;
               bid: number | null;
@@ -581,6 +584,7 @@ export function HsCloneBoard({
                 info: {
                   name: s.name,
                   status: s.status,
+                  foreign: s.foreign === true,
                   countries: s.countries,
                   budget: s.budget,
                   bid: s.bid,
@@ -734,7 +738,10 @@ export function HsCloneBoard({
       r.state !== "ok" &&
       r.state !== "unsure",
   );
-  const unreadable = rows.filter((r) => r.info?.status === "UNREADABLE").length;
+  // Two reasons a source is out of the wave, told apart for the buyer: another team's campaign (final)
+  // and one LION cannot show right now (deleted, or a newborn it has not synced — may clear).
+  const foreignCount = rows.filter((r) => r.info?.status === "UNREADABLE" && r.info.foreign).length;
+  const unreadable = rows.filter((r) => r.info?.status === "UNREADABLE" && !r.info.foreign).length;
   /** Rows skipped ONLY for their sub-$1 budget (amber field + chip — otherwise they vanish silently). */
   const lowBudgetCount = rows.filter(
     (r) =>
@@ -1708,6 +1715,11 @@ export function HsCloneBoard({
                   {unreadable} unreadable — excluded (their duplicates would fail too)
                 </span>
               ) : null}
+              {foreignCount > 0 ? (
+                <span className="rounded-md border border-danger/30 bg-danger/10 px-1.5 py-0.5 text-[10.5px] text-danger">
+                  {foreignCount} not {TEAM.label}’s — excluded (only the team’s own campaigns can be cloned here)
+                </span>
+              ) : null}
               {lowBudgetCount > 0 ? (
                 <span className="rounded-md border border-warn/40 bg-warn/10 px-1.5 py-0.5 text-[10.5px] text-warn">
                   {lowBudgetCount} below $1/day — won&apos;t fire (amber Budget field)
@@ -1791,7 +1803,9 @@ export function HsCloneBoard({
                         </span>
                       ) : unreadableRow ? (
                         <span className="mb-1 block font-mono text-[10.5px] font-semibold text-danger">
-                          LION can’t read this campaign — excluded from the wave
+                          {r.info?.foreign
+                            ? `Not a ${TEAM.label} campaign — excluded from the wave`
+                            : "LION can’t read this campaign — excluded from the wave"}
                         </span>
                       ) : !r.info && r.failed ? (
                         <span className="mb-1 block font-mono text-[10.5px] font-semibold text-danger">LION read failed</span>

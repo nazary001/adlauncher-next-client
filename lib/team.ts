@@ -192,7 +192,10 @@ const API_NEEDS: ReadonlyArray<readonly [string, Need]> = [
   ["/api/tiktok", "platform:tiktok"],
   ["/api/snap-tasks", "platform:snap"],
   ["/api/snap", "platform:snap"],
-  ["/api/wave-status", "platform:any"],
+  // "Did the server take this wave?" — asked by the three platform boards AND by the HS clone boards
+  // (a LION duplicate / JURO wave whose answer was lost is held until this route answers), so every
+  // team needs it: on a LION-only team a refusal here left such a wave's rows held for good (12.10).
+  ["/api/wave-status", "always"],
   ["/api/acct-limit", "always"],
   ["/api/acct-assignments", "tool:accounts"],
   ["/api/team", "tool:accounts"],

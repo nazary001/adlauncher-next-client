@@ -322,6 +322,11 @@ export const lionCampaignRefusal = (campaignId: string, verdict: CampaignTeam): 
     ? `campaign ${campaignId} is not a ${TEAM.label} campaign`
     : `campaign ${campaignId} could not be confirmed as a ${TEAM.label} campaign — LION does not show it right now; try again in a minute`;
 
+/** What a reader adds to the blank row of a source this team may not work on: `foreign` when the
+ *  campaign is provably another team's. A strict team's "unknown" (LION shows too little to tell)
+ *  stays unmarked — it may be the team's own newborn. */
+const foreignMark = (verdict: CampaignTeam | undefined): { foreign?: true } => (verdict === "foreign" ? { foreign: true } : {});
+
 /** The last word before a duplicate is submitted (the routes refuse earlier and cleaner — this is
  *  the backstop no caller can skip): the SOURCE must be a campaign this team may work on. */
 async function assertOwnCampaign(campaignId: string): Promise<void> {
@@ -509,6 +514,9 @@ export type LionJuroSource = {
   name: string;
   /** "UNREADABLE" = details/ can't see the campaign right now (deleted or fresh-campaign lag). */
   status: string;
+  /** An UNREADABLE source that is ANOTHER TEAM's campaign (lib/team judgeCampaign "foreign"): final,
+   *  unlike one LION merely cannot show right now. Nothing else of such a campaign is handed on. */
+  foreign?: boolean;
   /** The page-post ids behind the source's ads — what jurar re-uses. Empty on UNREADABLE. */
   stories: string[];
   /** Page carrying those posts (story id prefix) — the executor profile must list it. */
@@ -561,9 +569,9 @@ export async function lionJuroSources(campaignIds: string[]): Promise<Record<str
     const d = dById.get(cid);
     const t = tById.get(cid);
     // A campaign that is not this team's to work on reads exactly like one LION cannot show:
-    // nothing of it is handed on — no posts, no targeting.
+    // nothing of it is handed on — no posts, no targeting. Only the reason differs (`foreign`).
     if (d && !d.error && !teamMayUseCampaign(teams.get(cid) ?? "unknown")) {
-      out[cid] = { campaignId: cid, name: "", status: "UNREADABLE", stories: [], page: "", countries: [], locales: [], adsCount: 0, bidStrategy: "", bid: null };
+      out[cid] = { campaignId: cid, name: "", status: "UNREADABLE", stories: [], page: "", countries: [], locales: [], adsCount: 0, bidStrategy: "", bid: null, ...foreignMark(teams.get(cid)) };
       continue;
     }
     const locales = (t?.locales_ids ?? [])
@@ -727,6 +735,9 @@ export type LionSourceInfo = {
   campaignId: string;
   name: string;
   status: string;
+  /** An UNREADABLE source that is ANOTHER TEAM's campaign — the board says so instead of "LION can't
+   *  read it" (a team that owns nothing yet met that on every id it pasted, 12.10). */
+  foreign?: boolean;
   /** MAJOR units (dollars) — LION reads are major, writes are cents (asymmetry, verified live). */
   budget: number | null;
   /** Ad set bid as LION reports it — MAJOR/decimal like all LION reads (cap $2.45 reads as
@@ -788,9 +799,10 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
   const teams = await judgeRows(details);
   const rows = campaignIds.map((cid) => {
     const d = byId.get(cid);
-    // Not this team's campaign → it reads like one LION cannot show, and nothing of it is handed on.
+    // Not this team's campaign → it reads like one LION cannot show, and nothing of it is handed on
+    // but the reason (`foreign`).
     if (d && !d.error && !teamMayUseCampaign(teams.get(cid) ?? "unknown")) {
-      return { campaignId: cid, name: "", status: "UNREADABLE", budget: null, bid: null, bidStrategy: "", currency: "", adsCount: 0, countries: [] as string[], pages: [] as { pageId: string; ads: number }[] };
+      return { campaignId: cid, name: "", status: "UNREADABLE", budget: null, bid: null, bidStrategy: "", currency: "", adsCount: 0, countries: [] as string[], pages: [] as { pageId: string; ads: number }[], ...foreignMark(teams.get(cid)) };
     }
     if (!d || d.error) {
       return { campaignId: cid, name: "", status: "UNREADABLE", budget: null, bid: null, bidStrategy: "", currency: "", adsCount: 0, countries: geoById.get(cid) ?? [], pages: [] as { pageId: string; ads: number }[] };

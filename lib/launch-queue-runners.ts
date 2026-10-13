@@ -177,7 +177,7 @@ const runHsJurar: JobRunner = async (job, ctx) => {
   if (r.outcome === "submitted") {
     return { status: "done", retryable: false, error: null, result: { link: r.lionTaskId }, ambiguous: false, openRow: null, row: { ...SRV, retry: 0, partner, status: "running", stage: "queue", link: r.lionTaskId, started_at: now, error: null } };
   }
-  if (r.family) await failSiblings(job, { ...hsFamily(shot.campaignId), "body.shot.binds.profile": shot.binds.profile }, { error: r.error, retryable: false }, ctx.log);
+  if (r.family) await failSiblings(job, { ...hsFamily(shot.campaignId), "body.shot.binds.profile": shot.binds.profile }, { error: r.error, retryable: r.retryable }, ctx.log);
   else if (r.accountFull) await failSiblings(job, hsAccount(shot.binds.account), { error: r.error, retryable: true }, ctx.log);
   else if (r.registryDown) await failSiblings(job, {}, { error: r.error, retryable: true }, ctx.log);
   void juroFamilyKey;

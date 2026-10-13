@@ -117,9 +117,18 @@ test("glo-02 reaches exactly the HS-through-LION surface", () => {
     "/api/launch-queue/cron",
     "/api/launch-queue/pump",
     "/api/team",
+    "/api/wave-status",
     "/clone",
     "/login",
   ]);
+});
+
+test("a held wave can be asked about on every team: the HS clone boards hold a LION wave whose answer was lost", () => {
+  // components/hs-clone-board.tsx asks GET /api/wave-status?rail=hs — a LION-only team that could not
+  // reach it kept such a wave's rows held forever (found on the live GLO-02 launcher, 12.10).
+  assert.equal(routeNeed("/api/wave-status"), "always");
+  assert.equal(teamAllowsPath("/api/wave-status", GLO1), true);
+  assert.equal(teamAllowsPath("/api/wave-status", GLO2), true);
 });
 
 test("glo-02: the other partners, channels, platforms and owner tools are refused; unknown APIs fail closed", () => {
@@ -145,7 +154,6 @@ test("glo-02: the other partners, channels, platforms and owner tools are refuse
     "/api/google-tasks",
     "/api/tiktok/launch",
     "/api/snap/launch",
-    "/api/wave-status",
     "/api/launch-tasks",
     "/api/auto-landings/1/prepare-launch",
     "/api/blob-upload",
