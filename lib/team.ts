@@ -43,6 +43,10 @@ export type TeamConfig = {
    *  launch), the fill meters and the usage ledger. Without it every page LION lists for a profile
    *  is offered and accepted, nothing is reported to the box and the pickers carry no meters. */
   pagesRegistry: boolean;
+  /** The HS card offers the partner's ready landings (lib/hs-ready-links — what LION's Campaign URL
+   *  Builder hands a buyer) as a pick above the link field. The link stays free text either way;
+   *  without this it is only ever pasted, as it always was on the first team. */
+  hsReadyLinks: boolean;
   /** LION pools whose slug carries no team prefix (globecoders-RENT-*) — the first team's. */
   sharedPools: boolean;
   /** Logins are the shared tools directory (`gc.up_users`, same accounts as Amazon Tools, with the
@@ -69,6 +73,7 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     platforms: ["google", "tiktok", "snap"],
     ownerTools: ["accounts", "autoLandings", "tokens", "sessions", "avKeys"],
     pagesRegistry: true,
+    hsReadyLinks: false,
     sharedPools: true,
     toolsDirectory: true,
     openApi: true,
@@ -85,6 +90,8 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     platforms: [],
     ownerTools: ["accounts"],
     pagesRegistry: false,
+    // Owner ask 13.10: the team picks the partner's Cars / MKD landings from a list on the card.
+    hsReadyLinks: true,
     sharedPools: false,
     toolsDirectory: false,
     openApi: false,

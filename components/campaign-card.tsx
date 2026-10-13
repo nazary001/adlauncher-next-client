@@ -20,12 +20,15 @@ import {
   PLACEMENTS,
   PROFILES,
   REDIRECT_TYPES,
+  type RichOption,
   accountsFor,
   geoSummary,
   pagesFor,
   pixelsFor,
 } from "@/lib/catalog";
 import { hsFinalLink, hsLinkSegments, hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
+import { hsReadyLinkOf, hsReadyLinksFor } from "@/lib/hs-ready-links";
+import { TEAM } from "@/lib/team";
 import { TOOL_MARK, toolEnsureMark } from "@/lib/tool-launch";
 import { DEFAULT_PLATFORM_CHOICE, PLATFORM_CHOICES } from "@/lib/publisher-platforms";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
@@ -66,6 +69,23 @@ const LINK_ROLE_CLASS: Record<LinkRole, string> = {
   fire: "text-launch2",
   pixel: "text-accent2",
 };
+
+/** Picker rows of the HS ready landings (lib/hs-ready-links) for a redirect type, built once per
+ *  type: the niche is the section, the language the tag — "Cars · Captcha 3 · ES". */
+const READY_LINK_OPTIONS = new Map<string, RichOption[]>();
+function readyLinkOptions(redirectType: string): RichOption[] {
+  let rows = READY_LINK_OPTIONS.get(redirectType);
+  if (!rows) {
+    rows = hsReadyLinksFor(redirectType).map((l) => ({
+      value: l.url,
+      label: `${l.short} · ${l.kind}`,
+      group: l.niche,
+      tag: l.lang,
+    }));
+    READY_LINK_OPTIONS.set(redirectType, rows);
+  }
+  return rows;
+}
 
 /** Human list of what a card is still missing to launch — partner-aware (mirrors isLaunchable +
  *  launchReadyOpts), so the draft-dot tooltip names the real blockers instead of a fixed string. */
@@ -502,6 +522,15 @@ function CampaignCardBase({
     tag: l.flow === "quiz" ? "QUIZ" : l.lang,
     tagTone: l.flow === "quiz" ? ("warn" as const) : l.lang === "ES" ? ("ok" as const) : ("dim" as const),
   }));
+  // HS ready landings — only on a team that has them (lib/team hsReadyLinks): the partner pages
+  // LION's Campaign URL Builder hands out, for THIS card's redirect type. A pick only fills the link
+  // field below — the link stays the one truth, so a pasted one works exactly as it always did.
+  const readyOn = hsMode && TEAM.hsReadyLinks;
+  const readyOptions = readyOn ? readyLinkOptions(c.redirectType) : [];
+  const readyLink = readyOn ? hsReadyLinkOf(c.link) : null;
+  // A ready landing of ANOTHER redirect type sits in the field (the type was switched after the
+  // pick): said under the field and never rewritten — the buyer decides which of the two is wrong.
+  const readyMismatch = readyLink && readyLink.redirectType !== c.redirectType ? readyLink : null;
   const conversions = c.optimization === "conversions";
   // AIF: the cabinet's OFFERABLE pixels (token catalog minus the retired «GC for AIF» / «GC
   // for MO» — owner call 09-02 pt3) feed the picker; pickAifPixel is the auto-default (the
@@ -1319,10 +1348,29 @@ function CampaignCardBase({
                   ) : (
                     <Field
                       label="Destination link"
-                      hint={hsMode ? "paste the bare landing — tracking + the picked pixel are appended" : undefined}
+                      hint={
+                        hsMode
+                          ? readyOptions.length
+                            ? "pick a ready landing or paste a bare one — tracking + the picked pixel are appended"
+                            : "paste the bare landing — tracking + the picked pixel are appended"
+                          : undefined
+                      }
                       error={hsMode && c.link.trim() !== "" && !isHttpUrl(c.link) ? "Must be an http(s) URL" : undefined}
                     >
                       <div>
+                        {readyOptions.length ? (
+                          <div className="mb-2">
+                            <SearchSelect
+                              value={readyLink && !readyMismatch ? readyLink.url : ""}
+                              onChange={(v) => patch({ link: v })}
+                              options={readyOptions}
+                              placeholder="Pick a ready landing — Cars / MKD"
+                              emptyHint="No ready landings match"
+                              ariaLabel="Ready landing"
+                              facets
+                            />
+                          </div>
+                        ) : null}
                         <TextInput
                           value={c.link}
                           onChange={(e) => patch({ link: e.target.value })}
@@ -1330,6 +1378,13 @@ function CampaignCardBase({
                           placeholder="https://…"
                           className="font-mono text-[12px]"
                         />
+                        {readyMismatch ? (
+                          <p className="mt-1.5 text-[11px] leading-snug text-warn">
+                            This is a {readyMismatch.redirectType} landing — the card&apos;s redirect type is{" "}
+                            {REDIRECT_TYPES.find((t) => t.value === c.redirectType)?.label ?? c.redirectType}.{" "}
+                            {readyOptions.length ? "Pick this type's landing from the list, or switch the type back." : "Switch the type back, or paste the link this type needs."}
+                          </p>
+                        ) : null}
                         {/* HS link builder preview — the EXACT link the launch will send (same
                             segments the payload joins); pixel slot mirrors the Pixel field live. */}
                         {hsMode && isHttpUrl(c.link) ? (
