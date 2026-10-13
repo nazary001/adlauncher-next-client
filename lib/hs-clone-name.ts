@@ -9,6 +9,17 @@
 // name on the campaign through a campaign-level Graph write (allowed even under the VD-C1 ad-set
 // ward; LION syncs the Facebook name back into its lists within ~15-20 min).
 
+/** A clone is born by the CLONING team's LION key, whichever team launched the source (any team's
+ *  campaign is a clone source since 13.10) — so the grammar prefix the board keeps from the source
+ *  carries the cloning team's acronym, never the source's: `[DD/MM] (ELV-02) API …` → `[DD/MM]
+ *  (GLO-02) API …`. Without it the board previewed — and the pump's Graph rename would write — a
+ *  name that says another team launched the clone. Only the acronym slot right after the date is
+ *  touched; a prefix that does not follow the grammar is returned as it is. */
+export function withOwnAcr(prefix: string, acr: string): string {
+  const own = acr.trim();
+  return own ? prefix.replace(/^(\s*\[\d{2}\/\d{2}\]\s*)\([^)]*\)/, `$1(${own})`) : prefix;
+}
+
 /** LION appends the suffix verbatim; keep the wire bounded like the legacy single-shot path. */
 export const LION_NAME_SUFFIX_MAX = 80;
 

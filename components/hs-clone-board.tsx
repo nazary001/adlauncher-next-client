@@ -9,7 +9,7 @@ import { useHsTaskManager } from "./hs-task-manager";
 import { UploadingNotice } from "./upload-guard";
 import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
 import { CLONE_DEFAULT_BUDGET, bidKind, bidTag, budgetOnStrategyChange, limitMoneyCents, moneyCentsLabel, moneyLabel, parseMoney } from "@/lib/types";
-import { lionWireSuffix } from "@/lib/hs-clone-name";
+import { lionWireSuffix, withOwnAcr } from "@/lib/hs-clone-name";
 import { carriesOwnName } from "@/lib/own-name";
 import { BID_STRATEGIES, geoSummary } from "@/lib/catalog";
 import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from "@/lib/hs-launch";
@@ -24,7 +24,7 @@ import { rememberedRowIds } from "./wave-memory-core";
 import { relabelNameGeo } from "@/lib/targeting-override";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import type { PartnerId } from "@/lib/partners";
-import { teamHas } from "@/lib/team";
+import { TEAM, teamHas } from "@/lib/team";
 import {
   ChevronDownIcon,
   CopyIcon,
@@ -137,7 +137,8 @@ function origBidLabel(info: NonNullable<Row["info"]>): string {
 
 /** Split a LION name by its validated grammar (shared splitHsGrammar): the STRUCTURED prefix
  *  `[DD/MM] (ACR) API[ (CLONE)] - (LABEL) - [CODES] - [LANG] - ...` stays fixed (re-dated to
- *  today, "(CLONE)" ensured — that part LION owns), while the free-text TAIL after it is the
+ *  today, "(CLONE)" ensured, the acronym set to THIS team's — a source may be another team's
+ *  campaign; that part LION owns), while the free-text TAIL after it is the
  *  buyer's to replace. A source's channel marker ("TOKEN - ", sits right before the tail) is
  *  STRIPPED here: the marker states how a run was CREATED, so the clone re-earns it only from
  *  the rail it fires on — never by inheritance. Unparseable names fall back to
@@ -147,7 +148,8 @@ function splitLionName(sourceName: string, ddmm: string): { prefix: string; tail
   if (!m) return { prefix: "", tail: stripTokenMark(sourceName) };
   let prefix = m.prefix.replace(/^\[\d{2}\/\d{2}\]/, `[${ddmm}]`);
   if (!/\(CLONE\)/.test(prefix)) prefix = prefix.replace(/API/, "API (CLONE)");
-  return { prefix, tail: stripTokenMark(m.tail.trim()) };
+  // The clone is this team's, whoever launched the source (lib/hs-clone-name withOwnAcr).
+  return { prefix: withOwnAcr(prefix, TEAM.label), tail: stripTokenMark(m.tail.trim()) };
 }
 
 /** Default tail = the source's old tail + " - <owner>" (the buyer duplicating it), matching the
