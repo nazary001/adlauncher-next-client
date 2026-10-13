@@ -16,10 +16,13 @@
 // Scope = partner: HS rides the default tables, MO under /mo, AIF under /aif. The AIF scope is
 // EMPTY until the box syncs AIF pages — reads answer zero rows and reports log "page not found",
 // both harmless by construction here.
+// Team (the box's update of 13.10): the HS tables hold one fanpage list per launcher team, read as
+// `/fb/api/v1/pages?team=<team>` (lib/team teamPagesQuery) — the un-filtered read is every team's
+// rows. MO / AIF have no teams and are read as before; the usage report goes by page id.
 
 import { gatePages, pageGateRefusal, registryRowStates } from "./hs-page-gate";
 import type { PartnerId } from "./partners";
-import { TEAM } from "./team.ts";
+import { TEAM, teamPagesQuery } from "./team.ts";
 
 const BASE = (process.env.HS_PAGES_API_URL || "https://hs.gctracking.xyz").replace(/\/+$/, "");
 const KEY = process.env.HS_PAGES_API_KEY ?? "";
@@ -140,7 +143,8 @@ async function registrySnapshot(partner: PartnerId): Promise<Snapshot> {
 
   const next = (async () => {
     try {
-      const body = await registryGet(partner, "/fb/api/v1/pages");
+      // The HS list is the team's own; the other scopes carry no teams.
+      const body = await registryGet(partner, `/fb/api/v1/pages${partner === "br" ? teamPagesQuery() : ""}`);
       const snap = shapeSnapshot((body.pages as RegistryRow[] | undefined) ?? []);
       snapshots.set(partner, snap);
       return snap;

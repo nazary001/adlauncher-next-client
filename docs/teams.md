@@ -146,8 +146,10 @@ must be updated in the same commit.
   `hsChannels` / `platforms`, give the Vercel project that rail's own credentials, redeploy. Google
   and TikTok additionally hard-code the first team's account book (`lib/google-bid.ts`,
   `GLO-HS-NNN`) — scope it per team before switching them on.
-- **The fanka gate** — once hs-tools tracks the team's fanpages: `pagesRegistry: true` and set
-  `HS_PAGES_API_URL` / `HS_PAGES_API_KEY`.
+- **The fanka gate** — the registry keeps one HS fanpage list per team and each launcher reads its
+  own (`/fb/api/v1/pages?team=glo-02`, `lib/team.ts` `teamPagesQuery`). Once that list holds the
+  team's fanpages (13.10: none of GLO-02's 5): `pagesRegistry: true` and set `HS_PAGES_API_URL` /
+  `HS_PAGES_API_KEY`. Not before — the gate hides every page the registry has no OK row for.
 
 ## A third team
 

@@ -92,7 +92,10 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     strictCampaigns: false,
   },
   // The second team (08.10): only the HS partner, only through LION, Facebook only. Its fanpages are
-  // not in the hs-tools registry (probed 08.10: 0 of 10), so the fanka gate cannot judge them.
+  // not in the hs-tools registry, so the fanka gate cannot judge them (probed 08.10: 0 of 10; 13.10,
+  // after the registry got its per-team lists: `?team=glo-02` answers 0 rows, the team's 5 fanpages
+  // are in no list). Turn `pagesRegistry` on only once the registry lists them — the gate hides
+  // every page it has no OK row for.
   "glo-02": {
     id: "glo-02",
     label: "GLO-02",
@@ -293,6 +296,13 @@ export function teamAllowsJob(scope: string, kind: string, team: TeamConfig = TE
   const channel = HS_KIND_CHANNEL[kind];
   return Boolean(channel) && team.hsChannels.includes(channel);
 }
+
+// ---- the fanpage registry -------------------------------------------------------------------------
+
+/** The hs-tools pages registry keeps one HS fanpage list per launcher team (its update of 13.10:
+ *  `/fb/api/v1/pages?team=glo-01 | glo-02`, `team=*` = every team's, an unknown team = 400). The
+ *  filter this team's reads carry — a launcher never reads the un-filtered list. */
+export const teamPagesQuery = (team: TeamConfig = TEAM): string => `?team=${team.id}`;
 
 // ---- LION profiles -----------------------------------------------------------------------------
 
