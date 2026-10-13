@@ -1,7 +1,7 @@
 // ONE LION duplicate shot — the body of /api/hs/duplicate's phase 1 (jittered submits), moved
 // here verbatim so the durable queue can run it as a job (lib/launch-queue-runners hs.dup):
-// re-read the source's bid facts, judge whose campaign it is, plan the bid, resolve the targeting
-// override, claim the account's launch slot, submit to LION, read LION's resolved bidding back,
+// re-read the source's bid facts (any team's campaign may be the source), plan the bid, resolve the
+// targeting override, claim the account's launch slot, submit to LION, read LION's resolved bidding back,
 // record the task id on the row, keep the fanka ledger. The route still validates the wave
 // (binds against LION's catalog, assignments, the launch-limit precheck) before anything is queued.
 // The poll + activate tail (the old phase 2) is the wave's hs.dup.follow job (lib/hs-follow-core).
@@ -13,10 +13,9 @@
 import { normalizeRoasGoal } from "@/lib/types";
 import { reportPagesUsed } from "@/lib/hs-pages";
 import { AcctLimitedError, acctKey, claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
-import { LionError, lionCampaignAds, lionCampaignRefusal, lionDuplicate, lionSourceBidFacts, lionSourceTeam, type LionLocale } from "@/lib/lion";
+import { LionError, lionCampaignAds, lionDuplicate, lionSourceBidFacts, type LionLocale } from "@/lib/lion";
 import { dupBidPlan, dupBiddingMismatch } from "@/lib/lion-dup-bid";
 import { lionDuplicateTargeting, type GeoOverride } from "@/lib/targeting-override";
-import { teamMayUseCampaign } from "@/lib/team";
 import type { ShotBinds } from "@/lib/hs-shot-binds";
 
 /** One validated shot of a duplicate wave, as the route resolved it (JSON — it is stored in the job). */
@@ -49,8 +48,7 @@ export type HsDupShotResult =
   | {
       outcome: "refused";
       error: string;
-      /** A fact of the SOURCE: its other copies would be refused identically (LION preflight, a
-       *  foreign source, a 4xx). */
+      /** A fact of the SOURCE: its other copies would be refused identically (LION preflight, a 4xx). */
       family: boolean;
       /** The account's 30-min window is full — its other copies would hit it too. */
       accountFull: boolean;
@@ -113,15 +111,6 @@ export async function runHsDupShot(s: HsDupShot, deps: HsDupShotDeps): Promise<H
     // alone (strategy omitted = the source's), or nothing (inherit). ROAS values ride as `roas_goal`
     // (multiplier), NEVER as starting_bid. Cap values are Meta account units of the DESTINATION.
     const facts = await cached(factsCache, s.campaignId, now, () => lionSourceBidFacts(s.campaignId));
-    // LION would duplicate ANY campaign of the company (lib/lion "whose campaign is it") — a source
-    // that is not this team's to work on kills its whole family here: no slot, no call.
-    const sourceTeam = await lionSourceTeam(s.campaignId);
-    if (!teamMayUseCampaign(sourceTeam)) {
-      // Another team's campaign is final. "unknown" (a strict team, and LION does not show the source
-      // right now — its own newborn lags in details/) says "try again in a minute": nothing was sent
-      // and no slot was claimed, so that copy can be retried.
-      return refuse(lionCampaignRefusal(s.campaignId, sourceTeam), { family: sourceTeam === "foreign", retryable: sourceTeam !== "foreign" });
-    }
     const plan = dupBidPlan({
       sourceStrategy: facts.bidStrategy || s.bidStrategy,
       override: s.bidStrategyOverride,

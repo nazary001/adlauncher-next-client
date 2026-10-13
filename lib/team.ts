@@ -63,7 +63,9 @@ export type TeamConfig = {
   /** An API route this file does not classify: allowed (the first team — nothing may break there
    *  because a route was forgotten here) or refused (a restricted team fails closed). */
   openApi: boolean;
-  /** How a campaign met by ID (a clone / JURO source, an activation) is judged — see judgeCampaign.
+  /** How a campaign the team is about to CHANGE (an activation that arrives by ID) is judged — see
+   *  judgeCampaign. A clone / JURO SOURCE is not judged at all: any campaign LION shows can be
+   *  cloned, whichever team launched it (owner 13.10).
    *  false — the first team, as it always was: every campaign is workable EXCEPT one whose name
    *  carries another launcher team's acronym. true — a team that came later: a campaign is workable
    *  only when it is provably the team's own (its name carries the team's acronym, or it lives in one
@@ -333,10 +335,12 @@ export function teamAcrProblem(acr: string | null | undefined, team: TeamConfig 
 
 // ---- LION campaigns ----------------------------------------------------------------------------
 
-// LION's campaign reads are company-wide too (probed 08.10: the GLO-02 key read details/ and
-// targeting/ of live GLO-01 campaigns), so a campaign id typed into the clone board — or sent by
-// hand — may be another team's. LION stamps the creator's acronym at the head of every name it
-// builds, clones and JURO included: "[06/10] (GLO-01) API - …" (all 28 457 GLO-01 rows of 08.10 do).
+// LION's campaign reads AND writes are company-wide too (probed 08.10: the GLO-02 key read details/
+// and targeting/ of live GLO-01 campaigns). Reading another team's campaign as a clone source is
+// wanted (owner 13.10) — its copy is born in the team's own account; CHANGING one (an activation
+// sent by hand with a foreign id) is not, so that is judged here. LION stamps the creator's acronym
+// at the head of every name it builds, clones and JURO included: "[06/10] (GLO-01) API - …" (all
+// 28 457 GLO-01 rows of 08.10 do).
 const NAME_ACR = /^\s*\[\d{2}\/\d{2}\]\s*\(([A-Za-z]+-\d+)\)/;
 
 /** The acronym at the head of a LION-built campaign name, upper-cased; null when the name carries
@@ -365,8 +369,8 @@ export function judgeCampaign(name: string | null | undefined, ownAcr: string, i
   return inOwnAccount === null ? "unknown" : inOwnAccount ? "own" : "foreign";
 }
 
-/** May the team work on a campaign with this verdict? The first team: anything but a foreign one.
- *  A strict team: only its own. */
+/** May the team CHANGE a campaign with this verdict? The first team: anything but a foreign one.
+ *  A strict team: only its own. (A clone source needs no verdict.) */
 export const teamMayUseCampaign = (verdict: CampaignTeam, team: TeamConfig = TEAM): boolean =>
   team.strictCampaigns ? verdict === "own" : verdict !== "foreign";
 

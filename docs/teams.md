@@ -35,9 +35,12 @@ on its own:
 
 - **Profiles** — by the slug's prefix (`glo-02-3` is GLO-02's). The list is filtered and every read
   and campaign-creating write refuses a foreign slug before a request leaves.
-- **Campaigns met by id** (clone / JURO sources, activation) — by the acronym LION stamps at the head
-  of every name it builds (`[06/10] (GLO-01) API - …`), else by the ad account. GLO-02 works only on a
-  campaign that is provably its own; GLO-01 on everything except a GLO-02 campaign.
+- **Clone / JURO sources** — not separated (owner 13.10): any campaign LION shows can be cloned,
+  whichever team launched it. The copy is born on the team's own profile and ad account; a JURO copy
+  re-uses the source's page posts, so the picked profile must carry their fanpage.
+- **Campaigns the team changes** (an activation that arrives by id) — by the acronym LION stamps at
+  the head of every name it builds (`[06/10] (GLO-01) API - …`), else by the ad account. GLO-02
+  activates only a campaign that is provably its own; GLO-01 everything except a GLO-02 campaign.
 - **Stored state** — users, the launch queue, the task registry, per-account launch limits and
   account assignments live in the team's own database. A build refuses to run on another team's.
 - **Sessions** — own `AUTH_SECRET` per team, and the cookie carries the team as well.

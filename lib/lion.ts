@@ -3,7 +3,7 @@
 
 import { juroStoryPages } from "./juro";
 import { activateRetryDelay } from "./activate-retry";
-import { type CampaignTeam, TEAM, judgeCampaign, teamAcrProblem, teamMayUseCampaign, teamOffersAccount, teamOwnsProfile } from "./team.ts";
+import { type CampaignTeam, TEAM, judgeCampaign, teamAcrProblem, teamOffersAccount, teamOwnsProfile } from "./team.ts";
 
 const BASE = (process.env.LION_BASE || "https://lion.highstakes.tech").replace(/\/+$/, "");
 const TOKEN = process.env.LION_TOKEN ?? "";
@@ -236,11 +236,14 @@ export async function lionAccountPixels(slug: string, accountId: string): Promis
 // ---------- whose campaign is it ----------
 //
 // LION answers details/ and targeting/ for ANY campaign of the company, whatever key asks (probed
-// 08.10 — like the profile list), and takes a duplicate of any of them. So a campaign that arrives
-// by ID — a clone / JURO source, an activation — is judged before it is used (lib/team judgeCampaign:
-// the acronym LION stamps at the head of the name, else the ad account). Every details/ row that
-// passes through this file leaves its verdict here, so the write that follows a read in the same
-// request costs nothing extra.
+// 08.10 — like the profile list), takes a duplicate of any of them and flips the status of any.
+//   • A clone / JURO SOURCE is only read, and the copy is born on the team's own profile and ad
+//     account — so a source may be anybody's campaign (owner 13.10: "клонировать же чтобы они могли
+//     с любой команды кампании"; until then a team was shown its own campaigns only, and GLO-02's
+//     board answered "not a GLO-02 campaign" to every id pasted from another team). The source
+//     readers and the duplicate below ask no question about whose it is.
+//   • A campaign the team CHANGES — an activation that arrives by ID — is judged first (lib/team
+//     judgeCampaign: the acronym LION stamps at the head of the name, else the ad account).
 
 type TeamedRow = { campaign_id?: string | number; campaign_name?: string; account_id?: string | number; error?: string };
 
@@ -305,34 +308,11 @@ export async function lionCampaignTeam(campaignId: string, timeoutMs = 8_000): P
   return Promise.race([read, late]).finally(() => clearTimeout(timer));
 }
 
-/** The verdict a SOURCE campaign goes by right before it is used. The first team pays nothing for it
- *  — only what a read of this instance already learned counts, and "unknown" passes as it always
- *  did; a strict team reads the source once when nothing is remembered. */
-export async function lionSourceTeam(campaignId: string): Promise<CampaignTeam> {
-  const known = fresh(campaignTeams.get(campaignId));
-  if (known) return known;
-  if (!TEAM.strictCampaigns) return "unknown";
-  const read = await lionCampaignTeam(campaignId);
-  return read;
-}
-
-/** Why this team may not work on a campaign with that verdict — the text a refusal carries. */
+/** Why this team may not change a campaign with that verdict — the text a refusal carries. */
 export const lionCampaignRefusal = (campaignId: string, verdict: CampaignTeam): string =>
   verdict === "foreign"
     ? `campaign ${campaignId} is not a ${TEAM.label} campaign`
     : `campaign ${campaignId} could not be confirmed as a ${TEAM.label} campaign — LION does not show it right now; try again in a minute`;
-
-/** What a reader adds to the blank row of a source this team may not work on: `foreign` when the
- *  campaign is provably another team's. A strict team's "unknown" (LION shows too little to tell)
- *  stays unmarked — it may be the team's own newborn. */
-const foreignMark = (verdict: CampaignTeam | undefined): { foreign?: true } => (verdict === "foreign" ? { foreign: true } : {});
-
-/** The last word before a duplicate is submitted (the routes refuse earlier and cleaner — this is
- *  the backstop no caller can skip): the SOURCE must be a campaign this team may work on. */
-async function assertOwnCampaign(campaignId: string): Promise<void> {
-  const verdict = await lionSourceTeam(campaignId);
-  if (!teamMayUseCampaign(verdict)) throw new LionError(lionCampaignRefusal(campaignId, verdict), 403);
-}
 
 // ---------- writes ----------
 
@@ -377,7 +357,8 @@ export type LionDuplicationResult = {
 
 /**
  * Clone ONE existing LION campaign into the picked binds (playbook-proven flow: duplicate →
- * creation-status → activate). `starting_budget` is integer CENTS of the account currency
+ * creation-status → activate). The SOURCE may be any campaign LION shows, whichever team launched
+ * it; the binds must be this team's own profile. `starting_budget` is integer CENTS of the account currency
  * (write-side convention). LION builds the clone's WHOLE name itself (re-dated prefix, "(CLONE)"
  * marker, "<landing family> <lang> <random5>") and `name_suffix` is the ONLY naming input its
  * body takes (partner API docs 09-08) — it is appended verbatim at the end. A `name` field is not
@@ -415,7 +396,6 @@ export async function lionDuplicate(args: {
   locales?: { name: string; id: string }[];
 }): Promise<LionDuplicationResult> {
   assertOwnProfile(args.profile_slug);
-  await assertOwnCampaign(args.campaign_id);
   const body = (await lionPostOnce("/api/facebook/campaigns/duplicate/", {
     profile_slug: args.profile_slug,
     account_id: args.account_id,
@@ -514,9 +494,6 @@ export type LionJuroSource = {
   name: string;
   /** "UNREADABLE" = details/ can't see the campaign right now (deleted or fresh-campaign lag). */
   status: string;
-  /** An UNREADABLE source that is ANOTHER TEAM's campaign (lib/team judgeCampaign "foreign"): final,
-   *  unlike one LION merely cannot show right now. Nothing else of such a campaign is handed on. */
-  foreign?: boolean;
   /** The page-post ids behind the source's ads — what jurar re-uses. Empty on UNREADABLE. */
   stories: string[];
   /** Page carrying those posts (story id prefix) — the executor profile must list it. */
@@ -543,7 +520,6 @@ export async function lionJuroSources(campaignIds: string[]): Promise<Record<str
     campaign_status?: string;
     error?: string;
     bid_strategy?: string;
-    account_id?: string | number;
     adsets?: Array<{ bid_amount?: number; adset_bid?: number; ads?: Ad[] }>;
   };
   type TargetingRow = {
@@ -564,16 +540,9 @@ export async function lionJuroSources(campaignIds: string[]): Promise<Record<str
     : [];
   const tById = new Map(targeting.map((t) => [String(t.campaign_id ?? ""), t]));
   const dById = new Map(details.map((d) => [String(d.campaign_id ?? ""), d]));
-  const teams = await judgeRows(details);
   for (const cid of campaignIds) {
     const d = dById.get(cid);
     const t = tById.get(cid);
-    // A campaign that is not this team's to work on reads exactly like one LION cannot show:
-    // nothing of it is handed on — no posts, no targeting. Only the reason differs (`foreign`).
-    if (d && !d.error && !teamMayUseCampaign(teams.get(cid) ?? "unknown")) {
-      out[cid] = { campaignId: cid, name: "", status: "UNREADABLE", stories: [], page: "", countries: [], locales: [], adsCount: 0, bidStrategy: "", bid: null, ...foreignMark(teams.get(cid)) };
-      continue;
-    }
     const locales = (t?.locales_ids ?? [])
       .map((id, i) => ({ id: Number(id), name: String((t?.locales ?? [])[i] ?? "") }))
       .filter((l) => Number.isFinite(l.id) && l.id > 0);
@@ -735,9 +704,6 @@ export type LionSourceInfo = {
   campaignId: string;
   name: string;
   status: string;
-  /** An UNREADABLE source that is ANOTHER TEAM's campaign — the board says so instead of "LION can't
-   *  read it" (a team that owns nothing yet met that on every id it pasted, 12.10). */
-  foreign?: boolean;
   /** MAJOR units (dollars) — LION reads are major, writes are cents (asymmetry, verified live). */
   budget: number | null;
   /** Ad set bid as LION reports it — MAJOR/decimal like all LION reads (cap $2.45 reads as
@@ -759,7 +725,8 @@ export type LionSourceInfo = {
 
 /** Read source campaigns for the duplicator table: details/ (name, budget, adsets/ads) +
  *  targeting/ (countries), both answering {campaignsData:[…]} ARRAYS (form gotcha, verified
- *  07-13 — never index by campaign id). A source details/ can't read ("Campaign data not
+ *  07-13 — never index by campaign id). Any campaign LION shows is read in full, whichever team
+ *  launched it (see "whose campaign is it"). A source details/ can't read ("Campaign data not
  *  found") is reported with status "UNREADABLE" — its duplicate would die the same way. */
 export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceInfo[]> {
   if (campaignIds.length === 0) return [];
@@ -774,7 +741,6 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
     campaign_budget?: number;
     /** The account's real billing currency (partner docs: details/ account_currency). */
     account_currency?: string;
-    account_id?: string | number;
     adsets?: Array<{
       bid_amount?: number;
       adset_bid?: number;
@@ -796,14 +762,8 @@ export async function lionSourceInfo(campaignIds: string[]): Promise<LionSourceI
     targeting.map((t) => [String(t.campaign_id ?? ""), (t.countries_code ?? t.countries ?? []).map(String)]),
   );
   const byId = new Map(details.map((d) => [String(d.campaign_id ?? ""), d]));
-  const teams = await judgeRows(details);
   const rows = campaignIds.map((cid) => {
     const d = byId.get(cid);
-    // Not this team's campaign → it reads like one LION cannot show, and nothing of it is handed on
-    // but the reason (`foreign`).
-    if (d && !d.error && !teamMayUseCampaign(teams.get(cid) ?? "unknown")) {
-      return { campaignId: cid, name: "", status: "UNREADABLE", budget: null, bid: null, bidStrategy: "", currency: "", adsCount: 0, countries: [] as string[], pages: [] as { pageId: string; ads: number }[], ...foreignMark(teams.get(cid)) };
-    }
     if (!d || d.error) {
       return { campaignId: cid, name: "", status: "UNREADABLE", budget: null, bid: null, bidStrategy: "", currency: "", adsCount: 0, countries: geoById.get(cid) ?? [], pages: [] as { pageId: string; ads: number }[] };
     }
@@ -860,17 +820,11 @@ export async function lionSourceBidFacts(campaignId: string): Promise<{ bidStrat
     const rows = Array.isArray(body?.campaignsData)
       ? (body!.campaignsData as Array<{
           campaign_id?: string | number;
-          campaign_name?: string;
-          account_id?: string | number;
-          error?: string;
           bid_strategy?: string;
           account_currency?: string;
           adsets?: Array<{ bid_amount?: number; adset_bid?: number }>;
         }>)
       : [];
-    // The verdict is remembered for the submit that follows (lionSourceTeam); a source that is
-    // another team's gives no facts at all.
-    if ((await judgeRows(rows)).get(campaignId) === "foreign") return { bidStrategy: "", currency: "", bid: null };
     const row = rows.find((r) => String(r.campaign_id ?? "") === campaignId);
     // The source's own cap (major, as LION reads) — the board prefills the Bid with it, and the
     // plan must tell that prefill from a value the buyer typed (cross-currency guard, audit 09-09).
@@ -915,19 +869,16 @@ export type LionCampaignReality = { status: string; adsCount: number };
  *  throttle, and a stale answer here would mislabel a live launch. */
 export async function lionCampaignAds(campaignIds: string[]): Promise<Record<string, LionCampaignReality>> {
   if (campaignIds.length === 0) return {};
-  type Row = TeamedRow & { campaign_status?: string; adsets?: Array<{ ads?: unknown[] }> };
+  type Row = { campaign_id?: string | number; campaign_status?: string; adsets?: Array<{ ads?: unknown[] }> };
   const body = (await lionPost("/api/facebook/campaigns/details/", {
     campaign_ids: campaignIds,
   })) as Record<string, unknown> | null;
   const rows = Array.isArray(body?.campaignsData) ? (body!.campaignsData as Row[]) : [];
   const out: Record<string, LionCampaignReality> = {};
   for (const id of campaignIds) out[id] = { status: "UNREADABLE", adsCount: 0 };
-  const teams = await judgeRows(rows);
   for (const r of rows) {
     const id = str(r.campaign_id);
     if (!id) continue;
-    // Another team's campaign stays "UNREADABLE" here — its status and ad count are not ours to tell.
-    if (!r.error && teams.get(id) === "foreign") continue;
     const adsets = Array.isArray(r.adsets) ? r.adsets : [];
     out[id] = {
       status: str(r.campaign_status),

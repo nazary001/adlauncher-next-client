@@ -13,7 +13,7 @@ import { hsWireBid } from "@/lib/hs-launch";
 import { juroBidPlan, juroConversionEvent, juroStoryPages, juroWireCountries } from "@/lib/juro";
 import { hsPageRefusal, reportPagesUsed } from "@/lib/hs-pages";
 import { AcctLimitedError, acctKey, claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
-import { LionError, type LionJuroSource, lionCampaignRefusal, lionJurar, lionJuroSources } from "@/lib/lion";
+import { LionError, type LionJuroSource, lionJurar, lionJuroSources } from "@/lib/lion";
 import type { GeoOverride } from "@/lib/targeting-override";
 import type { ShotBinds } from "@/lib/hs-shot-binds";
 
@@ -92,10 +92,7 @@ export function resolveJuroShotWire(
       conversionEvent: string;
     } {
   if (src.status === "UNREADABLE") {
-    // Another team's campaign (final) is named as such; anything else LION may show a minute later.
-    return src.foreign
-      ? lionCampaignRefusal(s.campaignId, "foreign")
-      : "LION can't read this source right now (deleted, or the fresh-campaign lag) — its JURO copy would die the same way";
+    return "LION can't read this source right now (deleted, or the fresh-campaign lag) — its JURO copy would die the same way";
   }
   if (src.stories.length === 0) return "source has no page posts (object stories) to relaunch";
   const pages = juroStoryPages(src.stories);
@@ -154,9 +151,9 @@ export async function runHsJuroShot(s: HsJuroShot, deps: HsJuroShotDeps): Promis
   const wire = resolveJuroShotWire(s, src);
   // A page/geo/bid refusal is a fact of the SOURCE for this profile — copies of the source bound
   // to the same profile refuse identically; other rows may carry another profile. A source LION
-  // cannot show RIGHT NOW (not another team's — that is final) may clear: nothing was sent and no
-  // slot was claimed, so that copy can be retried, its family with it.
-  if (typeof wire === "string") return refuse(wire, { family: true, retryable: src.status === "UNREADABLE" && !src.foreign });
+  // cannot show RIGHT NOW may clear: nothing was sent and no slot was claimed, so that copy can be
+  // retried, its family with it.
+  if (typeof wire === "string") return refuse(wire, { family: true, retryable: src.status === "UNREADABLE" });
   // Owner rule 2026-09-07: JURO copies land on the source post's OWN fanka — it must be OK in
   // hs-tools like any picked page (family-scoped: every copy of this source refuses alike).
   const fankaRefusal = await hsPageRefusal("br", wire.pages.map((p) => ({ id: p.pageId })));
