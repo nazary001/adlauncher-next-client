@@ -47,6 +47,11 @@ export type TeamConfig = {
    *  Builder hands a buyer) as a pick above the link field. The link stays free text either way;
    *  without this it is only ever pasted, as it always was on the first team. */
   hsReadyLinks: boolean;
+  /** A LION profile lists its persona's own PERSONAL ad account next to the team's business ones
+   *  (isPersonalAccount). true — it is part of the bind space, as it always was on the first team.
+   *  false — it is left out at the source (lib/lion lionProfileData): no picker offers it and no
+   *  creating route accepts it. */
+  personalAccounts: boolean;
   /** LION pools whose slug carries no team prefix (globecoders-RENT-*) — the first team's. */
   sharedPools: boolean;
   /** Logins are the shared tools directory (`gc.up_users`, same accounts as Amazon Tools, with the
@@ -74,6 +79,7 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     ownerTools: ["accounts", "autoLandings", "tokens", "sessions", "avKeys"],
     pagesRegistry: true,
     hsReadyLinks: false,
+    personalAccounts: true,
     sharedPools: true,
     toolsDirectory: true,
     openApi: true,
@@ -92,6 +98,8 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     pagesRegistry: false,
     // Owner ask 13.10: the team picks the partner's Cars / MKD landings from a list on the card.
     hsReadyLinks: true,
+    // Owner ask 13.10: "из списка акаунтов убери личку … чтобы были только норм аки".
+    personalAccounts: false,
     sharedPools: false,
     toolsDirectory: false,
     openApi: false,
@@ -289,6 +297,21 @@ export function teamOwnsProfile(slug: string, team: TeamConfig = TEAM): boolean 
   const m = TEAM_SLUG.exec(s);
   return m ? m[1].toLowerCase() === team.id : team.sharedPools;
 }
+
+const sameName = (v: string | null | undefined): string => String(v ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+
+/** Is this ad account the profile's own PERSONAL one? LION lists it under the persona's own name: on
+ *  13.10 each of the five GLO-02 profiles carried 51 DRGC-VD-C1-BR-* accounts and one named exactly
+ *  as its persona ("Адель Иванова" on glo-02-1) — the personal one, with no pixel to launch on. A
+ *  profile whose persona name LION leaves empty has no account this can name. */
+export function isPersonalAccount(accountName: string | null | undefined, personaName: string | null | undefined): boolean {
+  const persona = sameName(personaName);
+  return persona !== "" && sameName(accountName) === persona;
+}
+
+/** Is this account of a profile part of the team's bind space (lib/team personalAccounts)? */
+export const teamOffersAccount = (accountName: string | null | undefined, personaName: string | null | undefined, team: TeamConfig = TEAM): boolean =>
+  team.personalAccounts || !isPersonalAccount(accountName, personaName);
 
 /** A LION key of ANOTHER team on this build is a deployment mistake that would launch one team's
  *  campaigns under the other's name: the reason to refuse every LION call, or null when the ACR is

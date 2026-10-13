@@ -28,8 +28,10 @@ const SCRIPT = `
     const p = new URL(String(u));
     calls.push((init?.method ?? "GET") + " " + p.pathname + p.search);
     let body = {};
-    if (p.pathname === "/api/facebook/profiles/list/") body = { profiles: LIVE.map((slug) => ({ slug, label: "L-" + slug, name: "", readonly: false })) };
-    else if (p.pathname === "/api/facebook/profile/data/") body = { data: { accounts: [{ id: "act_1", name: "A", status: 1, currency: "USD" }], pages: [{ id: "11", name: "P" }], locales: [] } };
+    if (p.pathname === "/api/facebook/profiles/list/") body = { profiles: LIVE.map((slug) => ({ slug, label: "L-" + slug, name: "Persona " + slug, readonly: false })) };
+    // Like the live list: the team's business account, and the persona's own personal one under the persona's name.
+    else if (p.pathname === "/api/facebook/profile/data/") body = { data: { accounts: [{ id: "act_1", name: "A", status: 1, currency: "USD" }, { id: "act_9", name: "Persona " + p.searchParams.get("profile_slug"), status: 1, currency: "USD" }], pages: [{ id: "11", name: "P" }], locales: [] } };
+    else if (p.pathname.endsWith("/details/")) body = { campaignsData: [{ campaign_id: "777", campaign_name: "made by hand in Ads Manager", account_id: "act_9" }] };
     else if (p.pathname.endsWith("/pixels/")) body = { pixels: [{ id: "9", name: "px" }] };
     else if (p.pathname.endsWith("/create/")) body = { creation_results: [{ result: "success", task_id: "t1" }] };
     else if (p.pathname.endsWith("/duplicate/")) body = { duplication_results: [{ result: "success", task_ids: ["t2"] }] };
@@ -47,6 +49,9 @@ const SCRIPT = `
   const OWN = process.env.T_OWN, FOREIGN = process.env.T_FOREIGN;
   await attempt("profiles", async () => (await lion.lionProfiles()).map((p) => p.slug));
   await attempt("ownData", async () => (await lion.lionProfileData(OWN)).accounts.length);
+  await attempt("ownAccounts", async () => (await lion.lionProfileData(OWN)).accounts.map((a) => a.name));
+  // a campaign made by hand in the persona's PERSONAL account: whose is it?
+  await attempt("personalAccountCampaign", () => lion.lionCampaignTeam("777"));
   await attempt("foreignData", () => lion.lionProfileData(FOREIGN));
   await attempt("ownPixels", async () => (await lion.lionAccountPixels(OWN, "act_1")).length);
   await attempt("foreignPixels", () => lion.lionAccountPixels(FOREIGN, "act_1"));
@@ -85,6 +90,17 @@ test("glo-02: only its five profiles, a glo-01 profile is refused before any req
     assert.equal(o[k].status, 403, k);
     assert.equal(o[k].calls, 0, `${k}: nothing may be sent for a foreign profile`);
   }
+});
+
+test("a profile's personal ad account: glo-02 is not offered it (and so cannot launch into it), glo-01 keeps its list as it was", () => {
+  const second = under("glo-02", { LION_ACR: "GLO-02", T_OWN: "glo-02-3", T_FOREIGN: "glo-01-39" });
+  assert.deepEqual(second.ownAccounts.value, ["A"]);
+  assert.equal(second.ownData.value, 1);
+  // …while a campaign that already lives in it is still the team's own — only the OFFER loses the account
+  assert.equal(second.personalAccountCampaign.value, "own");
+  const first = under(null, { LION_ACR: "GLO-01", T_OWN: "glo-01-39", T_FOREIGN: "glo-02-1" });
+  assert.deepEqual(first.ownAccounts.value, ["A", "Persona glo-01-39"]);
+  assert.equal(first.ownData.value, 2);
 });
 
 test("glo-02: the un-prefixed RENT pools are the first team's — refused too", () => {

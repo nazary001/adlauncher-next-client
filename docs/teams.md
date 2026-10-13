@@ -20,6 +20,7 @@ the server of that build). Unset = `glo-01` = the launcher as it always was.
 | LION profiles it works on | `glo-01-*`, `globecoders-RENT-*` | `glo-02-*` |
 | hs-tools pages registry (fanka gate) | on | off — its pages are not tracked there |
 | Ready landings on the HS card | no — the link is pasted | a pick above the link field (Cars / MKD) |
+| A profile's personal ad account | listed, as LION lists it | left out — business accounts only |
 | S3 creative bucket | `gc-adlauncher-creatives` | the same bucket, own key namespace |
 
 Everything a team has is declared in **`lib/team.ts`** and nowhere else. The UI hides the rest; the
@@ -120,6 +121,15 @@ pasted landing launches exactly as before, and the tracking tail is appended eit
 The list is `lib/hs-ready-links.ts` (read off the builder 13.10, pinned by
 `tests/hs-ready-links.test.ts`) — another template, niche or language is one more row there. To offer
 it to GLO-01 as well, set `hsReadyLinks: true` in its entry in `lib/team.ts`.
+
+## Business accounts only (GLO-02)
+
+LION lists, next to the team's business ad accounts, the personal ad account of each profile's
+persona — under the persona's own name (`Адель Иванова` in the profile of persona `Адель Иванова`),
+first in the list and with no pixel to launch on. A team with `personalAccounts: false` in
+`lib/team.ts` never sees it: `lionProfileData` leaves it out at the source, so the launch card, the
+clone boards and the Account access page do not offer it and the creating routes answer
+`account_not_on_profile`. A campaign that already lives in such an account is still the team's own.
 
 ## Giving GLO-02 more
 

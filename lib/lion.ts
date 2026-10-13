@@ -3,7 +3,7 @@
 
 import { juroStoryPages } from "./juro";
 import { activateRetryDelay } from "./activate-retry";
-import { type CampaignTeam, TEAM, judgeCampaign, teamAcrProblem, teamMayUseCampaign, teamOwnsProfile } from "./team.ts";
+import { type CampaignTeam, TEAM, judgeCampaign, teamAcrProblem, teamMayUseCampaign, teamOffersAccount, teamOwnsProfile } from "./team.ts";
 
 const BASE = (process.env.LION_BASE || "https://lion.highstakes.tech").replace(/\/+$/, "");
 const TOKEN = process.env.LION_TOKEN ?? "";
@@ -163,9 +163,22 @@ export async function lionProfiles(): Promise<LionProfile[]> {
   });
 }
 
-/** A profile's accounts, pages and locales (the create/ bind space). Heavy (hundreds of
- *  accounts) → cached 10 min per slug. */
+/** A profile's accounts, pages and locales (the create/ bind space). A team that does not take a
+ *  profile's personal ad account (lib/team personalAccounts) gets the list WITHOUT it — left out
+ *  here, at the source, so no picker offers it and no creating route accepts it. */
 export async function lionProfileData(slug: string): Promise<LionProfileData> {
+  const listed = await lionProfileDataListed(slug);
+  if (TEAM.personalAccounts) return listed;
+  // The personal account is the one named after the profile's persona; when the profile list
+  // cannot be read the persona is not known and nothing is hidden.
+  const persona = (await lionProfiles().catch((): LionProfile[] => [])).find((p) => p.slug === slug)?.name ?? "";
+  const accounts = listed.accounts.filter((a) => teamOffersAccount(a.name, persona));
+  // A new object when something was left out — `listed` is the shared cache entry, never mutated.
+  return accounts.length === listed.accounts.length ? listed : { ...listed, accounts };
+}
+
+/** The profile's data exactly as LION lists it. Heavy (hundreds of accounts) → cached 10 min per slug. */
+async function lionProfileDataListed(slug: string): Promise<LionProfileData> {
   assertOwnProfile(slug);
   const cached = fresh(profileDataCache.get(slug));
   if (cached) return cached;
@@ -236,14 +249,15 @@ let ownAccountsCache: CacheEntry<Set<string>> | undefined;
 const bareAccount = (v: unknown): string => str(v).trim().replace(/^act_/, "");
 
 /** Every ad account of the team's own profiles (they mirror a pool or two) — only ever needed by a
- *  strict team, for a campaign whose name carries no acronym of ours. */
+ *  strict team, for a campaign whose name carries no acronym of ours. The list as LION gives it: an
+ *  account the team is not OFFERED (a persona's personal one) is the team's own all the same. */
 async function ownAccountIds(): Promise<Set<string>> {
   const cached = fresh(ownAccountsCache);
   if (cached) return cached;
   return dedupe("ownaccounts", async () => {
     const ids = new Set<string>();
     for (const p of await lionProfiles()) {
-      for (const a of (await lionProfileData(p.slug)).accounts) ids.add(bareAccount(a.id));
+      for (const a of (await lionProfileDataListed(p.slug)).accounts) ids.add(bareAccount(a.id));
     }
     ownAccountsCache = { at: Date.now(), value: ids };
     return ids;
