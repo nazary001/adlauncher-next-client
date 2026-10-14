@@ -216,7 +216,8 @@ export function AvDestinationField({
   }
 
   // What the catalog on screen says of a chat host — what a line under a paste box is weighed
-  // against; `probes` names the hosts it speaks for (chat.<root site> + the known chats' hosts).
+  // against; `probes` names the hosts it speaks for (the known chats' hosts, and chat.<root site> of
+  // a site with none).
   const siteDomains = cat ? cat.sites.map((s) => s.domain) : null;
   const probes = avChatProbeHosts(siteDomains ?? []).map((p) => p.host);
   const chats = cat?.chats ?? NO_CHATS;
@@ -578,8 +579,8 @@ function ChatPicker({
   reread: React.RefObject<(host: string) => boolean>;
   destinations: AvDestinations;
 }) {
-  // The catalog probes chat.<site> of the ROOT sites (a site's own subdomain has none) and the hosts
-  // of our known chats (lib/av-link AV_KNOWN_CHATS — lp1.thecadrion.com), which it offers in one click.
+  // The catalog probes the hosts of our known chats (lib/av-link AV_KNOWN_CHATS — lp1.thecadrion.com),
+  // which it offers in one click, and chat.<site> of a ROOT site with none (a site's own subdomain has none).
   const probed = avChatProbeHosts(siteDomains ?? []).map((p) => p.host);
   const known = siteDomains ? avKnownChats(siteDomains) : [];
   // What is KNOWN about the picked chat's host: listed ready; listed not ready, or probed and not

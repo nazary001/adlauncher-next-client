@@ -18,6 +18,11 @@ delete process.env.AV_CHAT_SCRIPT_CDN;
 const LIVE_SEAM = "redirect.thecadrion.com";
 process.env.AV_TEST_LIVE_REDIRECT_DOMAINS = LIVE_SEAM;
 const dest = await import("../lib/av-destination.ts");
+// The shipped registry of known chats (lib/av-link AV_KNOWN_CHATS — lp1.thecadrion.com) stands in for
+// thecadrion.com's chat.<site> since 14.10 (a site whose chat host is known is not guessed); these
+// tests drive the conventional chat.<site> probe, so the registry is emptied — as in av-chat.test.ts.
+const { _setAvKnownChats } = await import("../lib/av-chat.ts");
+_setAvKnownChats([]);
 
 const GATEWAY = "assistant-quiz-infrastructure-gateway.activeview.app";
 const json = (o: unknown, status = 200) => new Response(JSON.stringify(o), { status, headers: { "content-type": "application/json" } });
@@ -457,6 +462,22 @@ test("a chat host that is not ready rides the catalog with its reason — the ar
     assert.deepEqual(cat.articles.map((a) => a.url), [ARTICLE]);
     assert.deepEqual(cat.redirects.map((r) => r.domain), ["redirect.thecadrion.com"]);
   });
+});
+
+test("a site whose chat host is KNOWN lists that host, and its never-activated chat.<site> is not probed (owner 14.10)", async () => {
+  const LP1 = "lp1.thecadrion.com";
+  _setAvKnownChats([{ host: LP1, id: "6ac8dd4d0bae90fe7e702cde", name: "Dating SPY" }]);
+  try {
+    const pages = { [`https://${LP1}/worker.js`]: { body: WORKER }, [SCRIPT_URL]: SERVED };
+    await inWorld({ cnames: { [LP1]: [GATEWAY], "chat.thecadrion.com": [GATEWAY] }, pages }, async (_calls, dnsCalls) => {
+      const cat = await dest.avDestinationCatalog({ titles: false });
+      assert.deepEqual(cat.chats, [{ host: LP1, site: "thecadrion.com", live: true }]);
+      assert.ok(!dnsCalls.includes("chat.thecadrion.com"), `chat.<site> was probed: ${dnsCalls.join(", ")}`);
+      assert.deepEqual(cat.articles.map((a) => a.url), [ARTICLE]);
+    });
+  } finally {
+    _setAvKnownChats([]);
+  }
 });
 
 test("a site without a chat host has an empty chat list and the rest of the catalog intact", async () => {

@@ -818,9 +818,10 @@ let knownChats: readonly AvKnownChat[] = AV_KNOWN_CHATS;
 
 /**
  * The card's hint: which of our sites have a chat host, and whether traffic may be bought for it.
- * The API lists no chats and a subdomain cannot be enumerated, so the conventional `chat.<site>` is
- * probed, plus the host of every KNOWN chat of the site (lib/av-link avChatProbeHosts — owner 30.09:
- * lp1.thecadrion.com); a chat on any other subdomain still resolves when its URL is pasted. A host
+ * The API lists no chats and a subdomain cannot be enumerated, so the host of every KNOWN chat of
+ * the site is probed (lib/av-link avChatProbeHosts — owner 30.09: lp1.thecadrion.com), and the
+ * conventional `chat.<site>` only for a site with no known chat (14.10); a chat on any other
+ * subdomain still resolves when its URL is pasted. A host
  * that is no chat host is left out; a host that could not be CHECKED is listed as such, never
  * dropped (that would read as "there is none"). What DNS said is remembered for a minute, here only:
  * the catalog is read on every card load and a DNS that does not answer costs its whole timeouts,

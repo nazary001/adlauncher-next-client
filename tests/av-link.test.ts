@@ -411,24 +411,42 @@ test("a refusal is of the host when it says what the host is — not what the ad
 
 const LP1_ID = "6abc53bbe2e270105e4c5586";
 
-test("the chat hosts probed: chat.<site> of each ROOT site, then every known chat host under one of them — each once", () => {
+test("the chat hosts probed: chat.<site> of each ROOT site with no known chat, then every known chat host under one of them — each once", () => {
   const known = [
     { host: "lp1.thecadrion.com", id: LP1_ID, name: "Emily" },
     { host: "LP2.TheCadrion.com.", id: LP1_ID, name: "case and trailing dot" },
-    { host: "chat.thecadrion.com", id: LP1_ID, name: "already probed as chat.<site>" },
+    { host: "chat.thecadrion.com", id: LP1_ID, name: "a known chat ON chat.<site>" },
     { host: "lp1.elsewhere.com", id: LP1_ID, name: "not a site of ours" },
     { host: "www.thecadrion.com", id: LP1_ID, name: "the site itself" },
     { host: "thecadrion.com", id: LP1_ID, name: "the root itself" },
     { host: "lp1.thecadrion.com", id: "0".repeat(24), name: "the same host twice" },
   ];
   assert.deepEqual(avChatProbeHosts(["thecadrion.com", "sub.thecadrion.com", "other.com"], known), [
-    { host: "chat.thecadrion.com", site: "thecadrion.com" },
     { host: "chat.other.com", site: "other.com" },
     { host: "lp1.thecadrion.com", site: "thecadrion.com" },
     { host: "lp2.thecadrion.com", site: "thecadrion.com" },
+    { host: "chat.thecadrion.com", site: "thecadrion.com" },
   ]);
   assert.deepEqual(avChatProbeHosts([], known), [], "no sites (a catalog not loaded yet) probe nothing");
   assert.deepEqual(avChatProbeHosts(["thecadrion.com"], []), [{ host: "chat.thecadrion.com", site: "thecadrion.com" }]);
+});
+
+test("a site whose chat host is known is not guessed at chat.<site> — the never-activated chat.thecadrion.com read 'chat_not_live' next to lp1 (owner 14.10)", () => {
+  assert.deepEqual(avChatProbeHosts(["thecadrion.com", "other.com"], [{ host: "lp1.thecadrion.com", id: LP1_ID, name: "Emily" }]), [
+    { host: "chat.other.com", site: "other.com" },
+    { host: "lp1.thecadrion.com", site: "thecadrion.com" },
+  ]);
+  assert.deepEqual(
+    avChatProbeHosts(["thecadrion.com"], [{ host: "lp3.thecadrion.com", id: "not-a-chat-id", name: "damaged id" }]),
+    [{ host: "chat.thecadrion.com", site: "thecadrion.com" }],
+    "a known chat with a damaged id is no known chat: neither probed nor standing in for chat.<site>",
+  );
+  assert.deepEqual(
+    avChatProbeHosts(["thecadrion.com"], [{ host: "lp1.elsewhere.com", id: LP1_ID, name: "not ours" }]),
+    [{ host: "chat.thecadrion.com", site: "thecadrion.com" }],
+    "a known chat of another site leaves ours guessed",
+  );
+  assert.deepEqual(avChatProbeHosts(["thecadrion.com"]), [{ host: "lp1.thecadrion.com", site: "thecadrion.com" }], "the shipped registry probes lp1 only");
 });
 
 test("known chats of our sites carry their ONE canonical address; a foreign host or a damaged id is left out", () => {
@@ -443,15 +461,21 @@ test("known chats of our sites carry their ONE canonical address; a foreign host
   assert.deepEqual(avKnownChats([], known), []);
 });
 
-test("the shipped registry names the lp1 chat of thecadrion.com, and its address is a well-formed chat address", () => {
-  const lp1 = AV_KNOWN_CHATS.find((c) => c.host === "lp1.thecadrion.com");
-  assert.ok(lp1, "lp1.thecadrion.com is listed");
-  assert.equal(lp1.id, LP1_ID);
-  const url = avChatUrl(`https://${lp1.host}/?asst=${lp1.id}`);
-  assert.equal(url.ok && url.base, `https://lp1.thecadrion.com/?asst=${LP1_ID}`);
+test("the shipped registry names the lp1 chats of thecadrion.com — Emily and Dating SPY (14.10) — each a well-formed chat address", () => {
+  const DATING_ID = "6ac8dd4d0bae90fe7e702cde";
+  const lp1 = AV_KNOWN_CHATS.filter((c) => c.host === "lp1.thecadrion.com");
+  assert.deepEqual(
+    lp1.map((c) => c.id),
+    [LP1_ID, DATING_ID],
+    "both chats of lp1.thecadrion.com are listed",
+  );
+  for (const c of lp1) {
+    const url = avChatUrl(`https://${c.host}/?asst=${c.id}`);
+    assert.equal(url.ok && url.base, `https://lp1.thecadrion.com/?asst=${c.id}`);
+  }
   assert.deepEqual(
     avKnownChats(["thecadrion.com"]).map((c) => c.base),
-    [`https://lp1.thecadrion.com/?asst=${LP1_ID}`],
+    [`https://lp1.thecadrion.com/?asst=${LP1_ID}`, `https://lp1.thecadrion.com/?asst=${DATING_ID}`],
     "the default registry is what the card offers",
   );
 });

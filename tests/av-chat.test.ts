@@ -1628,14 +1628,14 @@ test("the chat-host probe lists chat.<site> only for the sites that have one, re
   });
 });
 
-test("the probe also reads a KNOWN chat's host — a subdomain other than chat.<site> (lp1, owner 30.09) — through the same gate", async () => {
+test("the probe reads a KNOWN chat's host — a subdomain other than chat.<site> (lp1, owner 30.09) — through the same gate, and no longer guesses chat.<site> for that site (14.10)", async () => {
   const LP1 = "lp1.thecadrion.com";
   chat._setAvKnownChats([{ host: LP1, id: ID, name: "Emily" }]);
   try {
     await withStubs({ [LP1]: [GATEWAY] }, { [`https://${LP1}/worker.js`]: { status: 200, body: worker("") } }, async ({ dnsCalls }) => {
       const hosts = await chat.avChatHosts(["thecadrion.com"], true);
-      assert.deepEqual([...dnsCalls].sort(), [HOST, LP1].sort(), "chat.<site> and the known host are both read");
-      assert.equal(hosts.length, 1, "chat.<site> is no chat host here — only the known one is listed");
+      assert.deepEqual([...dnsCalls], [LP1], "only the known host is read — chat.<site> is no longer guessed");
+      assert.equal(hosts.length, 1, "only the known chat host is listed");
       assert.equal(hosts[0].host, LP1);
       assert.equal(hosts[0].site, "thecadrion.com");
       assert.equal(hosts[0].live, false, "no ad script yet: the money gate still says not ready");

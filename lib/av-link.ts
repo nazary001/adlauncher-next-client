@@ -117,12 +117,14 @@ export type AvKnownChat = { host: string; id: string; name: string };
 /**
  * The chats the card offers with one click. AV's API lists no chats and a subdomain cannot be
  * enumerated, so a chat on a subdomain OTHER than the conventional chat.<site> is known from here
- * (owner 30.09: the Chat Builder host of thecadrion.com is lp1, its first chat "Emily"). A pick is
+ * (owner 30.09: the Chat Builder host of thecadrion.com is lp1, its first chat "Emily"; 14.10 "Dating
+ * SPY", whose button hands the visitor on to the dating-apps guide with the ad's params). A pick is
  * checked exactly like a pasted chat — on the pick and again on every launch the host must show ads
  * — so this list only saves the paste; it never vouches for a chat.
  */
 export const AV_KNOWN_CHATS: readonly AvKnownChat[] = [
   { host: "lp1.thecadrion.com", id: "6abc53bbe2e270105e4c5586", name: "Emily — AI Companion (lp1)" },
+  { host: "lp1.thecadrion.com", id: "6ac8dd4d0bae90fe7e702cde", name: "Dating SPY — dating apps guide (lp1)" },
 ];
 
 const normChatHost = (h: unknown): string => String(h ?? "").trim().toLowerCase().replace(/\.+$/, "");
@@ -136,34 +138,40 @@ const rootSites = (siteDomains: string[]): string[] => {
 /** The root site a host is a subdomain of (never the site itself or its www), or "". */
 const siteOfChatHost = (host: string, roots: string[]): string => roots.find((s) => host.endsWith(`.${s}`) && host !== `www.${s}`) ?? "";
 
-/**
- * The chat hosts the card's catalog probes for our sites: chat.<site> of every ROOT site, then the
- * host of every known chat that is a subdomain of one of them — each host once, in that order. A
- * known chat of a site that is not ours is never probed (lib/av-chat would refuse it anyway).
- */
-export function avChatProbeHosts(siteDomains: string[], known: readonly AvKnownChat[] = AV_KNOWN_CHATS): { host: string; site: string }[] {
-  const roots = rootSites(siteDomains);
-  const out = roots.map((site) => ({ host: `chat.${site}`, site }));
+/** The known chats under our ROOT sites whose id is well-formed — each with its root site and its ONE
+ *  canonical address (avChatUrl). */
+function knownChatsOf(roots: string[], known: readonly AvKnownChat[]): Array<AvKnownChat & { base: string; site: string }> {
+  const out: Array<AvKnownChat & { base: string; site: string }> = [];
   for (const c of known) {
     const host = normChatHost(c.host);
     const site = siteOfChatHost(host, roots);
-    if (site && !out.some((o) => o.host === host)) out.push({ host, site });
+    if (!site) continue;
+    const url = avChatUrl(`https://${host}/?asst=${String(c.id ?? "").trim()}`);
+    if (url.ok) out.push({ host, id: url.id, name: c.name, base: url.base, site });
   }
+  return out;
+}
+
+/**
+ * The chat hosts the card's catalog probes for our sites: chat.<site> of every ROOT site that has NO
+ * known chat, then the host of every known chat — each host once, in that order. chat.<site> is only
+ * the conventional guess for a site we know nothing of; where a known chat names the site's Chat
+ * Builder host the guess is dropped (owner 14.10: chat.thecadrion.com was never activated, and its
+ * "chat_not_live … the template's" row stood on every card next to the live lp1). A known chat of a
+ * site that is not ours, or with a damaged id, is never probed (lib/av-chat would refuse it anyway).
+ */
+export function avChatProbeHosts(siteDomains: string[], known: readonly AvKnownChat[] = AV_KNOWN_CHATS): { host: string; site: string }[] {
+  const roots = rootSites(siteDomains);
+  const chats = knownChatsOf(roots, known);
+  const out = roots.filter((site) => !chats.some((c) => c.site === site)).map((site) => ({ host: `chat.${site}`, site }));
+  for (const { host, site } of chats) if (!out.some((o) => o.host === host)) out.push({ host, site });
   return out;
 }
 
 /** The known chats of our sites, each with its ONE canonical address (lib/av-link avChatUrl); a
  *  chat of another site or with a damaged id is left out. */
 export function avKnownChats(siteDomains: string[], known: readonly AvKnownChat[] = AV_KNOWN_CHATS): Array<AvKnownChat & { base: string }> {
-  const roots = rootSites(siteDomains);
-  const out: Array<AvKnownChat & { base: string }> = [];
-  for (const c of known) {
-    const host = normChatHost(c.host);
-    if (!siteOfChatHost(host, roots)) continue;
-    const url = avChatUrl(`https://${host}/?asst=${String(c.id ?? "").trim()}`);
-    if (url.ok) out.push({ host, id: url.id, name: c.name, base: url.base });
-  }
-  return out;
+  return knownChatsOf(rootSites(siteDomains), known).map(({ host, id, name, base }) => ({ host, id, name, base }));
 }
 
 export type AvDestinationKind = "article" | "redirect" | "chat";
