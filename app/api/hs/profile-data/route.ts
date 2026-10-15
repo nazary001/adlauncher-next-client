@@ -46,7 +46,9 @@ export async function GET(req: Request): Promise<NextResponse> {
     // Owner rule 2026-09-07: the pickers offer ONLY fankas the hs-tools registry marks OK — every
     // other state and every unregistered page is hidden here at the source (launcher card and
     // clone board share this route); the creating routes refuse the same pages at fire time.
-    // Registry off/unreachable = NO pages offered (fail closed), the reason rides along.
+    // Registry off/unreachable = NO pages offered (fail closed), the reason rides along. A page the HS
+    // team marked "(Not Eligible)" in its NAME is hidden too, on every team (owner ask 16.10) — the
+    // pickers print both counts in one line.
     const fankas = await hsOfferablePages("br", data.pages);
     return NextResponse.json({
       ok: true,
@@ -54,6 +56,7 @@ export async function GET(req: Request): Promise<NextResponse> {
       accounts,
       pages: fankas.pages,
       pagesHidden: fankas.hidden,
+      pagesMarked: fankas.marked,
       pagesUnavailable: fankas.unavailable,
       tokenAccounts,
       dupTokenAccounts,

@@ -2,6 +2,7 @@
 
 import { memo, useEffect, useState } from "react";
 import type { Campaign } from "@/lib/types";
+import { hiddenFankasNote, noFankasOfferedNote } from "@/lib/hs-page-gate";
 import { LAUNCH_DEFAULT_BUDGET, MO_SOC_MARK, ROAS_DEFAULT_BUDGET, bidAmountMissing, bidKind, budgetOnStrategyChange, fullName, isHttpUrl, isLaunchable, limitMoney, limitMoneyCents, moEnsureSocMark, moneyLabel, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import {
   AGES,
@@ -832,11 +833,12 @@ function CampaignCardBase({
                   label={partner.pageLabel}
                   className={setupCol}
                   // HS: the picker offers only fankas hs-tools marks OK (server-filtered, owner
-                  // rule 09-07) — say how many the rule hid, so a missing page isn't mistaken
-                  // for a LION catalog gap.
+                  // rule 09-07) and none the HS team marked "(Not Eligible)" in the page name (owner
+                  // ask 16.10) — say how many the rules hid, so a missing page isn't mistaken for a
+                  // LION catalog gap.
                   hint={
-                    hsMode && hsData && hsData.pages.length > 0 && hsData.pagesHidden > 0
-                      ? `${hsData.pagesHidden} fanka${hsData.pagesHidden === 1 ? "" : "s"} hidden — not OK in hs-tools`
+                    hsMode && hsData && hsData.pages.length > 0
+                      ? (hiddenFankasNote({ hidden: hsData.pagesHidden, marked: hsData.pagesMarked }) ?? undefined)
                       : undefined
                   }
                   error={
@@ -862,9 +864,7 @@ function CampaignCardBase({
                             ? (hs?.errorFor(c.profile) ?? "Loading pages…")
                             : hsData.pagesUnavailable
                               ? `No fankas offered — ${hsData.pagesUnavailable} (only OK fankas may launch)`
-                              : hsData.pagesHidden > 0
-                                ? `No OK fankas on this profile — ${hsData.pagesHidden} hidden by hs-tools status`
-                                : "No pages on this profile"
+                              : (noFankasOfferedNote({ hidden: hsData.pagesHidden, marked: hsData.pagesMarked }) ?? "No pages on this profile")
                       }
                       metaWhenClosed
                     />

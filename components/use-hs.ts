@@ -24,6 +24,9 @@ export type HsProfileData = {
   /** Fankas the server HID from `pages` — not OK in hs-tools, or unregistered there (owner
    *  rule 09-07: the pickers offer only OK fankas; the fire-time gate refuses the rest). */
   pagesHidden: number;
+  /** Fankas the server hid for the mark in their NAME — "Lisa4 | (Not Eligible)", the HS team's own
+   *  flag on a page Facebook will not let advertise (owner ask 16.10); printed next to pagesHidden. */
+  pagesMarked: number;
   /** Registry off/unreachable → the server offered NO pages; the reason for the empty picker. */
   pagesUnavailable: string | null;
 };
@@ -299,6 +302,7 @@ export function useHs(enabled: boolean): HsCatalog {
             tokenAccounts?: string[] | null;
             dupTokenAccounts?: string[] | null;
             pagesHidden?: number;
+            pagesMarked?: number;
             pagesUnavailable?: string | null;
             error?: string;
             code?: string;
@@ -344,6 +348,7 @@ export function useHs(enabled: boolean): HsCatalog {
             tokenAccounts: Array.isArray(d.tokenAccounts) ? new Set(d.tokenAccounts.map(String)) : null,
             dupTokenAccounts: Array.isArray(d.dupTokenAccounts) ? new Set(d.dupTokenAccounts.map(String)) : null,
             pagesHidden: typeof d.pagesHidden === "number" ? d.pagesHidden : 0,
+            pagesMarked: typeof d.pagesMarked === "number" ? d.pagesMarked : 0,
             pagesUnavailable:
               typeof d.pagesUnavailable === "string" && d.pagesUnavailable ? d.pagesUnavailable : null,
           };

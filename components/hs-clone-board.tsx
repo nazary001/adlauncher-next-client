@@ -23,6 +23,8 @@ import { forgetWave, recallWave, rememberWave } from "./wave-memory";
 import { rememberedRowIds } from "./wave-memory-core";
 import { relabelNameGeo } from "@/lib/targeting-override";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
+import { hiddenFankasNote, hiddenFankasWhy, noFankasOfferedNote } from "@/lib/hs-page-gate";
+import { type HsAutofillPatch, autofillNote, autofillRows, autofillTakes, undoAutofill } from "@/lib/hs-autofill";
 import type { PartnerId } from "@/lib/partners";
 import { TEAM, teamHas } from "@/lib/team";
 import {
@@ -35,11 +37,14 @@ import {
   MoreIcon,
   PlusIcon,
   RetryIcon,
+  SparklesIcon,
   TrashIcon,
   UndoIcon,
+  XIcon,
 } from "./icons";
 import { HsTargetingModal } from "./hs-targeting-modal";
 import { HsDestinationModal, type HsRowDest } from "./hs-destination-modal";
+import { HsAutofillModal } from "./hs-autofill-modal";
 import { hsTokensAllDown, useHsTokenStatus } from "./hs-token-status";
 import { useToolReady } from "./use-tool-ready";
 import type { SessionUser } from "./user-menu";
@@ -312,6 +317,10 @@ export function HsCloneBoard({
   const [draftId, setDraftId] = useState("");
   const [targetingRowId, setTargetingRowId] = useState<string | null>(null);
   const [destRowId, setDestRowId] = useState<string | null>(null);
+  // "Autofill all rows" (owner ask 16.10): one form → its ticked fields on every row of the wave; the
+  // banner under the table header keeps ONE Undo of the last autofill (lib/hs-autofill).
+  const [autofillOpen, setAutofillOpen] = useState(false);
+  const [autofillDone, setAutofillDone] = useState<{ before: Row[]; note: string; changed: number; skipped: number } | null>(null);
   const counter = useRef(1);
   // One waveId per PREPARED wave (same binds + same shots): a retry-click after a lost answer
   // re-sends the same id, and the server's wave claim makes the re-POST a no-op instead of a
@@ -536,6 +545,25 @@ export function HsCloneBoard({
   const retrySource = (r: Row) => {
     fetchedRef.current.delete(r.campaignId.trim());
     patchRow(r.id, { failed: false });
+  };
+
+  // ---- autofill (owner ask 16.10) -----------------------------------------------------------------
+  /** Rows an autofill reaches right now: readable sources that are not mid-submit. */
+  const autofillRowsN = rows.filter(autofillTakes).length;
+  const applyAutofill = (patch: HsAutofillPatch) => {
+    const res = autofillRows(rows, patch, CLONE_DEFAULT_BUDGET);
+    setRows(res.rows);
+    setAutofillDone({ before: rows, note: autofillNote(patch), changed: res.changed, skipped: res.skipped });
+    setAutofillOpen(false);
+    setPreviewed(false); // the wave changed — re-preview before firing
+    setFireNote(null);
+  };
+  const undoLastAutofill = () => {
+    if (!autofillDone) return;
+    const { before } = autofillDone;
+    setRows((rs) => undoAutofill(rs, before));
+    setAutofillDone(null);
+    setPreviewed(false);
   };
 
   // ---- source facts from LION (details + targeting), batched + debounced ----
@@ -1195,6 +1223,20 @@ export function HsCloneBoard({
     window.location.assign(url.toString());
   };
 
+  // The Page picker's hidden-fankas line (owner rule 09-07 + owner ask 16.10): the registry's non-OK
+  // pages and the pages the HS team marked "(Not Eligible)" in the name — one sentence, both counts.
+  const hiddenCounts = { hidden: data?.pagesHidden ?? 0, marked: data?.pagesMarked ?? 0 };
+  const hiddenTotal = hiddenCounts.hidden + hiddenCounts.marked;
+  const hiddenWhy = data ? hiddenFankasWhy(hiddenCounts) : null;
+  const hiddenNote = data ? hiddenFankasNote(hiddenCounts) : null;
+  /** The same count as a tail on the fill / auto line — the count stays visible whatever else the line says. */
+  const hiddenTail = hiddenWhy ? ` · ${hiddenTotal} hidden (${hiddenWhy})` : "";
+
+  // Languages for the autofill form: the wave profile's own FB locale list — or, with no wave profile
+  // picked yet, the first row's own profile.
+  const autofillProfile = profile || rows.find((r) => r.dest?.profile)?.dest?.profile || "";
+  const autofillLocales = (autofillProfile ? (hs.dataFor(autofillProfile)?.locales ?? []) : []).map((l) => ({ value: l.id, label: l.name }));
+
   /** Preview footer: the wave's clones grouped by destination (one line per distinct tuple). */
   const destSummary = (() => {
     const m = new Map<string, { b: HsRowDest; n: number }>();
@@ -1415,11 +1457,12 @@ export function HsCloneBoard({
                   hint={
                     effPage && boundPageFill && !defaultPageOver
                       ? `${pageIsAuto ? "auto · least filled · " : ""}${boundPageFill.approx ? "~" : ""}${boundPageFill.used}/${boundPageFill.limit} ads on this page · ${boundPageFill.approx ? "~" : ""}${boundPageFill.free} free` +
-                        (pageAdsDemand > 0 ? ` · wave adds ${pageAdsDemand}` : "")
+                        (pageAdsDemand > 0 ? ` · wave adds ${pageAdsDemand}` : "") +
+                        hiddenTail
                       : pageIsAuto
-                        ? `auto · least filled fanka — pick another to override${data && data.pagesHidden > 0 ? ` · ${data.pagesHidden} hidden (not OK in hs-tools)` : ""}`
-                        : !page && data && data.pages.length > 0 && data.pagesHidden > 0
-                          ? `${data.pagesHidden} fanka${data.pagesHidden === 1 ? "" : "s"} hidden — not OK in hs-tools`
+                        ? `auto · least filled fanka — pick another to override${hiddenTail}`
+                        : data && data.pages.length > 0 && hiddenNote
+                          ? hiddenNote
                           : undefined
                   }
                   error={
@@ -1444,9 +1487,7 @@ export function HsCloneBoard({
                           ? (hs.errorFor(profile) ?? "Loading…")
                           : data.pagesUnavailable
                             ? `No fankas offered — ${data.pagesUnavailable} (only OK fankas may launch)`
-                            : data.pagesHidden > 0
-                              ? `No OK fankas on this profile — ${data.pagesHidden} hidden by hs-tools status`
-                              : "No pages"
+                            : (noFankasOfferedNote(hiddenCounts) ?? "No pages")
                     }
                   />
                 </Field>
@@ -1723,7 +1764,54 @@ export function HsCloneBoard({
                   {lowBudgetCount} below $1/day — won&apos;t fire (amber Budget field)
                 </span>
               ) : null}
+              {/* Autofill (owner ask 16.10): one form sets targeting · strategy + bid · budget · copies on
+                  every row at once — the bulk counterpart of the per-row editors. */}
+              <button
+                type="button"
+                onClick={() => setAutofillOpen(true)}
+                disabled={firing || autofillRowsN === 0}
+                title={
+                  autofillRowsN === 0
+                    ? "Add source campaigns first — the autofill sets geo · strategy + bid · budget · copies on every row at once"
+                    : "Set geo · strategy + bid · budget · copies on every row at once"
+                }
+                className="ml-auto flex h-8 items-center gap-1.5 rounded-md border border-accent/40 bg-accent/10 px-2.5 text-[11.5px] font-semibold text-[#9db8ff] transition-colors hover:border-accent/60 hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <SparklesIcon className="h-3.5 w-3.5" />
+                Autofill{autofillRowsN > 0 ? ` ${autofillRowsN} row${autofillRowsN === 1 ? "" : "s"}` : ""}
+              </button>
             </div>
+            {autofillDone ? (
+              <div
+                role="status"
+                className="animate-pop-in flex flex-wrap items-center gap-2 rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 text-[11.5px] leading-snug text-[#9db8ff]"
+              >
+                <SparklesIcon className="h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 flex-1">
+                  {autofillDone.changed > 0
+                    ? `Autofill set ${autofillDone.note} on ${autofillDone.changed} row${autofillDone.changed === 1 ? "" : "s"}`
+                    : `Autofill changed nothing — every row already had these values`}
+                  {autofillDone.skipped > 0 ? ` · ${autofillDone.skipped} skipped (unreadable or in flight)` : ""}.
+                </span>
+                <button
+                  type="button"
+                  onClick={undoLastAutofill}
+                  disabled={autofillDone.changed === 0}
+                  className="inline-flex h-6 items-center gap-1 rounded-md border border-accent/40 bg-surface px-2 text-[11px] font-semibold text-[#9db8ff] transition-colors hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                >
+                  <UndoIcon className="h-3 w-3" />
+                  Undo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAutofillDone(null)}
+                  aria-label="Dismiss"
+                  className="inline-flex h-6 w-6 items-center justify-center rounded-md text-faint transition-colors hover:bg-raise hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                >
+                  <XIcon className="h-3 w-3" />
+                </button>
+              </div>
+            ) : null}
 
             {/* Responsive grid list (owner ask 09-08, same as the MO/AIF board): ONE aligned line
                 per row on a wide board, folded lines on a laptop board, a stacked card below
@@ -2456,6 +2544,28 @@ export function HsCloneBoard({
           />
         );
       })()}
+      {autofillOpen ? (
+        <HsAutofillModal
+          rows={rows.map((r) => ({
+            id: r.id,
+            label: r.info?.name || `#${r.campaignId.trim() || "—"}`,
+            takes: autofillTakes(r),
+            countries: r.countries,
+            locales: r.locales,
+            budget: r.budget,
+            bidStrategy: rowStrategy(r),
+            bid: r.bid,
+            copies: r.copies,
+          }))}
+          localeOptions={autofillLocales}
+          strategyOptions={strategyOptions}
+          geoLocked={toolRail ? "TOOL cannot change geo on a duplicate — fire on LION API or FB Token for a geo test" : null}
+          maxCopies={MAX_COPIES}
+          defaultCopies={copiesN}
+          onClose={() => setAutofillOpen(false)}
+          onApply={applyAutofill}
+        />
+      ) : null}
     </>
   );
 }

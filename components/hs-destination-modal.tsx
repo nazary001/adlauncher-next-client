@@ -6,6 +6,7 @@ import { SearchSelect } from "./search-select";
 import { type AcctLimits, decorateAccountOptions } from "./use-acct-limit";
 import type { HsCatalog } from "./use-hs";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
+import { noFankasOfferedNote } from "@/lib/hs-page-gate";
 import { TargetIcon, XIcon } from "./icons";
 
 /** One row's OWN destination picks on the HS clone board (owner ask 2026-09-08). Every field is
@@ -227,7 +228,13 @@ export function HsDestinationModal({
                 onChange={(v) => setDraft((d) => ({ ...d, page: v }))}
                 options={data?.pages ?? []}
                 placeholder="Search page"
-                emptyHint={!draft.profile ? "Pick a profile first" : data ? "No pages" : (hs.errorFor(draft.profile) ?? "Loading…")}
+                emptyHint={
+                  !draft.profile
+                    ? "Pick a profile first"
+                    : data
+                      ? (noFankasOfferedNote({ hidden: data.pagesHidden, marked: data.pagesMarked }) ?? "No pages")
+                      : (hs.errorFor(draft.profile) ?? "Loading…")
+                }
                 metaWhenClosed
               />
             </Field>

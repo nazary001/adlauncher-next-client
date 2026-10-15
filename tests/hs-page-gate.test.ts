@@ -135,3 +135,67 @@ test("single offender carries no '+N more' tail", () => {
   assert.ok(refusal);
   assert.doesNotMatch(refusal, /more/);
 });
+
+// ---- the page NAME as a verdict (owner ask 16.10) ------------------------------------------------
+// The HS team marks a fanpage Facebook will not let advertise by RENAMING it — "Lisa4 | (Not
+// Eligible)" (live 16.10: three such pages offered on every glo-01 profile, registry state ok, 0/250
+// → the "least filled" default landed on them). Such a page is hidden like a non-OK registry row.
+import { hiddenFankasNote, hiddenFankasWhy, noFankasOfferedNote, pageNameMark, splitMarkedPages } from "../lib/hs-page-gate.ts";
+
+test("a page renamed with a (Not Eligible) tag is marked, whatever the spacing or case", () => {
+  assert.equal(pageNameMark("Lisa4 | (Not Eligible)"), "not eligible");
+  assert.equal(pageNameMark("Dr Nicolás Badosa  | (Not Eligible)"), "not eligible");
+  assert.equal(pageNameMark("Gertrude Considine | (not eligible)"), "not eligible");
+  assert.equal(pageNameMark("Kim1 (NOT_ELIGIBLE)"), "not eligible");
+  assert.equal(pageNameMark("Kim1 [Ineligible]"), "not eligible");
+  assert.equal(pageNameMark("Kim1 | Not Eligible"), "not eligible");
+});
+
+test("the other words the team may tag a page with are marked too", () => {
+  assert.equal(pageNameMark("Joy11 | (Unavailable)"), "unavailable");
+  assert.equal(pageNameMark("Joy11 (Restricted)"), "restricted");
+  assert.equal(pageNameMark("Joy11 | (Disabled)"), "disabled");
+  assert.equal(pageNameMark("Joy11 | banned"), "banned");
+  assert.equal(pageNameMark("Joy11 [blocked]"), "blocked");
+});
+
+test("a plain persona name is not marked — not even one that merely contains such a word", () => {
+  assert.equal(pageNameMark("Kim1"), null);
+  assert.equal(pageNameMark("Delfi Kriminálhronika"), null);
+  assert.equal(pageNameMark("Kim (2)"), null);
+  assert.equal(pageNameMark("Blocker Jones"), null); // no separated tag
+  assert.equal(pageNameMark("Unavailable Shop"), null); // the word is the name, not a tag
+  assert.equal(pageNameMark(""), null);
+  assert.equal(pageNameMark(undefined), null);
+});
+
+test("splitMarkedPages keeps the plain pages (in order, same objects) and sets the marked ones aside", () => {
+  const pages = [
+    { id: "1", name: "Kim1" },
+    { id: "2", name: "Lisa4 | (Not Eligible)" },
+    { id: "3", name: "Marcus8" },
+    { id: "4" }, // no name at all → offered
+  ];
+  const { offered, marked } = splitMarkedPages(pages);
+  assert.deepEqual(offered.map((p) => p.id), ["1", "3", "4"]);
+  assert.deepEqual(marked.map((p) => p.id), ["2"]);
+  assert.equal(offered[0], pages[0]);
+});
+
+test("the pickers' hidden-fankas line counts both reasons in one sentence", () => {
+  assert.equal(hiddenFankasNote({ hidden: 0, marked: 0 }), null);
+  assert.equal(hiddenFankasNote({ hidden: 4, marked: 0 }), "4 fankas hidden — not OK in hs-tools");
+  assert.equal(hiddenFankasNote({ hidden: 1, marked: 0 }), "1 fanka hidden — not OK in hs-tools");
+  assert.equal(hiddenFankasNote({ hidden: 0, marked: 2 }), "2 fankas hidden — not eligible");
+  assert.equal(hiddenFankasNote({ hidden: 0, marked: 1 }), "1 fanka hidden — not eligible");
+  assert.equal(hiddenFankasNote({ hidden: 4, marked: 3 }), "7 fankas hidden — 4 not OK in hs-tools · 3 not eligible");
+  assert.equal(hiddenFankasWhy({ hidden: 4, marked: 3 }), "4 not OK in hs-tools · 3 not eligible");
+  assert.equal(hiddenFankasWhy({ hidden: 0, marked: 3 }), "not eligible");
+  assert.equal(hiddenFankasWhy({ hidden: 0, marked: 0 }), null);
+});
+
+test("an empty picker names why every fanka is gone", () => {
+  assert.equal(noFankasOfferedNote({ hidden: 4, marked: 0 }), "No fankas offered on this profile — all 4 hidden (not OK in hs-tools)");
+  assert.equal(noFankasOfferedNote({ hidden: 2, marked: 1 }), "No fankas offered on this profile — all 3 hidden (2 not OK in hs-tools · 1 not eligible)");
+  assert.equal(noFankasOfferedNote({ hidden: 0, marked: 0 }), null);
+});

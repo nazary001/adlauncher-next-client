@@ -20,7 +20,7 @@
 // `/fb/api/v1/pages?team=<team>` (lib/team teamPagesQuery) — the un-filtered read is every team's
 // rows. MO / AIF have no teams and are read as before; the usage report goes by page id.
 
-import { gatePages, pageGateRefusal, registryRowStates } from "./hs-page-gate";
+import { gatePages, pageGateRefusal, registryRowStates, splitMarkedPages } from "./hs-page-gate";
 import type { PartnerId } from "./partners";
 import { TEAM, teamPagesQuery } from "./team.ts";
 
@@ -227,22 +227,26 @@ export async function hsPageRefusal(
  * registry marks OK, plus how many it hid. Registry off/unreachable = NOTHING offered — the
  * pickers show `unavailable` as the reason instead of pages the fire-time gate would refuse.
  */
-export async function hsOfferablePages<T extends { id: string }>(
+export async function hsOfferablePages<T extends { id: string; name?: string }>(
   partner: PartnerId,
   pages: readonly T[],
-): Promise<{ pages: T[]; hidden: number; unavailable: string | null }> {
-  if (!TEAM.pagesRegistry) return { pages: [...pages], hidden: 0, unavailable: null };
+): Promise<{ pages: T[]; hidden: number; marked: number; unavailable: string | null }> {
+  // A page the HS team marked in its NAME — "Lisa4 | (Not Eligible)" (owner ask 16.10) — is hidden on
+  // every team, registry or not: the mark is LION's own catalog, and such a page sat at 0/250 as the
+  // "least filled" default. `marked` counts them next to the registry's `hidden`.
+  const { offered: plain, marked } = splitMarkedPages(pages);
+  if (!TEAM.pagesRegistry) return { pages: plain, hidden: 0, marked: marked.length, unavailable: null };
   if (!hsPagesConfigured()) {
-    return { pages: [], hidden: pages.length, unavailable: "HS_PAGES_API_KEY is not configured" };
+    return { pages: [], hidden: plain.length, marked: marked.length, unavailable: "HS_PAGES_API_KEY is not configured" };
   }
   let states: Record<string, string>;
   try {
     states = await hsToolsPageStates(partner);
   } catch (e) {
-    return { pages: [], hidden: pages.length, unavailable: `hs-tools registry unreachable (${(e as Error).message ?? e})` };
+    return { pages: [], hidden: plain.length, marked: marked.length, unavailable: `hs-tools registry unreachable (${(e as Error).message ?? e})` };
   }
-  const { offered, hidden } = gatePages(pages, states);
-  return { pages: offered, hidden: hidden.length, unavailable: null };
+  const { offered, hidden } = gatePages(plain, states);
+  return { pages: offered, hidden: hidden.length, marked: marked.length, unavailable: null };
 }
 
 export type UsedReport = { pageId: string; delta: number };
