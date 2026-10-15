@@ -167,13 +167,13 @@ export function HsDestinationModal({
             This row&apos;s clones land HERE instead of the wave defaults in Settings — mix accounts, pages
             and copies across rows in one wave.
           </p>
-          <Field label="Profile">
+          <Field label="Profile" error={draft.profile ? (hs.errorFor(draft.profile) ?? undefined) : undefined}>
             <SearchSelect
               value={draft.profile}
               onChange={(v) => {
                 // A new profile is a new bind space — every dependent pick resets.
                 setDraft({ profile: v, account: "", page: "", pixel: "" });
-                if (v) hs.ensureProfile(v);
+                if (v) hs.ensureProfile(v, true); // an explicit pick retries a profile whose read failed
               }}
               options={hs.profiles ?? []}
               placeholder="Search profile"
@@ -201,7 +201,7 @@ export function HsDestinationModal({
                 !draft.profile
                   ? "Pick a profile first"
                   : !data
-                    ? "Loading…"
+                    ? (hs.errorFor(draft.profile) ?? "Loading…")
                     : toolRail && (data.accounts?.length ?? 0) > 0 && accountOptions.length === 0
                       ? "No accounts here are visible to a live TOOL session — pick another profile or fire on LION API"
                       : tokenVisible !== null && (data.accounts?.length ?? 0) > 0 && accountOptions.length === 0
@@ -227,7 +227,7 @@ export function HsDestinationModal({
                 onChange={(v) => setDraft((d) => ({ ...d, page: v }))}
                 options={data?.pages ?? []}
                 placeholder="Search page"
-                emptyHint={!draft.profile ? "Pick a profile first" : data ? "No pages" : "Loading…"}
+                emptyHint={!draft.profile ? "Pick a profile first" : data ? "No pages" : (hs.errorFor(draft.profile) ?? "Loading…")}
                 metaWhenClosed
               />
             </Field>

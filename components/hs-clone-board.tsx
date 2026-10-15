@@ -432,7 +432,7 @@ export function HsCloneBoard({
     setPixel("");
     setPreviewed(false);
     reopenQueued();
-    if (slug) hs.ensureProfile(slug);
+    if (slug) hs.ensureProfile(slug, true); // an explicit pick retries a profile whose read failed
   };
   const pickAccount = (id: string) => {
     setAccount(id);
@@ -687,7 +687,7 @@ export function HsCloneBoard({
     const next = { ...(r.dest ?? emptyDest), ...patch };
     editRow(r.id, { dest: next.profile || next.account || next.page || next.pixel ? next : null });
     setPreviewed(false);
-    if (next.profile) hs.ensureProfile(next.profile);
+    if (next.profile) hs.ensureProfile(next.profile, true);
   };
   const bindsComplete = (b: HsRowDest): boolean =>
     Boolean(b.profile && b.account && (b.page || !needsPage) && b.pixel);
@@ -1361,7 +1361,13 @@ export function HsCloneBoard({
                 </p>
               </div>
 
-              <Field label="Profile">
+              <Field
+                label="Profile"
+                // LION cannot read this profile right now (a checkpointed Facebook user, 15.10) —
+                // the reason sits under the picker, and the Account picker repeats it where the
+                // list would be. Re-picking the profile retries.
+                error={profile ? (hs.errorFor(profile) ?? undefined) : undefined}
+              >
                 <SearchSelect
                   value={profile}
                   onChange={pickProfile}
@@ -1390,7 +1396,7 @@ export function HsCloneBoard({
                     !profile
                       ? "Pick a profile first"
                       : !data
-                        ? "Loading…"
+                        ? (hs.errorFor(profile) ?? "Loading…")
                         : settingsFilter !== null && (data.accounts?.length ?? 0) > 0 && accountOptions.length === 0
                           ? toolRail
                             ? "No accounts here are visible to a live TOOL session — pick another profile or fire on LION API"
@@ -1435,7 +1441,7 @@ export function HsCloneBoard({
                       !profile
                         ? "Pick a profile first"
                         : !data
-                          ? "Loading…"
+                          ? (hs.errorFor(profile) ?? "Loading…")
                           : data.pagesUnavailable
                             ? `No fankas offered — ${data.pagesUnavailable} (only OK fankas may launch)`
                             : data.pagesHidden > 0
@@ -2036,7 +2042,7 @@ export function HsCloneBoard({
                             !b.profile
                               ? "Pick a profile first"
                               : !rowData
-                                ? "Loading…"
+                                ? (hs.errorFor(b.profile) ?? "Loading…")
                                 : railAccountFilter(b.profile) !== null && (rowData.accounts?.length ?? 0) > 0 && rowAccounts.length === 0
                                   ? toolRail
                                     ? "No accounts here are visible to a live TOOL session — pick another profile or fire on LION API"
@@ -2055,7 +2061,7 @@ export function HsCloneBoard({
                             onChange={(v) => patchRowDest(r, { page: v })}
                             options={rowData?.pages ?? []}
                             placeholder="Page"
-                            emptyHint={!b.profile ? "Pick a profile first" : rowData ? "No pages" : "Loading…"}
+                            emptyHint={!b.profile ? "Pick a profile first" : rowData ? "No pages" : (hs.errorFor(b.profile) ?? "Loading…")}
                             disabled={unreadableRow}
                             warn={!b.page}
                             accent={Boolean(r.dest?.page)}

@@ -112,6 +112,7 @@ test("glo-02 reaches exactly the HS-through-LION surface", () => {
     "/api/hs/page-volume",
     "/api/hs/pixels",
     "/api/hs/profile-data",
+    "/api/hs/profile-health",
     "/api/hs/profiles",
     "/api/hs/sources",
     "/api/hs/status",

@@ -3,7 +3,7 @@ import { filterAccountsFor } from "@/lib/acct-assignments";
 import { hsOfferablePages } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { hsDupTokenAccountIds, hsDupTokenConfigured, hsTokenAccountIds, hsTokenConfigured } from "@/lib/hs-token-launch";
-import { lionConfigured, lionProfileData } from "@/lib/lion";
+import { lionConfigured, lionProfileData, lionProfileUnreadable } from "@/lib/lion";
 import { teamHas } from "@/lib/team";
 
 export const runtime = "nodejs";
@@ -59,6 +59,12 @@ export async function GET(req: Request): Promise<NextResponse> {
       dupTokenAccounts,
     });
   } catch (e) {
-    return NextResponse.json({ ok: false, error: String((e as Error).message) }, { status: 502 });
+    // LION's own "cannot read this profile" verdict (a checkpointed Facebook user, 15.10) rides
+    // with a code — the pickers show the sentence where the accounts would be, not "Loading…".
+    const problem = lionProfileUnreadable(e);
+    return NextResponse.json(
+      { ok: false, error: String((e as Error).message), ...(problem ? { code: "profile_unreadable", checkpoint: problem.checkpoint } : {}) },
+      { status: 502 },
+    );
   }
 }

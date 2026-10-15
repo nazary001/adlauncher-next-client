@@ -707,7 +707,13 @@ function CampaignCardBase({
                   <Field
                     label="Profile"
                     className="col-span-12 md:col-span-6 xl:col-span-3"
-                    error={hsMode && hs?.profiles?.length && !c.profile ? "Pick a profile" : undefined}
+                    error={
+                      hsMode && hs?.profiles?.length && !c.profile
+                        ? "Pick a profile"
+                        : hsMode && c.profile
+                          ? (hs?.errorFor(c.profile) ?? undefined) // LION cannot read it (checkpoint, 15.10)
+                          : undefined
+                    }
                   >
                     <SearchSelect
                       value={c.profile}
@@ -748,7 +754,7 @@ function CampaignCardBase({
                         !c.profile
                           ? "Pick a profile first"
                           : !hsData
-                            ? "Loading accounts…"
+                            ? (hs?.errorFor(c.profile) ?? "Loading accounts…")
                             : hsVisible !== null &&
                                 (hsData.accounts?.length ?? 0) > 0 &&
                                 hsAccountOptions.length === 0
@@ -853,7 +859,7 @@ function CampaignCardBase({
                         !c.profile
                           ? "Pick a profile first"
                           : !hsData
-                            ? "Loading pages…"
+                            ? (hs?.errorFor(c.profile) ?? "Loading pages…")
                             : hsData.pagesUnavailable
                               ? `No fankas offered — ${hsData.pagesUnavailable} (only OK fankas may launch)`
                               : hsData.pagesHidden > 0

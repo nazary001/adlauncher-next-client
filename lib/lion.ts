@@ -163,6 +163,91 @@ export async function lionProfiles(): Promise<LionProfile[]> {
   });
 }
 
+// ---------- a profile LION itself cannot read ----------
+//
+// Facebook refuses a profile's user — checkpointed ("You cannot access the app till you log in to
+// www.facebook.com and follow the instructions given", OAuth error 190 / subcode 459) or a session
+// that died — and LION then answers profile/data/ with HTTP 200 and `data: { status: false,
+// error: {…} }`, its FacebookRequestError inside. Live on GLO-01 15.10: glo-01-39 and glo-01-66,
+// the FIRST profile of the picker among them — read as "no data" here, answered as a bare 502 by
+// the route, shown as an endless "Loading…" by every account picker ("accounts do not load in the
+// cloner"). The problem is named here, at the source: the boards tag such a profile and tell the
+// buyer to pick another one until the HS team re-logs it (their anti-detect browser, not ours).
+
+export type LionProfileProblem = {
+  slug: string;
+  /** Facebook's own sentence (LION relays it verbatim). */
+  message: string;
+  fbCode: number | null;
+  fbSubcode: number | null;
+  /** The user must log in on facebook.com again (subcode 459 / the checkpoint sentence). */
+  checkpoint: boolean;
+};
+
+function profileReadProblem(slug: string, data: Record<string, unknown>): LionProfileProblem | null {
+  if (data.status !== false && data.error == null) return null;
+  const err = (data.error && typeof data.error === "object" ? data.error : {}) as Record<string, unknown>;
+  // The Graph error body rides as `response` — an object, or its JSON as a string.
+  let resp: Record<string, unknown> = {};
+  const raw = err.response ?? err.data;
+  if (raw && typeof raw === "object") resp = raw as Record<string, unknown>;
+  else if (typeof raw === "string") {
+    try {
+      resp = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      /* a sentence, not JSON */
+    }
+  }
+  const message =
+    (str(err.message) || str(resp.message) || (typeof data.error === "string" ? data.error : "") || "LION could not read it").trim();
+  const num = (v: unknown): number | null => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
+  const fbCode = num(resp.code ?? err.code);
+  const fbSubcode = num(resp.error_subcode ?? err.error_subcode);
+  const checkpoint =
+    fbSubcode === 459 || /log in to www\.facebook\.com/i.test(message) || /checkpoint_url/i.test(str(resp.error_data));
+  return { slug, message, fbCode, fbSubcode, checkpoint };
+}
+
+/** The sentence the route answers and the pickers show where the accounts would be. */
+export const lionProfileProblemText = (p: LionProfileProblem): string =>
+  p.checkpoint
+    ? `LION cannot read profile "${p.slug}" — Facebook asks its user to log in again (checkpoint, error ${p.fbCode ?? 190}/${p.fbSubcode ?? 459}) — pick another profile until the HS team re-logs this one`
+    : `LION cannot read profile "${p.slug}" — Facebook: ${p.message} — pick another profile until the HS team restores this one`;
+
+/** The problem behind a thrown error when it is LION's own "cannot read this profile" verdict —
+ *  never a LION outage, a timeout or an empty answer (those say nothing about the profile). */
+export function lionProfileUnreadable(e: unknown): LionProfileProblem | null {
+  const d = e instanceof LionError ? (e.detail as { profileUnreadable?: LionProfileProblem } | undefined) : undefined;
+  return d?.profileUnreadable ?? null;
+}
+
+// Health of the team's profiles: slug → why it cannot be read right now. Remembered briefly (a
+// re-logged profile should show up within minutes); a readable profile costs nothing after its
+// first read (the per-slug data cache), so a re-probe re-asks LION only about the dead ones.
+const HEALTH_TTL_MS = 2 * 60_000;
+let healthCache: CacheEntry<Record<string, string>> | undefined;
+export async function lionProfilesHealth(): Promise<Record<string, string>> {
+  if (healthCache && Date.now() - healthCache.at < HEALTH_TTL_MS) return healthCache.value;
+  return dedupe("profiles-health", async () => {
+    const queue = [...(await lionProfiles())];
+    const unreadable: Record<string, string> = {};
+    // A few reads at a time — profile/data/ is LION's heaviest read (hundreds of accounts).
+    await Promise.all(
+      Array.from({ length: Math.min(4, queue.length) }, async () => {
+        for (let p = queue.shift(); p; p = queue.shift()) {
+          try {
+            await lionProfileDataListed(p.slug);
+          } catch (e) {
+            unreadable[p.slug] = e instanceof Error ? e.message : String(e);
+          }
+        }
+      }),
+    );
+    healthCache = { at: Date.now(), value: unreadable };
+    return unreadable;
+  });
+}
+
 /** A profile's accounts, pages and locales (the create/ bind space). A team that does not take a
  *  profile's personal ad account (lib/team personalAccounts) gets the list WITHOUT it — left out
  *  here, at the source, so no picker offers it and no creating route accepts it. */
@@ -187,6 +272,10 @@ async function lionProfileDataListed(slug: string): Promise<LionProfileData> {
       `/api/facebook/profile/data/?profile_slug=${encodeURIComponent(slug)}`,
     )) as Record<string, unknown> | null;
     const data = (body?.data ?? body ?? {}) as Record<string, unknown>;
+    // LION's own "cannot read it" verdict (HTTP 200, data.status === false) — named before the
+    // empty-answer fallback below, so the boards can tell a checkpointed profile from a hiccup.
+    const problem = profileReadProblem(slug, data);
+    if (problem) throw new LionError(lionProfileProblemText(problem), undefined, { profileUnreadable: problem, body });
     const accounts = (Array.isArray(data.accounts) ? (data.accounts as Record<string, unknown>[]) : []).map(
       (a) => ({ id: str(a.id), name: str(a.name), currency: str(a.currency), status: Number(a.status ?? 0) }),
     );
@@ -259,9 +348,19 @@ async function ownAccountIds(): Promise<Set<string>> {
   if (cached) return cached;
   return dedupe("ownaccounts", async () => {
     const ids = new Set<string>();
+    let readable = 0;
     for (const p of await lionProfiles()) {
-      for (const a of (await lionProfileDataListed(p.slug)).accounts) ids.add(bareAccount(a.id));
+      try {
+        for (const a of (await lionProfileDataListed(p.slug)).accounts) ids.add(bareAccount(a.id));
+        readable++;
+      } catch (e) {
+        // A profile LION itself cannot read (a checkpointed Facebook user — glo-01-39 on 15.10)
+        // is skipped: the team's profiles mirror one pool, so its accounts are listed by the
+        // others. A LION outage still throws — a blind judge must not guess.
+        if (!lionProfileUnreadable(e)) throw e;
+      }
     }
+    if (readable === 0) throw new LionError(`LION could not read any ${TEAM.label} profile`);
     ownAccountsCache = { at: Date.now(), value: ids };
     return ids;
   });

@@ -39,9 +39,16 @@ export type HsCatalog = {
   /** Profile bind space: undefined = never requested / failed, null = loading. */
   dataFor: (slug: string) => HsProfileData | null | undefined;
   pixelsFor: (slug: string, account: string) => PixelInfo[] | null | undefined;
-  /** Idempotent loaders — safe to call from card effects on every render. */
-  ensureProfile: (slug: string) => void;
+  /** Idempotent loaders — safe to call from card effects on every render. `force` (an explicit
+   *  pick in an event handler — never an effect, which re-runs on every catalog change) retries
+   *  a profile whose last read failed before its cooldown is over. */
+  ensureProfile: (slug: string, force?: boolean) => void;
   ensurePixels: (slug: string, account: string) => void;
+  /** Why a profile's bind space could not be read — the route's sentence ("LION cannot read
+   *  profile … Facebook asks its user to log in again (checkpoint …)"), or null while loading /
+   *  loaded. Known from the profile's own failed read, or ahead of any pick from the team's
+   *  profile health (/api/hs/profile-health); the Profile picker tags such rows "unreadable". */
+  errorFor: (slug: string) => string | null;
   /** Fill meter of ONE fanpage id (any page — not just the picked profile's catalog): used/limit/
    *  free per the /api/hs/page-volume feed, plus the registry's display name ("" = unnamed).
    *  `approx` = the number is the LION-tally ESTIMATE (registry never read this page — render it
@@ -68,6 +75,7 @@ const EMPTY: HsCatalog = {
   pixelsFor: () => undefined,
   ensureProfile: () => {},
   ensurePixels: () => {},
+  errorFor: () => null,
   pageStats: () => null,
   pageFill: () => null,
   pageState: () => null,
@@ -91,6 +99,8 @@ export function useHs(enabled: boolean): HsCatalog {
   const [profiles, setProfiles] = useState<RichOption[] | null>(null);
   const [data, setData] = useState<Map<string, HsProfileData | null>>(new Map());
   const [pixels, setPixels] = useState<Map<string, PixelInfo[] | null>>(new Map());
+  // slug → why its bind space could not be read (cleared by a later successful read).
+  const [errors, setErrors] = useState<Map<string, string>>(new Map());
   // page id → active-ads count (+ per-page real limits in registry mode), one global map for
   // every profile (mirrors of one pool). null = not landed (yet / at all) → pages render
   // untagged, exactly like MO's loading state.
@@ -229,13 +239,53 @@ export function useHs(enabled: boolean): HsCatalog {
     };
   }, [enabled]);
 
+  // Profile health: which of the team's profiles LION cannot read right now (a checkpointed
+  // Facebook user — glo-01-39, the first row of the picker, on 15.10). Fetched once the list is
+  // in, so the Profile picker tags such rows BEFORE a pick and the account picker names the
+  // reason instead of "Loading…". Decoration only: a failure here changes nothing (a profile's
+  // own read still reports its own failure), and a profile this tab already read fine keeps it.
+  const profilesLanded = profiles !== null && profiles.length > 0;
+  useEffect(() => {
+    if (!enabled || !profilesLanded) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    async function load(attempt: number): Promise<void> {
+      try {
+        const r = await fetch("/api/hs/profile-health");
+        const d = (await r.json().catch(() => ({}))) as { ok?: boolean; unreadable?: Record<string, string> };
+        if (!alive) return;
+        if (r.ok && d?.ok && d.unreadable && typeof d.unreadable === "object") {
+          const found = d.unreadable;
+          setErrors((m) => {
+            const next = new Map(m);
+            for (const [slug, why] of Object.entries(found)) {
+              if (!doneRef.current.has(`d:${slug}`) && typeof why === "string" && why) next.set(slug, why);
+            }
+            return next;
+          });
+          return;
+        }
+        throw new Error(`HTTP ${r.status}`);
+      } catch {
+        if (alive && attempt < 2) timer = setTimeout(() => void load(attempt + 1), 15_000);
+      }
+    }
+
+    void load(0);
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [enabled, profilesLanded]);
+
   const ensureProfile = useCallback(
-    (slug: string) => {
+    (slug: string, force = false) => {
       if (!enabled || !slug) return;
       const key = `d:${slug}`;
       if (inflightRef.current.has(key) || doneRef.current.has(key)) return;
       const cooldown = failedAt.current.get(key);
-      if (cooldown && Date.now() < cooldown) return;
+      if (!force && cooldown && Date.now() < cooldown) return;
       inflightRef.current.add(key);
       setData((m) => (m.has(slug) ? m : new Map(m).set(slug, null))); // null = loading
       void (async () => {
@@ -250,8 +300,18 @@ export function useHs(enabled: boolean): HsCatalog {
             dupTokenAccounts?: string[] | null;
             pagesHidden?: number;
             pagesUnavailable?: string | null;
+            error?: string;
+            code?: string;
           };
-          if (!r.ok || !d?.ok) throw new Error(`HTTP ${r.status}`);
+          // The route's sentence names the reason (LION's "cannot read profile … log in again
+          // (checkpoint)" since 15.10); a bodiless failure is a blip the next pick retries.
+          if (!r.ok || !d?.ok) {
+            throw new Error(
+              typeof d?.error === "string" && d.error && d.error !== "unauthorized"
+                ? d.error
+                : `LION did not answer for this profile (HTTP ${r.status}) — re-pick it to retry`,
+            );
+          }
           // Disabled accounts are DROPPED entirely (owner call 2026-08-11) — the picker offers
           // only what can actually launch; the server refuses status≠1 anyway.
           const accounts = (d.accounts ?? [])
@@ -290,11 +350,19 @@ export function useHs(enabled: boolean): HsCatalog {
           failedAt.current.delete(key);
           doneRef.current.add(key);
           setData((m) => new Map(m).set(slug, value));
-        } catch {
+          setErrors((m) => {
+            if (!m.has(slug)) return m;
+            const next = new Map(m);
+            next.delete(slug);
+            return next;
+          });
+        } catch (e) {
           failedAt.current.set(key, Date.now() + FAIL_COOLDOWN_MS);
+          const why = e instanceof Error && e.message ? e.message : "LION did not answer for this profile — re-pick it to retry";
+          setErrors((m) => new Map(m).set(slug, why));
           setData((m) => {
             const next = new Map(m);
-            next.delete(slug); // slot free again → a later ensure (post-cooldown) retries
+            next.delete(slug); // slot free again → a later ensure (post-cooldown, or a re-pick) retries
             return next;
           });
         } finally {
@@ -382,6 +450,15 @@ export function useHs(enabled: boolean): HsCatalog {
     return next;
   }, [data, pageVolume]);
 
+  // The Profile picker's rows: a profile LION cannot read right now wears a red "unreadable" tag
+  // (closed input and dropdown alike); it stays pickable — a re-pick retries, and the reason
+  // sits under the field / where the accounts would be.
+  const profilesShown = useMemo(() => {
+    if (!profiles || errors.size === 0) return profiles;
+    return profiles.map((p) => (errors.has(p.value) ? { ...p, tag: "unreadable", tagTone: "danger" as const } : p));
+  }, [profiles, errors]);
+  const errorFor = useCallback((slug: string): string | null => (slug ? (errors.get(slug) ?? null) : null), [errors]);
+
   const dataFor = useCallback((slug: string) => (slug ? decorated.get(slug) : undefined), [decorated]);
   const pixelsFor = useCallback(
     (slug: string, account: string) => (slug && account ? pixels.get(`${slug}|${account}`) : undefined),
@@ -432,8 +509,8 @@ export function useHs(enabled: boolean): HsCatalog {
   return useMemo(
     () =>
       enabled
-        ? { acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels, pageStats, pageFill, pageState }
+        ? { acr, tokenLaunch, profiles: profilesShown, dataFor, pixelsFor, ensureProfile, ensurePixels, errorFor, pageStats, pageFill, pageState }
         : EMPTY,
-    [enabled, acr, tokenLaunch, profiles, dataFor, pixelsFor, ensureProfile, ensurePixels, pageStats, pageFill, pageState],
+    [enabled, acr, tokenLaunch, profilesShown, dataFor, pixelsFor, ensureProfile, ensurePixels, errorFor, pageStats, pageFill, pageState],
   );
 }
