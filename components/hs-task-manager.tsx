@@ -33,6 +33,7 @@ import { UploadingNotice } from "./upload-guard";
 import { type Campaign, type FileItem, bidTag, moneyLabel } from "@/lib/types";
 import { CANCELED_STAGE, type QueueKind } from "@/lib/launch-queue-types";
 import { teamHas } from "@/lib/team";
+import { ACTIVATE_STAGE, doneRowNote, lionWaitLabel } from "@/lib/hs-wait-label";
 import type { SessionUser } from "./user-menu";
 import { AlertIcon, CheckIcon, CopyIcon, RetryIcon, RocketIcon, TasksIcon, XIcon } from "./icons";
 
@@ -157,6 +158,9 @@ const HS_STAGE_ALIAS: Record<string, string> = {
   processing: "submit",
   creative: "ads",
   ad: "ads",
+  // A clone the follow-up parked while LION's store catches up with its own newborn (15.10):
+  // the tree exists, so the bar sits on its last slot.
+  [ACTIVATE_STAGE]: "ads",
 };
 
 const stageIndex = (stage: string): number => {
@@ -1584,7 +1588,9 @@ function HsTaskRow({
                   : t.kind === "token"
                     ? TOKEN_STAGE_LABELS[t.stage]
                     : STAGES[idx]?.label) ?? "Working…"
-              : (t.lionStatus && LION_STAGE[t.lionStatus]?.label) || `On LION: ${t.lionStatus ?? "…"}`;
+              : // "submitted": a server row says the stage the follow-up wrote (queue → … → ads →
+                // activating); a legacy client-polled row says what it learned itself.
+                lionWaitLabel(t);
 
   return (
     <div
@@ -1712,6 +1718,14 @@ function HsTaskRow({
               ? t.lionNote
               : `LION retrying: ${t.lionNote}`}
           </span>
+        </p>
+      ) : null}
+      {/* A done row that still carries a note: the chain exists but the follow-up could not flip
+          it ACTIVE within its window — said here, never hidden under a green row (15.10). */}
+      {doneRowNote(t) ? (
+        <p className="mt-1.5 flex items-start gap-1.5 rounded-md border border-warn/25 bg-warn/5 px-2 py-1 text-[10.5px] leading-relaxed text-warn">
+          <AlertIcon className="mt-px h-3 w-3 shrink-0" />
+          <span className="min-w-0 break-words">{doneRowNote(t)}</span>
         </p>
       ) : null}
     </div>

@@ -36,6 +36,7 @@ import { runTtFollowSlice } from "@/lib/tt-follow-core";
 import { runHsDupShot, type HsDupShot } from "@/lib/hs-dup-shot";
 import { juroFamilyKey, runHsJuroShot, type HsJuroShot } from "@/lib/hs-jurar-shot";
 import { runHsFollowSlice, type FollowMode, type FollowShot } from "@/lib/hs-follow-core";
+import { ACTIVATE_STAGE } from "@/lib/hs-wait-label";
 import { runHsTokenDupShot, type HsTokenDupShot } from "@/lib/hs-token-dup-shot";
 import { runHsTokenJuroShot, type HsTokenJuroShot } from "@/lib/hs-token-jurar-shot";
 import { runHsToolDupShot, type HsToolDupShot } from "@/lib/hs-tool-dup-shot";
@@ -189,7 +190,7 @@ const runHsJurar: JobRunner = async (job, ctx) => {
 const hsFollow =
   (mode: FollowMode): JobRunner =>
   async (job, ctx) => {
-    const body = job.body as { waveId: string; until: number; renamed?: string[] };
+    const body = job.body as { waveId: string; until: number; renamed?: string[]; activating?: Record<string, number> };
     const kind = mode === "dup" ? "hs.dup" : "hs.jurar";
     const submits = await findJobsByGroup(body.waveId, [kind]);
     const submitted = submits.filter((j) => j.status === "done" && j.result?.link);
@@ -212,6 +213,12 @@ const hsFollow =
         biddingMismatch: mode === "dup" ? (j.result?.note ?? null) : null,
         campaignId: shot.campaignId,
         renamed: renamed.has(j.job_id),
+        // The stage a slice last wrote (LION's creation status) and, for a clone parked at
+        // "activate" (LION's store lagging its own newborn), when that wait began — the body
+        // remembers it across slices; a row parked by a build without the memory starts now.
+        stage: row.stage || null,
+        activatingSince: row.stage === ACTIVATE_STAGE && row.campaign_id ? (body.activating?.[j.job_id] ?? ctx.now()) : null,
+        adCount: Number(row.ad_id) || null,
       });
     }
     const res = await runHsFollowSlice(
@@ -220,6 +227,7 @@ const hsFollow =
         creationStatus: lionCreationStatus,
         campaignAds: lionCampaignAds,
         activate: lionActivateWithRetry,
+        activateOnce: (id) => lionSetCampaignStatus(id, "ACTIVE"),
         pause: (id) => lionSetCampaignStatus(id, "PAUSED").then((r) => r.ok),
         // A team without our FB tokens keeps LION's own name: nothing could sign the rename.
         rename: teamHas("channel:token") ? hsRenameCampaign : null,
@@ -240,12 +248,19 @@ const hsFollow =
     if (res.pending.length === 0 && !stillSubmitting) return followDone(job);
     if (ctx.now() >= body.until) {
       // Nobody is coming for these: the drawer's old 3 h sentence, with whatever ids are known.
+      // A clone parked at "activate" EXISTS — it closes done with the activation note, not as lost.
       for (const s of res.pending) {
+        if (s.activatingSince != null && s.cloneId) {
+          await patchOpenTaskRow(s.taskId, { ...SRV, partner: "br", status: "done", stage: "ads", campaign_id: s.cloneId, ad_id: String(s.adCount ?? 1), error: "activation failed — flip it ACTIVE in LION (LION never synced the clone within the wave's window)", finished_at: ctx.now() }).catch(() => false);
+          continue;
+        }
         await patchOpenTaskRow(s.taskId, { ...SRV, partner: "br", status: "interrupted", error: FOLLOW_GAVE_UP_MSG, ...(s.cloneId ? { campaign_id: s.cloneId } : {}), finished_at: ctx.now() }).catch(() => false);
       }
       return followDone(job);
     }
-    return again(ctx.now() + FOLLOW_DEFER_MS, { ...body, renamed: [...renamed] });
+    const activating: Record<string, number> = {};
+    for (const s of res.pending) if (s.activatingSince != null) activating[s.taskId] = s.activatingSince;
+    return again(ctx.now() + FOLLOW_DEFER_MS, { ...body, renamed: [...renamed], activating });
   };
 
 // ---- HS token duplicate / JURO ----

@@ -15,6 +15,7 @@ import { reportPagesUsed } from "@/lib/hs-pages";
 import { AcctLimitedError, acctKey, claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 import { LionError, lionCampaignAds, lionDuplicate, lionSourceBidFacts, type LionLocale } from "@/lib/lion";
 import { dupBidPlan, dupBiddingMismatch } from "@/lib/lion-dup-bid";
+import { explainDupRefusal } from "@/lib/hs-dup-refusal";
 import { lionDuplicateTargeting, type GeoOverride } from "@/lib/targeting-override";
 import type { ShotBinds } from "@/lib/hs-shot-binds";
 
@@ -173,7 +174,7 @@ export async function runHsDupShot(s: HsDupShot, deps: HsDupShotDeps): Promise<H
       // Preflight rejection kills the whole family (object-story creatives, dead source…).
       // No clone was created → the account slot goes back to the pool.
       await releaseAcctSlot(slotDoc);
-      return refuse(result.reason || `LION rejected the duplicate (${result.result ?? "no result"})`, { family: true });
+      return refuse(explainDupRefusal(result.reason || `LION rejected the duplicate (${result.result ?? "no result"})`), { family: true });
     }
     // Read back LION's RESOLVED bidding (v2): a unit slip or a strategy LION quietly changed must
     // never reach an ACTIVE clone — a mismatch parks the clone PAUSED at finalize with the

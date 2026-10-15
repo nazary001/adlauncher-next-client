@@ -13,8 +13,20 @@
 // wall is paused best-effort; a wall that is about the ACCOUNT settles every pending shot bound to
 // that account, a family wall the source's other copies; NO_COUNTRIES_LEFT is final.
 // Relative `.ts` imports only (node --test loads this straight from disk).
+//
+// 15.10: LION's creation status is written onto the open row as its `stage` (the drawer read
+// "On LION: …" for the whole wait), and an activation LION answers "Campaign not found" no longer
+// closes the row with a note after ~60 s: the clone EXISTS, LION's store just hasn't seen it yet
+// (99 such notes on 15.10, 98 of the campaigns ACTIVE minutes later). The shot parks at stage
+// "activate" — open — and every tick asks once more, until LION syncs (or someone else flips it:
+// the reality check reads campaign_status), or a give-up window closes it with the note.
+
+import { ACTIVATE_STAGE, LION_STATUS_STAGE } from "./hs-wait-label.ts";
 
 export type FollowMode = "dup" | "jurar";
+
+/** How long an "activate" shot keeps asking before the note goes on the row (the chain exists). */
+export const ACTIVATE_GIVE_UP_MS = 30 * 60_000;
 
 /** One submitted shot the follow-up watches. */
 export type FollowShot = {
@@ -32,6 +44,14 @@ export type FollowShot = {
   campaignId: string;
   /** The rename already landed (or was given up) in an earlier slice. */
   renamed: boolean;
+  /** The row's current stage (what LION last said, as written by a slice) — written again only
+   *  when it changes. Absent on legacy callers = unknown. */
+  stage?: string | null;
+  /** Set once activation hit "Campaign not found": the clone exists, LION's store lags. The
+   *  moment (ms) the wait began — carried across slices by the job body. */
+  activatingSince?: number | null;
+  /** The clone's ad count once known (the row's ad_id) — what a later slice closes the row with. */
+  adCount?: number | null;
 };
 
 export type LionTaskRead = { task_id: string; campaign_id?: string | null; ad_ids?: string[]; status: string; error?: { message?: string } | null };
@@ -41,6 +61,9 @@ export type FollowDeps = {
   campaignAds(campaignIds: string[]): Promise<Record<string, { status: string; adsCount: number }>>;
   /** lionActivateWithRetry — "already active" counts as ok. */
   activate(campaignId: string): Promise<{ ok: boolean; message?: string; attempts: number }>;
+  /** ONE activation attempt (lionSetCampaignStatus ACTIVE) — the cheap per-tick ask once a clone
+   *  is parked at "activate"; "already active" counts as ok. */
+  activateOnce(campaignId: string): Promise<{ ok: boolean; message?: string }>;
   pause(campaignId: string): Promise<boolean>;
   /** Graph rename to the board's exact name — null when the team has no FB token to sign it. */
   rename: ((campaignId: string, name: string, account: string) => Promise<boolean>) | null;
@@ -66,6 +89,8 @@ export type FollowSliceOpts = {
   mode: FollowMode;
   pollMs?: number;
   realityEveryMs?: number;
+  /** How long a parked "activate" shot keeps asking before the note closes it. */
+  activateGiveUpMs?: number;
 };
 
 export type FollowSliceResult = {
@@ -85,6 +110,7 @@ export type FollowSliceResult = {
 export async function runHsFollowSlice(shots: FollowShot[], deps: FollowDeps, opts: FollowSliceOpts): Promise<FollowSliceResult> {
   const pollMs = opts.pollMs ?? 10_000;
   const realityEveryMs = opts.realityEveryMs ?? 40_000;
+  const activateGiveUpMs = opts.activateGiveUpMs ?? ACTIVATE_GIVE_UP_MS;
   const pending = new Map(shots.map((s) => [s.taskId, { ...s }]));
   const settled: string[] = [];
   const renamed: string[] = [];
@@ -118,14 +144,55 @@ export async function runHsFollowSlice(shots: FollowShot[], deps: FollowDeps, op
     const act = await deps.activate(cloneId).catch((e) => ({ ok: false, message: String((e as Error).message ?? e), attempts: 0 }));
     if (!act.ok) {
       deps.log?.(`activate ${cloneId} failed after ${act.attempts} attempt(s): ${act.message ?? ""}`);
-      // The chain exists; the buyer flips it by hand. Said on the row — never a silent green "done".
-      const note = `activation failed — flip it ACTIVE in LION (${(act.message ?? "unknown").slice(0, 200)})`;
-      await deps.writeOpen(s.taskId, { status: "done", stage: "ads", campaign_id: cloneId, ad_id: String(adCount), error: note, finished_at: now() }).catch(() => false);
-      settle(s.taskId);
+      if (/not found/i.test(act.message ?? "")) {
+        // The clone exists (LION just said COMPLETED / details read its ads); LION's own store
+        // is what lags. Park the row OPEN at "activate" with the ids and keep asking each tick.
+        s.cloneId = cloneId;
+        s.activatingSince = now();
+        s.adCount = adCount;
+        s.stage = ACTIVATE_STAGE;
+        await deps.writeOpen(s.taskId, { stage: ACTIVATE_STAGE, campaign_id: cloneId, ad_id: String(adCount) }).catch(() => false);
+        return;
+      }
+      await closeWithNote(s, cloneId, adCount, act.message);
       return;
     }
     await deps.writeOpen(s.taskId, { status: "done", stage: "ads", campaign_id: cloneId, ad_id: String(adCount), error: null, finished_at: now() }).catch(() => false);
     settle(s.taskId);
+  };
+
+  /** The chain exists but could not be flipped: said on the row — never a silent green "done". */
+  const closeWithNote = async (s: FollowShot, cloneId: string, adCount: number, message: string | undefined): Promise<void> => {
+    const note = `activation failed — flip it ACTIVE in LION (${(message ?? "unknown").slice(0, 200)})`;
+    await deps.writeOpen(s.taskId, { status: "done", stage: "ads", campaign_id: cloneId, ad_id: String(adCount), error: note, finished_at: now() }).catch(() => false);
+    settle(s.taskId);
+  };
+
+  /** A parked "activate" shot: one cheap ask per tick. Inside the window EVERY failure waits —
+   *  "not found" is LION's store still syncing, anything else (a 502, a timeout) is a blip the
+   *  next tick retries (review 15.10: a single transient answer must not close a healthy clone
+   *  with the note). Past the window the note names LION's last answer. */
+  const askActivate = async (s: FollowShot, adCount: number): Promise<void> => {
+    const cloneId = s.cloneId as string;
+    const r = await deps.activateOnce(cloneId).catch((e) => ({ ok: false, message: String((e as Error).message ?? e) }));
+    if (r.ok) {
+      await deps.writeOpen(s.taskId, { status: "done", stage: "ads", campaign_id: cloneId, ad_id: String(adCount), error: null, finished_at: now() }).catch(() => false);
+      settle(s.taskId);
+      return;
+    }
+    if (now() - (s.activatingSince ?? now()) < activateGiveUpMs) return;
+    await closeWithNote(s, cloneId, adCount, r.message);
+  };
+
+  /** LION's creation status onto the row as its stage — only when it moves FORWARD (LION's
+   *  read side can lag a step behind; the bar never walks back) and only when it changes. */
+  const STAGE_ORDER = ["queue", "campaign", "adset", "ads"];
+  const noteStage = async (s: FollowShot, status: string): Promise<void> => {
+    const stage = LION_STATUS_STAGE[status];
+    if (!stage || stage === s.stage) return;
+    if (s.stage && STAGE_ORDER.indexOf(stage) < STAGE_ORDER.indexOf(s.stage)) return;
+    s.stage = stage;
+    await deps.writeOpen(s.taskId, { stage }).catch(() => false);
   };
 
   /** A wall answer settles a shot as failed; a JURO shell is born ACTIVE, so a best-effort pause
@@ -147,8 +214,11 @@ export async function runHsFollowSlice(shots: FollowShot[], deps: FollowDeps, op
       const tasks = await deps.creationStatus([...new Set(list.map((s) => s.lionTaskId))]);
       const byId = new Map(tasks.map((t) => [String(t.task_id ?? ""), t]));
       let accountWall: { reason: string; account: string } | null = null;
+      // Parked clones first: they exist whatever LION's task record says (it may be pruned by now).
+      for (const s of list) if (pending.has(s.taskId) && s.activatingSince != null && s.cloneId) await askActivate(s, s.adCount ?? 1);
       for (const s of list) {
         if (!pending.has(s.taskId)) continue; // settled by a family / account sweep in this pass
+        if (s.activatingSince != null) continue; // parked — asked above, the record no longer matters
         const r = byId.get(s.lionTaskId);
         if (!r) continue;
         if (r.campaign_id && !s.cloneId) {
@@ -173,6 +243,7 @@ export async function runHsFollowSlice(shots: FollowShot[], deps: FollowDeps, op
             }
           }
         }
+        await noteStage(s, r.status);
         const errText = r.error?.message;
         if (opts.mode === "dup") {
           // Meta's min-ROAS eligibility rejection: LION retries the requested strategy forever —
@@ -202,7 +273,9 @@ export async function runHsFollowSlice(shots: FollowShot[], deps: FollowDeps, op
           if (wall) {
             await settleWall(s, wall.reason);
             if (wall.scope === "account") accountWall = { reason: wall.reason, account: deps.acctKey(s.account) };
-            else for (const sib of [...pending.values()].filter((x) => x.campaignId === s.campaignId)) await settleWall(sib, wall.reason);
+            // A parked sibling is already CREATED on Meta — a wall its source's other copies hit
+            // is not its story (review 15.10: the sweep used to pause and error it).
+            else for (const sib of [...pending.values()].filter((x) => x.campaignId === s.campaignId && x.activatingSince == null)) await settleWall(sib, wall.reason);
           }
         }
         // NOT_FOUND / CREATING_*: the reality check below settles them (task records wedge and
@@ -211,7 +284,7 @@ export async function runHsFollowSlice(shots: FollowShot[], deps: FollowDeps, op
       if (accountWall) {
         // An account wall (certification) kills every pending shot bound to THAT account — rows on
         // other destinations keep going (per-row destinations 09-08).
-        for (const s of [...pending.values()].filter((x) => deps.acctKey(x.account) === accountWall!.account)) await settleWall(s, accountWall.reason);
+        for (const s of [...pending.values()].filter((x) => deps.acctKey(x.account) === accountWall!.account && x.activatingSince == null)) await settleWall(s, accountWall.reason);
       }
       if (now() - lastReality > realityEveryMs) {
         lastReality = now();
@@ -220,7 +293,16 @@ export async function runHsFollowSlice(shots: FollowShot[], deps: FollowDeps, op
           const real = await deps.campaignAds(ids).catch(() => ({}) as Record<string, { status: string; adsCount: number }>);
           for (const s of [...pending.values()].filter((x) => x.cloneId)) {
             const c = real[s.cloneId as string];
-            if (c && c.adsCount > 0) await finalize(s, s.cloneId as string, c.adsCount);
+            if (!c) continue;
+            if (s.activatingSince != null) {
+              // Someone else flipped it (the buyer, or a JURO born ACTIVE): the row closes clean.
+              if (c.status === "ACTIVE") {
+                await deps.writeOpen(s.taskId, { status: "done", stage: "ads", campaign_id: s.cloneId, ad_id: String(c.adsCount || s.adCount || 1), error: null, finished_at: now() }).catch(() => false);
+                settle(s.taskId);
+              }
+              continue;
+            }
+            if (c.adsCount > 0) await finalize(s, s.cloneId as string, c.adsCount);
           }
         }
       }
