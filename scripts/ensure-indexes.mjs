@@ -56,6 +56,9 @@ const PLAN = {
   mo_landing_jobs: [...envelope, { key: { status: 1, scheduled_at: 1 } }, { key: { status: 1, started_at: 1 } }],
   mo_landings: [...envelope, { key: { slug: 1 } }, { key: { lang: 1, createdAt: -1 } }, { key: { niche: 1, createdAt: -1 } }],
   up_users: [...envelope, { key: { username: 1 }, unique: true }, { key: { email: 1 }, unique: true }],
+  // Campaign templates (lib/template-store): the picker lists one partner's newest-updated first; one
+  // name per buyer per partner is the unique key (name_key = the name lower-cased, spaces collapsed).
+  launch_templates: [...envelope, { key: { partner: 1, updatedAt: -1 } }, { key: { owner: 1, partner: 1, name_key: 1 }, unique: true }],
   // The server-side launch queue (lib/launch-queue-store.ts). job_id is the hand-off idempotency key;
   // {lane,status,seq} serves claimNextJob / peekQueued, {status,lease_until} the reaper, {owner,status}
   // retry/cancel, {status,account} the launch-limit demand; expire_at is the 14-day TTL.

@@ -44,6 +44,8 @@ export async function ensureTestIndexes(): Promise<void> {
     // The launch-queue job collection: job_id is the hand-off idempotency key AND the claim/finish
     // precondition, so the live queue tests need its unique index (+ the Strapi envelope).
     ["launch_jobs", { job_id: 1 }],
+    // Campaign templates: one name per buyer per partner (lib/template-store createTemplate relies on it).
+    ["launch_templates", { owner: 1, partner: 1, name_key: 1 }],
   ];
   for (const [name, key] of plan) {
     await db.collection(name).createIndex(key, { unique: true });

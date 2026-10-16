@@ -8,7 +8,7 @@
 //
 // What moves: the user's `username` (the old one is kept in `former_usernames`, so the buyer can still
 // sign in under the name they have always typed), the account assignments of /accounts, the registry
-// rows the login holds (Snapchat / AV keys, wave claims) and the owner of their task and queue rows —
+// rows the login holds (Snapchat / AV keys, wave claims), their campaign templates and the owner of their task and queue rows —
 // their history stays theirs. Campaign names already launched are NOT rewritten: they are what the
 // platforms show. The buyer's open tab picks the new name up by itself (components/session-watch asks
 // /api/auth/session, which re-issues the cookie) — the launcher build that has that must be live first.
@@ -43,6 +43,7 @@ const { TEAM } = await import("../lib/team.ts");
 const { coll, getClient } = await import("../lib/mongo.ts");
 const { APP_CACHES, LAUNCH_TASKS, UP_USERS } = await import("../lib/store.ts");
 const { LAUNCH_JOBS } = await import("../lib/launch-queue-store.ts");
+const { LAUNCH_TEMPLATES } = await import("../lib/template-store.ts");
 
 /** lib/acct-assignments ACCT_ASSIGN_KEY (that module imports through "@/", which plain node cannot). */
 const ACCT_ASSIGN_KEY = "fb-acct-assignments";
@@ -104,6 +105,8 @@ async function main() {
     nextAccounts[acct] = out;
   }
 
+  const templates = await coll(LAUNCH_TEMPLATES);
+  const ownTemplates = await templates.countDocuments({ owner: oldName });
   const held = await caches.countDocuments({ "cvalue.user": oldName });
   const ownTasks = await tasks.countDocuments({ owner: oldName });
   const ownJobs = await jobs.countDocuments({ owner: oldName });
@@ -114,6 +117,7 @@ async function main() {
   console.log(`  account assignments: ${moved} account(s)`);
   console.log(`  registry rows held (keys, wave claims): ${held}`);
   console.log(`  task rows: ${ownTasks}   queue rows: ${ownJobs}`);
+  console.log(`  campaign templates: ${ownTemplates}`);
   if (!apply) return 0;
 
   const now = new Date();
@@ -135,6 +139,9 @@ async function main() {
   if (held) await caches.updateMany({ "cvalue.user": oldName }, { $set: { "cvalue.user": newName, updatedAt: now } });
   if (ownTasks) await tasks.updateMany({ owner: oldName }, { $set: { owner: newName } });
   if (ownJobs) await jobs.updateMany({ owner: oldName, status: { $nin: ["queued", "running"] } }, { $set: { owner: newName } });
+  // Templates: the creator (the one-name-per-buyer key moves with them) and the last-editor stamp.
+  if (ownTemplates) await templates.updateMany({ owner: oldName }, { $set: { owner: newName } });
+  await templates.updateMany({ updated_by: oldName }, { $set: { updated_by: newName } });
   console.log(`done — ${newName} can sign in as "${newName}", "${oldName}" or the e-mail; an open tab switches by itself within minutes`);
   return 0;
 }

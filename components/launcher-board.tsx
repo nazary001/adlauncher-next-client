@@ -33,12 +33,16 @@ import { useHs } from "./use-hs";
 import { LaunchRail } from "./launch-rail";
 import { type ToolSessionOption, useToolReady } from "./use-tool-ready";
 import { CopySettingsModal } from "./copy-settings-modal";
-import { ChevronsIcon, CopyIcon, PlusIcon } from "./icons";
+import { ChevronsIcon, CopyIcon, LayersIcon, PlusIcon } from "./icons";
 import { useAifTaskManager, useAvTaskManager, useTaskManager } from "./task-manager";
 import { useAvDestinations } from "./use-av-destinations";
 import { pinAvNamePrefix } from "@/lib/av-link";
 import { type HsLaunchChannel, useHsTaskManager } from "./hs-task-manager";
 import type { SessionUser } from "./user-menu";
+import { type CampaignTemplate, applyTemplate } from "@/lib/templates";
+import { useTemplates } from "./use-templates";
+import { SaveTemplateModal, type SaveTemplateMode } from "./save-template-modal";
+import { TemplatesModal, type TemplatePickerMode } from "./templates-modal";
 
 /** Card clone for duplication: fresh array/object identities for every mutable field (files —
  *  cover objects included — countries, locales), so a future in-place edit on one card can never
@@ -244,6 +248,14 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   );
   const [previewed, setPreviewed] = useState(false);
   const [copyOpen, setCopyOpen] = useState(false);
+  // Campaign templates (owner ask 16.10): the active partner's list (shared by the whole team), the
+  // picker (opened from a card or from the toolbar), the save / edit form, and the note the toolbar
+  // shows for a moment after a save or an apply.
+  const templates = useTemplates(partnerId);
+  const [tplPicker, setTplPicker] = useState<{ kind: "card"; cardId: string } | { kind: "board" } | null>(null);
+  const [tplForm, setTplForm] = useState<{ kind: "create"; cardId: string } | { kind: "edit"; template: CampaignTemplate } | null>(null);
+  const [tplNote, setTplNote] = useState("");
+  const tplTimer = useRef<number | null>(null);
   const nextId = useRef(2);
   // Owner-generated MK Learn pages join the MO landing catalog live (grouped "Auto · <niche>",
   // appended after the static niches so SearchSelect's contiguous-group contract holds).
@@ -806,6 +818,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     aifTm.setOpen(false);
     avTm.setOpen(false);
     hsTasks.setOpen(false);
+    // The template picker / form are the outgoing partner's (its fields, its list) — closed too.
+    setTplPicker(null);
+    setTplForm(null);
     // The pick rides in the URL so a refresh reopens on the same partner (no navigation).
     const url = new URL(window.location.href);
     url.searchParams.set("partner", id);
@@ -918,6 +933,60 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     [mutate],
   );
 
+  // ---- campaign templates (owner ask 16.10) ----------------------------------------------------
+  const noteTemplate = (text: string) => {
+    setTplNote(text);
+    if (tplTimer.current) window.clearTimeout(tplTimer.current);
+    tplTimer.current = window.setTimeout(() => setTplNote(""), 4500);
+  };
+  /** Focus-pulse a card in place (the Launch-bay jump without the scroll). */
+  const pulse = (id: string) => {
+    setHighlightId(null);
+    window.setTimeout(() => setHighlightId(id), 30);
+    if (hlTimer.current) window.clearTimeout(hlTimer.current);
+    hlTimer.current = window.setTimeout(() => setHighlightId(null), 1800);
+  };
+  // Stable (useCallback) like every card handler — the cards are memoized.
+  const openTemplatePicker = useCallback((id: string) => setTplPicker({ kind: "card", cardId: id }), []);
+  const openTemplateSave = useCallback((id: string) => setTplForm({ kind: "create", cardId: id }), []);
+  /** A template lands on one card or on every card: its own keys only, the creatives stay
+   *  (lib/templates applyTemplate); mutate then re-runs the partner locks, the marker assignment and
+   *  the default fills exactly as after a hand edit. */
+  const applyTemplateTo = (t: CampaignTemplate, target: "all" | string) => {
+    const me = user?.username ?? "";
+    const n = target === "all" ? campaigns.length : 1;
+    mutate((cs) => cs.map((c) => (target === "all" || c.id === target ? applyTemplate(c, t, me) : c)));
+    templates.use(t.documentId);
+    setTplPicker(null);
+    noteTemplate(`Template «${t.name}» applied to ${n} campaign${n === 1 ? "" : "s"}`);
+    if (target !== "all") pulse(target);
+  };
+  /** A fresh card with the template already on it, appended and brought into view. */
+  const newCardFromTemplate = (t: CampaignTemplate) => {
+    const id = `c${nextId.current++}`;
+    const me = user?.username ?? "";
+    mutate((cs) => [...cs, applyTemplate(freshCard(id, partner, me), t, me)]);
+    templates.use(t.documentId);
+    setTplPicker(null);
+    noteTemplate(`New campaign from «${t.name}»`);
+    jumpTo(id);
+  };
+  const tplPickerCard = tplPicker?.kind === "card" ? campaigns.find((c) => c.id === tplPicker.cardId) : undefined;
+  // A picker opened from a card that was removed meanwhile falls back to the board mode.
+  const tplPickerMode: TemplatePickerMode | null = !tplPicker
+    ? null
+    : tplPicker.kind === "card" && tplPickerCard
+      ? { kind: "card", card: tplPickerCard, cardIndex: campaigns.indexOf(tplPickerCard) }
+      : { kind: "board", cardCount: campaigns.length };
+  const tplFormCard = tplForm?.kind === "create" ? campaigns.find((c) => c.id === tplForm.cardId) : undefined;
+  const tplFormMode: SaveTemplateMode | null = !tplForm
+    ? null
+    : tplForm.kind === "edit"
+      ? { kind: "edit", template: tplForm.template }
+      : tplFormCard
+        ? { kind: "create", card: tplFormCard, cardIndex: campaigns.indexOf(tplFormCard) }
+        : null;
+
   return (
     <>
       <Header partner={partnerId} onPartnerChange={changePartner} user={user} />
@@ -1021,6 +1090,31 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
               ) : null}
 
               <div className="ml-auto flex items-center gap-2">
+                {tplNote ? (
+                  <span role="status" data-template-note className="animate-fade-in hidden items-center gap-1.5 text-[12px] font-medium text-launch2 md:flex">
+                    <span className="h-1.5 w-1.5 rounded-full bg-launch2" />
+                    {tplNote}
+                  </span>
+                ) : null}
+                {/* Campaign templates (owner ask 16.10): the team's library for this partner — apply to
+                    every card or add a card from one; each card has its own Apply / Save buttons. */}
+                <button
+                  type="button"
+                  onClick={() => setTplPicker({ kind: "board" })}
+                  data-action="templates"
+                  className={
+                    "flex h-9 items-center gap-2 rounded-lg border border-line bg-surface px-3.5 " +
+                    "text-[13px] font-medium text-dim transition-all duration-150 " +
+                    "hover:border-line2 hover:bg-surface2 hover:text-ink active:scale-[0.97] " +
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  }
+                >
+                  <LayersIcon className="h-4 w-4 text-[#9db8ff]" />
+                  Templates
+                  {templates.templates && templates.templates.length > 0 ? (
+                    <span className="rounded-md border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[11px] text-dim">{templates.templates.length}</span>
+                  ) : null}
+                </button>
                 <button
                   type="button"
                   onClick={() => setCopyOpen(true)}
@@ -1089,6 +1183,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
                 onDuplicate={duplicate}
                 onRemove={remove}
                 onApplyFilesToAll={campaigns.length > 1 ? applyFilesToAll : undefined}
+                onApplyTemplate={openTemplatePicker}
+                onSaveTemplate={openTemplateSave}
               />
             ))}
 
@@ -1150,6 +1246,48 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
         onClose={() => setCopyOpen(false)}
         onApply={applyCopy}
       />
+      {tplPickerMode ? (
+        <TemplatesModal
+          mode={tplPickerMode}
+          partner={partner}
+          api={templates}
+          user={{ username: user?.username ?? "", owner: Boolean(user?.owner) }}
+          onClose={() => setTplPicker(null)}
+          onApplyToCard={(t, id) => applyTemplateTo(t, id)}
+          onApplyToAll={(t) => applyTemplateTo(t, "all")}
+          onNewCard={newCardFromTemplate}
+          onEdit={(t) => {
+            setTplPicker(null);
+            setTplForm({ kind: "edit", template: t });
+          }}
+          onSaveCard={
+            tplPickerMode.kind === "card"
+              ? () => {
+                  setTplPicker(null);
+                  setTplForm({ kind: "create", cardId: tplPickerMode.card.id });
+                }
+              : undefined
+          }
+        />
+      ) : null}
+      {tplFormMode ? (
+        <SaveTemplateModal
+          mode={tplFormMode}
+          partner={partner}
+          api={templates}
+          onClose={() => setTplForm(null)}
+          onSaved={(t, what) => {
+            setTplForm(null);
+            noteTemplate(
+              what === "created"
+                ? `Template «${t.name}» saved — the whole team sees it now`
+                : what === "replaced"
+                  ? `Template «${t.name}» now carries this card's settings`
+                  : `Template «${t.name}» updated`,
+            );
+          }}
+        />
+      ) : null}
     </>
   );
 }

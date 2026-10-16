@@ -209,6 +209,9 @@ const API_NEEDS: ReadonlyArray<readonly [string, Need]> = [
   ["/api/wave-status", "always"],
   ["/api/acct-limit", "always"],
   ["/api/acct-assignments", "tool:accounts"],
+  // Campaign templates (owner ask 16.10): every login of every team saves and applies them — the
+  // team's own partners only (the route checks the partner), in the team's own database.
+  ["/api/templates", "always"],
   ["/api/team", "tool:accounts"],
   ["/api/creatives", "always"],
   ["/api/blob-upload", "legacyBlob"],

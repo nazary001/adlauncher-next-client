@@ -41,8 +41,9 @@ on its own:
 - **Campaigns the team changes** (an activation that arrives by id) — by the acronym LION stamps at
   the head of every name it builds (`[06/10] (GLO-01) API - …`), else by the ad account. GLO-02
   activates only a campaign that is provably its own; GLO-01 everything except a GLO-02 campaign.
-- **Stored state** — users, the launch queue, the task registry, per-account launch limits and
-  account assignments live in the team's own database. A build refuses to run on another team's.
+- **Stored state** — users, the launch queue, the task registry, per-account launch limits,
+  account assignments and campaign templates live in the team's own database. A build refuses to run
+  on another team's.
 - **Sessions** — own `AUTH_SECRET` per team, and the cookie carries the team as well.
 - A LION key whose acronym names the other team is refused outright (`lion_team_mismatch`).
 
@@ -136,6 +137,17 @@ first in the list and with no pixel to launch on. A team with `personalAccounts:
 `lib/team.ts` never sees it: `lionProfileData` leaves it out at the source, so the launch card, the
 clone boards and the Account access page do not offer it and the creating routes answer
 `account_not_on_profile`. A campaign that already lives in such an account is still the team's own.
+
+## Campaign templates (both teams)
+
+Since 16.10 a buyer can save a launcher card — every field but the creatives — as a named **template**
+(the card's "Save as template" button) and anyone on the team can apply it to a card, to every card,
+or add a card from it (the card's "Apply template" button, the toolbar's **Templates**). Templates are
+the partner's (an HS template never shows on MO), live in the team's database (`launch_templates`,
+one name per buyer per partner), and are listed with the buyer's own first; only the creator or an
+owner-role login edits or deletes one — everyone else gets "Copy to mine". `lib/templates.ts` holds
+the rules, `lib/template-store.ts` the store, `/api/templates` the routes (need `always`);
+`npm run ensure-indexes` creates the collection's indexes on a database that has none yet.
 
 ## Giving GLO-02 more
 

@@ -486,3 +486,43 @@ export function SnapMark({ mono, ...props }: P & { mono?: boolean }) {
     </svg>
   );
 }
+
+/** Campaign templates (a stack of cards) — the picker / apply button. */
+export function LayersIcon(props: P) {
+  return (
+    <S {...props}>
+      <path d="m12 3 8.5 4.5L12 12 3.5 7.5 12 3z" />
+      <path d="m3.5 12 8.5 4.5 8.5-4.5" />
+      <path d="m3.5 16.5 8.5 4.5 8.5-4.5" />
+    </S>
+  );
+}
+
+/** Save as template — a bookmark with a plus. */
+export function BookmarkPlusIcon(props: P) {
+  return (
+    <S {...props}>
+      <path d="M18 21 12 17l-6 4V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v16z" />
+      <path d="M12 7v6" />
+      <path d="M9 10h6" />
+    </S>
+  );
+}
+
+/** Edit (rename / describe) a template. */
+export function PencilIcon(props: P) {
+  return (
+    <S {...props}>
+      <path d="M17 3a2.83 2.83 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+    </S>
+  );
+}
+
+/** The buyer's own templates. */
+export function StarIcon(props: P) {
+  return (
+    <S {...props}>
+      <path d="m12 2.5 2.9 6.1 6.6.8-4.9 4.6 1.3 6.5L12 17.3l-5.9 3.2 1.3-6.5-4.9-4.6 6.6-.8L12 2.5z" />
+    </S>
+  );
+}

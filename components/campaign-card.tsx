@@ -48,10 +48,12 @@ import { type AvDestinationKind, avDestinationKind } from "@/lib/av-link";
 import { MultiSelect } from "./multi-select";
 import { Dropzone } from "./dropzone";
 import {
+  BookmarkPlusIcon,
   CheckIcon,
   ChevronDownIcon,
   CopyIcon,
   GlobeIcon,
+  LayersIcon,
   LockIcon,
   MegaphoneIcon,
   SlidersIcon,
@@ -271,6 +273,8 @@ function CampaignCardBase({
   onDuplicate,
   onRemove,
   onApplyFilesToAll,
+  onApplyTemplate,
+  onSaveTemplate,
 }: {
   campaign: Campaign;
   index: number;
@@ -321,6 +325,9 @@ function CampaignCardBase({
   onRemove: (id: string) => void;
   /** Copy this card's creatives onto every card (only passed when >1 card exists). */
   onApplyFilesToAll?: (files: import("@/lib/types").FileItem[]) => void;
+  /** Campaign templates (owner ask 16.10): open the picker for THIS card / save this card as one. */
+  onApplyTemplate?: (id: string) => void;
+  onSaveTemplate?: (id: string) => void;
 }) {
   const [leaving, setLeaving] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -627,6 +634,16 @@ function CampaignCardBase({
         ) : null}
 
         <span className="ml-auto flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+          {onApplyTemplate ? (
+            <IconButton label="Apply template" onClick={() => onApplyTemplate(c.id)} data-action="apply-template">
+              <LayersIcon className="h-4 w-4" />
+            </IconButton>
+          ) : null}
+          {onSaveTemplate ? (
+            <IconButton label="Save as template" onClick={() => onSaveTemplate(c.id)} data-action="save-template">
+              <BookmarkPlusIcon className="h-4 w-4" />
+            </IconButton>
+          ) : null}
           <IconButton label="Duplicate" onClick={() => onDuplicate(c.id)}>
             <CopyIcon className="h-4 w-4" />
           </IconButton>
