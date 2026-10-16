@@ -461,13 +461,14 @@ test("known chats of our sites carry their ONE canonical address; a foreign host
   assert.deepEqual(avKnownChats([], known), []);
 });
 
-test("the shipped registry names the lp1 chats of thecadrion.com — Emily and Dating SPY (14.10) — each a well-formed chat address", () => {
+test("the shipped registry names the lp1 chats of thecadrion.com — Emily, Dating SPY (14.10) and Dating SPY 2 (16.10) — each a well-formed chat address", () => {
   const DATING_ID = "6ac8dd4d0bae90fe7e702cde";
+  const DATING2_ID = "6ad2171a25c3368a5b21c66c";
   const lp1 = AV_KNOWN_CHATS.filter((c) => c.host === "lp1.thecadrion.com");
   assert.deepEqual(
     lp1.map((c) => c.id),
-    [LP1_ID, DATING_ID],
-    "both chats of lp1.thecadrion.com are listed",
+    [LP1_ID, DATING_ID, DATING2_ID],
+    "all three chats of lp1.thecadrion.com are listed",
   );
   for (const c of lp1) {
     const url = avChatUrl(`https://${c.host}/?asst=${c.id}`);
@@ -475,8 +476,17 @@ test("the shipped registry names the lp1 chats of thecadrion.com — Emily and D
   }
   assert.deepEqual(
     avKnownChats(["thecadrion.com"]).map((c) => c.base),
-    [`https://lp1.thecadrion.com/?asst=${LP1_ID}`, `https://lp1.thecadrion.com/?asst=${DATING_ID}`],
+    [
+      `https://lp1.thecadrion.com/?asst=${LP1_ID}`,
+      `https://lp1.thecadrion.com/?asst=${DATING_ID}`,
+      `https://lp1.thecadrion.com/?asst=${DATING2_ID}`,
+    ],
     "the default registry is what the card offers",
+  );
+  assert.equal(
+    new Set(AV_KNOWN_CHATS.map((c) => c.name)).size,
+    AV_KNOWN_CHATS.length,
+    "every chat has its own name, so the card's pills tell them apart",
   );
 });
 

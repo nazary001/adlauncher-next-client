@@ -118,13 +118,15 @@ export type AvKnownChat = { host: string; id: string; name: string };
  * The chats the card offers with one click. AV's API lists no chats and a subdomain cannot be
  * enumerated, so a chat on a subdomain OTHER than the conventional chat.<site> is known from here
  * (owner 30.09: the Chat Builder host of thecadrion.com is lp1, its first chat "Emily"; 14.10 "Dating
- * SPY", whose button hands the visitor on to the dating-apps guide with the ad's params). A pick is
+ * SPY", whose button hands the visitor on to the dating-apps guide with the ad's params; 16.10 "Dating
+ * SPY 2", the same flow into the like-or-chat-first article with its one-button rewarded quiz). A pick is
  * checked exactly like a pasted chat — on the pick and again on every launch the host must show ads
  * — so this list only saves the paste; it never vouches for a chat.
  */
 export const AV_KNOWN_CHATS: readonly AvKnownChat[] = [
   { host: "lp1.thecadrion.com", id: "6abc53bbe2e270105e4c5586", name: "Emily — AI Companion (lp1)" },
   { host: "lp1.thecadrion.com", id: "6ac8dd4d0bae90fe7e702cde", name: "Dating SPY — dating apps guide (lp1)" },
+  { host: "lp1.thecadrion.com", id: "6ad2171a25c3368a5b21c66c", name: "Dating SPY 2 — like or chat first (lp1)" },
 ];
 
 const normChatHost = (h: unknown): string => String(h ?? "").trim().toLowerCase().replace(/\.+$/, "");
