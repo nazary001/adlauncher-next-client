@@ -411,13 +411,11 @@ function Toggle({ on, onChange, disabled, label, text }: { on: boolean; onChange
 function LoginModal({
   mode,
   me,
-  shared,
   onClose,
   onSaved,
 }: {
   mode: { kind: "create" } | { kind: "edit"; user: ManagedUser };
   me: number;
-  shared: boolean;
   onClose: () => void;
   onSaved: (user: ManagedUser, handover: Handover | null, moved: MovedCounts | null) => void;
 }) {
@@ -574,7 +572,7 @@ function LoginModal({
           {mailError ? (
             <p className="text-[11px] leading-snug text-warn">{mailError}</p>
           ) : (
-            <p className="text-[11px] leading-snug text-faint">They can sign in with it instead of the name{shared ? " — here and in Amazon Tools" : ""}.</p>
+            <p className="text-[11px] leading-snug text-faint">They can sign in with it instead of the name.</p>
           )}
         </div>
 
@@ -608,13 +606,11 @@ function LoginModal({
 
 function DeleteModal({
   user,
-  shared,
   onClose,
   onDeleted,
   onBlocked,
 }: {
   user: ManagedUser;
-  shared: boolean;
   onClose: () => void;
   onDeleted: (r: { username: string; accounts: number; freed: number }) => void;
   onBlocked: (u: ManagedUser) => void;
@@ -686,11 +682,6 @@ function DeleteModal({
         </li>
         <li>Ad accounts assigned only to them become visible to the whole team again (re-assign them in Account access).</li>
         <li>Their launch history and campaign templates stay.</li>
-        {shared ? (
-          <li className="text-warn">
-            {TEAM.label} logins are the shared Amazon Tools accounts — this also deletes their Amazon Tools login.
-          </li>
-        ) : null}
       </ul>
       <div className="mt-4 flex flex-col gap-1.5">
         <label htmlFor="ul-confirm" className={labelCls}>
@@ -759,7 +750,6 @@ export function UsersBoard({ user }: { user: SessionUser }) {
 
   const users = useMemo(() => data?.users ?? [], [data]);
   const me = data?.me ?? -1;
-  const shared = data?.team.sharedDirectory ?? TEAM.toolsDirectory;
   const counts = useMemo(
     () => ({
       all: users.length,
@@ -854,13 +844,6 @@ export function UsersBoard({ user }: { user: SessionUser }) {
               New login
             </button>
           </div>
-
-          {shared ? (
-            <div className="rounded-xl border border-warn/30 bg-warn/[0.07] px-3.5 py-2.5 text-[12px] leading-snug text-dim">
-              <span className="font-semibold text-warn">Shared with Amazon Tools.</span> {TEAM.label} logins are the Amazon Tools
-              accounts — a login added, renamed, blocked or deleted here is the same login there.
-            </div>
-          ) : null}
 
           {handover ? (
             <HandoverCard
@@ -1032,7 +1015,6 @@ export function UsersBoard({ user }: { user: SessionUser }) {
           key={modal.kind === "edit" ? `edit-${modal.user.id}` : "create"}
           mode={modal}
           me={me}
-          shared={shared}
           onClose={closeModal}
           onSaved={(saved, ho, moved) => {
             setModal(null);
@@ -1051,7 +1033,6 @@ export function UsersBoard({ user }: { user: SessionUser }) {
       {modal?.kind === "delete" ? (
         <DeleteModal
           user={modal.user}
-          shared={shared}
           onClose={closeModal}
           onBlocked={(u) => {
             setModal(null);
