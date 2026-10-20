@@ -23,7 +23,8 @@ export type TeamPartner = "br" | "in" | "us" | "av";
 /** How an HS campaign can be submitted: the LION weapons, our own FB tokens, or the TOOL sessions. */
 export type HsChannel = "lion" | "token" | "tool";
 export type TeamPlatform = "google" | "tiktok" | "snap";
-export type OwnerTool = "accounts" | "autoLandings" | "tokens" | "sessions" | "avKeys";
+/** "users" = Team logins (/users): owners add, edit and delete the team's logins (owner ask 20.10). */
+export type OwnerTool = "accounts" | "autoLandings" | "tokens" | "sessions" | "avKeys" | "users";
 
 export type TeamConfig = {
   id: TeamId;
@@ -81,7 +82,7 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     defaultPartner: "in",
     hsChannels: ["lion", "token", "tool"],
     platforms: ["google", "tiktok", "snap"],
-    ownerTools: ["accounts", "autoLandings", "tokens", "sessions", "avKeys"],
+    ownerTools: ["accounts", "autoLandings", "tokens", "sessions", "avKeys", "users"],
     pagesRegistry: true,
     hsReadyLinks: false,
     hsCreativesNote: true,
@@ -103,7 +104,7 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     defaultPartner: "br",
     hsChannels: ["lion"],
     platforms: [],
-    ownerTools: ["accounts"],
+    ownerTools: ["accounts", "users"],
     pagesRegistry: false,
     // Owner ask 13.10: the team picks the partner's Cars / MKD landings from a list on the card.
     hsReadyLinks: true,
@@ -213,6 +214,8 @@ const API_NEEDS: ReadonlyArray<readonly [string, Need]> = [
   // team's own partners only (the route checks the partner), in the team's own database.
   ["/api/templates", "always"],
   ["/api/team", "tool:accounts"],
+  // Team logins (owner ask 20.10): the owners of every team manage their own directory's logins.
+  ["/api/users", "tool:users"],
   ["/api/creatives", "always"],
   ["/api/blob-upload", "legacyBlob"],
 ];
@@ -225,6 +228,7 @@ const PAGE_NEEDS: ReadonlyArray<readonly [string, Need]> = [
   ["/tokens", "tool:tokens"],
   ["/sessions", "tool:sessions"],
   ["/av", "tool:avKeys"],
+  ["/users", "tool:users"],
   ["/google", "platform:google"],
   ["/tiktok", "platform:tiktok"],
   ["/snap", "platform:snap"],

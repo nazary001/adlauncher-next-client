@@ -526,3 +526,46 @@ export function StarIcon(props: P) {
     </S>
   );
 }
+
+/** Team logins (/users) — a person with a gear: who can sign in, and as what. */
+export function UserCogIcon(props: P) {
+  return (
+    <S {...props}>
+      <circle cx="10" cy="7" r="4" />
+      <path d="M2 21v-1a6 6 0 0 1 9.5-4.9" />
+      <circle cx="18" cy="17" r="2.5" />
+      <path d="M18 12.5v2M18 19.5v2M13.5 17h2M20.5 17h2M14.8 13.8l1.4 1.4M19.8 18.8l1.4 1.4M14.8 20.2l1.4-1.4M19.8 15.2l1.4-1.4" />
+    </S>
+  );
+}
+
+/** Block a login — a circle with a bar. */
+export function BanIcon(props: P) {
+  return (
+    <S {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="m5.6 5.6 12.8 12.8" />
+    </S>
+  );
+}
+
+/** Hide a revealed password. */
+export function EyeOffIcon(props: P) {
+  return (
+    <S {...props}>
+      <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 8 10 8a18.5 18.5 0 0 1-2.16 3.19" />
+      <path d="M6.61 6.61A18.5 18.5 0 0 0 2 12s3.5 8 10 8a9.74 9.74 0 0 0 5.39-1.61" />
+      <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+      <path d="m2 2 20 20" />
+    </S>
+  );
+}
+
+/** Owner role — a shield. */
+export function ShieldIcon(props: P) {
+  return (
+    <S {...props}>
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+    </S>
+  );
+}

@@ -48,6 +48,13 @@ export function SessionWatch({ username }: { username: string }) {
       askedAt = Date.now();
       try {
         const r = await fetch("/api/auth/session", { cache: "no-store", signal: AbortSignal.timeout(10_000) });
+        if (r.status === 401) {
+          // The owner deleted / blocked this login or signed it out everywhere (/users) — that IS this
+          // component's business: the tab must stop launching as it. A plain expiry still is not.
+          const d = (await r.json().catch(() => ({}))) as { error?: unknown };
+          if (!off && d.error === "session_revoked") window.location.href = "/login";
+          return;
+        }
         if (!r.ok) return;
         const d = (await r.json().catch(() => ({}))) as { username?: unknown };
         if (!off && typeof d.username === "string" && d.username && d.username !== username) startOver(d.username);

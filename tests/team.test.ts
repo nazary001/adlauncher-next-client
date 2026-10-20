@@ -42,7 +42,9 @@ test("glo-01 keeps everything it had; glo-02 is HS through LION on Facebook only
   assert.equal(GLO2.defaultPartner, "br");
   assert.deepEqual([...GLO2.hsChannels], ["lion"]);
   assert.deepEqual([...GLO2.platforms], []);
-  assert.deepEqual([...GLO2.ownerTools], ["accounts"]);
+  assert.deepEqual([...GLO2.ownerTools], ["accounts", "users"]);
+  // Team logins (owner ask 20.10): every team's owners manage their own logins from the launcher.
+  assert.ok(GLO1.ownerTools.includes("users"));
   assert.equal(GLO2.pagesRegistry, false);
   assert.equal(GLO2.toolsDirectory, false);
   assert.equal(GLO2.hsCreativesNote, false);
@@ -123,9 +125,12 @@ test("glo-02 reaches exactly the HS-through-LION surface", () => {
     "/api/templates",
     "/api/templates/x",
     "/api/templates/x/use",
+    "/api/users",
+    "/api/users/x",
     "/api/wave-status",
     "/clone",
     "/login",
+    "/users",
   ]);
 });
 

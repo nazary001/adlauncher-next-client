@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { AvFlag, CheckIcon, ChevronDownIcon, KeyIcon, LogoutIcon, SessionsIcon, SparklesIcon, UsersIcon } from "./icons";
+import { AvFlag, CheckIcon, ChevronDownIcon, KeyIcon, LogoutIcon, SessionsIcon, SparklesIcon, UserCogIcon, UsersIcon } from "./icons";
 import { TEAM } from "@/lib/team";
 
 // AV keys is an owner tool that only makes sense where the AV rail is unlocked (local only for now).
@@ -94,6 +94,7 @@ export function UserMenu({ user }: { user: SessionUser }) {
   const onTokens = pathname === "/tokens";
   const onSessions = pathname === "/sessions";
   const onAvKeys = pathname === "/av/keys";
+  const onUsers = pathname === "/users";
 
   return (
     <div ref={boxRef} className="relative">
@@ -169,6 +170,38 @@ export function UserMenu({ user }: { user: SessionUser }) {
               </span>
               <span className="block text-[11px] leading-snug text-faint">
                 Split FB ad accounts between the team
+              </span>
+            </span>
+          </Link>
+          ) : null}
+          {/* Team logins (owner ask 20.10) — add, edit, block and delete who can sign in here. */}
+          {TEAM.ownerTools.includes("users") ? (
+          <Link
+            href="/users"
+            role="menuitem"
+            onClick={() => setOpen(false)}
+            className={
+              "group flex items-start gap-2.5 rounded-xl px-2.5 py-2 transition-colors " +
+              (onUsers ? "bg-accent/10" : "hover:bg-raise")
+            }
+          >
+            <span
+              className={
+                "mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg border transition-colors " +
+                (onUsers
+                  ? "border-accent/40 bg-accent/15 text-[#9db8ff]"
+                  : "border-line bg-surface2 text-dim group-hover:text-[#9db8ff]")
+              }
+            >
+              <UserCogIcon className="h-4 w-4" />
+            </span>
+            <span className="min-w-0">
+              <span className="flex items-center gap-1.5 text-[13px] font-medium text-ink">
+                Team logins
+                {onUsers ? <CheckIcon className="h-3.5 w-3.5 text-[#9db8ff]" /> : null}
+              </span>
+              <span className="block text-[11px] leading-snug text-faint">
+                Add, edit &amp; remove owners and designers
               </span>
             </span>
           </Link>

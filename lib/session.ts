@@ -87,6 +87,43 @@ export function renamedSessionToken(s: Session, username: string, now = nowSec()
   return { token: signPayload({ sub, username, email, role, team: team.id, iat, exp }), maxAge: Math.max(1, exp - now) };
 }
 
+/**
+ * The SAME session as the directory has it now — its current name and role (lib/session-live: the
+ * owner renamed the login or changed its role on /users). Sign-in time and expiry are kept; returns
+ * the new token, its cookie max-age and the session it carries.
+ */
+export function refreshedSessionToken(
+  s: Session,
+  current: { username: string; role: string | null },
+  now = nowSec(),
+  team: TeamConfig = TEAM,
+): { token: string; maxAge: number; session: Session } {
+  const { sub, email, iat, exp } = s;
+  // Through JSON, so the session handed back is exactly what the token carries (no undefined keys).
+  const session = JSON.parse(JSON.stringify({ sub, username: current.username, email, role: current.role, team: team.id, iat, exp })) as Session;
+  return { token: signPayload(session), maxAge: Math.max(1, exp - now), session };
+}
+
+/** A Cookie request header with one cookie's value swapped (or added) — how the proxy hands a
+ *  re-issued session to the route behind it on the same request. */
+export function cookieHeaderWith(header: string | null | undefined, name: string, value: string): string {
+  const parts = String(header ?? "")
+    .split(";")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  let found = false;
+  const out = parts.map((p) => {
+    const eq = p.indexOf("=");
+    if (eq >= 0 && p.slice(0, eq).trim() === name) {
+      found = true;
+      return `${name}=${value}`;
+    }
+    return p;
+  });
+  if (!found) out.push(`${name}=${value}`);
+  return out.join("; ");
+}
+
 /** Read + verify the session straight from a request's Cookie header. Used by routes that are
  *  excluded from the proxy (e.g. the large-body /api/launch upload) so they gate themselves. */
 export function sessionFromCookieHeader(cookieHeader: string | null): Session | null {

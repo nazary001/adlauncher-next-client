@@ -13,7 +13,7 @@ the server of that build). Unset = `glo-01` = the launcher as it always was.
 | Partners | HS, MO, AIF, AV | HS only |
 | HS launch channels | LION, FB token, TOOL | LION only |
 | Platform tabs | Facebook, TikTok, Google, Snapchat | Facebook only |
-| Owner tools | all | Account access |
+| Owner tools | all | Account access, Team logins |
 | Logins | the shared tools directory (`gc.up_users`) | its own list (`gc_glo02.up_users`) |
 | Mongo database (same cluster) | `gc` | `gc_glo02` |
 | LION key / acronym | GLO-01 | GLO-02 |
@@ -55,7 +55,25 @@ Own values — never copied from another team: `NEXT_PUBLIC_ADL_TEAM`, `MONGODB_
 `STRAPI_TOOLS_URL`, the `NEXT_PUBLIC_*_ENABLED` flags of rails the team does not have. See
 `.env.example`.
 
-## Logins (GLO-02)
+## Team logins (both teams) — Owner tools → Team logins (`/users`)
+
+Since 20.10 an owner manages the team's logins in the launcher itself: add an owner or a designer
+(a password is generated and shown once, with a sign-in note to copy), rename, change the role, reset
+the password, block / unblock, "sign out everywhere", delete (typed confirm). `lib/user-admin.ts` does
+the work, `/api/users` serves the page. Rules the server keeps: an owner never deletes, blocks, demotes
+or signs out their OWN login, and the team always keeps one active owner. A rename moves the same
+things `rename-user` moves (below) and the old name stops signing in; a deletion takes the login out
+of the account assignments (an account it held alone is visible to everyone again) — its launch history
+and templates stay; both are refused while the login has launches in the queue. On GLO-01 the logins
+are the shared Amazon Tools accounts — a change there is a change in Amazon Tools too.
+
+Every proxied request holds the session cookie against the directory (`lib/session-live.ts`, answers
+remembered ~15 s per instance, a directory that does not answer changes nothing): a deleted or blocked
+login, or one whose password was changed / that was signed out everywhere, is refused within seconds
+(API: 401 `session_revoked`, pages: /login, an open tab goes to /login by itself); a renamed login or a
+changed role has its cookie re-issued in place — no new sign-in.
+
+## Logins from the terminal (GLO-02)
 
 Run from the team's own folder — the script reads its `.env.local` and lands in its database:
 
@@ -67,9 +85,10 @@ npm run add-user -- <username> --block                          # no more logins
 npm run add-user -- --list
 ```
 
-Usernames are exact and case-sensitive. A blocked or re-passworded user stays signed in until their
-cookie runs out (7 days, renewed while they work) — to cut everyone off at once, change the team's
-`AUTH_SECRET` and redeploy.
+Usernames are exact and case-sensitive. A user blocked here is signed out within seconds (the
+session check above); a password set here does NOT end the user's open sessions — use the page's
+"Sign out everywhere" (or its password reset, which does). To cut everyone off at once, change the
+team's `AUTH_SECRET` and redeploy.
 
 ### Renaming a login (either team)
 

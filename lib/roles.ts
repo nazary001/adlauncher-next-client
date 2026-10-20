@@ -21,9 +21,15 @@ const csv = (v: string | undefined, fallback: string): Set<string> =>
 const OWNER_ROLES = csv(process.env.ADL_OWNER_ROLES, "owner,admin");
 const OWNER_USERS = csv(process.env.ADL_OWNER_USERS, "");
 
+/** Does a login with this name and directory role count as an owner? (The session check below and
+ *  lib/user-admin's "the team keeps one owner" rule read the same two knobs.) */
+export function isOwnerIdentity(username: string | null | undefined, role: string | null | undefined): boolean {
+  const r = String(role ?? "").trim().toLowerCase();
+  if (r && OWNER_ROLES.has(r)) return true;
+  return OWNER_USERS.has(String(username ?? "").trim().toLowerCase());
+}
+
 export function isOwnerSession(s: Session | null | undefined): boolean {
   if (!s) return false;
-  const role = String(s.role ?? "").trim().toLowerCase();
-  if (role && OWNER_ROLES.has(role)) return true;
-  return OWNER_USERS.has(String(s.username ?? "").trim().toLowerCase());
+  return isOwnerIdentity(s.username, s.role);
 }
