@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { SESSION_COOKIE, cookieHeaderWith, refreshedSessionToken, renewedSessionToken, sessionCookieOptions, verifySession } from "@/lib/session";
 import { liveSessionVerdict } from "@/lib/session-live";
+import { canonicalRedirectUrl } from "@/lib/canonical-host";
 import { teamAllowsPath } from "@/lib/team";
 
 /**
@@ -25,6 +26,18 @@ import { teamAllowsPath } from "@/lib/team";
  * behind this request already reads the new one (the request's Cookie header is swapped).
  */
 export async function proxy(request: NextRequest) {
+  // A production page opened on a deployment's own vercel.app URL goes to the team's real site — that
+  // URL would show its own (possibly old) build for ever (lib/canonical-host).
+  const canonical = canonicalRedirectUrl({
+    host: request.headers.get("host"),
+    pathname: request.nextUrl.pathname,
+    search: request.nextUrl.search,
+    method: request.method,
+    selfOrigin: process.env.ADL_SELF_ORIGIN,
+    vercelEnv: process.env.VERCEL_ENV,
+  });
+  if (canonical) return NextResponse.redirect(canonical, 307);
+
   const token = request.cookies.get(SESSION_COOKIE)?.value;
   let session = verifySession(token);
   if (session) {
