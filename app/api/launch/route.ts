@@ -13,6 +13,7 @@ import {
   money,
 } from "@/lib/fb-launch";
 import { sessionFromCookieHeader } from "@/lib/session";
+import { liveSessionVerdict } from "@/lib/session-live";
 import { teamHas } from "@/lib/team";
 import {
   FbError,
@@ -123,6 +124,12 @@ export async function POST(req: Request) {
   const session = sessionFromCookieHeader(req.headers.get("cookie"));
   if (!session) {
     return NextResponse.json({ ok: false, stage: "auth", error: "unauthorized" }, { status: 401 });
+  }
+  // …and holds the cookie against the user directory itself, as the proxy does (lib/session-live): a
+  // login deleted, blocked or signed out everywhere on Team logins launches nothing here either.
+  const live = await liveSessionVerdict(session);
+  if (live.kind === "revoked") {
+    return NextResponse.json({ ok: false, stage: "auth", error: "session_revoked", reason: live.reason }, { status: 401 });
   }
   // …and, for the same reason, asks the team gate itself (lib/team): this is the MO rail's launch.
   if (!teamHas("partner:in")) {

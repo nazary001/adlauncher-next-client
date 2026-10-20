@@ -138,3 +138,18 @@ export async function liveSessionVerdict(s: Session): Promise<LiveVerdict> {
   const user = await readLiveUser(id);
   return judgeLiveSession(s, user);
 }
+
+/**
+ * The launch queue runs a job in-process under a cookie it mints for the job's owner — past the proxy,
+ * so it asks here itself (lib/launch-queue-run runJob). A launch still waiting in the queue when the
+ * owner deleted or blocked its login is NOT sent (owner on /users: a blocked buyer's wave must stop);
+ * a follow-up of a launch already made (activation, the TOOL / TikTok follow) still runs — it finishes
+ * what was already created. A new password / "sign out everywhere" ends sessions, not queued work.
+ * The refusal text, or null to run the job.
+ */
+export function queueOwnerRefusal(kind: string, owner: string, verdict: LiveVerdict): string | null {
+  if (verdict.kind !== "revoked" || verdict.reason === "signed_out") return null;
+  if (/\.follow$/.test(kind)) return null;
+  const what = verdict.reason === "blocked" ? "blocked" : "deleted";
+  return `${owner}'s login was ${what} on Team logins while this launch waited in the queue — nothing was sent`;
+}

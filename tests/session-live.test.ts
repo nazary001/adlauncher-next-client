@@ -134,3 +134,16 @@ test("liveSessionVerdict: ADL_SESSION_LIVE=off (a bench whose scripts sign their
     else process.env.MONGODB_URI = prev.uri;
   }
 });
+
+test("queueOwnerRefusal: a queued launch of a login deleted or blocked meanwhile is not sent; a follow-up of a launch already made still runs; a new password stops nothing", () => {
+  const gone = { kind: "revoked", reason: "gone" } as const;
+  const blocked = { kind: "revoked", reason: "blocked" } as const;
+  const signedOut = { kind: "revoked", reason: "signed_out" } as const;
+  assert.match(String(live.queueOwnerRefusal("hs.lion", "Oleg", gone)), /Oleg.*deleted.*nothing was sent/);
+  assert.match(String(live.queueOwnerRefusal("mo.launch", "Oleg", blocked)), /Oleg.*blocked.*nothing was sent/);
+  assert.match(String(live.queueOwnerRefusal("tt.launch", "Oleg", blocked)), /blocked/);
+  for (const k of ["hs.dup.follow", "hs.jurar.follow", "tool.follow", "tt.follow"]) assert.equal(live.queueOwnerRefusal(k, "Oleg", gone), null, k);
+  assert.equal(live.queueOwnerRefusal("hs.lion", "Oleg", signedOut), null);
+  assert.equal(live.queueOwnerRefusal("hs.lion", "Oleg", { kind: "ok" }), null);
+  assert.equal(live.queueOwnerRefusal("hs.lion", "Oleg", { kind: "refresh", username: "Olegg", role: null }), null);
+});

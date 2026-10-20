@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
 import { sessionFromCookieHeader } from "@/lib/session";
+import { liveSessionVerdict } from "@/lib/session-live";
 import { teamHas } from "@/lib/team";
 
 export const runtime = "nodejs";
@@ -32,7 +33,13 @@ export async function POST(req: Request): Promise<NextResponse> {
       request: req,
       // Runs only for the browser's token request — enforce auth here.
       onBeforeGenerateToken: async () => {
-        if (!sessionFromCookieHeader(req.headers.get("cookie"))) {
+        const session = sessionFromCookieHeader(req.headers.get("cookie"));
+        if (!session) {
+          throw new Error(UNAUTHORIZED);
+        }
+        // Excluded from the proxy — so the directory check (lib/session-live) is asked here too.
+        const live = await liveSessionVerdict(session);
+        if (live.kind === "revoked") {
           throw new Error(UNAUTHORIZED);
         }
         return {

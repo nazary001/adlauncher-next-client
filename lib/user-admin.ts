@@ -291,7 +291,7 @@ async function editAssignments<R extends { accounts: Record<string, string[]>; t
 /** Everything filed under a login's name moves to its new one — the moves of scripts/rename-user. */
 async function moveUserData(oldName: string, newName: string, actor: string): Promise<MovedCounts> {
   const assigned = await editAssignments((a) => renameInAssignments(a, oldName, newName), actor);
-  if (!assigned) throw new Error("the account assignments kept changing — the login was renamed, its accounts were not moved; rename it again");
+  if (!assigned) throw new Error("the account assignments kept changing — the login was not renamed; try again");
   const caches = await coll(APP_CACHES);
   const tasks = await coll(LAUNCH_TASKS);
   const jobs = await coll(LAUNCH_JOBS);
@@ -313,8 +313,10 @@ async function moveUserData(oldName: string, newName: string, actor: string): Pr
 /**
  * Change a login. A rename is refused while the login has launches in the queue (they run under its
  * name) and onto a name somebody has or had; the OLD name does not keep signing in (owner 15.10 on
- * Taras → Tarass: "старое Taras работать не должно"). A new password or signOutEverywhere ends the
- * login's open sessions. Throws on a store failure.
+ * Taras → Tarass: "старое Taras работать не должно"). Everything filed under the name moves FIRST and
+ * the login's own name flips last: a store failure half-way leaves the login under its old name and the
+ * same rename simply runs again (every move is idempotent); a flip that fails moves the data back.
+ * A new password or signOutEverywhere ends the login's open sessions. Throws on a store failure.
  */
 export async function updateManagedUser(id: number, patch: UserPatch, actor: string): Promise<UpdateResult> {
   const c = await coll(UP_USERS);
@@ -347,15 +349,16 @@ export async function updateManagedUser(id: number, patch: UserPatch, actor: str
   if (patch.password !== undefined) set.password = await hash(patch.password, BCRYPT_COST);
   if (patch.password !== undefined || patch.signOutEverywhere) set.sessions_valid_after = Math.floor(Date.now() / 1000);
 
+  const moved = renaming ? await moveUserData(oldName, String(set.username), actor) : undefined;
   try {
     await bounded(c.updateOne({ documentId: doc.documentId }, { $set: set }), "user update");
   } catch (e) {
+    if (renaming) await moveUserData(String(set.username), oldName, actor).catch(() => {});
     const field = dupKeyField(e);
     if (field === "username") return { ok: false, error: "username_taken" };
     if (field === "email") return { ok: false, error: "email_taken" };
     throw e;
   }
-  const moved = renaming ? await moveUserData(oldName, String(set.username), actor) : undefined;
   const fresh = await userDoc(id);
   if (!fresh) return { ok: false, error: "not_found" };
   return moved ? { ok: true, user: managedUserOf(fresh), moved } : { ok: true, user: managedUserOf(fresh) };

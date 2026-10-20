@@ -109,6 +109,8 @@ function errorText(e: ApiFail | { error: string; busy?: number; message?: string
   }
 }
 
+const byName = (a: ManagedUser, b: ManagedUser): number => a.username.localeCompare(b.username, undefined, { sensitivity: "base" });
+
 const dayLabel = (iso: string | null): string | null => {
   if (!iso) return null;
   const d = new Date(iso);
@@ -723,6 +725,9 @@ export function UsersBoard({ user }: { user: SessionUser }) {
   const [handover, setHandover] = useState<Handover | null>(null);
   const [toast, setToast] = useState<{ text: string; tone: "ok" | "warn" } | null>(null);
   const [rowBusy, setRowBusy] = useState<number | null>(null);
+  /** The owner renamed their OWN login while a new password is on screen: the page starts over under
+   *  the new name only once that password has been dismissed (it is shown this once). */
+  const [reloadAfterHandover, setReloadAfterHandover] = useState(false);
 
   const load = useCallback(async () => {
     const r = await api<Listing>("GET", "/api/users");
@@ -766,7 +771,7 @@ export function UsersBoard({ user }: { user: SessionUser }) {
   );
   const q = query.trim().toLowerCase();
   const shown = users.filter((u) => {
-    if (q && !u.username.toLowerCase().includes(q) && !(u.email ?? "").includes(q)) return false;
+    if (q && !u.username.toLowerCase().includes(q) && !(u.email ?? "").toLowerCase().includes(q)) return false;
     if (filter === "owner") return u.owner && !u.blocked;
     if (filter === "designer") return !u.owner && !u.blocked;
     if (filter === "blocked") return u.blocked;
@@ -774,10 +779,14 @@ export function UsersBoard({ user }: { user: SessionUser }) {
   });
 
   /** After a change of the owner's OWN login the server re-issued their cookie — the page starts over
-   *  under the new name (the header still shows the old one otherwise). */
-  const replaceUser = (next: ManagedUser) => {
-    setData((d) => (d ? { ...d, users: d.users.map((u) => (u.id === next.id ? next : u)) } : d));
-    if (next.id === me && next.username !== user.username) window.location.reload();
+   *  under the new name (the header still shows the old one otherwise); with a new password on screen,
+   *  only once it is dismissed. */
+  const replaceUser = (next: ManagedUser, handoverShown = false) => {
+    setData((d) => (d ? { ...d, users: d.users.map((u) => (u.id === next.id ? next : u)).sort(byName) } : d));
+    if (next.id === me && next.username !== user.username) {
+      if (handoverShown) setReloadAfterHandover(true);
+      else window.location.reload();
+    }
   };
 
   async function toggleBlock(u: ManagedUser) {
@@ -853,7 +862,15 @@ export function UsersBoard({ user }: { user: SessionUser }) {
             </div>
           ) : null}
 
-          {handover ? <HandoverCard handover={handover} onClose={() => setHandover(null)} /> : null}
+          {handover ? (
+            <HandoverCard
+              handover={handover}
+              onClose={() => {
+                setHandover(null);
+                if (reloadAfterHandover) window.location.reload();
+              }}
+            />
+          ) : null}
 
           {/* ---- search + filters ---- */}
           <div className="flex flex-wrap items-center gap-2.5">
@@ -1021,10 +1038,10 @@ export function UsersBoard({ user }: { user: SessionUser }) {
             setModal(null);
             if (ho) setHandover(ho);
             if (modal.kind === "create") {
-              setData((d) => (d ? { ...d, users: [...d.users, saved].sort((a, b) => a.username.localeCompare(b.username, undefined, { sensitivity: "base" })) } : d));
+              setData((d) => (d ? { ...d, users: [...d.users, saved].sort(byName) } : d));
               setToast({ text: `${saved.username} added as ${saved.owner ? "owner" : "designer"}.`, tone: "ok" });
             } else {
-              replaceUser(saved);
+              replaceUser(saved, Boolean(ho));
               const m = moved ? ` Moved: ${moved.accounts} ad account${moved.accounts === 1 ? "" : "s"}, ${moved.tasks} task row${moved.tasks === 1 ? "" : "s"}, ${moved.templates} template${moved.templates === 1 ? "" : "s"}.` : "";
               setToast({ text: `${saved.username} saved.${m}`, tone: "ok" });
             }

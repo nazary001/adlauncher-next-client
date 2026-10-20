@@ -22,6 +22,7 @@ import { resolveMoSigner } from "@/lib/mo-soc";
 import { aifRail } from "@/lib/aif-launch";
 import { partnerConfig, type PartnerId } from "@/lib/partners";
 import { TEAM, teamAllowsJob } from "@/lib/team";
+import { liveSessionVerdict, queueOwnerRefusal } from "@/lib/session-live";
 import {
   SCOPE_PARTNER,
   type Defer,
@@ -218,6 +219,12 @@ export async function runJob(job: QueueJob, opts: { deadlineAt: number }): Promi
   if (!teamAllowsJob(job.scope, job.kind)) {
     return refusedOutcome(job, `This launcher (${TEAM.label}) does not run ${job.kind} launches — nothing was sent`, Date.now());
   }
+  // …and its own login check: the job runs under a cookie minted here, which the proxy never sees. A
+  // launch of a login the owner deleted or blocked on Team logins since it was queued is not sent.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const ownerVerdict = await liveSessionVerdict({ sub: job.sub, username: job.owner, role: job.role ?? null, iat: nowSec, exp: nowSec + 900 });
+  const ownerRefused = queueOwnerRefusal(job.kind, job.owner, ownerVerdict);
+  if (ownerRefused) return refusedOutcome(job, ownerRefused, Date.now());
   if (isHandlerKind(job.kind)) {
     const reply = await invokeHandler(job);
     return outcomeOf(job, reply, Date.now());
