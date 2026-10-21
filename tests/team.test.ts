@@ -59,8 +59,8 @@ test("glo-01 keeps everything it had; glo-02 is HS through LION on Facebook only
   }
 });
 
-test("AV keys registered in ActiveView: glo-01 av001…av250 (av201–av250 made by AV 21.10), glo-02 none", () => {
-  assert.equal(GLO1.avKeysRegistered, 250);
+test("AV keys registered in ActiveView: glo-01 av001…av300 (av201–av300 made by AV 21.10), glo-02 none", () => {
+  assert.equal(GLO1.avKeysRegistered, 300);
   assert.equal(GLO2.avKeysRegistered, 0, "glo-02 has no AV partner — nothing launchable");
 });
 
