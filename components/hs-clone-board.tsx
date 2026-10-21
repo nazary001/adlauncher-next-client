@@ -7,7 +7,7 @@ import { SearchSelect } from "./search-select";
 import { useHs } from "./use-hs";
 import { useHsTaskManager } from "./hs-task-manager";
 import { UploadingNotice } from "./upload-guard";
-import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
+import { decorateAccountOptions, fmtCountdown, useAcctLimits, windowMinutes } from "./use-acct-limit";
 import { CLONE_DEFAULT_BUDGET, bidKind, bidTag, budgetOnStrategyChange, limitMoneyCents, moneyCentsLabel, moneyLabel, parseMoney } from "@/lib/types";
 import { lionWireSuffix, withOwnAcr } from "@/lib/hs-clone-name";
 import { carriesOwnName } from "@/lib/own-name";
@@ -385,7 +385,7 @@ export function HsCloneBoard({
   // catalog; the token rail checks our token's own page access — both server-side).
   const needsPage = mode !== "juro";
 
-  // Account launch limit (5 campaigns / 30 min) — feeds the pickers' N/5 badges, the default
+  // Account launch limit (5 campaigns / 15 min) — feeds the pickers' N/5 badges, the default
   // account pick and the wave gate below.
   const limits = useAcctLimits();
   // FB Token rails: offer only accounts the DUP signer can act on (its grant is its own — 299
@@ -397,7 +397,7 @@ export function HsCloneBoard({
     ? (data?.accounts ?? []).filter((a) => settingsFilter(a.value))
     : (data?.accounts ?? []);
 
-  // ---- default binds (owner rule 09-08): the LEAST-LOADED account on our 5/30-min timer and
+  // ---- default binds (owner rule 09-08): the LEAST-LOADED account on our 5/15-min timer and
   // the LEAST-FILLED fanka are what the Settings picks DEFAULT to. Purely derived: an empty pick
   // ("" — nothing chosen, or the × clear) shows and fires the auto value, live as the meters
   // move; a real pick wins via state and the auto value stops mattering. The choice stays.
@@ -753,7 +753,7 @@ export function HsCloneBoard({
   const defaultsReady = Boolean(profile && effAccount && (effPage || !needsPage) && effectivePixel);
   // Fireable rows only: a real id, a ≥$1 budget AND not UNREADABLE — an unreadable source's
   // duplicate dies the same way (LION can't read it), so firing it only burns wave slots and the
-  // account's 30-min window. Every wave number (totalClones, acct gate, fanka demand) counts the
+  // account's 15-min window. Every wave number (totalClones, acct gate, fanka demand) counts the
   // SAME set; excluded rows are flagged in the table instead of silently diverging.
   // A queued row ("ok") waits for an edit; a held row ("unsure") waits for the server's word.
   const validRows = rows.filter(
@@ -780,7 +780,7 @@ export function HsCloneBoard({
   const bindsReady = validRows.length > 0 && incompleteRows.length === 0;
   const totalClones = validRows.reduce((s, r) => s + rowCopies(r), 0);
 
-  // Account launch limit (5 campaigns / 30 min): EVERY account the wave targets must take its
+  // Account launch limit (5 campaigns / 15 min): EVERY account the wave targets must take its
   // share — an over-capacity account blocks the fire here with the countdown (the server
   // precheck would 429 it anyway).
   const acctDemand = new Map<string, number>();
@@ -1422,10 +1422,10 @@ export function HsCloneBoard({
               </Field>
               <Field
                 label="Account"
-                // The auto pick names itself: the least-loaded account on the 5/30-min timer.
+                // The auto pick names itself: the least-loaded account on the 5/15-min timer.
                 hint={
                   accountIsAuto
-                    ? `auto · least loaded (${limits.countFor(effAccount)}/${limits.limit} launches in its 30-min window) — pick another to override`
+                    ? `auto · least loaded (${limits.countFor(effAccount)}/${limits.limit} launches in its ${windowMinutes(limits)}-min window) — pick another to override`
                     : undefined
                 }
               >
@@ -1651,7 +1651,7 @@ export function HsCloneBoard({
                 ? acctShort.map((x) => (
                     <p key={x.acct} className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
                       Account limit — {accountLabel(rowBinds(validRows.find((r) => rowBinds(r).account === x.acct) ?? validRows[0]).profile, x.acct)}: only {x.remaining} of {x.need} clones fit
-                      its 30-min window
+                      its {windowMinutes(limits)}-min window
                       {x.resetAt ? ` · resets in ${fmtCountdown(x.resetAt, limits.skew)}` : ""}.
                       Trim copies/rows or pick another account.
                     </p>
@@ -2047,7 +2047,7 @@ export function HsCloneBoard({
                         cascade re-resolves: another profile brings its own least-loaded account /
                         least-filled page), a pick here overrides just that field (accent border =
                         the row's own). × returns a field to the default, ↺ drops the whole
-                        override. Badges: the account's 5/30-min load, the fanka fill. */}
+                        override. Badges: the account's 5/15-min load, the fanka fill. */}
                     <div className="cr-dest min-w-0">
                       <span className="cr-label">Destination</span>
                       <div className="mb-1.5 flex flex-wrap items-center gap-1">

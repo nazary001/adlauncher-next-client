@@ -16,7 +16,7 @@ import { useHandoffDemand, useHandoffItems, useHandoffPending } from "./launch-h
 import { uploadingLabel } from "./upload-guard";
 import { type QueueHealth, sweepLateMinutes } from "@/lib/launch-queue-types";
 
-// Client mirror of the per-account launch limit (5 campaigns / 30 min, window anchored at the
+// Client mirror of the per-account launch limit (5 campaigns / 15 min, window anchored at the
 // first launch — owner rule 2026-08-18). One provider (app layout) polls /api/acct-limit and
 // every surface reads this context: the header timer widget, the account pickers' N/5 badges,
 // the card/rail launch gates and the clone boards. The SERVER claim is the authority — this
@@ -53,9 +53,17 @@ export function acctIdKey(raw: string): string {
   return String(raw ?? "").trim().replace(/^act_/, "");
 }
 
+/** lib/acct-limit's ACCT_WINDOW_MS until the first poll — the server's windowMs wins after it. */
+const DEFAULT_WINDOW_MS = 15 * 60_000;
+
+/** The window length in whole minutes, as the server set it — every "N-min window" text reads this. */
+export function windowMinutes(limits: Pick<AcctLimits, "windowMs">): number {
+  return Math.round(limits.windowMs / 60_000);
+}
+
 const EMPTY: AcctLimits = {
   limit: 5,
-  windowMs: 30 * 60_000,
+  windowMs: DEFAULT_WINDOW_MS,
   accounts: {},
   skew: 0,
   countFor: () => 0,
@@ -118,7 +126,7 @@ const REFRESH_THROTTLE_MS = 2_000;
 const FOCUS_THROTTLE_MS = 5_000;
 
 export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<State>({ limit: 5, windowMs: 30 * 60_000, accounts: {}, skew: 0, queued: {} });
+  const [state, setState] = useState<State>({ limit: 5, windowMs: DEFAULT_WINDOW_MS, accounts: {}, skew: 0, queued: {} });
   const [staleBuild, setStaleBuild] = useState(false);
   // Whole minutes the server queue's sweep is late while jobs wait (null = nothing to say).
   const [sweepLate, setSweepLate] = useState<number | null>(null);
@@ -155,7 +163,7 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
       if (own && typeof d.build === "string" && d.build && d.build !== own) setStaleBuild(true);
       const next = {
         limit: Number(d.limit) || 5,
-        windowMs: Number(d.windowMs) || 30 * 60_000,
+        windowMs: Number(d.windowMs) || DEFAULT_WINDOW_MS,
         accounts: d.accounts ?? {},
         skew: (Number(d.now) || Date.now()) - Date.now(),
         // Jobs still queued on the server per account (spec §4.5) — the slot claim is still the

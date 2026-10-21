@@ -220,7 +220,7 @@ export async function POST(req: Request): Promise<Response> {
         const adIds: string[] = [];
         let acctSlot: { documentId: string } | null = null;
         try {
-          // 0) account launch slot (5 campaigns / 30 min per ad account, every channel — owner
+          // 0) account launch slot (5 campaigns / 15 min per ad account, every channel — owner
           // rule 2026-08-18) — claimed before any FB work; released below on any pre-campaign
           // failure (media registration included: no campaign exists yet).
           progress("submit");

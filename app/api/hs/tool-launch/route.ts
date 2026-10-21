@@ -240,7 +240,7 @@ export async function POST(req: Request): Promise<Response> {
       // runs included), exactly like the token rail.
       let landedAdIds: string[] = [];
       try {
-        // 0) account launch slot (5 campaigns / 30 min per ad account, every channel — owner rule
+        // 0) account launch slot (5 campaigns / 15 min per ad account, every channel — owner rule
         // 2026-08-18) — claimed before any TOOL work; released below on any pre-campaign failure.
         setStage("submit");
         acctSlot = await claimAcctSlot(accountId, {
@@ -393,7 +393,7 @@ export async function POST(req: Request): Promise<Response> {
         // Pre-terminal throw (claimAcctSlot AcctLimitedError, registry down, a helper throwing before
         // submit). Free the slot ONLY when nothing was created: once TOOL accepted the submit
         // (submittedJobId set, before any poll) the create job is in flight server-side and a
-        // campaign may be live — releasing the slot then would under-count the 5/30 window and let an
+        // campaign may be live — releasing the slot then would under-count the 5/15 window and let an
         // over-limit launch through. Mirrors token-launch's `!created.campaign_id` guard (a known
         // campaign id implies a submitted job).
         if (acctSlot && submittedJobId == null) await releaseAcctSlot(acctSlot.documentId);

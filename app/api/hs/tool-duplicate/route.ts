@@ -251,7 +251,7 @@ export async function POST(req: Request): Promise<NextResponse> {
     return alreadyAccepted();
   }
 
-  // ---- account launch-limit precheck (5 campaigns / 30 min per ad account, owner rule 2026-08-18):
+  // ---- account launch-limit precheck (5 campaigns / 15 min per ad account, owner rule 2026-08-18):
   // EVERY account the wave targets must take its share (per-row destinations, 09-08). Runs AFTER the
   // wave-idempotency checks. The per-shot claim in the job stays the authority.
   {

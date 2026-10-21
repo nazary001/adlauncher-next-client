@@ -7,7 +7,7 @@ import { Field } from "./ui";
 import { SearchSelect } from "./search-select";
 import type { FanpageOption } from "./use-fanpages";
 import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-adaccounts";
-import { type AcctLimits, decorateAccountOptions } from "./use-acct-limit";
+import { type AcctLimits, decorateAccountOptions, windowMinutes } from "./use-acct-limit";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { LockIcon, TargetIcon, XIcon } from "./icons";
 
@@ -206,7 +206,7 @@ export function CloneDestinationModal({
                 error={!effAccountId ? "required" : undefined}
                 hint={
                   accountIsAuto
-                    ? `auto · least loaded (${limits.countFor(effAccountId)}/${limits.limit} launches in its 30-min window) — pick another or “From each source” to override`
+                    ? `auto · least loaded (${limits.countFor(effAccountId)}/${limits.limit} launches in its ${windowMinutes(limits)}-min window) — pick another or “From each source” to override`
                     : undefined
                 }
               >

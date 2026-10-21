@@ -85,7 +85,7 @@ export async function runHsToolDupShot(s: HsToolDupShot, deps: HsTokenShotDeps &
   let slot: { documentId: string } | null = null;
   try {
     rowWrite({ status: "running", stage: "queue", started_at: deps.now() });
-    // Account launch slot (5/30min) — right before the submit; released below on a clean refusal
+    // Account launch slot (5/15min) — right before the submit; released below on a clean refusal
     // that created nothing.
     slot = await claimAcctSlot(target, { user, partner: "br", channel: "hs-tool-dup", name, accountName: s.accountName });
 

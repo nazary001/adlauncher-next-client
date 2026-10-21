@@ -2,10 +2,10 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { TimerIcon } from "./icons";
-import { type AcctLimits, fmtCountdown, useAcctLimits } from "./use-acct-limit";
+import { type AcctLimits, fmtCountdown, useAcctLimits, windowMinutes } from "./use-acct-limit";
 
 // Header widget for the per-account launch limit: a compact pill showing the hottest account's
-// N/5 + live countdown, expanding into a panel that lists every account with an active 30-min
+// N/5 + live countdown, expanding into a panel that lists every account with an active 15-min
 // window — segmented 5-cell bar, name/id, mm:ss until its reset. Every user sees the same
 // numbers (the registry is global), so the wave planner reads capacity here before firing.
 
@@ -89,7 +89,7 @@ export function AcctLimitWidget() {
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        data-tip={hottest ? undefined : "Account launch limits — 5 campaigns / 30 min per account"}
+        data-tip={hottest ? undefined : `Account launch limits — ${limits.limit} campaigns / ${windowMinutes(limits)} min per account`}
         className={
           "tip tip-b flex h-9 items-center gap-2 rounded-lg border px-3 font-mono text-[12px] " +
           "font-semibold tabular-nums transition-all duration-150 active:scale-[0.97] " +
@@ -111,7 +111,9 @@ export function AcctLimitWidget() {
             ) : null}
           </>
         ) : (
-          <span className="text-[11px] font-medium tracking-wide">5/30m</span>
+          <span className="text-[11px] font-medium tracking-wide">
+            {limits.limit}/{windowMinutes(limits)}m
+          </span>
         )}
       </button>
 
@@ -138,7 +140,7 @@ export function AcctLimitWidget() {
             <p className="px-1 py-4 text-center text-[12px] leading-relaxed text-faint">
               No account is inside a launch window.
               <br />
-              The 30-min timer starts on an account&apos;s first campaign.
+              The {windowMinutes(limits)}-min timer starts on an account&apos;s first campaign.
             </p>
           ) : (
             <div className="flex max-h-[320px] flex-col overflow-y-auto overscroll-contain">
@@ -171,7 +173,7 @@ export function AcctLimitWidget() {
           )}
 
           <p className="border-t border-line px-1 pt-2 text-[10px] leading-relaxed text-faint">
-            {limits.limit} campaigns per account / 30 min · counter resets when the window ends ·
+            {limits.limit} campaigns per account / {windowMinutes(limits)} min · counter resets when the window ends ·
             all users &amp; channels share it
           </p>
         </div>

@@ -8,7 +8,7 @@ export const runtime = "nodejs";
 
 /**
  * GET /api/acct-limit — the live per-account launch-limit picture for the UI (header timer,
- * account-picker badges, launch gates): every account with an ACTIVE 30-min window and its
+ * account-picker badges, launch gates): every account with an ACTIVE 15-min window and its
  * count/resetAt/name. Proxy-gated; self-checks the session too (defense-in-depth, same as the
  * other data routes). Also opportunistically sweeps expired registry rows (bounded, in lib).
  */

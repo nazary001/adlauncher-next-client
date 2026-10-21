@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Field } from "./ui";
 import { SearchSelect } from "./search-select";
-import { type AcctLimits, decorateAccountOptions } from "./use-acct-limit";
+import { type AcctLimits, decorateAccountOptions, windowMinutes } from "./use-acct-limit";
 import type { HsCatalog } from "./use-hs";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { noFankasOfferedNote } from "@/lib/hs-page-gate";
@@ -186,7 +186,7 @@ export function HsDestinationModal({
             label="Account"
             hint={
               accountIsAuto
-                ? `auto · least loaded (${limits.countFor(effAccount)}/${limits.limit} launches in its 30-min window) — pick another to override`
+                ? `auto · least loaded (${limits.countFor(effAccount)}/${limits.limit} launches in its ${windowMinutes(limits)}-min window) — pick another to override`
                 : undefined
             }
           >

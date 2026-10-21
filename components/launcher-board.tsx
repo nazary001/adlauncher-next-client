@@ -124,7 +124,7 @@ function freshCard(id: string, partner: PartnerConfig, owner: string): Campaign 
 }
 
 /** Token-account partners: fill an empty/invalid account with the LEAST-LOADED account on the
- *  5/30-min launch timer (owner rule 09-08 — fewest launches in its open window, then the sooner
+ *  5/15-min launch timer (owner rule 09-08 — fewest launches in its open window, then the sooner
  *  reset; the partner's preferred account is ranked first so it wins ties, i.e. a quiet board
  *  still lands on the historical default) and keep the pixel on something the chosen account
  *  actually carries. Only ever touches EMPTY/invalid accounts — a buyer's pick is never moved.
@@ -231,7 +231,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // Count just sent to the Task Manager, shown as a brief confirmation (campaigns stay on the board).
   const [justQueued, setJustQueued] = useState(0);
   const queuedTimer = useRef<number | null>(null);
-  // Cards the last Launch click held back because their account hit the 5/30min launch limit.
+  // Cards the last Launch click held back because their account hit the 5/15min launch limit.
   const [heldBack, setHeldBack] = useState(0);
   const heldTimer = useRef<number | null>(null);
   // Per-account launch-limit picture (server counts + own queued demand) — gates the wave below.
@@ -574,7 +574,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // Single-flight latch for the Launch click: launchWave() awaits a fresh limits fetch before
   // anything enqueues, and a double-click's second call lands inside that window — both calls
   // would pass every guard and fire the whole wave twice (real duplicate campaigns within the
-  // account's 5/30min headroom). React state can't close a same-tick window; the synchronous
+  // account's 5/15min headroom). React state can't close a same-tick window; the synchronous
   // gate does. launchBusy greys the rail button for the visible part of the wave.
   const launchGate = useRef(makeGate());
   const [launchBusy, setLaunchBusy] = useState(false);
@@ -614,7 +614,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     const launchable = campaigns.filter((c) => isLaunchable(c, opts));
     if (launchable.length === 0) return;
 
-    // Account launch limit (5 campaigns / 30 min, all users & channels): send only what fits each
+    // Account launch limit (5 campaigns / 15 min, all users & channels): send only what fits each
     // account's remaining capacity, measured against a picture fetched AT THIS CLICK — never the
     // ≤30s poll cache (another buyer may have filled the account seconds ago). Capacity = fresh
     // server count (the live window + jobs already QUEUED on the server for the account, spec §4.5)

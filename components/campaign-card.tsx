@@ -38,7 +38,7 @@ import { aifFlowOf } from "@/lib/aif-link";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
 import { type AdAccountOption, defaultPixelFor, pixelOptionsOf } from "./use-adaccounts";
-import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
+import { type AcctLimits, decorateAccountOptions, fmtCountdown, useAcctLimits, windowMinutes } from "./use-acct-limit";
 import { Field, MoneyInput, Select, TextArea, TextInput, IconButton } from "./ui";
 import type { ToolSessionOption } from "./use-tool-ready";
 import { SearchSelect } from "./search-select";
@@ -96,10 +96,11 @@ function missingRequirements(
   c: Campaign,
   partner: PartnerConfig,
   opts: ReturnType<typeof launchReadyOpts>,
-  acctFull = false,
+  /** The limits when the card's account is at its cap, else null. */
+  acctFull: Pick<AcctLimits, "limit" | "windowMs"> | null = null,
 ): string[] {
   const m: string[] = [];
-  if (acctFull) m.push("account at its 5/30min launch limit — pick another or wait for the reset");
+  if (acctFull) m.push(`account at its ${acctFull.limit}/${windowMinutes(acctFull)}min launch limit — pick another or wait for the reset`);
   if (!opts.nameOptional && !c.name.trim()) m.push("name");
   if (c.countries.length === 0) m.push("geo");
   if (opts.account && !c.account) m.push("account");
@@ -341,13 +342,13 @@ function CampaignCardBase({
   // Match the Launch bay + launch filter EXACTLY (isLaunchable = isReady + a video creative), so the
   // card dot can't show green "ready" while the rail refuses to launch it for want of a video.
   const opts = launchReadyOpts(partner);
-  // Account launch limit (5 campaigns / 30 min, all users & channels): a full account blocks the
+  // Account launch limit (5 campaigns / 15 min, all users & channels): a full account blocks the
   // card exactly like a missing field — dot, tooltip, rail and the launch filter all agree.
   const limits = useAcctLimits();
   const acctFull = Boolean(c.account) && limits.countFor(c.account) >= limits.limit;
   const acctResetAt = acctFull ? limits.resetAtFor(c.account) : null;
   const ready = isLaunchable(c, opts) && !acctFull;
-  const missing = missingRequirements(c, partner, opts, acctFull);
+  const missing = missingRequirements(c, partner, opts, acctFull ? limits : null);
   const bidCapEnabled = c.bidStrategy !== "LOWEST_COST_WITHOUT_CAP";
 
   // ---- AIF mode: MO-style pickers on the AIF token; destination = free-typed slug; the pixel
@@ -447,7 +448,7 @@ function CampaignCardBase({
     if (moAccountHidden) onPatch(c.id, { account: "", pixel: "" });
   }, [moAccountHidden, onPatch, c.id]);
   // Default binds (owner rule 09-08): once the profile's catalog lands, an EMPTY account fills
-  // with the LEAST-LOADED one on the 5/30-min timer and an empty page with the LEAST-FILLED
+  // with the LEAST-LOADED one on the 5/15-min timer and an empty page with the LEAST-FILLED
   // fanka. Re-pickable like any pick; a duplicate keeps its source's (they arrive non-empty).
   const hsAutoAccount =
     hsMode && hsData && !c.account

@@ -65,7 +65,7 @@ import { useSigners } from "./use-signers";
 import { SignerBadge } from "./signer-badge";
 import { useFanpages } from "./use-fanpages";
 import { defaultPixelFor, pixelOptionsOf, useAdAccounts } from "./use-adaccounts";
-import { decorateAccountOptions, fmtCountdown, useAcctLimits } from "./use-acct-limit";
+import { decorateAccountOptions, fmtCountdown, useAcctLimits, windowMinutes } from "./use-acct-limit";
 import { useToolReady } from "./use-tool-ready";
 import type { SessionUser } from "./user-menu";
 
@@ -363,7 +363,7 @@ function CloneInner({
   const destMissingFor = (d: CloneRowDest): boolean =>
     fanpageMissingFor(d) || accountMissingFor(d) || pixelMissingFor(d);
 
-  // Account launch limit (5 campaigns / 30 min) — the pickers' N/5 badges, the default account
+  // Account launch limit (5 campaigns / 15 min) — the pickers' N/5 badges, the default account
   // pick and the batch gate below.
   const limits = useAcctLimits();
 
@@ -397,7 +397,7 @@ function CloneInner({
   const bidStrategyOptions = avMode ? BID_STRATEGIES.filter((o) => bidKind(o.value) !== "roas") : BID_STRATEGIES;
 
   // ---- default binds (owner rule 09-08): the LEAST-FILLED fanka and the LEAST-LOADED account
-  // on our 5/30-min timer are what an EMPTY Settings pick shows and fires; a real pick (incl.
+  // on our 5/15-min timer are what an EMPTY Settings pick shows and fires; a real pick (incl.
   // "From each source") wins via state and the × clear returns to auto. The partner's preferred
   // account (BR-1500) is ranked first so it wins ties. Purely derived — live as the meters move.
   const autoPageId = partner.fanpagesFromToken
@@ -470,7 +470,7 @@ function CloneInner({
       })
     : [];
 
-  // Account launch limit (5 campaigns / 30 min): EVERY concrete TARGET account must fit its
+  // Account launch limit (5 campaigns / 15 min): EVERY concrete TARGET account must fit its
   // share (rows × copies bound to it). From-each-source rows aren't metered here — the sources'
   // accounts aren't exposed to the board, so the per-copy server claim refuses any overflow with
   // the countdown instead.
@@ -896,7 +896,7 @@ function CloneInner({
                       />
                       {settingsAccountIsAuto ? (
                         <p className="px-0.5 font-mono text-[10.5px] tabular-nums text-faint">
-                          auto · least loaded · {limits.countFor(effAccountId)}/{limits.limit} launches in its 30-min window —
+                          auto · least loaded · {limits.countFor(effAccountId)}/{limits.limit} launches in its {windowMinutes(limits)}-min window —
                           pick another (or “From each source”) to override
                         </p>
                       ) : null}
@@ -1088,7 +1088,7 @@ function CloneInner({
                     >
                       Account limit — <span className="font-semibold">{accountLabel(x.accountId)}</span>: only{" "}
                       <span className="font-semibold">{x.remaining}</span> of{" "}
-                      <span className="font-semibold">{x.need}</span> clones fit its 30-min window
+                      <span className="font-semibold">{x.need}</span> clones fit its {windowMinutes(limits)}-min window
                       {x.resetAt ? (
                         <>
                           {" "}
@@ -1361,7 +1361,7 @@ function CloneInner({
                           empty rides the batch Settings; a pick here overrides just that field
                           (accent border = the row's own). × on a field returns it to the default;
                           ↺ drops the whole override. The badges are the live fanka fill and the
-                          account's 5/30-min load. */}
+                          account's 5/15-min load. */}
                       <div className="cr-dest min-w-0">
                         <span className="cr-label">Destination</span>
                         <div className="mb-1.5 flex flex-wrap items-center gap-1">

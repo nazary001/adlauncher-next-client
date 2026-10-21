@@ -89,7 +89,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   // ---- build + submit ----
   const payload = hsCreatePayload(c, creatives, data.locales, LION_ACR, todaySaoPauloDDMM());
 
-  // Account launch slot (5 campaigns / 30 min per ad account, every channel — owner rule
+  // Account launch slot (5 campaigns / 15 min per ad account, every channel — owner rule
   // 2026-08-18), claimed right before the LION submit. Kept once LION accepts (a campaign will
   // exist); released on a clean LION rejection; KEPT on an ambiguous submit error — the create
   // may have landed (same exactly-once philosophy as the duplicate pump).

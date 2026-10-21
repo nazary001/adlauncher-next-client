@@ -18,7 +18,10 @@ import { coll } from "./mongo.ts";
 import { APP_CACHES, STORE_TIMEOUT_MS, bounded, dupKeyOn, insertFresh, prefixFilter, storeConfigured } from "./store.ts";
 
 export const ACCT_LIMIT = 5;
-export const ACCT_WINDOW_MS = 30 * 60_000;
+/** 30 until 21.10, then 15 on both teams (owner: "снизь таймер с 30 минут на акаунт до 15 …
+ *  для гло 2 тоже"). A window already open shrinks with it: its end is anchor + this, never stored. */
+export const ACCT_WINDOW_MIN = 15;
+export const ACCT_WINDOW_MS = ACCT_WINDOW_MIN * 60_000;
 /** Expired rows linger this long before the snapshot sweep deletes them (a just-expired window
  *  must not be churned by a claim re-creating it mid-sweep). */
 const SWEEP_GRACE_MS = 5 * 60_000;
@@ -48,7 +51,7 @@ export function acctLimitMessage(resetAt: number, now: number = Date.now()): str
   const left = Math.max(0, resetAt - now);
   const mm = Math.floor(left / 60_000);
   const ss = Math.floor((left % 60_000) / 1000);
-  return `Account limit: ${ACCT_LIMIT} campaigns / 30 min — resets in ${mm}:${String(ss).padStart(2, "0")}`;
+  return `Account limit: ${ACCT_LIMIT} campaigns / ${ACCT_WINDOW_MIN} min — resets in ${mm}:${String(ss).padStart(2, "0")}`;
 }
 
 export class AcctLimitedError extends Error {

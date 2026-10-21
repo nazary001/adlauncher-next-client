@@ -1,6 +1,6 @@
 // Default destination picks (owner rule 2026-09-08): every fanka / ad-account picker DEFAULTS to
 // the LEAST-FILLED fanka (fewest ads against its per-page limit) and the LEAST-LOADED account
-// relative to our 5-per-30-min launch timer — the buyer keeps the choice, the default just lands
+// relative to our 5-per-15-min launch timer — the buyer keeps the choice, the default just lands
 // on the emptiest slot. Pure and dependency-free so `node --test tests/pick-defaults.test.ts`
 // runs it straight off Node's type stripping.
 
@@ -43,7 +43,7 @@ export function leastFilledPage(pages: readonly PageFill[], defaultLimit = 250):
 
 export type AcctLoad = {
   id: string;
-  /** Launches already in the account's open 30-min window (own queued demand included). */
+  /** Launches already in the account's open 15-min window (own queued demand included). */
   count: number;
   /** When that window resets (epoch ms); null = no open window at all. */
   resetAt: number | null;

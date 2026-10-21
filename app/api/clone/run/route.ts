@@ -567,10 +567,10 @@ export async function POST(req: Request) {
             if (roster.ok) toolAcctCurrency = roster.accounts.find((a) => a.account_id === binds.accountId)?.currency || "USD";
           }
 
-          // Account launch slot (5 campaigns / 30 min per ad account, all channels — owner rule
+          // Account launch slot (5 campaigns / 15 min per ad account, all channels — owner rule
           // 2026-08-18), claimed BEFORE the costly media migration so a full account fails fast;
           // released in the catch on any pre-campaign failure. The channel marker is telemetry only
-          // (the 5/30min window spans every channel); TOOL clones tag "tool-clone"/"aif-tool-clone".
+          // (the 5/15min window spans every channel); TOOL clones tag "tool-clone"/"aif-tool-clone".
           acctSlot = await claimAcctSlot(binds.accountId, {
             user: session.username,
             partner: av ? "av" : aif ? "us" : "in",

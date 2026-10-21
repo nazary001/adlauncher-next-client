@@ -84,7 +84,7 @@ test("live: five slots per account window, the sixth claim is refused with the c
     await assert.rejects(lim.claimAcctSlot(account, { user: "tima" }), (e: unknown) => {
       assert.ok(e instanceof lim.AcctLimitedError);
       assert.equal(e.accountId, account);
-      assert.match(e.message, /Account limit: 5 campaigns \/ 30 min — resets in \d+:\d\d/);
+      assert.match(e.message, /Account limit: 5 campaigns \/ 15 min — resets in \d+:\d\d/);
       return true;
     });
     const snap = await lim.acctLimitSnapshot();

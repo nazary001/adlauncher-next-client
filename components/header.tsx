@@ -241,7 +241,7 @@ export function Header({
               keeping it on screen also keeps the shared failover state fresh (the status
               endpoint's probe marks burned tokens for the whole fleet). FB rail only. */}
           {!pinned && partnerConfig(partner).lionLaunch && teamHas("channel:token") ? <HsTokenStatusWidget /> : null}
-          {/* Per-account launch-limit timer (5 campaigns / 30 min) — the FB rails' concern; the
+          {/* Per-account launch-limit timer (5 campaigns / 15 min) — the FB rails' concern; the
               Google rail has no such per-account window (LION owns pacing), nor does Snapchat
               (the server pump paces the wave). */}
           {!pinned ? <AcctLimitWidget /> : null}

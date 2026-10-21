@@ -263,7 +263,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       return alreadyAccepted();
     }
 
-    // ---- account launch-limit precheck (5 campaigns / 30 min per ad account, owner rule
+    // ---- account launch-limit precheck (5 campaigns / 15 min per ad account, owner rule
     // 2026-08-18): EVERY account the wave targets must take its share (per-row destinations,
     // 09-08), else the wave is refused up front with the countdown instead of queuing jobs
     // destined to fail. Runs AFTER the wave-idempotency checks (a re-POST of an already-queued
@@ -368,7 +368,7 @@ export async function POST(req: Request): Promise<NextResponse> {
     startingBid = wire;
   }
 
-  // Account launch slots (5 campaigns / 30 min per ad account): the legacy shape creates
+  // Account launch slots (5 campaigns / 15 min per ad account): the legacy shape creates
   // `copies` clones in ONE LION call, so it needs `copies` slots up front. Limited/store-down
   // mid-claim → everything just claimed goes back and the request is refused with the countdown.
   const acctSlots: string[] = [];

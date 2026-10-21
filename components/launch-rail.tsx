@@ -13,7 +13,7 @@ import type { ToolReadyState } from "./use-tool-ready";
 import type { SlotSigner } from "./use-signers";
 import { SignerBadge } from "./signer-badge";
 import { CheckIcon, EyeIcon, RocketIcon } from "./icons";
-import { useAcctLimits } from "./use-acct-limit";
+import { useAcctLimits, windowMinutes } from "./use-acct-limit";
 
 // lib/team: the non-lion HS rails THIS build's team offers. With neither (a lion-only team,
 // glo-02) there is nothing to choose between, so the rail control and its caption are not rendered
@@ -97,7 +97,7 @@ export function LaunchRail({
 }) {
   const total = campaigns.reduce((s, c) => s + parseMoney(c.budget), 0);
   const opts = launchReadyOpts(partner);
-  // Account launch limit (5/30min): a card bound to a full account is not launchable — the SAME
+  // Account launch limit (5/15min): a card bound to a full account is not launchable — the SAME
   // predicate the card dot uses, so the bay count, the dots and the launch filter always agree.
   const limits = useAcctLimits();
   const launchableOf = (c: Campaign) =>
@@ -479,7 +479,7 @@ export function LaunchRail({
 
           {heldBack > 0 ? (
             <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
-              {heldBack} held by the account limit (5 / 30 min) — they stay on the board; relaunch
+              {heldBack} held by the account limit ({limits.limit} / {windowMinutes(limits)} min) — they stay on the board; relaunch
               after the reset or move them to another account.
             </p>
           ) : null}

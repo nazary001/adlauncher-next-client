@@ -51,7 +51,7 @@ export type HsDupShotResult =
       error: string;
       /** A fact of the SOURCE: its other copies would be refused identically (LION preflight, a 4xx). */
       family: boolean;
-      /** The account's 30-min window is full — its other copies would hit it too. */
+      /** The account's 15-min window is full — its other copies would hit it too. */
       accountFull: boolean;
       /** The launch registry could not be asked at all — nothing was sent, the whole rest waits. */
       registryDown: boolean;
@@ -141,7 +141,7 @@ export async function runHsDupShot(s: HsDupShot, deps: HsDupShotDeps): Promise<H
     const targeting = s.override ? lionDuplicateTargeting(s.override, s.profileLocales) : {};
     if ("refusal" in targeting) return refuse(targeting.refusal);
 
-    // Account launch slot (5 campaigns / 30 min per ad account) — claimed right before the submit;
+    // Account launch slot (5 campaigns / 15 min per ad account) — claimed right before the submit;
     // released on a clean preflight rejection below, KEPT on ambiguous outcomes (the clone may
     // exist on LION).
     slotDoc = (

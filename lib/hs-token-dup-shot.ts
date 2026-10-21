@@ -136,7 +136,7 @@ export async function runHsTokenDupShot(s: HsTokenDupShot, deps: HsTokenShotDeps
   try {
     rowWrite({ status: "running", stage: "queue", started_at: deps.now() });
 
-    // Account launch slot (5/30min) — right before the build; released on pre-campaign failure.
+    // Account launch slot (5/15min) — right before the build; released on pre-campaign failure.
     acctSlot = await claimAcctSlot(binds.account, { user, partner: "br", channel: "hs-token-dup", name: s.name || s.label || `Clone of ${s.campaignId}`, accountName: binds.accountName });
 
     let tree = recall(treeCache, s.campaignId, now);

@@ -530,14 +530,14 @@ export async function POST(req: Request) {
       // as PENDING (keep slot + gcm), never freed — the job may still be creating the live campaign.
       let toolSubmittedJob: number | null = null;
       try {
-        // 0) claim the ACCOUNT's launch slot — at most 5 campaigns per ad account per 30-min
+        // 0) claim the ACCOUNT's launch slot — at most 5 campaigns per ad account per 15-min
         // window, across every user and channel (owner rule 2026-08-18). Throws the human
         // countdown message when the window is full; released below on any pre-campaign failure.
         progress("gcm");
         acctSlot = await claimAcctSlot(binds.accountId, {
           user: session.username,
           partner: "in",
-          // The 5/30-min account meter spans every channel; a TOOL launch claims here too, under
+          // The 5/15-min account meter spans every channel; a TOOL launch claims here too, under
           // its own channel label so the drawer can tell the rails apart (owner ask 28.09).
           channel: viaTool ? "tool" : "launch",
           name,

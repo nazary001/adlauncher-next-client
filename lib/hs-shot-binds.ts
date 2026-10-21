@@ -74,7 +74,7 @@ export function demandByAccount<T>(shots: readonly T[], accountOf: (s: T) => str
 export type AcctWindowInfo = { count: number; resetAt: number; name?: string };
 
 /**
- * Wave-level launch-limit precheck over EVERY account the wave targets (5 campaigns / 30 min per
+ * Wave-level launch-limit precheck over EVERY account the wave targets (5 campaigns / 15 min per
  * ad account — owner rule 2026-08-18; per-row destinations 09-08): the first account whose open
  * window can't take its share refuses the whole wave, with the countdown text the caller
  * renders (`message(resetAt)`). null = every account fits. The per-shot claim in the pump stays
@@ -95,7 +95,7 @@ export function acctLimitRefusal(
     if (need > remaining) {
       const tail = info ? ` — ${message(info.resetAt)}` : "";
       return {
-        error: `account_limit — only ${Math.max(0, remaining)} of ${need} ${noun} fit account ${who}'s 30-min window${tail}`,
+        error: `account_limit — only ${Math.max(0, remaining)} of ${need} ${noun} fit account ${who}'s launch window${tail}`,
         status: 429,
       };
     }
