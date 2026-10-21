@@ -34,6 +34,11 @@ export function avRegisteredCount(raw: unknown): number {
   const n = Math.floor(Number(String(raw ?? "").trim() || "0"));
   return Number.isFinite(n) && n > 0 ? Math.min(n, AV_KEY_POOL_MAX) : 0;
 }
+/** The launchable range: the keys the team has registered in AV (lib/team avKeysRegistered — a push
+ *  is all a new batch needs), raised — never lowered — by AV_KEYS_REGISTERED, so the old Vercel value
+ *  (200) cannot hide a later batch. Both clamped like avRegisteredCount. */
+export const avLaunchableCount = (teamRegistered: number, envRaw: unknown): number =>
+  Math.max(avRegisteredCount(teamRegistered), avRegisteredCount(envRaw));
 /** Is `key` inside the launchable (registered) range? */
 export const avKeyLaunchable = (key: string, registered: number): boolean => {
   const i = avKeyIndex(key);

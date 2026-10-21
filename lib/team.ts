@@ -72,6 +72,9 @@ export type TeamConfig = {
    *  only when it is provably the team's own (its name carries the team's acronym, or it lives in one
    *  of the team's ad accounts); one LION cannot show right now waits until it can. */
   strictCampaigns: boolean;
+  /** AV keys av001…avN registered in ActiveView's "UTM Campaign Values" — the launchable AV pool
+   *  (lib/av-launch; the server env AV_KEYS_REGISTERED can only raise it). 0 = nothing launchable. */
+  avKeysRegistered: number;
 };
 
 const TEAMS: Record<TeamId, TeamConfig> = {
@@ -91,6 +94,8 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     toolsDirectory: true,
     openApi: true,
     strictCampaigns: false,
+    // av001–av200 uploaded by the owner 28.09 (all bound by 16.10); av201–av250 made by AV 21.10.
+    avKeysRegistered: 250,
   },
   // The second team (08.10): only the HS partner, only through LION, Facebook only. Its fanpages are
   // not in the hs-tools registry, so the fanka gate cannot judge them (probed 08.10: 0 of 10; 13.10,
@@ -116,6 +121,7 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     toolsDirectory: false,
     openApi: false,
     strictCampaigns: true,
+    avKeysRegistered: 0,
   },
 };
 

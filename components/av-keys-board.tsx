@@ -5,8 +5,9 @@
 // the AIF-brand twin — see lib/av-keys / lib/av-link). This page shows every claimed key (who holds
 // it, which campaign, which destination), lets the owner RELEASE a row (the registry row is deleted
 // and the key returns to the pool — the FB campaign is NOT touched), and hands the owner the plain
-// upload files to feed AV's "Upload file" form. The launchable range is the SERVER env
-// AV_KEYS_REGISTERED (=poolMax here); 0 = the stub (nothing launchable until the pool is uploaded).
+// upload files to feed AV's "Upload file" form. The launchable range (=poolMax here) is the team's
+// registered count (lib/team avKeysRegistered), raised by the server env AV_KEYS_REGISTERED when that is
+// higher; 0 = the stub (nothing launchable until the pool is uploaded).
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
@@ -215,9 +216,9 @@ export function AvKeysBoard({ user }: { user: SessionUser }) {
               <p className="text-[11.5px] leading-relaxed text-faint">
                 The AV revenue pool: <span className="font-mono">av001…av{String(codecMax)}</span>, one key per
                 campaign. A key earns reportable revenue in ActiveView only once it is registered under{" "}
-                <em>UTM Campaign Values</em>. The launchable range is the server env{" "}
-                <span className="font-mono">AV_KEYS_REGISTERED</span> — until it is set, launches and clones refuse{" "}
-                <span className="font-mono">av_keys_not_registered</span>.
+                <em>UTM Campaign Values</em>. The launchable range is the team&apos;s registered count in the launcher (the
+                server env <span className="font-mono">AV_KEYS_REGISTERED</span> can raise it) — while it is 0, launches and
+                clones refuse <span className="font-mono">av_keys_not_registered</span>.
               </p>
             </div>
 
@@ -280,8 +281,9 @@ export function AvKeysBoard({ user }: { user: SessionUser }) {
                   file — TXT/CSV/XLSX accepted).
                 </li>
                 <li>
-                  <span className="mr-1.5 font-mono text-faint">4.</span> Set the server env{" "}
-                  <span className="font-mono">AV_KEYS_REGISTERED</span> to the highest registered number and restart the server (on Vercel: redeploy).
+                  <span className="mr-1.5 font-mono text-faint">4.</span> Raise the team&apos;s registered count in the launcher to
+                  the highest registered number (a release), or set the server env{" "}
+                  <span className="font-mono">AV_KEYS_REGISTERED</span> to it and restart the server (on Vercel: redeploy).
                 </li>
               </ol>
             </div>

@@ -21,6 +21,7 @@ import {
   avKeyOfLink,
   avKeysUploadFiles,
   avKnownChats,
+  avLaunchableCount,
   avLink,
   avLinkSegments,
   avMappingLabel,
@@ -75,6 +76,19 @@ test("key codec: av001…av999, lower-case, registered range gates launchability
   assert.equal(avKeyLaunchable("av200", 200), true);
   assert.equal(avKeyLaunchable("av201", 200), false);
   assert.equal(avKeyLaunchable("av001", 0), false);
+});
+
+test("launchable count = the team's registered keys; AV_KEYS_REGISTERED only raises it", () => {
+  assert.equal(avLaunchableCount(250, undefined), 250, "no env → the team's count");
+  assert.equal(avLaunchableCount(250, "200"), 250, "the old Vercel value 200 must not hide av201…av250");
+  assert.equal(avLaunchableCount(250, "300"), 300, "a bigger env value still raises the range");
+  assert.equal(avLaunchableCount(250, "garbage"), 250);
+  assert.equal(avLaunchableCount(0, undefined), 0, "no team keys, no env = the stub");
+  assert.equal(avLaunchableCount(0, "200"), 200);
+  assert.equal(avLaunchableCount(5000, undefined), 999, "clamped to the codec range");
+  assert.equal(avLaunchableCount(-3, ""), 0);
+  assert.equal(avKeyLaunchable("av250", avLaunchableCount(250, "200")), true);
+  assert.equal(avKeyLaunchable("av251", avLaunchableCount(250, "200")), false);
 });
 
 test("destination base: https, lower-case host, query/hash/trailing slash stripped, home refused", () => {

@@ -13,8 +13,9 @@ const bad = (error: string, status = 400) => NextResponse.json({ ok: false, erro
 /**
  * GET /api/av/keys — the launcher/clone board pool preview + the owner AV keys page registry.
  *
- * `poolMax` is the LAUNCHABLE range (AV_KEYS_REGISTERED), NOT the codec ceiling (`codecMax` =
- * av999): the boards walk `poolMax` as the effective max for the AV pool, and `poolMax === 0`
+ * `poolMax` is the LAUNCHABLE range (lib/av-launch avKeysRegistered: the team's registered keys, raised
+ * by AV_KEYS_REGISTERED), NOT the codec ceiling (`codecMax` = av999): the boards walk `poolMax` as the
+ * effective max for the AV pool, and `poolMax === 0`
  * reads as "no AV keys are registered in ActiveView yet", never "pool exhausted". `used` = the
  * bound keys from the registry; `next` = the key a launch would take.
  *
