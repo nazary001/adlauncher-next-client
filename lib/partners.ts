@@ -184,6 +184,10 @@ const MKLEARN_LANDINGS: Landing[] = [
   { slug: "memory-test-80-percent", title: "Memory Test – 10 Rounds, 70 Questions", lang: "EN", niche: "Quizzes" },
   { slug: "quick-memory-test", title: "Quick Memory Test – 10 Questions", lang: "EN", niche: "Quizzes" },
   { slug: "memory-test-challenge", title: "Memory Test Challenge – 10 Questions (paper style)", lang: "EN", niche: "Quizzes" },
+  // A step-by-step dating-style quiz (MK Learn <DateQuizFunnel />, after the allfeellove.com
+  // funnel): the gender tiles / "Halfway there!" after question 6 / "See my result" / the
+  // breakdown are rewarded gates, with the inline banner on top of every step.
+  { slug: "dating-style-quiz", title: "Dating Style Quiz – 12 Questions", lang: "EN", niche: "Quizzes" },
 ];
 
 // The VD-C1 partner's value pixel «VD-C1-HS-11»: the ONE pixel the VD-C1 admin shares to every
