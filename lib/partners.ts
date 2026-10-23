@@ -1,16 +1,17 @@
 import type { ComponentType, SVGProps } from "react";
-import { AvFlag, BrazilFlag, IndiaFlag, UsaFlag } from "@/components/icons";
+import { AvFlag, BrazilFlag, IndiaFlag, UsaFlag, VcFlag } from "@/components/icons";
 import type { Campaign } from "./types";
 import { AIF_POOL_MAX, aifBrandCode, GCM_POOL_MAX, gcmCode } from "./pool-codes";
 import { bidKind } from "./types";
 import { type AifFlow, AIF_RW_BASE, aifFlowOf, aifLinkSegments } from "./aif-link";
 import { AV_KEY_POOL_MAX, avKeyCode, avLinkSegments } from "./av-link";
 import { avLockPatch } from "./av-delivery";
+import { VC_PIXEL, vcDestination, vcLinkSegments, vcLockPatch } from "./vc-link";
 import { TEAM } from "./team.ts";
 
 export type Bound = { id: string; name: string };
 
-export type PartnerId = "br" | "in" | "us" | "av";
+export type PartnerId = "br" | "in" | "us" | "av" | "vc";
 
 export type Landing = {
   slug: string;
@@ -81,6 +82,13 @@ export type PartnerConfig = {
    *  fired by AV's own site script (AV_PIXEL): delivery is Purchase on it (default) or Traffic / link
    *  clicks with no pixel — the optimization picks, avDelivery maps (applyPartnerLocks + the route). */
   avLaunch?: boolean;
+  /** ValueClick (VC, lib/vc-*): a direct Graph launch on VC's OWN token (slots vc.launch/vc.clone, no
+   *  env default) onto a VC search-arb landingpage — the link the buyer copies from VC's dashboard
+   *  (…qualitydays.com/rsp/<article>/?cmpid=<id>), kept in Campaign.landing; the launch writes the
+   *  ad's title into its `adtitle`. VC fires Purchase (with value) into VC_PIXEL through the
+   *  Conversions API, so delivery is Purchase on it (default, min-ROAS allowed) or Traffic / link
+   *  clicks with no pixel (vcDelivery, applyPartnerLocks + the route). No marker pool. */
+  vcLaunch?: boolean;
   /** Not built out yet → the switcher renders this partner disabled ("in development"). */
   inDevelopment?: boolean;
   /** Not one of THIS team's partners (lib/team) → the switcher does not render it at all. Such a
@@ -426,11 +434,39 @@ export const PARTNERS: PartnerConfig[] = [
     inDevelopment: offTeam("av") || process.env.NEXT_PUBLIC_AV_ENABLED !== "1",
     hidden: offTeam("av"),
   },
+  {
+    id: "vc",
+    label: "VC",
+    Flag: VcFlag,
+    usesGcm: false,
+    vcLaunch: true,
+    usesProfile: false,
+    nameTier: "vc",
+    // The destination is the VC landingpage link pasted on the card (lib/vc-link) — VC has no
+    // catalog API, so there is no static list either.
+    landingBase: "",
+    landings: [],
+    pageLabel: "Fanpage",
+    pagePlaceholder: "Search fanpage",
+    fanpages: [],
+    fanpagesFromToken: true,
+    accountsFromToken: true,
+    launchNote: "Submits via the VC token",
+    pageAdLimit: 250,
+    // AIF/AV parity: one campaign → one ad set → one ad per creative, ≤5 creatives.
+    maxCreatives: 5,
+    // Live wherever the team lists it (owner ask 23.10: "сделай нового партнера VC … на прод") — no
+    // build flag; without a token in the VC · Launches slot the board says so and nothing launches.
+    inDevelopment: offTeam("vc"),
+    hidden: offTeam("vc"),
+  },
 ];
 
 // AV delivery modes (owner ask 30.09) — Purchase on the AV site pixel (default) or Traffic / link
 // clicks with no pixel; pure module (lib/av-delivery) so node --test covers it.
 export { AV_OBJECTIVE, AV_PIXEL, AV_SALES_OBJECTIVE, type AvDelivery, avAdText, avDelivery, avLockPatch } from "./av-delivery";
+// VC (ValueClick) link / pixel / delivery contract — pure module, node --test covers it.
+export { VC_EVENT, VC_PIXEL, VC_PORTAL_URL, vcAdTitle, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcLockPatch } from "./vc-link";
 
 export function partnerConfig(id: PartnerId): PartnerConfig {
   return PARTNERS.find((p) => p.id === id) ?? PARTNERS[0];
@@ -460,10 +496,13 @@ export function launchReadyOpts(p: PartnerConfig): {
   adText: boolean;
   roasPixel: string;
   nameOptional: boolean;
+  landingValid?: (v: string) => boolean;
 } {
   return {
     // AIF reuses the landing slot for its free-typed destination slug — required all the same.
-    landing: p.usesGcm || Boolean(p.aifLaunch) || Boolean(p.avLaunch),
+    // VC keeps its pasted landingpage link there and it must be a real VC link (vcDestination).
+    landing: p.usesGcm || Boolean(p.aifLaunch) || Boolean(p.avLaunch) || Boolean(p.vcLaunch),
+    ...(p.vcLaunch ? { landingValid: (v: string) => vcDestination(v).ok } : {}),
     profile: p.usesProfile,
     page: Boolean(p.fanpagesFromToken) || Boolean(p.lionLaunch),
     account: Boolean(p.accountsFromToken) || Boolean(p.lionLaunch),
@@ -472,7 +511,8 @@ export function launchReadyOpts(p: PartnerConfig): {
     // dead-lock them, so readiness never gates on it for AIF.
     // AV's pixel is never a pick: Purchase binds AV_PIXEL, link clicks bind none (avDelivery, pinned
     // by the locks) — nothing for readiness to gate on.
-    pixel: (Boolean(p.accountsFromToken) && !p.aifLaunch && !p.avLaunch) || Boolean(p.lionLaunch),
+    // VC's pixel is never a pick either: Purchase / min-ROAS bind VC_PIXEL, clicks none (vcDelivery).
+    pixel: (Boolean(p.accountsFromToken) && !p.aifLaunch && !p.avLaunch && !p.vcLaunch) || Boolean(p.lionLaunch),
     // Marker-pool partners (MO gcm / AIF brand) need a claimed code before the card counts as
     // ready — a card whose code hasn't loaded (registry unreachable / pre-load window) must not
     // look launchable, and Copy must not offer a link with an empty marker.
@@ -483,7 +523,8 @@ export function launchReadyOpts(p: PartnerConfig): {
     // Min-ROAS pins the partner's value pixel VD-C1-HS-11 on both rails (AIF since 09-02, MO
     // since 09-08 — both VO-probed); LION partners validate pixels their own way.
     // AV has no value pixel (and refuses min-ROAS) — no pin.
-    roasPixel: p.avLaunch ? "" : p.aifLaunch ? AIF_VALUE_PIXEL.id : p.accountsFromToken ? ROAS_PIXEL.id : "",
+    // VC: min-ROAS runs on VC's own pixel (its Purchase carries a value).
+    roasPixel: p.avLaunch ? "" : p.vcLaunch ? VC_PIXEL.id : p.aifLaunch ? AIF_VALUE_PIXEL.id : p.accountsFromToken ? ROAS_PIXEL.id : "",
     // AV: the name body is the locked "<topic> | <GEO> | <lang> | " from the (required) destination —
     // the buyer's typed tail may stay empty (owner ask 30.09).
     nameOptional: Boolean(p.avLaunch),
@@ -541,6 +582,10 @@ export function landingUrlSegments(
   // fire tail even for Purchase (AV's own site script fires the pixel) — lib/av-link builds <destination>?utm_source=facebook&utm_medium={{campaign.id}}
   // &utm_campaign=<key>&utm_term={{adset.id}}&utm_content={{ad.id}}.
   if (p.avLaunch) return avLinkSegments(slug, gcm);
+  // VC: `slug` IS the pasted landingpage link; `gcm` carries the ad title for `adtitle` (VC has no
+  // marker — the card and the route pass vcAdTitle(campaign) there). No pixel / fire tail: VC fires
+  // the pixel itself through the Conversions API.
+  if (p.vcLaunch) return vcLinkSegments(slug, gcm);
   const medium = p.nameTier ? `&utm_medium=${p.nameTier}` : "";
   const segs: LinkSegment[] = [
     { text: `${p.landingBase}/`, role: "base" },
@@ -576,7 +621,7 @@ export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[
   const acct = p.lockedAccount?.name;
   const px = p.lockedPixel?.id; // pixel is identified by its numeric id, not its text name
   const fan = p.fanpages.length === 1 ? p.fanpages[0] : undefined;
-  if (!acct && !px && !fan && !p.aifLaunch && !p.avLaunch) return rows;
+  if (!acct && !px && !fan && !p.aifLaunch && !p.avLaunch && !p.vcLaunch) return rows;
   let changed = false;
   const next = rows.map((r) => {
     const patch: Partial<Campaign> = {};
@@ -600,6 +645,11 @@ export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[
       // (conversions — what a fresh card carries) or Traffic / link clicks with no pixel; min-ROAS
       // snaps to lowest cost (no purchase value). The route re-pins it all (avLockPatch).
       Object.assign(patch, avLockPatch(r));
+    }
+    if (p.vcLaunch) {
+      // VC: Purchase on VC_PIXEL (conversions / min-ROAS — a fresh card's default) or Traffic / link
+      // clicks with no pixel; the route re-pins it all (vcDelivery).
+      Object.assign(patch, vcLockPatch(r));
     }
     if (Object.keys(patch).length === 0) return r;
     changed = true;

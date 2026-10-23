@@ -19,7 +19,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExterna
 import type { JSX } from "react";
 import { isRemoteSource, useCreativeUploads } from "@/components/creative-uploads";
 import type { UploadSnapshot } from "@/components/creative-uploads";
-import { useTaskManager, useAifTaskManager, useAvTaskManager } from "@/components/task-manager";
+import { useTaskManager, useAifTaskManager, useAvTaskManager, useVcTaskManager } from "@/components/task-manager";
 import { useHsTaskManager } from "@/components/hs-task-manager";
 import { useGoogleTaskManager } from "@/components/google-task-manager";
 import { useSnapTaskManager } from "@/components/snap-task-manager";
@@ -159,6 +159,7 @@ export function LaunchHandoffHost(): JSX.Element | null {
   const mo = useTaskManager();
   const aif = useAifTaskManager();
   const av = useAvTaskManager();
+  const vc = useVcTaskManager();
   const hs = useHsTaskManager();
   const gg = useGoogleTaskManager();
   const sn = useSnapTaskManager();
@@ -169,6 +170,7 @@ export function LaunchHandoffHost(): JSX.Element | null {
         mo: mo.setOpen,
         aif: aif.setOpen,
         av: av.setOpen,
+        vc: vc.setOpen,
         hs: hs.setOpen,
         gg: gg.setOpen,
         sn: sn.setOpen,
@@ -176,7 +178,7 @@ export function LaunchHandoffHost(): JSX.Element | null {
       };
       open[scope]?.(true);
     },
-    [mo.setOpen, aif.setOpen, av.setOpen, hs.setOpen, gg.setOpen, sn.setOpen, tt.setOpen],
+    [mo.setOpen, aif.setOpen, av.setOpen, vc.setOpen, hs.setOpen, gg.setOpen, sn.setOpen, tt.setOpen],
   );
 
   const [overlayWave, setOverlayWave] = useState<number | null>(null);

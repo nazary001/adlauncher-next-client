@@ -442,6 +442,8 @@ export function AccountAccessBoard({
     undefined,
     "/api/av/adaccounts",
   );
+  // VC (23.10): its token's cabinets — only on a team that has VC (the route 404s elsewhere).
+  const vcAccounts = useAdAccounts(!partnerConfig("vc").inDevelopment && !partnerConfig("vc").hidden, undefined, "/api/vc/adaccounts");
 
   // HS: ONE flat list — the MAIN pool only (owner ask 08-21). The globecoders profiles mirror
   // one VD-C1 account pool, so the page loads the first non-FARM profile's bind space and shows
@@ -640,7 +642,8 @@ export function AccountAccessBoard({
   };
 
   // ---- rail rows -------------------------------------------------------------------------------
-  const graphRows = rail === "in" ? moAccounts : rail === "us" ? aifAccounts : rail === "av" ? avAccounts : null;
+  const graphRows =
+    rail === "in" ? moAccounts : rail === "us" ? aifAccounts : rail === "av" ? avAccounts : rail === "vc" ? vcAccounts : null;
   const railLabel = PARTNERS.find((p) => p.id === rail)?.label ?? rail;
 
   const renderRows = (rows: { id: string; name: string }[]) => {

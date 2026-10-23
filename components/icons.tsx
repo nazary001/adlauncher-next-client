@@ -431,6 +431,29 @@ export function AvFlag(props: P) {
   );
 }
 
+/** ValueClick (VC) — the partner's green with a "VC" monogram. */
+export function VcFlag(props: P) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...props}>
+      <defs>
+        <clipPath id="flag-vc">
+          <circle cx="12" cy="12" r="11" />
+        </clipPath>
+        <linearGradient id="flag-vc-bg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#2F8A68" />
+          <stop offset="1" stopColor="#11402F" />
+        </linearGradient>
+      </defs>
+      <g clipPath="url(#flag-vc)">
+        <rect width="24" height="24" fill="url(#flag-vc-bg)" />
+        <path d="M4.2 7.4h2l1.95 6 1.95-6h2l-3 9.2h-1.9z" fill="#F5F7FA" />
+        <path d="M19 9.2a3.6 3.6 0 1 0 0 5.6" fill="none" stroke="#F2C94C" strokeWidth="2" strokeLinecap="round" />
+      </g>
+      <circle cx="12" cy="12" r="10.6" fill="none" stroke="rgba(255,255,255,0.16)" strokeWidth="0.8" />
+    </svg>
+  );
+}
+
 /* ---------- platform marks ---------- */
 
 export function FacebookMark(props: P) {

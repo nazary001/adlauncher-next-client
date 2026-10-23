@@ -7,6 +7,14 @@ import { UploadingNotice } from "./upload-guard";
 import { CONVERSION_EVENTS, geoSummary } from "@/lib/catalog";
 import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { type PartnerConfig, launchReadyOpts, markerPool } from "@/lib/partners";
+import { vcDestination } from "@/lib/vc-link";
+
+/** A VC row's tag: the landingpage id (cmpid) of its pasted link, or what is missing. */
+const vcRowTag = (landing: string): string => {
+  if (!landing.trim()) return "no VC link";
+  const d = vcDestination(landing);
+  return d.ok ? `cmpid ${d.cmpid}` : "bad VC link";
+};
 import { teamHas } from "@/lib/team";
 import type { HsLaunchChannel } from "./hs-task-manager";
 import type { ToolReadyState } from "./use-tool-ready";
@@ -118,7 +126,8 @@ export function LaunchRail({
   // both picked and ready; else the FB Token rail's fixed TOKEN marker; else LION's bare grammar.
   const nameChannel: HsLaunchChannel =
     hsChannel === "tool" && toolReady ? "tool" : hsChannel === "token" && hsTokenReady ? "token" : "lion";
-  const graphRail = !partner.lionLaunch && (partner.usesGcm || Boolean(partner.aifLaunch) || Boolean(partner.avLaunch));
+  const graphRail =
+    !partner.lionLaunch && (partner.usesGcm || Boolean(partner.aifLaunch) || Boolean(partner.avLaunch) || Boolean(partner.vcLaunch));
   // MO/AIF/AV TOOL is the EFFECTIVE channel. MO/AIF: only when picked AND ready — a stale "tool"
   // pick falls back to our FB token (the same rule the board fires on). AV launches ONLY through
   // TOOL (owner ask 28.09) — its graphChannel is pinned "tool", so this is really "AV and a live
@@ -183,7 +192,8 @@ export function LaunchRail({
             {campaigns.map((c, i) => {
               const ready = launchableOf(c);
               // AV runs one of its two modes — Purchase on the AV site pixel or link clicks (avDelivery).
-              const eventLabel = partner.avLaunch
+              // VC the same pair — Purchase on the VC pixel or link clicks (vcDelivery).
+              const eventLabel = partner.avLaunch || partner.vcLaunch
                 ? c.optimization === "clicks"
                   ? "link clicks"
                   : "Purchase"
@@ -216,6 +226,8 @@ export function LaunchRail({
                             ? `gcm ${c.gcm}`
                             : c.gcm
                           : `no ${pool.label}`
+                        : partner.vcLaunch
+                          ? vcRowTag(c.landing)
                         : c.profile
                           ? c.profile.replace("globecoders-", "")
                           : "no profile") +
@@ -489,7 +501,9 @@ export function LaunchRail({
             </p>
           ) : moSignerMissing ? (
             <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">
-              No launch token is assigned for this partner — an owner assigns one under FB tokens (menu).
+              {partner.vcLaunch
+                ? "No VC launch token yet — an owner adds one under FB tokens (menu) → VC · Launches: a system user with ads_management on the VC cabinets (the Conversions API token in VC's Tracking cannot launch)."
+                : "No launch token is assigned for this partner — an owner assigns one under FB tokens (menu)."}
             </p>
           ) : avToolBlocked ? (
             // AV launches only through TOOL (owner ask 28.09): no fallback rail, so the button stays

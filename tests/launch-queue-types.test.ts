@@ -215,7 +215,7 @@ test("firstStage / worstCaseMs / laneOf", () => {
   assert.equal(firstStage("aif.launch"), "gcm");
   assert.equal(firstStage("av.launch"), "gcm");
   assert.equal(worstCaseMs("hs.lion"), 310_000, "in-process the LION route can spend minutes on cold catalog reads before the submit");
-  for (const k of ["mo.launch", "aif.launch", "av.launch", "fb.clone", "hs.dup", "hs.jurar", "hs.tokendup", "hs.tokenjurar"] as QueueKind[]) assert.equal(worstCaseMs(k), 310_000, k);
+  for (const k of ["mo.launch", "aif.launch", "av.launch", "vc.launch", "fb.clone", "hs.dup", "hs.jurar", "hs.tokendup", "hs.tokenjurar"] as QueueKind[]) assert.equal(worstCaseMs(k), 310_000, k);
   // The token / TOOL launch handlers do the cold LION reads AND a full 240 s / 270 s build stream
   // after them — a flat 310 s let the fit check start one the platform then cut mid-stream (audit 09.10).
   assert.equal(worstCaseMs("hs.token"), 520_000);
@@ -235,7 +235,7 @@ test("firstStage / worstCaseMs / laneOf", () => {
 });
 
 test("kinds: the browser's handler kinds, the routes' runner kinds and the follow-ups never overlap; every scope lists its kinds", () => {
-  assert.deepEqual([...HANDLER_KINDS], ["mo.launch", "aif.launch", "av.launch", "fb.clone", "hs.lion", "hs.token", "hs.tool"]);
+  assert.deepEqual([...HANDLER_KINDS], ["mo.launch", "aif.launch", "av.launch", "vc.launch", "fb.clone", "hs.lion", "hs.token", "hs.tool"]);
   for (const k of HANDLER_KINDS) assert.equal(isHandlerKind(k), true);
   for (const k of ["sn.launch", "hs.dup", "tt.follow"]) assert.equal(isHandlerKind(k), false);
   for (const k of ["hs.dup.follow", "hs.jurar.follow", "tt.follow", "tool.follow"]) assert.equal(isFollowKind(k), true);
@@ -298,7 +298,7 @@ test("runningRow / canceledRow / reapedRow", () => {
 });
 
 test("SCOPE_PARTNER mapping", () => {
-  assert.deepEqual(SCOPE_PARTNER, { mo: "in", aif: "us", av: "av", hs: "br", gg: "gg", sn: "sn", tt: "tt" });
+  assert.deepEqual(SCOPE_PARTNER, { mo: "in", aif: "us", av: "av", vc: "vc", hs: "br", gg: "gg", sn: "sn", tt: "tt" });
 });
 
 // ---------------------------------------------------------------------------
@@ -307,10 +307,10 @@ test("SCOPE_PARTNER mapping", () => {
 
 const reply = (over: Partial<RunReply> = {}): RunReply => ({ httpStatus: 200, streamed: true, final: null, lastStage: null, ...over });
 const NOW = 9000;
-const jb = (kind: QueueKind, body: Record<string, unknown> = {}): Pick<QueueJob, "kind" | "partner" | "body"> => ({ kind, partner: SCOPE_PARTNER[kind.startsWith("hs") ? "hs" : kind === "fb.clone" ? "mo" : (kind.split(".")[0] as "mo" | "aif" | "av")], body });
+const jb = (kind: QueueKind, body: Record<string, unknown> = {}): Pick<QueueJob, "kind" | "partner" | "body"> => ({ kind, partner: SCOPE_PARTNER[kind.startsWith("hs") ? "hs" : kind === "fb.clone" ? "mo" : (kind.split(".")[0] as "mo" | "aif" | "av" | "vc")], body });
 
 test("outcomeOf: a clean done for mo / aif / av", () => {
-  for (const kind of ["mo.launch", "aif.launch", "av.launch"] as QueueKind[]) {
+  for (const kind of ["mo.launch", "aif.launch", "av.launch", "vc.launch"] as QueueKind[]) {
     const o = outcomeOf(jb(kind), reply({ final: { ok: true, campaign_id: "c1", adset_id: "s1", ad_id: "a1", gcm: "mk7", link: "https://x" }, lastStage: "ad" }), NOW);
     assert.equal(o.status, "done");
     assert.equal(o.retryable, false);
@@ -416,7 +416,7 @@ test("outcomeOf: no verdict at all — ambiguous, never retryable", () => {
 });
 
 test("outcomeOf: a handler that THREW — retryable for the streaming rails, ambiguous for hs.lion", () => {
-  for (const kind of ["mo.launch", "aif.launch", "av.launch", "fb.clone", "hs.token", "hs.tool"] as QueueKind[]) {
+  for (const kind of ["mo.launch", "aif.launch", "av.launch", "vc.launch", "fb.clone", "hs.token", "hs.tool"] as QueueKind[]) {
     const o = outcomeOf(jb(kind), reply({ thrown: "boom", httpStatus: 500 }), NOW);
     assert.equal(o.status, "error");
     assert.equal(o.retryable, true, `${kind}: a throw is BEFORE any create on the streaming rails`);
@@ -584,7 +584,7 @@ test("closingRowFor: what a row that stayed open becomes once its job is not ope
 });
 
 test("closingRowFor: a done row lands exactly where the rail's own verdict would have put it", () => {
-  for (const kind of ["mo.launch", "aif.launch", "av.launch", "fb.clone", "hs.lion", "hs.token", "hs.tool"] as QueueKind[]) {
+  for (const kind of ["mo.launch", "aif.launch", "av.launch", "vc.launch", "fb.clone", "hs.lion", "hs.token", "hs.tool"] as QueueKind[]) {
     const final = kind === "hs.lion" ? { ok: true, lionTaskId: "lion-task-1", name: "Final name" } : { ok: true, campaign_id: "c1", adset_id: "s1", ad_id: "a1", gcm: "mk7", link: "https://x", name: "Final name" };
     const verdict = outcomeOf(jb(kind, { creatives: [{ url: "a" }] }), reply({ streamed: kind !== "hs.lion", final }), NOW);
     assert.equal(verdict.status, "done", kind);

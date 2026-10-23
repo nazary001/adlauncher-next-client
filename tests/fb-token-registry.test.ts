@@ -160,6 +160,9 @@ test("envDefaultIds: today's per-rail defaults (MO system-class first; HS dup fa
   // the HS pool the chain would otherwise fall through to.
   assert.deepEqual(envDefaultIds(seeds, "av.launch"), []);
   assert.deepEqual(envDefaultIds(seeds, "av.clone"), []);
+  // VC (23.10) the same: only an owner-assigned token signs VC.
+  assert.deepEqual(envDefaultIds(seeds, "vc.launch"), []);
+  assert.deepEqual(envDefaultIds(seeds, "vc.clone"), []);
   const noDup = envSeeds({ ...ENV, FB_HS_DUP_TOKEN: "" }, fp);
   assert.deepEqual(envDefaultIds(noDup, "hs.clone"), ["env:FB_HS_LAUNCH_TOKEN", "env:FB_HS_LAUNCH_TOKEN_2"]);
   // no soc at all → MO has NO default (the legacy launch token never signs MO by default: retired 09-08)

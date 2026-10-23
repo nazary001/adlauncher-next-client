@@ -85,7 +85,7 @@ export async function POST(req: Request) {
   const label = validateLabel(body?.label);
   if (!label) return NextResponse.json({ ok: false, error: "label_invalid — 1–40 chars: letters, digits, space . _ ( ) # / + -" }, { status: 400 });
   const partners = validatePartners(body?.partners);
-  if (!partners) return NextResponse.json({ ok: false, error: "partners_required — tag at least one partner (MO / AIF / HS / AV)" }, { status: 400 });
+  if (!partners) return NextResponse.json({ ok: false, error: "partners_required — tag at least one partner (MO / AIF / HS / AV / VC)" }, { status: 400 });
   const assign: SlotId[] = Array.isArray(body?.assign) ? (body!.assign as unknown[]).filter(isSlotId) : [];
   for (const slot of assign) {
     if (!partners.includes(slotPartner(slot))) {

@@ -67,17 +67,21 @@ export async function GET(req: Request) {
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   if (!storeConfigured()) return NextResponse.json({ ok: false, tasks: [] });
   // Every partner runs its OWN task manager over this one collection (owner call 08-17):
-  // ?scope=aif → only AIF rows (partner="us"); ?scope=av → only AV rows (partner="av"); default →
+  // ?scope=aif → only AIF rows (partner="us"); ?scope=av → only AV rows (partner="av"); ?scope=vc →
+  // only VC rows (partner="vc"); default →
   // the MO drawer, which excludes every other partner's rows (HS "br", AIF "us", Google "gg",
-  // Snapchat "sn", TikTok "tt", AV "av") and KEEPS partner-null rows (historic server-writer/beacon
+  // Snapchat "sn", TikTok "tt", AV "av", VC "vc") and KEEPS partner-null rows (historic server-writer/beacon
   // creates — null = MO by definition, lib/task-view.ts). See taskScopeFilter for the null semantics.
   const scope = new URL(req.url).searchParams.get("scope");
   // Bounded + short-cached read (task-store): the team's polling collapses to ~one store read per
   // scope per few seconds, and a slow/failing store serves the last good list instead of hanging.
   const cutoff = Date.now() - WINDOW_MS;
-  const filter = taskScopeFilter(scope === "aif" ? { partner: "us" } : scope === "av" ? { partner: "av" } : "mo", cutoff);
+  const filter = taskScopeFilter(
+    scope === "aif" ? { partner: "us" } : scope === "av" ? { partner: "av" } : scope === "vc" ? { partner: "vc" } : "mo",
+    cutoff,
+  );
   const { ok, tasks } = await readTeamTasks(
-    scope === "aif" ? "launch:aif" : scope === "av" ? "launch:av" : "launch:mo",
+    scope === "aif" ? "launch:aif" : scope === "av" ? "launch:av" : scope === "vc" ? "launch:vc" : "launch:mo",
     filter,
     toClient,
     { limit: PAGE_SIZE * MAX_PAGES },

@@ -28,9 +28,9 @@ const BASE = (process.env.HS_PAGES_API_URL || "https://hs.gctracking.xyz").repla
 const KEY = process.env.HS_PAGES_API_KEY ?? "";
 
 /** hs-tools partner prefix per adlauncher partner (br = HS default tables). null = the partner has
- *  NO hs-tools scope (AV — its fanpages are not synced to the box): reads throw "no scope" (callers
+ *  NO hs-tools scope (AV, VC — their fanpages are not synced to the box): reads throw "no scope" (callers
  *  already treat a failed registry as unknown) and usage reports are skipped. */
-const SCOPE: Record<PartnerId, string | null> = { br: "", in: "/mo", us: "/aif", av: null };
+const SCOPE: Record<PartnerId, string | null> = { br: "", in: "/mo", us: "/aif", av: null, vc: null };
 
 /** The box prefix of a partner; throws for a partner without an hs-tools scope. */
 function scopeOf(partner: PartnerId): string {

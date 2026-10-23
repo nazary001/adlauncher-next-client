@@ -1561,6 +1561,222 @@
           []
         ]
       }
+    },
+    {
+      "name": "vc.launch — a VC (ValueClick) launch handed over with via:tool (23.10; the token rail is the same body without via)",
+      "request": {
+        "scope": "vc",
+        "jobs": [
+          {
+            "taskId": "vc3bdab1-8207-427d-bf98-05353dda35d4muz5rmfs",
+            "kind": "vc.launch",
+            "account": "1000000000000005",
+            "row": {
+              "name": "[23/10] (VC) - tail",
+              "gcm": "",
+              "geo": "United States",
+              "budget": "10",
+              "bid": "auto"
+            },
+            "body": {
+              "partnerId": "vc",
+              "campaign": {
+                "id": "c1",
+                "collapsed": false,
+                "namePrefix": "",
+                "name": "tail",
+                "profile": "",
+                "account": "1000000000000005",
+                "page": "610000000000001",
+                "pixel": "1505591128290736",
+                "objective": "OUTCOME_SALES",
+                "bidStrategy": "LOWEST_COST_WITHOUT_CAP",
+                "conversionEvent": "PURCHASE",
+                "optimization": "conversions",
+                "budget": "7",
+                "bidCap": "",
+                "title": "Find a better job today",
+                "copy": "Thousands of openings near you. Take the 30-second quiz and see what fits.",
+                "cta": "LEARN_MORE",
+                "link": "",
+                "landing": "https://www.qualitydays.com/rsp/construction-software-pt/?cmpid=aoz37upzf0",
+                "gcm": "",
+                "redirectType": "META ADX",
+                "paramMode": "url_tags",
+                "headline": "",
+                "countries": [
+                  "US"
+                ],
+                "locales": [],
+                "category": "",
+                "placement": "FULL",
+                "ageMin": "18",
+                "userOs": "all",
+                "files": [
+                  {
+                    "id": "f1791441086702-0",
+                    "name": "clip.mp4",
+                    "size": 2848208,
+                    "kind": "video",
+                    "url": "blob:https://adlauncher.gcamazingtool.xyz/9bc6a42d-4056-48cd-bc09-963c5ee3d03b"
+                  }
+                ],
+                "autoPage": "610000000000001"
+              },
+              "medias": [
+                {
+                  "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                  "kind": "video"
+                }
+              ],
+              "mediaUrl": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+              "mediaKind": "video",
+              "via": "tool",
+              "name": "[23/10] (VC) - tail"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "value": {
+          "scope": "vc",
+          "jobs": [
+            {
+              "taskId": "vc3bdab1-8207-427d-bf98-05353dda35d4muz5rmfs",
+              "kind": "vc.launch",
+              "body": {
+                "partnerId": "vc",
+                "campaign": {
+                  "id": "c1",
+                  "collapsed": false,
+                  "namePrefix": "",
+                  "name": "tail",
+                  "profile": "",
+                  "account": "1000000000000005",
+                  "page": "610000000000001",
+                  "pixel": "1505591128290736",
+                  "objective": "OUTCOME_SALES",
+                  "bidStrategy": "LOWEST_COST_WITHOUT_CAP",
+                  "conversionEvent": "PURCHASE",
+                  "optimization": "conversions",
+                  "budget": "7",
+                  "bidCap": "",
+                  "title": "Find a better job today",
+                  "copy": "Thousands of openings near you. Take the 30-second quiz and see what fits.",
+                  "cta": "LEARN_MORE",
+                  "link": "",
+                  "landing": "https://www.qualitydays.com/rsp/construction-software-pt/?cmpid=aoz37upzf0",
+                  "gcm": "",
+                  "redirectType": "META ADX",
+                  "paramMode": "url_tags",
+                  "headline": "",
+                  "countries": [
+                    "US"
+                  ],
+                  "locales": [],
+                  "category": "",
+                  "placement": "FULL",
+                  "ageMin": "18",
+                  "userOs": "all",
+                  "files": [
+                    {
+                      "id": "f1791441086702-0",
+                      "name": "clip.mp4",
+                      "size": 2848208,
+                      "kind": "video",
+                      "url": "blob:https://adlauncher.gcamazingtool.xyz/9bc6a42d-4056-48cd-bc09-963c5ee3d03b"
+                    }
+                  ],
+                  "autoPage": "610000000000001"
+                },
+                "medias": [
+                  {
+                    "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                    "kind": "video"
+                  }
+                ],
+                "mediaUrl": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                "mediaKind": "video",
+                "via": "tool",
+                "name": "[23/10] (VC) - tail"
+              },
+              "row": {
+                "name": "[23/10] (VC) - tail",
+                "gcm": "",
+                "geo": "United States",
+                "budget": "10",
+                "bid": "auto"
+              },
+              "account": "1000000000000005"
+            }
+          ]
+        },
+        "handlerBodies": [
+          {
+            "partnerId": "vc",
+            "campaign": {
+              "id": "c1",
+              "collapsed": false,
+              "namePrefix": "",
+              "name": "tail",
+              "profile": "",
+              "account": "1000000000000005",
+              "page": "610000000000001",
+              "pixel": "1505591128290736",
+              "objective": "OUTCOME_SALES",
+              "bidStrategy": "LOWEST_COST_WITHOUT_CAP",
+              "conversionEvent": "PURCHASE",
+              "optimization": "conversions",
+              "budget": "7",
+              "bidCap": "",
+              "title": "Find a better job today",
+              "copy": "Thousands of openings near you. Take the 30-second quiz and see what fits.",
+              "cta": "LEARN_MORE",
+              "link": "",
+              "landing": "https://www.qualitydays.com/rsp/construction-software-pt/?cmpid=aoz37upzf0",
+              "gcm": "",
+              "redirectType": "META ADX",
+              "paramMode": "url_tags",
+              "headline": "",
+              "countries": [
+                "US"
+              ],
+              "locales": [],
+              "category": "",
+              "placement": "FULL",
+              "ageMin": "18",
+              "userOs": "all",
+              "files": [
+                {
+                  "id": "f1791441086702-0",
+                  "name": "clip.mp4",
+                  "size": 2848208,
+                  "kind": "video",
+                  "url": "blob:https://adlauncher.gcamazingtool.xyz/9bc6a42d-4056-48cd-bc09-963c5ee3d03b"
+                }
+              ],
+              "autoPage": "610000000000001"
+            },
+            "medias": [
+              {
+                "url": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+                "kind": "video"
+              }
+            ],
+            "mediaUrl": "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+            "mediaKind": "video",
+            "via": "tool",
+            "name": "[23/10] (VC) - tail",
+            "taskId": "vc3bdab1-8207-427d-bf98-05353dda35d4muz5rmfs"
+          }
+        ],
+        "mediaUrls": [
+          [
+            "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4",
+            "https://gc-adlauncher-creatives.s3.eu-central-1.amazonaws.com/creatives/0505050505050505050505050505050505050505050505050505050505050505-2848208-2dd616c99094.mp4"
+          ]
+        ]
+      }
     }
   ]
 }

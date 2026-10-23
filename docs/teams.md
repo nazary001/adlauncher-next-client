@@ -10,7 +10,7 @@ the server of that build). Unset = `glo-01` = the launcher as it always was.
 | GitHub repo | `nazary001/adlauncher-next-client` | `nazary001/glo-02adLauncher-next-client` |
 | Vercel project (team GlobeCoders) | `adlauncher-next-client` | `glo-02adlauncher-next-client` |
 | Local folder | `GC-coding/adlauncher-mongo` | `GC-coding/adLauncher_glo-2` |
-| Partners | HS, MO, AIF, AV | HS only |
+| Partners | HS, MO, AIF, AV, VC | HS only |
 | HS launch channels | LION, FB token, TOOL | LION only |
 | Platform tabs | Facebook, TikTok, Google, Snapchat | Facebook only |
 | Owner tools | all | Account access, Team logins |

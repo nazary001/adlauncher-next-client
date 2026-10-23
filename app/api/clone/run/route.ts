@@ -147,6 +147,10 @@ export async function POST(req: Request) {
   if (!partner.fanpagesFromToken) {
     return NextResponse.json({ ok: false, error: "partner_not_launchable" }, { status: 400 });
   }
+  // VC (23.10) has no clone rail — refuse rather than fall into the MO flow below (MO signer, gcm).
+  if (partner.vcLaunch) {
+    return NextResponse.json({ ok: false, error: "clone_not_available — VC campaigns launch from the launcher board" }, { status: 400 });
+  }
   // The partner picks the RAIL: AV clones ride the AV token, the AV key registry and a
   // destination+key link rewrite (no pixel tail — AV's site script fires AV_PIXEL); AIF clones ride the AIF token, the aif-maps brand
   // registry and a brand-only link rewrite; everything else stays byte-identical to the MO flow

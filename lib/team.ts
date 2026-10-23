@@ -19,7 +19,7 @@ export type TeamId = "glo-01" | "glo-02";
 export const DEFAULT_TEAM: TeamId = "glo-01";
 
 /** FB-board partner ids (= lib/partners PartnerId; repeated here so this file imports nothing). */
-export type TeamPartner = "br" | "in" | "us" | "av";
+export type TeamPartner = "br" | "in" | "us" | "av" | "vc";
 /** How an HS campaign can be submitted: the LION weapons, our own FB tokens, or the TOOL sessions. */
 export type HsChannel = "lion" | "token" | "tool";
 export type TeamPlatform = "google" | "tiktok" | "snap";
@@ -81,7 +81,8 @@ const TEAMS: Record<TeamId, TeamConfig> = {
   "glo-01": {
     id: "glo-01",
     label: "GLO-01",
-    partners: ["br", "in", "us", "av"],
+    // VC (ValueClick) joined 23.10.
+    partners: ["br", "in", "us", "av", "vc"],
     defaultPartner: "in",
     hsChannels: ["lion", "token", "tool"],
     platforms: ["google", "tiktok", "snap"],
@@ -145,7 +146,7 @@ export const TEAM: TeamConfig = teamConfig(process.env.NEXT_PUBLIC_ADL_TEAM);
 export type Need =
   | "always"
   | `partner:${TeamPartner}`
-  /** At least one direct-Graph partner (MO / AIF / AV) — their shared clone board and task drawers. */
+  /** At least one direct-Graph partner (MO / AIF / AV / VC) — their shared clone board and task drawers. */
   | "graph"
   | `channel:${"token" | "tool"}`
   /** Our own FB tokens exist for the team at all: a Graph partner or the HS token rail. */
@@ -156,7 +157,7 @@ export type Need =
   /** The pre-S3 Vercel Blob upload broker — only tabs opened before the S3 release still call it. */
   | "legacyBlob";
 
-const GRAPH_PARTNERS: readonly TeamPartner[] = ["in", "us", "av"];
+const GRAPH_PARTNERS: readonly TeamPartner[] = ["in", "us", "av", "vc"];
 
 export function teamHas(need: Need, team: TeamConfig = TEAM): boolean {
   if (need === "always") return true;
@@ -204,6 +205,7 @@ const API_NEEDS: ReadonlyArray<readonly [string, Need]> = [
   ["/api/auto-landings", "tool:autoLandings"],
   ["/api/aif", "partner:us"],
   ["/api/av", "partner:av"],
+  ["/api/vc", "partner:vc"],
   ["/api/google-tasks", "platform:google"],
   ["/api/google", "platform:google"],
   ["/api/tiktok-tasks", "platform:tiktok"],
@@ -261,7 +263,7 @@ export function teamAllowsPath(pathname: string, team: TeamConfig = TEAM): boole
 
 // ---- the launch queue --------------------------------------------------------------------------
 
-const SCOPE_PARTNER: Record<string, TeamPartner> = { hs: "br", mo: "in", aif: "us", av: "av" };
+const SCOPE_PARTNER: Record<string, TeamPartner> = { hs: "br", mo: "in", aif: "us", av: "av", vc: "vc" };
 /** The platform drawers' scopes (lib/launch-queue-types QUEUE_SCOPES gg / sn / tt). */
 const SCOPE_PLATFORM: Record<string, TeamPlatform> = { gg: "google", sn: "snap", tt: "tiktok" };
 /** Which HS launch channel a queue kind rides: the LION weapons (launch, duplicate, JURO and their
@@ -286,6 +288,8 @@ const GRAPH_SCOPE_KINDS: Record<string, readonly string[]> = {
   mo: ["mo.launch", "fb.clone", "tool.follow"],
   aif: ["aif.launch", "fb.clone", "tool.follow"],
   av: ["av.launch", "fb.clone", "tool.follow"],
+  // VC (23.10): its launch (VC token or TOOL) and a TOOL job's follow-up — no clone board yet.
+  vc: ["vc.launch", "tool.follow"],
 };
 const PLATFORM_SCOPE_KINDS: Record<string, readonly string[]> = {
   gg: ["gg.launch", "gg.clone", "gg.juro"],

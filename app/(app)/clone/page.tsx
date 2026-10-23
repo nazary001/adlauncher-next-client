@@ -5,6 +5,7 @@ import { SESSION_COOKIE, verifySession } from "@/lib/session";
 import { isOwnerSession } from "@/lib/roles";
 import { CloneBoard } from "@/components/clone-board";
 import { HsCloneBoard } from "@/components/hs-clone-board";
+import { VcCloneNotice } from "@/components/vc-clone-notice";
 import { type PartnerId, partnerConfig, sanitizePartnerId } from "@/lib/partners";
 
 export const metadata: Metadata = {
@@ -56,7 +57,10 @@ export default async function ClonePage({
         />
       </div>
 
-      {partnerConfig(partner).lionLaunch ? (
+      {partnerConfig(partner).vcLaunch ? (
+        // VC has no clone rail yet — a notice (with the header to switch partners) instead of a board.
+        <VcCloneNotice user={{ username: session.username, role: session.role ?? null, owner: isOwnerSession(session) }} />
+      ) : partnerConfig(partner).lionLaunch ? (
         // HS clones go through LION's duplicate weapon — a different rail entirely (no Graph
         // token, no gcm), so it gets its own board.
         <HsCloneBoard

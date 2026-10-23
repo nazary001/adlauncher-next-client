@@ -17,6 +17,7 @@ import {
   OBJECTIVES,
   OPTIMIZATIONS,
   AV_OPTIMIZATIONS,
+  VC_OPTIMIZATIONS,
   OS_OPTIONS,
   PLACEMENTS,
   PROFILES,
@@ -34,6 +35,8 @@ import { TOOL_MARK, toolEnsureMark } from "@/lib/tool-launch";
 import { DEFAULT_PLATFORM_CHOICE, PLATFORM_CHOICES } from "@/lib/publisher-platforms";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { AIF_VALUE_PIXEL, AV_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifOfferablePixels, avDelivery, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
+import { VC_PIXEL, vcAdTitle, vcDelivery, vcDestination, vcLink, vcLinkSegments } from "@/lib/vc-link";
+import { VcTrackingHint } from "./vc-tracking-hint";
 import { aifFlowOf } from "@/lib/aif-link";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
@@ -106,7 +109,8 @@ function missingRequirements(
   if (opts.account && !c.account) m.push("account");
   if (opts.pixel && !c.pixel) m.push("pixel");
   if (opts.page && !c.page) m.push(partner.pageLabel.toLowerCase());
-  if (opts.landing && !c.landing) m.push(partner.aifLaunch || partner.avLaunch ? "destination" : "landing");
+  if (opts.landing && !c.landing) m.push(partner.vcLaunch ? "VC link" : partner.aifLaunch || partner.avLaunch ? "destination" : "landing");
+  else if (opts.landing && opts.landingValid && !opts.landingValid(c.landing)) m.push("a valid VC link");
   if (opts.gcm && !c.gcm) m.push(partner.avLaunch ? "AV key" : partner.aifLaunch ? "brand" : "gcm code");
   if (opts.profile && !c.profile) m.push("profile");
   if (opts.link && !isHttpUrl(c.link)) m.push("link");
@@ -115,7 +119,7 @@ function missingRequirements(
   if (parseMoney(c.budget) < 1) m.push("budget");
   if (bidAmountMissing(c)) m.push("bid cap");
   if (opts.roasPixel && bidKind(c.bidStrategy) === "roas" && c.pixel !== opts.roasPixel)
-    m.push(`${ROAS_PIXEL.name} pixel`);
+    m.push(`${partner.vcLaunch ? VC_PIXEL.name : ROAS_PIXEL.name} pixel`);
   if (!c.files.some((f) => f.kind === "video" || f.kind === "image")) m.push("creative");
   return m.length ? m : ["—"];
 }
@@ -357,6 +361,9 @@ function CampaignCardBase({
   // ---- AV mode: MO-style token pickers, an AV destination (article / redirect path) in place of
   // the landing, an AV key in the marker slot, and Traffic / link-clicks delivery (no pixel). ----
   const avMode = Boolean(partner.avLaunch);
+  // ---- VC mode: MO-style token pickers, the pasted VC landingpage link in the landing slot, and
+  // Purchase on VC_PIXEL (min-ROAS too) or Traffic / link clicks — vcDelivery decides, never a pick. ----
+  const vcMode = Boolean(partner.vcLaunch);
   // ---- HS (LION) mode: the bind cascade + locales come from LION's catalog ----
   const hsMode = Boolean(partner.lionLaunch && hs);
   const hsData = hsMode && hs ? hs.dataFor(c.profile) : undefined;
@@ -377,7 +384,7 @@ function CampaignCardBase({
   // a draft restored with another pixel converges to the only ROAS-allowed one (MO →
   // VD-C1-HS-1, AIF → VD-C1-HS-11). Idempotent (patches only on mismatch), so the unstable
   // `patch` identity is safe to leave out of deps.
-  const roasPin = aifMode ? AIF_VALUE_PIXEL : ROAS_PIXEL;
+  const roasPin = vcMode ? VC_PIXEL : aifMode ? AIF_VALUE_PIXEL : ROAS_PIXEL;
   // AV never pins a value pixel (it refuses min-ROAS and carries no pixel at all) — the drift
   // effect must never touch an AV card, even if a restored draft momentarily reads as min-ROAS
   // before applyPartnerLocks snaps it back to lowest cost.
@@ -553,7 +560,14 @@ function CampaignCardBase({
     ? isHttpUrl(c.link)
       ? hsFinalLink(c.link, c.pixel, hs?.acr ?? "", c)
       : ""
-    : fullLandingUrl(partner, c.landing, c.gcm, conversions, c.pixel);
+    : vcMode
+      ? vcLink(c.landing, vcAdTitle(c))
+      : fullLandingUrl(partner, c.landing, c.gcm, conversions, c.pixel);
+  // VC: the pasted link's verdict (empty = nothing pasted yet) and whether its cabinet carries VC_PIXEL.
+  const vcDest = vcMode ? vcDestination(c.landing) : null;
+  const vcPixelMissing =
+    vcMode && conversions && Boolean(c.account) && Boolean(adAccounts?.some((a) => a.value === c.account)) &&
+    !pixelOptionsOf(adAccounts ?? null, c.account).some((p) => p.id === VC_PIXEL.id);
 
   // Copy is offered only once the link is COMPLETE — for gcm partners that means a claimed code, so
   // the button never yields a "?gcm=" link with an empty code (which is also why the preview shows a
@@ -796,6 +810,8 @@ function CampaignCardBase({
                           // AIF pixels are derived from the optimization (normalize re-pins) — never refilled.
                           pixel: avMode
                             ? avDelivery(c.optimization).pixel
+                            : vcMode
+                              ? vcDelivery(c.optimization, c.bidStrategy).pixel
                             : aifMode
                               ? c.pixel
                               : kind === "roas"
@@ -915,6 +931,12 @@ function CampaignCardBase({
                       ? conversions
                         ? "fired by the AV site script"
                         : "clicks need no pixel"
+                      : vcMode
+                        ? conversions
+                          ? kind === "roas"
+                            ? "min ROAS · VC sends the value"
+                            : "VC fires Purchase (Conversions API)"
+                          : "clicks need no pixel"
                       : aifMode
                         ? kind === "roas"
                           ? "pinned by min ROAS"
@@ -928,6 +950,10 @@ function CampaignCardBase({
                   error={
                     avMode
                       ? undefined
+                      : vcMode
+                        ? vcPixelMissing
+                          ? `share ${VC_PIXEL.name} ${VC_PIXEL.id} to this cabinet in BM first (or switch to Clicks)`
+                          : undefined
                       : hsMode
                       ? // Quiet until the fanka is picked — that's where the pixel step starts
                         // (single-pixel accounts then self-fill and never show this nag).
@@ -958,6 +984,14 @@ function CampaignCardBase({
                     // the locks and the route pin it (avDelivery).
                     conversions ? (
                       <LockedField value={`${AV_PIXEL.name} · ${AV_PIXEL.id}`} hint="Purchase" mono />
+                    ) : (
+                      <LockedField value="No pixel — link clicks" hint="auto" />
+                    )
+                  ) : vcMode ? (
+                    // VC's pixel is never a pick either: Purchase / min-ROAS on VC_PIXEL (VC fires it through
+                    // the Conversions API), link clicks bind none — vcDelivery, pinned by the locks + route.
+                    conversions ? (
+                      <LockedField value={`${VC_PIXEL.name} · ${VC_PIXEL.id}`} hint="Purchase" mono />
                     ) : (
                       <LockedField value="No pixel — link clicks" hint="auto" />
                     )
@@ -1042,6 +1076,11 @@ function CampaignCardBase({
                   <Field label="Objective" className="col-span-6 md:col-span-4">
                     <LockedField value={conversions ? "Sales" : "Traffic"} hint="AV" />
                   </Field>
+                ) : vcMode ? (
+                  // VC: the objective follows the Optimization pick (vcDelivery) — Sales / Traffic.
+                  <Field label="Objective" className="col-span-6 md:col-span-4">
+                    <LockedField value={conversions ? "Sales" : "Traffic"} hint="VC" />
+                  </Field>
                 ) : !aifMode ? (
                   <Field label="Objective" className={hsMode ? "col-span-6 md:col-span-4" : "col-span-6 md:col-span-3"}>
                     <Select
@@ -1072,6 +1111,19 @@ function CampaignCardBase({
                       options={AV_OPTIMIZATIONS}
                     />
                   </Field>
+                ) : vcMode ? (
+                  <Field
+                    label="Optimization"
+                    className="col-span-6 md:col-span-4"
+                    hint={kind === "roas" ? "pinned by min ROAS" : conversions ? "Purchase on the VC pixel" : "Traffic — no pixel"}
+                  >
+                    <Select
+                      value={kind === "roas" ? "conversions" : conversions ? "conversions" : "clicks"}
+                      onChange={(e) => patch({ ...vcDelivery(e.target.value, c.bidStrategy) })}
+                      options={VC_OPTIMIZATIONS}
+                      disabled={kind === "roas"}
+                    />
+                  </Field>
                 ) : !hsMode ? (
                   <Field
                     label="Optimization"
@@ -1098,7 +1150,7 @@ function CampaignCardBase({
                 ) : null}
                 <Field
                   label="Bid strategy"
-                  className={avMode ? "col-span-6 md:col-span-4" : hsMode ? "col-span-6 md:col-span-4" : aifMode ? "col-span-6" : "col-span-6 md:col-span-3"}
+                  className={avMode || vcMode ? "col-span-6 md:col-span-4" : hsMode ? "col-span-6 md:col-span-4" : aifMode ? "col-span-6" : "col-span-6 md:col-span-3"}
                 >
                   <Select
                     value={c.bidStrategy}
@@ -1129,7 +1181,9 @@ function CampaignCardBase({
                           budget,
                           ...(kind === "roas" && partner.accountsFromToken
                             ? {
-                                pixel: aifMode
+                                pixel: vcMode
+                                  ? vcDelivery(c.optimization, bidStrategy).pixel
+                                  : aifMode
                                   ? (aifPixelPick?.id ?? "")
                                   : defaultPixelFor(adAccounts ?? null, c.account, partner.preferredPixel),
                               }
@@ -1141,7 +1195,7 @@ function CampaignCardBase({
                     options={avMode ? BID_STRATEGIES.filter((s) => s.value !== "LOWEST_COST_WITH_MIN_ROAS") : BID_STRATEGIES}
                   />
                 </Field>
-                {!aifMode && !avMode ? (
+                {!aifMode && !avMode && !vcMode ? (
                   <Field
                     label="Conversion event"
                     className={hsMode ? "col-span-6 md:col-span-4" : "col-span-6 md:col-span-3"}
@@ -1330,6 +1384,42 @@ function CampaignCardBase({
                             </div>
                           </div>
                         ) : null}
+                      </div>
+                    </Field>
+                  ) : vcMode ? (
+                    <Field
+                      label="VC landingpage link"
+                      hint="paste it from VC → Search Arb → Landingpages; the ad's headline goes into adtitle"
+                      error={c.landing.trim() && vcDest && !vcDest.ok ? vcDest.error.replace(/^[a-z_]+ — /, "") : undefined}
+                    >
+                      <div>
+                        <TextInput
+                          value={c.landing}
+                          onChange={(e) => patch({ landing: e.target.value.trim() })}
+                          maxLength={2000}
+                          placeholder="https://www.qualitydays.com/rsp/…/?cmpid=…"
+                          className="font-mono text-[12px]"
+                        />
+                        {/* VC link preview — the EXACT link the launch sends (vcLinkSegments): the pasted
+                            landingpage link with this ad's headline in adtitle. */}
+                        {vcDest?.ok ? (
+                          <div className="mt-2 overflow-hidden rounded-lg border border-line bg-surface2/50">
+                            <div className="max-h-24 select-all overflow-y-auto break-all px-3 py-2 font-mono text-[11px] leading-relaxed">
+                              {vcLinkSegments(c.landing, vcAdTitle(c)).map((seg, i) => (
+                                <span key={i} className={LINK_ROLE_CLASS[seg.role]}>
+                                  {seg.text}
+                                </span>
+                              ))}
+                            </div>
+                            <div className="flex items-center justify-between gap-2 border-t border-line bg-surface/50 px-2 py-1.5">
+                              <span className="select-none font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
+                                VC link · cmpid {vcDest.cmpid}
+                              </span>
+                              <CopyLinkButton copied={copied} disabled={!linkCopyable} title="Paste a VC link first" onClick={copyLink} />
+                            </div>
+                          </div>
+                        ) : null}
+                        <VcTrackingHint />
                       </div>
                     </Field>
                   ) : avMode ? (

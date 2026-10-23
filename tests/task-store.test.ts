@@ -33,10 +33,10 @@ test("the MO scope is `$nin` over the drawer partners (null/missing partner stay
   const mo = taskScopeFilter("mo", 1000);
   assert.deepEqual(mo, {
     owner: { $ne: null },
-    partner: { $nin: ["br", "us", "gg", "sn", "tt", "av"] },
+    partner: { $nin: ["br", "us", "gg", "sn", "tt", "av", "vc"] },
     queued_at: { $gte: 1000 },
   });
-  assert.deepEqual([...DRAWER_PARTNERS], ["br", "us", "gg", "sn", "tt", "av"]);
+  assert.deepEqual([...DRAWER_PARTNERS], ["br", "us", "gg", "sn", "tt", "av", "vc"]);
   assert.deepEqual(taskScopeFilter({ partner: "br" }, 5), { owner: { $ne: null }, partner: "br", queued_at: { $gte: 5 } });
   // No `$ne` anywhere: in Mongo `{partner: {$ne: "br"}}` would MATCH null — the SQL filter this
   // replaces (`$or[partner $null][$and partner $ne …]`) is the `$nin` set, not a transliteration.

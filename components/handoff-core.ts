@@ -10,7 +10,7 @@
 // module owns the single definition and the contract's exported names stay byte-for-byte the same.
 
 /** Which drawer the item's task lives in. */
-export type HandoffScope = "mo" | "aif" | "av" | "hs" | "gg" | "sn" | "tt";
+export type HandoffScope = "mo" | "aif" | "av" | "vc" | "hs" | "gg" | "sn" | "tt";
 
 /**
  *  uploading  one or more of its files are not on the server yet

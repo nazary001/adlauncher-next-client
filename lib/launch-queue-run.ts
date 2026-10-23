@@ -88,6 +88,7 @@ import { computeInternalToken, computeSelfOrigin, mayAnnounceBuild, parseReplyLi
 import { POST as launchPOST } from "@/app/api/launch/route";
 import { POST as aifLaunchPOST } from "@/app/api/aif/launch/route";
 import { POST as avLaunchPOST } from "@/app/api/av/launch/route";
+import { POST as vcLaunchPOST } from "@/app/api/vc/launch/route";
 import { POST as clonePOST } from "@/app/api/clone/run/route";
 import { POST as hsLaunchPOST } from "@/app/api/hs/launch/route";
 import { POST as hsTokenPOST } from "@/app/api/hs/token-launch/route";
@@ -112,6 +113,7 @@ const HANDLERS: Record<HandlerKind, (req: Request) => Promise<Response>> = {
   "mo.launch": launchPOST,
   "aif.launch": aifLaunchPOST,
   "av.launch": avLaunchPOST,
+  "vc.launch": vcLaunchPOST,
   "fb.clone": clonePOST,
   "hs.lion": hsLaunchPOST,
   "hs.token": hsTokenPOST,

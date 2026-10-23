@@ -15,7 +15,7 @@
 //      handlers the browser called (in-process, as the job's owner) and reads the very same replies.
 // Relative `.ts` imports only (node --test loads this straight from disk).
 
-export const QUEUE_SCOPES = ["mo", "aif", "av", "hs", "gg", "sn", "tt"] as const;
+export const QUEUE_SCOPES = ["mo", "aif", "av", "vc", "hs", "gg", "sn", "tt"] as const;
 /** One drawer / one task-manager instance on the client (gg / sn / tt = the Google / Snapchat /
  *  TikTok platform drawers — their waves are queued by their ROUTES, never by the browser). */
 export type QueueScope = (typeof QUEUE_SCOPES)[number];
@@ -23,9 +23,10 @@ export type QueueScope = (typeof QUEUE_SCOPES)[number];
 /** Kinds the BROWSER hands over (POST /api/launch-queue). The pump runs each by calling the launch
  *  ROUTE HANDLER in-process and reading its reply:
  *   mo.launch → POST /api/launch · aif.launch → /api/aif/launch · av.launch → /api/av/launch
+ *   vc.launch → /api/vc/launch
  *   fb.clone → /api/clone/run (MO / AIF / AV — the body's partnerId picks the rail)
  *   hs.lion → /api/hs/launch · hs.token → /api/hs/token-launch · hs.tool → /api/hs/tool-launch */
-export const HANDLER_KINDS = ["mo.launch", "aif.launch", "av.launch", "fb.clone", "hs.lion", "hs.token", "hs.tool"] as const;
+export const HANDLER_KINDS = ["mo.launch", "aif.launch", "av.launch", "vc.launch", "fb.clone", "hs.lion", "hs.token", "hs.tool"] as const;
 /** Kinds a wave ROUTE enqueues itself, one job per validated shot (09.10: every rail on the queue).
  *  A RUNNER (lib/launch-queue-runners.ts) feeds the rail's own pump core ONE shot:
  *   sn.launch → lib/snap-pump-core (a clone is a shot with cloneOf) · gg.* → lib/google-pump
@@ -51,6 +52,8 @@ export const SCOPE_KINDS: Record<QueueScope, readonly QueueKind[]> = {
   mo: ["mo.launch", "fb.clone", "tool.follow"],
   aif: ["aif.launch", "fb.clone", "tool.follow"],
   av: ["av.launch", "fb.clone", "tool.follow"],
+  // VC (23.10): its launch (Graph or TOOL) and a TOOL job's follow-up — no clone board yet.
+  vc: ["vc.launch", "tool.follow"],
   hs: ["hs.lion", "hs.token", "hs.tool", "hs.dup", "hs.jurar", "hs.tokendup", "hs.tokenjurar", "hs.tooldup", "hs.dup.follow", "hs.jurar.follow", "tool.follow"],
   gg: ["gg.launch", "gg.clone", "gg.juro"],
   sn: ["sn.launch"],
@@ -58,7 +61,7 @@ export const SCOPE_KINDS: Record<QueueScope, readonly QueueKind[]> = {
 };
 
 /** The `partner` every row of a scope carries (what the drawers' list filters key on). */
-export const SCOPE_PARTNER: Record<QueueScope, string> = { mo: "in", aif: "us", av: "av", hs: "br", gg: "gg", sn: "sn", tt: "tt" };
+export const SCOPE_PARTNER: Record<QueueScope, string> = { mo: "in", aif: "us", av: "av", vc: "vc", hs: "br", gg: "gg", sn: "sn", tt: "tt" };
 
 /** HS rows keep their kind in the reused `gcm` column (see /api/hs-tasks). Every clone rail is
  *  "duplicate" there — what the HS drawer polled and activated before the server follow-up did. */
@@ -373,7 +376,7 @@ export function jobMediaUrls(kind: QueueKind, body: Record<string, unknown>): st
   const push = (v: unknown) => {
     if (typeof v === "string" && v) out.push(v);
   };
-  if (kind === "mo.launch" || kind === "aif.launch" || kind === "av.launch") {
+  if (kind === "mo.launch" || kind === "aif.launch" || kind === "av.launch" || kind === "vc.launch") {
     for (const m of Array.isArray(body.medias) ? body.medias : []) {
       if (isObj(m)) {
         push(m.url);

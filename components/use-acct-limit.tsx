@@ -10,7 +10,7 @@ import {
   useState,
 } from "react";
 import type { RichOption } from "@/lib/catalog";
-import { useAifTaskManager, useAvTaskManager, useTaskManager } from "./task-manager";
+import { useAifTaskManager, useAvTaskManager, useTaskManager, useVcTaskManager } from "./task-manager";
 import { useHsTaskManager } from "./hs-task-manager";
 import { useHandoffDemand, useHandoffItems, useHandoffPending } from "./launch-handoff";
 import { uploadingLabel } from "./upload-guard";
@@ -191,6 +191,7 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
   const team = useTaskManager();
   const aif = useAifTaskManager();
   const av = useAvTaskManager();
+  const vc = useVcTaskManager();
   const hsTm = useHsTaskManager();
   const pending = useHandoffDemand();
   const handoffItems = useHandoffItems();
@@ -212,8 +213,8 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
       }
       return `${q}:${run}:${term}`;
     };
-    return `${phases}|${sig(team.tasks)}|${sig(aif.tasks)}|${sig(av.tasks)}|${sig(hsTm.tasks)}`;
-  }, [handoffItems, team.tasks, aif.tasks, av.tasks, hsTm.tasks]);
+    return `${phases}|${sig(team.tasks)}|${sig(aif.tasks)}|${sig(av.tasks)}|${sig(vc.tasks)}|${sig(hsTm.tasks)}`;
+  }, [handoffItems, team.tasks, aif.tasks, av.tasks, vc.tasks, hsTm.tasks]);
   const skipFirstSig = useRef(true);
   useEffect(() => {
     if (skipFirstSig.current) {

@@ -1,7 +1,7 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { SESSION_COOKIE, verifySession } from "@/lib/session";
-import { AifTaskManagerProvider, AvTaskManagerProvider, TaskManagerProvider } from "@/components/task-manager";
+import { AifTaskManagerProvider, AvTaskManagerProvider, TaskManagerProvider, VcTaskManagerProvider } from "@/components/task-manager";
 import { HsTaskManagerProvider } from "@/components/hs-task-manager";
 import { GoogleTaskManagerProvider } from "@/components/google-task-manager";
 import { SnapTaskManagerProvider } from "@/components/snap-task-manager";
@@ -28,6 +28,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           {/* AV queue — mounted ABOVE AcctLimitProvider so use-acct-limit can fold its queued
               demand into the shared per-account launch limit (same reason MO/AIF/HS sit above). */}
           <AvTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
+            {/* VC queue (23.10) — above AcctLimitProvider for the same reason as AV. */}
+            <VcTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
             <AcctLimitProvider>
             {/* Google rail queue — innermost so it survives navigating between every board. */}
             <GoogleTaskManagerProvider user={{ username: session.username, role: session.role ?? null }}>
@@ -45,6 +47,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
               </SnapTaskManagerProvider>
             </GoogleTaskManagerProvider>
             </AcctLimitProvider>
+            </VcTaskManagerProvider>
           </AvTaskManagerProvider>
         </HsTaskManagerProvider>
       </AifTaskManagerProvider>

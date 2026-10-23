@@ -34,7 +34,8 @@ import { LaunchRail } from "./launch-rail";
 import { type ToolSessionOption, useToolReady } from "./use-tool-ready";
 import { CopySettingsModal } from "./copy-settings-modal";
 import { ChevronsIcon, CopyIcon, LayersIcon, PlusIcon } from "./icons";
-import { useAifTaskManager, useAvTaskManager, useTaskManager } from "./task-manager";
+import { useAifTaskManager, useAvTaskManager, useTaskManager, useVcTaskManager } from "./task-manager";
+import { vcDestination } from "@/lib/vc-link";
 import { useAvDestinations } from "./use-av-destinations";
 import { pinAvNamePrefix } from "@/lib/av-link";
 import { type HsLaunchChannel, useHsTaskManager } from "./hs-task-manager";
@@ -83,6 +84,8 @@ const HAS_TOOL_RAIL = teamHas("channel:tool");
  *  fresh `...channel2` key, NOT the retired `adlauncher.mo.channel` (the old soc-signer switch). */
 const MO_CHANNEL_LS = "adlauncher.mo.channel2";
 const AIF_CHANNEL_LS = "adlauncher.aif.channel";
+/** VC launch-rail pick (FB Token | TOOL, owner ask 23.10 "сделай на основе Tool тоже"). */
+const VC_CHANNEL_LS = "adlauncher.vc.channel";
 // AV has NO launch-rail pick (owner ask 28.09: "нужно на нужную фанку делать — на то что тянет
 // токен, а через сам токен только фанку тянуть"): AV launches ONLY through TOOL — its cabinets come
 // from the live TOOL session, the fanpage from the AV token's own catalog — so there is no FB Token
@@ -172,7 +175,8 @@ function fillAccountDefaults(
     // this backfill too: an AV cabinet that happens to expose a Meta pixel would otherwise seed one
     // onto the card here (the only unguarded AV no-pixel path), violating the invariant in client
     // state and relying solely on the server's pixel="" override (review find 09-28).
-    if (!partner.avLaunch && bidKind(c.bidStrategy) !== "roas" && (!pixel || !pixels.some((p) => p.id === pixel))) {
+    // VC likewise: its pixel is pinned by the locks (VC_PIXEL / none), never back-filled from the cabinet.
+    if (!partner.avLaunch && !partner.vcLaunch && bidKind(c.bidStrategy) !== "roas" && (!pixel || !pixels.some((p) => p.id === pixel))) {
       pixel = partner.aifLaunch
         ? (pickAifPixel(pixels)?.id ?? "")
         : defaultPixelFor(adAccounts, account, partner.preferredPixel);
@@ -221,6 +225,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   const teamTm = useTaskManager();
   const aifTm = useAifTaskManager();
   const avTm = useAvTaskManager();
+  const vcTm = useVcTaskManager();
   const [partnerId, setPartnerId] = useState<PartnerId>(initialPartner);
   // Codes already taken in the current partner's Strapi registry (MO gcm / AIF brand / AV keys),
   // keyed by the registry endpoint they came from: switching partners makes the other pool's
@@ -268,7 +273,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // The board talks to the ACTIVE partner's own task manager: AIF launches queue/track in the
   // separate AIF instance (own drawer, own Strapi scope), AV in its own, everything else in the
   // team one.
-  const { enqueue, tasks } = partner.avLaunch ? avTm : partner.aifLaunch ? aifTm : teamTm;
+  const { enqueue, tasks } = partner.vcLaunch ? vcTm : partner.avLaunch ? avTm : partner.aifLaunch ? aifTm : teamTm;
   const anyExpanded = campaigns.some((c) => !c.collapsed);
   // The partner's marker pool (MO gcm 01..200 / AIF brand test01..test700 / AV key av001..;
   // null = no markers).
@@ -301,7 +306,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   const poolExhausted = Boolean(pool) && poolFree === 0;
   // The rail's signer (MO / AIF direct-Graph rails) is the OWNER'S pick on /tokens — read-only
   // here (badge in the rail); the launch route resolves the very same slot server-side.
-  const graphRail = !partner.lionLaunch && (partner.usesGcm || Boolean(partner.aifLaunch) || Boolean(partner.avLaunch));
+  const graphRail =
+    !partner.lionLaunch && (partner.usesGcm || Boolean(partner.aifLaunch) || Boolean(partner.avLaunch) || Boolean(partner.vcLaunch));
   // TOOL launch-channel readiness for the ACTIVE partner (owner ask 28.09): the server verifies the
   // key + scopes + ≥1 live-session account also in this partner's catalog and assigned to this
   // buyer. Gates the TOOL rail segment and filters the account pickers; polls 5 min + on focus and
@@ -314,7 +320,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   const toolReady = useToolReady(partnerId, "launch", HAS_TOOL_RAIL);
   const signers = useSigners(graphRail);
   const railSigner = graphRail
-    ? (signers.slots?.[partner.avLaunch ? "av.launch" : partner.aifLaunch ? "aif.launch" : "mo.launch"] ?? null)
+    ? (signers.slots?.[partner.vcLaunch ? "vc.launch" : partner.avLaunch ? "av.launch" : partner.aifLaunch ? "aif.launch" : "mo.launch"] ?? null)
     : null;
   /** A token exists for this rail (assigned or env default) — the catalogs load and waves may
    *  fire. An UNHEALTHY token stays effective: its pickers/launch error with FB's own reason. */
@@ -332,7 +338,10 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   const fanpages = useFanpages(
     Boolean(partner.fanpagesFromToken) && signerReady,
     partner.pageAdLimit ?? 250,
-    partner.avLaunch
+    partner.vcLaunch
+      ? // hs-tools has no VC scope either → no fill badges.
+        { list: "/api/vc/fanpages?rail=launch", volume: null }
+      : partner.avLaunch
       ? // hs-tools has no AV scope → no fill badges (volume: null); the list alone is the picker.
         { list: "/api/av/fanpages?rail=launch", volume: null }
       : partner.aifLaunch
@@ -355,7 +364,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   const adAccounts = useAdAccounts(
     Boolean(partner.accountsFromToken) && signerReady && !partner.avLaunch,
     partner.preferredPixel,
-    partner.aifLaunch ? "/api/aif/adaccounts?rail=launch" : "/api/adaccounts?rail=launch",
+    partner.vcLaunch ? "/api/vc/adaccounts?rail=launch" : partner.aifLaunch ? "/api/aif/adaccounts?rail=launch" : "/api/adaccounts?rail=launch",
   );
   // AV destination catalog (articles + redirect paths) — loaded only on the AV rail; passed to the
   // cards' Destination field. Undefined for every other partner.
@@ -371,6 +380,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // sessions service. Per-partner localStorage keys, restored after mount (SSR-safe).
   const [moChannel, setMoChannel] = useState<GraphChannel>("token");
   const [aifChannel, setAifChannel] = useState<GraphChannel>("token");
+  const [vcChannel, setVcChannel] = useState<GraphChannel>("token");
   useEffect(() => {
     try {
       // Safe setState-in-effect: runs once on mount (localStorage is unreadable during SSR),
@@ -385,6 +395,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       if (mo === "token" || mo === "tool") setMoChannel(mo);
       const aif = localStorage.getItem(AIF_CHANNEL_LS);
       if (aif === "token" || aif === "tool") setAifChannel(aif);
+      const vc = localStorage.getItem(VC_CHANNEL_LS);
+      if (vc === "token" || vc === "tool") setVcChannel(vc);
     } catch {
       /* storage disabled — session-local pick only */
     }
@@ -401,7 +413,14 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // AV has no channel switch (it is TOOL-only, owner ask 28.09), so this only ever fires for MO/AIF.
   // Plain function (the rail isn't memoized): reads the current `partner` freshly, no stale closure.
   const changeGraphChannel = (ch: GraphChannel) => {
-    if (partner.aifLaunch) {
+    if (partner.vcLaunch) {
+      setVcChannel(ch);
+      try {
+        localStorage.setItem(VC_CHANNEL_LS, ch);
+      } catch {
+        /* storage disabled */
+      }
+    } else if (partner.aifLaunch) {
       setAifChannel(ch);
       try {
         localStorage.setItem(AIF_CHANNEL_LS, ch);
@@ -421,7 +440,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
   // has no FB Token rail and never falls back to one (its cabinets ride the live TOOL session, its
   // fanpage the AV token's catalog). MO/AIF read their own pick; a stale "tool" pick with the rail
   // not ready still falls back to FB Token at fire time (graphToolActive gates that).
-  const graphChannel: GraphChannel = partner.avLaunch ? "tool" : partner.aifLaunch ? aifChannel : moChannel;
+  const graphChannel: GraphChannel = partner.avLaunch ? "tool" : partner.vcLaunch ? vcChannel : partner.aifLaunch ? aifChannel : moChannel;
   const hsToolActive = Boolean(partner.lionLaunch) && hsChannel === "tool" && toolReady.ready;
   const graphToolActive = graphRail && graphChannel === "tool" && toolReady.ready;
   // AV-on-TOOL specifically (owner ask 28.09): AV launches ONLY through TOOL, so this is really
@@ -742,7 +761,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
             ? moEnsureSocMark(fullName(c))
             : fullName(c),
         ...(graphToolActive || partner.avLaunch ? { via: "tool" as const } : {}),
-        gcm: c.gcm,
+        // VC has no marker — its drawer row shows the landingpage's cmpid instead (the server writes the same).
+        gcm: partner.vcLaunch ? (() => { const d = vcDestination(c.landing); return d.ok ? d.cmpid : ""; })() : c.gcm,
         geo: geoSummary(c.countries),
         budget: c.budget,
       });
@@ -800,7 +820,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     // refreshGcm loads the new pool's used-set + poolMax and assigns then, exactly like a fresh mount
     // (poolMax 0 → no code, matching the stub). MO/AIF/HS ↔ MO/AIF/HS switches stay byte-identical: the
     // branch is dead while AV is dormant (review find 09-28).
-    const crossesAv = Boolean(cfg.avLaunch) || Boolean(partner.avLaunch);
+    // VC (no marker at all) clears it the same way, so a card never carries another rail's code onto VC.
+    const crossesAv = Boolean(cfg.avLaunch) || Boolean(partner.avLaunch) || Boolean(cfg.vcLaunch) || Boolean(partner.vcLaunch);
     // Re-baseline the redirect to the incoming partner's default (HS → HIGH ADX). Cards born on
     // another partner carry makeCampaign's global META ADX from a board where the field never
     // rendered — without this, switching MO → HS shows every card on a redirect nobody picked.
@@ -817,6 +838,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     teamTm.setOpen(false);
     aifTm.setOpen(false);
     avTm.setOpen(false);
+    vcTm.setOpen(false);
     hsTasks.setOpen(false);
     // The template picker / form are the outgoing partner's (its fields, its list) — closed too.
     setTplPicker(null);
@@ -1222,7 +1244,9 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
             inFlight={
               partner.lionLaunch
                 ? hsTasks.counts.inFlight
-                : partner.avLaunch
+                : partner.vcLaunch
+                  ? vcTm.counts.inFlight
+                  : partner.avLaunch
                   ? avTm.counts.inFlight
                   : partner.aifLaunch
                     ? aifTm.counts.inFlight

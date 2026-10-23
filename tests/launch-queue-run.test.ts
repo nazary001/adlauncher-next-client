@@ -124,6 +124,8 @@ test("laneNameValid accepts <scope>:<user> lanes — whatever the username holds
   assert.equal(laneNameValid("hs:katya_m"), true);
   assert.equal(laneNameValid("aif:a.b-c"), true);
   assert.equal(laneNameValid("av:name@host"), true);
+  assert.equal(laneNameValid("vc:name@host"), true);
+  assert.equal(laneNameValid("vc-follow:name@host"), true);
   // A username is whatever the session carries: a lane the pump route refused could never be
   // continued by a self-kick or restarted by the sweep — so spaces and non-Latin names must pass.
   assert.equal(laneNameValid("mo:na zar"), true, "space in user");

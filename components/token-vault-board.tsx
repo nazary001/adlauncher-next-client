@@ -96,8 +96,8 @@ async function call<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> 
 
 // ---- formatting ---------------------------------------------------------------------------------
 
-const PARTNER_OF_RAIL: Record<PartnerId, TokenPartner> = { in: "mo", us: "aif", br: "hs", av: "av" };
-const RAIL_OF_PARTNER: Record<TokenPartner, PartnerId> = { mo: "in", aif: "us", hs: "br", av: "av" };
+const PARTNER_OF_RAIL: Record<PartnerId, TokenPartner> = { in: "mo", us: "aif", br: "hs", av: "av", vc: "vc" };
+const RAIL_OF_PARTNER: Record<TokenPartner, PartnerId> = { mo: "in", aif: "us", hs: "br", av: "av", vc: "vc" };
 
 function ago(ms: number): string {
   if (!ms) return "never";
@@ -934,6 +934,8 @@ export function TokenVaultBoard({ user, initialPartner = "in" }: { user: Session
                             ? "Both slots are failover pools: the first token is primary, the rest take over on an app-level limit or a dead token."
                             : p === "av"
                               ? "One token per rail. AV has no env default — an unassigned slot blocks the rail until its own token is assigned."
+                              : p === "vc"
+                                ? "One token per rail. VC has no env default — the Launches token (a system user with ads_management on the VC cabinets, NOT the Conversions API token VC's Tracking holds) unlocks VC launches; clones are not built yet."
                               : "One token per rail. Unassigned = the env default (what runs today)."}
                         </p>
                       </div>

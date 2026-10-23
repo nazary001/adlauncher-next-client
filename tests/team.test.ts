@@ -35,7 +35,7 @@ test("teamConfig: unset is the first team, a typo is refused instead of silently
 });
 
 test("glo-01 keeps everything it had; glo-02 is HS through LION on Facebook only", () => {
-  assert.deepEqual([...GLO1.partners], ["br", "in", "us", "av"]);
+  assert.deepEqual([...GLO1.partners], ["br", "in", "us", "av", "vc"]);
   assert.equal(GLO1.defaultPartner, "in");
   assert.deepEqual([...GLO1.hsChannels], ["lion", "token", "tool"]);
   assert.deepEqual([...GLO2.partners], ["br"]);
@@ -156,6 +156,8 @@ test("glo-02: the other partners, channels, platforms and owner tools are refuse
     "/api/gcm",
     "/api/aif/launch",
     "/api/av/launch",
+    "/api/vc/launch",
+    "/api/vc/adaccounts",
     "/api/hs/token-launch",
     "/api/hs/token-duplicate",
     "/api/hs/token-jurar",
@@ -218,6 +220,7 @@ test("launch queue: glo-02 may only hand over and run hs.lion", () => {
     ["aif", "aif.launch"],
     ["aif", "fb.clone"],
     ["av", "av.launch"],
+    ["vc", "vc.launch"],
     ["mo", "hs.lion"],
     ["xx", "hs.lion"],
   ] as const) {
@@ -233,6 +236,7 @@ test("launch queue: glo-02 may only hand over and run hs.lion", () => {
     ["aif", "fb.clone"],
     ["av", "av.launch"],
     ["av", "fb.clone"],
+    ["vc", "vc.launch"],
   ] as const) {
     assert.equal(teamAllowsJob(scope, kind, GLO1), true, `${scope}/${kind}`);
   }
@@ -369,4 +373,16 @@ test("each team runs on its own database", () => {
 test("the first team's store namespace is empty — its S3 keys stay what they were", () => {
   assert.equal(teamNamespace(GLO1), "");
   assert.equal(teamNamespace(GLO2), "glo-02");
+});
+
+test("VC (ValueClick, 23.10): glo-01 only; its scope queues its launch (token or TOOL) and a TOOL follow-up — no clone, no other rail's kind", () => {
+  assert.equal(routeNeed("/api/vc/launch"), "partner:vc");
+  assert.equal(routeNeed("/api/vc"), "partner:vc");
+  assert.equal(teamAllowsPath("/api/vc/fanpages", GLO1), true);
+  assert.equal(teamAllowsPath("/api/vc/fanpages", GLO2), false);
+  assert.equal(teamAllowsJob("vc", "vc.launch", GLO1), true);
+  assert.equal(teamAllowsJob("vc", "tool.follow", GLO1), true);
+  for (const kind of ["fb.clone", "mo.launch", "av.launch", "hs.lion"]) assert.equal(teamAllowsJob("vc", kind, GLO1), false, `vc/${kind}`);
+  for (const scope of ["mo", "aif", "av", "hs"]) assert.equal(teamAllowsJob(scope, "vc.launch", GLO1), false, `${scope}/vc.launch`);
+  assert.equal(teamAllowsJob("vc", "vc.launch", GLO2), false);
 });

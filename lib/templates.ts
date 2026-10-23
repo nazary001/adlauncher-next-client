@@ -28,8 +28,8 @@ import {
 } from "./catalog.ts";
 import { DEFAULT_PLATFORM_CHOICE, PLATFORM_CHOICES } from "./publisher-platforms.ts";
 
-export type TemplatePartner = "br" | "in" | "us" | "av";
-export const TEMPLATE_PARTNERS: readonly TemplatePartner[] = ["br", "in", "us", "av"];
+export type TemplatePartner = "br" | "in" | "us" | "av" | "vc";
+export const TEMPLATE_PARTNERS: readonly TemplatePartner[] = ["br", "in", "us", "av", "vc"];
 
 /** The card settings a template may carry. NEVER: `files` (creatives — owner rule), `gcm` (every card
  *  claims its own marker), `id` / `collapsed` (the board's), `namePrefix` (the partner's and the day's),
@@ -380,6 +380,7 @@ export type TemplatePartnerLike = {
   lionLaunch?: boolean;
   aifLaunch?: boolean;
   avLaunch?: boolean;
+  vcLaunch?: boolean;
   fanpagesFromToken?: boolean;
   accountsFromToken?: boolean;
   lockedAccount?: unknown;
@@ -412,19 +413,20 @@ export const TEMPLATE_FIELD_DEFS: readonly TemplateFieldDef[] = [
   { key: "account", label: "Account", group: "Setup", when: (p) => !p.lockedAccount, preview: (f) => text(f.account) },
   { key: "toolSession", label: "TOOL profile", group: "Setup", when: (p) => Boolean(p.avLaunch), preview: (f) => (f.toolSession === undefined ? "—" : f.toolSession ? `session #${f.toolSession}` : "Auto") },
   { key: "page", label: "Page / fanpage", group: "Setup", when: (p) => !p.lockedAccount || Boolean(p.fanpagesFromToken), preview: (f) => text(f.page) },
-  { key: "pixel", label: "Pixel", group: "Setup", when: (p) => !p.lockedPixel && !p.avLaunch, preview: (f) => text(f.pixel) },
+  { key: "pixel", label: "Pixel", group: "Setup", when: (p) => !p.lockedPixel && !p.avLaunch && !p.vcLaunch, preview: (f) => text(f.pixel) },
 
-  { key: "objective", label: "Objective", group: "Delivery", when: (p) => !p.aifLaunch && !p.avLaunch, preview: (f) => pick(OBJECTIVES)(f.objective) },
+  { key: "objective", label: "Objective", group: "Delivery", when: (p) => !p.aifLaunch && !p.avLaunch && !p.vcLaunch, preview: (f) => pick(OBJECTIVES)(f.objective) },
   { key: "optimization", label: "Optimization", group: "Delivery", when: (p) => !p.lionLaunch, preview: (f) => pick(OPTIMIZATIONS)(f.optimization) },
   { key: "bidStrategy", label: "Bid strategy", group: "Delivery", preview: (f) => pick(BID_STRATEGIES)(f.bidStrategy) },
-  { key: "conversionEvent", label: "Conversion event", group: "Delivery", when: (p) => !p.aifLaunch && !p.avLaunch, preview: (f) => pick(CONVERSION_EVENTS)(f.conversionEvent) },
+  { key: "conversionEvent", label: "Conversion event", group: "Delivery", when: (p) => !p.aifLaunch && !p.avLaunch && !p.vcLaunch, preview: (f) => pick(CONVERSION_EVENTS)(f.conversionEvent) },
   { key: "budget", label: "Daily budget", group: "Delivery", preview: (f) => (f.budget === undefined || f.budget === "" ? "—" : `$${moneyLabel(f.budget)}`) },
   { key: "bidCap", label: "Bid cap / ROAS goal", group: "Delivery", preview: (f) => (f.bidCap === undefined || f.bidCap === "" ? "—" : f.bidStrategy === "LOWEST_COST_WITH_MIN_ROAS" ? `ROAS ${f.bidCap}` : `$${moneyLabel(f.bidCap)}`) },
 
   { key: "landing", label: "Landing", group: "Creative", when: (p) => Boolean(p.usesGcm), preview: (f) => text(f.landing) },
   { key: "landing", label: "Destination article", group: "Creative", when: (p) => Boolean(p.aifLaunch), preview: (f) => text(f.landing) },
   { key: "landing", label: "Destination", group: "Creative", when: (p) => Boolean(p.avLaunch), preview: (f) => text(f.landing) },
-  { key: "link", label: "Destination link", group: "Creative", when: (p) => !p.usesGcm && !p.aifLaunch && !p.avLaunch, preview: (f) => text(f.link) },
+  { key: "landing", label: "VC landingpage link", group: "Creative", when: (p) => Boolean(p.vcLaunch), preview: (f) => text(f.landing) },
+  { key: "link", label: "Destination link", group: "Creative", when: (p) => !p.usesGcm && !p.aifLaunch && !p.avLaunch && !p.vcLaunch, preview: (f) => text(f.link) },
   { key: "title", label: "Title", group: "Creative", preview: (f) => text(f.title) },
   { key: "copy", label: "Primary text", group: "Creative", preview: (f) => text(f.copy) },
   { key: "cta", label: "CTA", group: "Creative", preview: (f) => pick(CTAS)(f.cta) },

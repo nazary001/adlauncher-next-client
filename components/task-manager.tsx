@@ -220,13 +220,23 @@ export function useAvTaskManager(): TaskManagerValue {
   return v;
 }
 
+// VC (ValueClick, 23.10) — the same separate-instance pattern: own context, store scope partner="vc",
+// own localStorage; mounted above AcctLimitProvider like AV.
+const VcCtx = createContext<TaskManagerValue | null>(null);
+
+export function useVcTaskManager(): TaskManagerValue {
+  const v = useContext(VcCtx);
+  if (!v) throw new Error("useVcTaskManager must be used within VcTaskManagerProvider");
+  return v;
+}
+
 /** Everything scope-specific about one task-manager instance. `api` serves the GET list only — the
  *  client never POSTs task rows any more (the server queue owns every row); the query param scopes
  *  the list on GET. `queueScope` is the drawer's lane in the server queue and the hand-off screen. */
 type TmScope = {
   api: string;
   lsBase: string;
-  /** mo | aif | av — the server launch-queue scope AND the hand-off screen scope. */
+  /** mo | aif | av | vc — the server launch-queue scope AND the hand-off screen scope. */
   queueScope: QueueScope;
   /** Header button caption. */
   label: string;
@@ -270,6 +280,16 @@ const AV_SCOPE: TmScope = {
   // Build-time flag (NEXT_PUBLIC_AV_ENABLED inlined): a dormant AV rail never polls the store.
   dormant: partnerConfig("av").inDevelopment === true,
 };
+const VC_SCOPE: TmScope = {
+  api: "/api/launch-tasks?scope=vc",
+  lsBase: "adlauncher.vctasks",
+  queueScope: "vc",
+  label: "VC Tasks",
+  title: "VC Task Manager",
+  subtitle: "VC launch queue · team view",
+  // Dormant on a team without VC (lib/team) — its routes 404 there.
+  dormant: partnerConfig("vc").inDevelopment === true,
+};
 
 // ---------- provider ----------
 // Mounted ONCE in the (app) layout, above both boards — the drawer and the team poll survive
@@ -298,6 +318,15 @@ export function AifTaskManagerProvider({ children, user }: { children: React.Rea
 export function AvTaskManagerProvider({ children, user }: { children: React.ReactNode; user?: SessionUser }) {
   return (
     <TaskManagerCore user={user} scope={AV_SCOPE} ctx={AvCtx}>
+      {children}
+    </TaskManagerCore>
+  );
+}
+
+/** The VC twin — mounted alongside in the (app) layout; boards pick the instance by partner. */
+export function VcTaskManagerProvider({ children, user }: { children: React.ReactNode; user?: SessionUser }) {
+  return (
+    <TaskManagerCore user={user} scope={VC_SCOPE} ctx={VcCtx}>
       {children}
     </TaskManagerCore>
   );
@@ -524,7 +553,7 @@ function TaskManagerCore({
       const id = mintId();
       const queuedAt = Date.now();
       const cfg = partnerConfig(args.partnerId);
-      const kind: QueueKind = cfg.avLaunch ? "av.launch" : cfg.aifLaunch ? "aif.launch" : "mo.launch";
+      const kind: QueueKind = cfg.vcLaunch ? "vc.launch" : cfg.avLaunch ? "av.launch" : cfg.aifLaunch ? "aif.launch" : "mo.launch";
       const bid = bidTag(args.campaign.bidStrategy, args.campaign.bidCap) || undefined;
       const account = stripAct(args.campaign.account) || undefined;
       // Everything this launch ships (1..maxCreatives): the multi shape when present, else the
@@ -783,6 +812,10 @@ export function AifTaskManagerButton() {
 
 export function AvTaskManagerButton() {
   return <TasksButtonCore tm={useAvTaskManager()} label={AV_SCOPE.label} />;
+}
+
+export function VcTaskManagerButton() {
+  return <TasksButtonCore tm={useVcTaskManager()} label={VC_SCOPE.label} />;
 }
 
 function TasksButtonCore({ tm, label }: { tm: TaskManagerValue; label: string }) {
@@ -1167,7 +1200,7 @@ function TaskRow({
             {task.name || "Untitled campaign"}
           </p>
           <p className="mt-0.5 truncate font-mono text-[10.5px] text-faint">
-            {task.partner === "us" ? "brand" : task.partner === "av" ? "key" : "gcm"} {task.gcm || "—"} · {task.geo} · ${moneyLabel(task.budget)}
+            {task.partner === "us" ? "brand" : task.partner === "av" ? "key" : task.partner === "vc" ? "cmpid" : "gcm"} {task.gcm || "—"} · {task.geo} · ${moneyLabel(task.budget)}
             {task.bid ? ` · ${task.bid}` : ""} ·{" "}
             <OwnerChip owner={task.owner} mine={mine} />
           </p>

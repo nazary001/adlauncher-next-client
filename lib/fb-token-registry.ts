@@ -17,19 +17,41 @@
 
 import { randomBytes } from "node:crypto";
 
-export type TokenPartner = "mo" | "aif" | "hs" | "av";
+export type TokenPartner = "mo" | "aif" | "hs" | "av" | "vc";
 export type TokenRail = "launch" | "clone";
-export type SlotId = "mo.launch" | "mo.clone" | "aif.launch" | "aif.clone" | "hs.launch" | "hs.clone" | "av.launch" | "av.clone";
+export type SlotId =
+  | "mo.launch"
+  | "mo.clone"
+  | "aif.launch"
+  | "aif.clone"
+  | "hs.launch"
+  | "hs.clone"
+  | "av.launch"
+  | "av.clone"
+  | "vc.launch"
+  | "vc.clone";
 
-export const TOKEN_PARTNERS: readonly TokenPartner[] = ["mo", "aif", "hs", "av"];
-export const SLOT_IDS: readonly SlotId[] = ["mo.launch", "mo.clone", "aif.launch", "aif.clone", "hs.launch", "hs.clone", "av.launch", "av.clone"];
+export const TOKEN_PARTNERS: readonly TokenPartner[] = ["mo", "aif", "hs", "av", "vc"];
+export const SLOT_IDS: readonly SlotId[] = [
+  "mo.launch",
+  "mo.clone",
+  "aif.launch",
+  "aif.clone",
+  "hs.launch",
+  "hs.clone",
+  "av.launch",
+  "av.clone",
+  "vc.launch",
+  "vc.clone",
+];
 
-export const PARTNER_LABEL: Record<TokenPartner, string> = { mo: "MO", aif: "AIF", hs: "HS", av: "AV" };
+export const PARTNER_LABEL: Record<TokenPartner, string> = { mo: "MO", aif: "AIF", hs: "HS", av: "AV", vc: "VC" };
 export const PARTNER_TITLE: Record<TokenPartner, string> = {
   mo: "MO · Magicoffers (direct Graph)",
   aif: "AIF · Airfind Rewarded Web (direct Graph)",
   hs: "HS · FB Token rails (LION stays on its own token)",
   av: "AV · ActiveView (direct Graph)",
+  vc: "VC · ValueClick (direct Graph)",
 };
 
 export type SlotMeta = { partner: TokenPartner; rail: TokenRail; title: string; hint: string; pool: boolean };
@@ -42,6 +64,8 @@ export const SLOT_META: Record<SlotId, SlotMeta> = {
   "hs.clone": { partner: "hs", rail: "clone", title: "Duplicates & JURO (FB Token rails)", hint: "Failover pool · also signs the geo-override patch of LION clones", pool: true },
   "av.launch": { partner: "av", rail: "launch", title: "Launches", hint: "AV launcher board", pool: false },
   "av.clone": { partner: "av", rail: "clone", title: "Clones", hint: "AV clone board", pool: false },
+  "vc.launch": { partner: "vc", rail: "launch", title: "Launches", hint: "VC launcher board", pool: false },
+  "vc.clone": { partner: "vc", rail: "clone", title: "Clones", hint: "Reserved — VC has no clone board yet", pool: false },
 };
 
 export const slotOf = (partner: TokenPartner, rail: TokenRail): SlotId => `${partner}.${rail}` as SlotId;
@@ -320,6 +344,8 @@ export function envDefaultIds(seeds: SeedEntry[], slot: SlotId): string[] {
   // AV has NO env bearer (owner call 28.09: its own new token, assigned on /tokens) — an unassigned
   // AV slot resolves to nothing, never falls through to the HS pool below.
   if (partner === "av") return [];
+  // VC likewise (23.10): only the token the owner assigns on /tokens signs VC — no env fallback.
+  if (partner === "vc") return [];
   const pool = seeds.filter((s) => s.id.startsWith("env:FB_HS_LAUNCH_TOKEN")).map((s) => s.id);
   if (slotRail(slot) === "clone") {
     const dup = seeds.find((s) => s.id === "env:FB_HS_DUP_TOKEN");
@@ -380,7 +406,7 @@ export function addToken(
   const label = validateLabel(entry.label);
   if (!label) return { ok: false, error: "label_invalid — 1–40 chars: letters, digits, space . _ ( ) # / + -" };
   const partners = validatePartners(entry.partners);
-  if (!partners) return { ok: false, error: "partners_required — tag at least one partner (MO / AIF / HS)" };
+  if (!partners) return { ok: false, error: "partners_required — tag at least one partner (MO / AIF / HS / AV / VC)" };
   if (!entry.sealed || !entry.fp) return { ok: false, error: "token_required" };
   const dupReg = reg.tokens.find((t) => t.fp === entry.fp);
   if (dupReg) return { ok: false, error: `duplicate_token — this token is already in the vault as "${dupReg.label}"` };
@@ -447,7 +473,7 @@ export function updateToken(
   }
   if (patch.partners !== undefined) {
     const partners = validatePartners(patch.partners);
-    if (!partners) return { ok: false, error: "partners_required — tag at least one partner (MO / AIF / HS)" };
+    if (!partners) return { ok: false, error: "partners_required — tag at least one partner (MO / AIF / HS / AV / VC)" };
     const dropped = t.partners.filter((p) => !partners.includes(p));
     for (const p of dropped) {
       for (const slot of SLOT_IDS) {

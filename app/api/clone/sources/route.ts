@@ -136,6 +136,10 @@ export async function GET(req: Request) {
   // means "no access" on build; default clone). A missing/unreadable token is a clean config
   // error, never a guessed bearer.
   const partner = partnerConfig(sanitizePartnerId(url.searchParams.get("partner")));
+  // VC (23.10) has no clone rail — never read sources with another partner's bearer.
+  if (partner.vcLaunch) {
+    return NextResponse.json({ ok: false, error: "clone_not_available — VC campaigns launch from the launcher board" }, { status: 400 });
+  }
   const av = Boolean(partner.avLaunch);
   const aif = Boolean(partner.aifLaunch);
   const railName = url.searchParams.get("rail") === "launch" ? "launch" : "clone";

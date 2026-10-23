@@ -318,6 +318,9 @@ export function bidAmountMissing(c: Campaign): boolean {
 
 type ReadyOpts = {
   landing?: boolean;
+  /** VC: the landing slot holds a pasted partner link — readiness also needs it to pass this check
+   *  (lib/vc-link vcDestination), not just be non-empty. */
+  landingValid?: (v: string) => boolean;
   profile?: boolean;
   page?: boolean;
   account?: boolean;
@@ -343,6 +346,7 @@ export function isReady(c: Campaign, opts: ReadyOpts = {}): boolean {
   // usesProfile:false — as never-ready if ever called without opts.)
   const {
     landing = false,
+    landingValid,
     profile = false,
     page = false,
     account = false,
@@ -356,6 +360,7 @@ export function isReady(c: Campaign, opts: ReadyOpts = {}): boolean {
   if ((!nameOptional && !c.name.trim()) || c.countries.length === 0) return false;
   if (profile && !c.profile) return false;
   if (landing && !c.landing) return false;
+  if (landing && landingValid && !landingValid(c.landing)) return false;
   if (page && !c.page) return false;
   if (account && !c.account) return false;
   if (pixel && !c.pixel) return false;

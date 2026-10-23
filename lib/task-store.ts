@@ -20,7 +20,7 @@ const teamCache = new Map<string, { at: number; tasks: unknown[] }>();
 
 /** Every partner that runs its OWN task manager over this one collection: HS ("br", /api/hs-tasks),
  *  AIF ("us"), Google ("gg"), Snapchat ("sn"), TikTok ("tt") and AV ("av", /api/launch-tasks?scope=av). */
-export const DRAWER_PARTNERS = ["br", "us", "gg", "sn", "tt", "av"] as const;
+export const DRAWER_PARTNERS = ["br", "us", "gg", "sn", "tt", "av", "vc"] as const;
 
 /**
  * The shared-view filter of one drawer: rows with an owner, queued inside the window, and the scope's

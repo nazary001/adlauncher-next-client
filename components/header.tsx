@@ -6,7 +6,7 @@ import { FacebookMark, GoogleMark, RocketIcon, SnapMark, TikTokMark } from "./ic
 import { PartnerSwitcher } from "./partner-switcher";
 import { AcctLimitWidget } from "./acct-limit-widget";
 import { HsTokenStatusWidget } from "./hs-token-status";
-import { AifTaskManagerButton, AvTaskManagerButton, TaskManagerButton } from "./task-manager";
+import { AifTaskManagerButton, AvTaskManagerButton, TaskManagerButton, VcTaskManagerButton } from "./task-manager";
 import { HsTaskManagerButton } from "./hs-task-manager";
 import { GoogleTaskManagerButton } from "./google-task-manager";
 import { SnapTaskManagerButton } from "./snap-task-manager";
@@ -259,6 +259,8 @@ export function Header({
             <TiktokTaskManagerButton />
           ) : partnerConfig(partner).lionLaunch ? (
             <HsTaskManagerButton />
+          ) : partnerConfig(partner).vcLaunch ? (
+            <VcTaskManagerButton />
           ) : partnerConfig(partner).avLaunch ? (
             <AvTaskManagerButton />
           ) : partnerConfig(partner).aifLaunch ? (
