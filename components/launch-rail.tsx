@@ -9,11 +9,11 @@ import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { type PartnerConfig, launchReadyOpts, markerPool } from "@/lib/partners";
 import { vcDestination } from "@/lib/vc-link";
 
-/** A VC row's tag: the landingpage id (cmpid) of its pasted link, or what is missing. */
+/** A VC row's tag: the landingpage id of its link, or what is missing. */
 const vcRowTag = (landing: string): string => {
   if (!landing.trim()) return "no VC link";
   const d = vcDestination(landing);
-  return d.ok ? `cmpid ${d.cmpid}` : "bad VC link";
+  return d.ok ? `LP ${d.lpId}` : "bad VC link";
 };
 import { teamHas } from "@/lib/team";
 import type { HsLaunchChannel } from "./hs-task-manager";

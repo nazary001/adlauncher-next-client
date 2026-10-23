@@ -83,9 +83,9 @@ export type PartnerConfig = {
    *  clicks with no pixel — the optimization picks, avDelivery maps (applyPartnerLocks + the route). */
   avLaunch?: boolean;
   /** ValueClick (VC, lib/vc-*): a direct Graph launch on VC's OWN token (slots vc.launch/vc.clone, no
-   *  env default) onto a VC search-arb landingpage — the link the buyer copies from VC's dashboard
-   *  (…qualitydays.com/rsp/<article>/?cmpid=<id>), kept in Campaign.landing; the launch writes the
-   *  ad's title into its `adtitle`. VC fires Purchase (with value) into VC_PIXEL through the
+   *  env default) or through TOOL onto a VC CONTENT-ARB landingpage — a ready one (VC_READY_LINKS) or
+   *  the link the buyer copies from VC's dashboard (…qualitydays.com/coa/<quiz>-<id>/), kept in
+   *  Campaign.landing and launched as is. VC fires Purchase (with value) into VC_PIXEL through the
    *  Conversions API, so delivery is Purchase on it (default, min-ROAS allowed) or Traffic / link
    *  clicks with no pixel (vcDelivery, applyPartnerLocks + the route). No marker pool. */
   vcLaunch?: boolean;
@@ -442,8 +442,8 @@ export const PARTNERS: PartnerConfig[] = [
     vcLaunch: true,
     usesProfile: false,
     nameTier: "vc",
-    // The destination is the VC landingpage link pasted on the card (lib/vc-link) — VC has no
-    // catalog API, so there is no static list either.
+    // The destination is the VC landingpage link on the card (lib/vc-link) — picked from the ready
+    // Content Arb list (VC_READY_LINKS, the card's own picker) or pasted; VC has no catalog API.
     landingBase: "",
     landings: [],
     pageLabel: "Fanpage",
@@ -466,7 +466,7 @@ export const PARTNERS: PartnerConfig[] = [
 // clicks with no pixel; pure module (lib/av-delivery) so node --test covers it.
 export { AV_OBJECTIVE, AV_PIXEL, AV_SALES_OBJECTIVE, type AvDelivery, avAdText, avDelivery, avLockPatch } from "./av-delivery";
 // VC (ValueClick) link / pixel / delivery contract — pure module, node --test covers it.
-export { VC_EVENT, VC_PIXEL, VC_PORTAL_URL, vcAdTitle, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcLockPatch } from "./vc-link";
+export { VC_EVENT, VC_PIXEL, VC_PORTAL_URL, VC_READY_LINKS, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcLockPatch, vcReadyLinkOf } from "./vc-link";
 
 export function partnerConfig(id: PartnerId): PartnerConfig {
   return PARTNERS.find((p) => p.id === id) ?? PARTNERS[0];
@@ -582,10 +582,9 @@ export function landingUrlSegments(
   // fire tail even for Purchase (AV's own site script fires the pixel) — lib/av-link builds <destination>?utm_source=facebook&utm_medium={{campaign.id}}
   // &utm_campaign=<key>&utm_term={{adset.id}}&utm_content={{ad.id}}.
   if (p.avLaunch) return avLinkSegments(slug, gcm);
-  // VC: `slug` IS the pasted landingpage link; `gcm` carries the ad title for `adtitle` (VC has no
-  // marker — the card and the route pass vcAdTitle(campaign) there). No pixel / fire tail: VC fires
-  // the pixel itself through the Conversions API.
-  if (p.vcLaunch) return vcLinkSegments(slug, gcm);
+  // VC: `slug` IS the landingpage link, launched as VC prints it (no marker, no pixel / fire tail:
+  // VC fires the pixel itself through the Conversions API).
+  if (p.vcLaunch) return vcLinkSegments(slug);
   const medium = p.nameTier ? `&utm_medium=${p.nameTier}` : "";
   const segs: LinkSegment[] = [
     { text: `${p.landingBase}/`, role: "base" },

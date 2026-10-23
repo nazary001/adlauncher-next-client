@@ -464,7 +464,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     }));
   }, [partner.avLaunch, toolReady.rows]);
   // VC through TOOL (owner ask 23.10: "без токена"): the cabinets are TOOL's VC rows (named
-  // GC-VD-C1-DE-* / seen by a session of TOOL's "VC" project, plus the token's when one is assigned),
+  // GC-for-VC-* / seen by a session of TOOL's "VC" project, plus the token's when one is assigned),
   // carrying the token catalog's pixels where the token holds the cabinet. null off that channel.
   const vcToolAccountsOpt = useMemo<AdAccountOption[] | null>(() => {
     if (!partner.vcLaunch || !graphToolActive) return null;
@@ -777,8 +777,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
             ? moEnsureSocMark(fullName(c))
             : fullName(c),
         ...(graphToolActive || partner.avLaunch ? { via: "tool" as const } : {}),
-        // VC has no marker — its drawer row shows the landingpage's cmpid instead (the server writes the same).
-        gcm: partner.vcLaunch ? (() => { const d = vcDestination(c.landing); return d.ok ? d.cmpid : ""; })() : c.gcm,
+        // VC has no marker — its drawer row shows the landingpage id instead (the server writes the same).
+        gcm: partner.vcLaunch ? (() => { const d = vcDestination(c.landing); return d.ok ? d.lpId : ""; })() : c.gcm,
         geo: geoSummary(c.countries),
         budget: c.budget,
       });

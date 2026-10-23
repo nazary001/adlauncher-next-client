@@ -2,18 +2,18 @@
 // VC through TOOL (owner ask 23.10 "сделай на основе Tool тоже"): the body /api/vc/launch hands TOOL for
 // each VC delivery mode — Purchase on the VC pixel, min-ROAS (value on the same pixel), link clicks —
 // built by the very helpers the route calls (vcDelivery → the toolInputFromCampaign mapping →
-// buildToolCampaign), with the VC link (adtitle = the ad's title) on every creative and the
+// buildToolCampaign), with the VC Content Arb link (as VC prints it) on every creative and the
 // "GCL TOOL - " marker after the (VC) prefix.
 import "./_resolve-hook.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 const tl = await import("../lib/tool-launch.ts");
-const { VC_PIXEL, vcAdTitle, vcDelivery, vcLink } = await import("../lib/vc-link.ts");
+const { VC_PIXEL, vcDelivery, vcLink } = await import("../lib/vc-link.ts");
 const { makeCampaign, normalizeRoasGoal, parseMoney, bidKind } = await import("../lib/types.ts");
 type Campaign = ReturnType<typeof makeCampaign>;
 
-const LP = "https://www.qualitydays.com/rsp/construction-software-pt/?cmpid=aoz37upzf0";
+const LP = "https://www.qualitydays.com/coa/words-or-actions-fn3zbpziuj/";
 
 /** The route's own steps: serverCampaign = card + vcDelivery, then lib/tool-run toolInputFromCampaign's
  *  field mapping (kept literal here — that module imports "@/" at runtime). */
@@ -22,7 +22,7 @@ function toolBody(over: Partial<Campaign>) {
   const c = { ...card, ...vcDelivery(card.optimization, card.bidStrategy) };
   const kind = bidKind(c.bidStrategy);
   const raw = parseMoney(c.bidCap);
-  const link = vcLink(c.landing, vcAdTitle(c));
+  const link = vcLink(c.landing);
   return tl.buildToolCampaign({
     name: tl.toolEnsureMark("[23/10] (VC) - tail"),
     objective: c.objective,
@@ -59,7 +59,8 @@ test("VC via TOOL · Purchase: Sales, conversion PURCHASE on the VC pixel, the V
   assert.equal(r.body.adsets[0].conversion?.pixel_id, VC_PIXEL.id);
   assert.equal(r.body.adsets[0].conversion?.event, "PURCHASE");
   const json = JSON.stringify(r.body);
-  assert.ok(json.includes("cmpid=aoz37upzf0&adtitle=Software+de+gest%C3%A3o"), "creative url = the VC link with adtitle");
+  assert.ok(json.includes(`"${LP}"`), "creative url = the VC Content Arb link, untouched");
+  assert.ok(!json.includes("adtitle"), "no Search Arb adtitle on a Content Arb link");
 });
 
 test("VC via TOOL · min ROAS: VALUE on the VC pixel", () => {

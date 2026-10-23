@@ -26,7 +26,7 @@ export const maxDuration = 60;
  *
  *   MO (in):  TOOL accounts ∩ the rail signer's token accounts ∩ filterAccountsFor(session).
  *   AIF (us): TOOL accounts ∩ the rail token's accounts ∩ filterAccountsFor(session).
- *   VC (vc):  VC's cabinets in TOOL (named GC-VD-C1-DE-* or seen by a session of TOOL's "VC" project)
+ *   VC (vc):  VC's cabinets in TOOL (named GC-for-VC-* or seen by a session of TOOL's "VC" project)
  *             ∪ (TOOL ∩ the VC token's accounts, when a token is assigned) ∩ filterAccountsFor(session) —
  *             a TOOL session alone is enough (owner ask 23.10: VC through TOOL without a token).
  *   HS (br):  TOOL accounts ∩ filterAccountsFor(session) — the per-profile intersection happens in

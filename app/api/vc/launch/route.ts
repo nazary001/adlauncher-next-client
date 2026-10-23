@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { type Campaign, bidAmountMissing, bidKind, bidTag, normalizeRoasGoal, parseMoney, withPartnerMark } from "@/lib/types";
 import { type PartnerId, partnerConfig } from "@/lib/partners";
-import { VC_PIXEL, vcAdTitle, vcDelivery, vcDestination, vcLink } from "@/lib/vc-link";
+import { VC_PIXEL, vcDelivery, vcDestination, vcLink } from "@/lib/vc-link";
 import {
   type LaunchBinds,
   SUPPORTED_BID_STRATEGIES,
@@ -64,12 +64,13 @@ const TOOL_DEADLINE_MS = 265_000;
  * POST /api/vc/launch — the VC (ValueClick) launch rail. Mirrors /api/aif/launch stage for stage (same
  * NDJSON events, same Task Manager pipeline, up to 5 creatives — one campaign → one ad set → one ad
  * per creative) with the rail's own pieces: the tree is built on VC's token (/tokens VC · Launches),
- * the ad link is the buyer's VC landingpage link (lib/vc-link vcDestination — only VC's own domains,
- * with its cmpid) with the ad's title written into `adtitle`, and the delivery is pinned by the server:
- * Purchase on VC_PIXEL (conversions / min-ROAS — VC fires it through the Conversions API with a value)
- * or Traffic / link clicks with no pixel. No marker pool: the landingpage's cmpid is VC's revenue key.
+ * the ad link is the buyer's VC Content Arb landingpage link as VC prints it (lib/vc-link vcDestination —
+ * only VC's own domains, only …/coa/<quiz>-<id>/; a Search Arb link is refused), and the delivery is
+ * pinned by the server: Purchase on VC_PIXEL (conversions / min-ROAS — VC fires it through the
+ * Conversions API with a value) or Traffic / link clicks with no pixel. No marker pool: the
+ * landingpage id is VC's revenue key.
  * `via:"tool"` builds the same campaign through TOOL (one job) and needs NO VC token (owner ask 23.10):
- * the cabinet must be one of VC's in TOOL (named GC-VD-C1-DE-* / seen by a session of TOOL's "VC"
+ * the cabinet must be one of VC's in TOOL (named GC-for-VC-* / seen by a session of TOOL's "VC"
  * project) or a token cabinet TOOL sees; a typed page id is accepted and TOOL checks page + pixel at
  * publish. With a token, the token's own checks (page, pixel) still run first.
  */
@@ -173,7 +174,7 @@ export async function POST(req: Request) {
       }
       if (!tokenAccount && !cat.vc.some((a) => a.account_id === pickedAccount)) {
         return NextResponse.json(
-          { ok: false, stage: "config", error: `account_not_vc — act_${pickedAccount} (${live.name}) is not a VC cabinet in TOOL (GC-VD-C1-DE-… or a session of the "VC" project) and no VC token holds it` },
+          { ok: false, stage: "config", error: `account_not_vc — act_${pickedAccount} (${live.name}) is not a VC cabinet in TOOL (GC-for-VC-… or a session of the "VC" project) and no VC token holds it` },
           { status: 400 },
         );
       }
@@ -217,8 +218,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, stage: "config", error: `destination check failed: ${err.message ?? String(e)}` }, { status: 502 });
   }
 
-  // The destination must be a VC landingpage link (VC's domains, with its cmpid) — a stale / mistyped
-  // paste would build a live ad pointing at a page VC does not pay for.
+  // The destination must be a VC Content Arb landingpage link (VC's domains, /coa/<quiz>-<id>/) — a stale
+  // / mistyped paste would build a live ad pointing at a page VC does not pay for.
   const dest = vcDestination(String(campaign.landing ?? ""));
   if (!dest.ok) {
     return NextResponse.json({ ok: false, stage: "config", error: dest.error }, { status: 400 });
@@ -303,9 +304,9 @@ export async function POST(req: Request) {
   // `GCL TOOL - ` after the partner prefix (toolEnsureMark).
   const baseName = withPartnerMark(`${serverCampaign.namePrefix}${serverCampaign.name}`.trim(), partner.label);
   const name = viaTool ? toolEnsureMark(baseName) : baseName;
-  // The ad link: the landingpage link with THIS ad's title in adtitle (one title per campaign — every
-  // creative of the card shares the card's headline / title).
-  const link = vcLink(dest.url, vcAdTitle(serverCampaign));
+  // The ad link: the landingpage link exactly as VC prints it (normalized) — Content Arb takes no
+  // params of ours; Meta's own fbclid is what VC matches the click by.
+  const link = vcLink(dest.url);
 
   const encoder = new TextEncoder();
   const stream = withFbBudget({ deadlineAt: Date.now() + FB_BUDGET_MS, retries: FB_BUDGET_RETRIES }, () =>
@@ -361,7 +362,7 @@ export async function POST(req: Request) {
           // ==========================================================================================
           if (viaTool) {
             const deadlineAt = startedAt + TOOL_DEADLINE_MS;
-            const idempotencyKey = taskId || `vc-tool-${dest.cmpid}-${startedAt.toString(36)}`;
+            const idempotencyKey = taskId || `vc-tool-${dest.lpId}-${startedAt.toString(36)}`;
             const onStage = (s: ToolNdjsonStage) => {
               if (s !== "done" && s !== "error") progress(s);
             };
@@ -462,7 +463,7 @@ export async function POST(req: Request) {
                 adset_id: pub.adsetId,
                 ad_id: pub.adIds[0],
                 link,
-                gcm: dest.cmpid,
+                gcm: dest.lpId,
                 error: null,
               });
               send({
@@ -470,7 +471,7 @@ export async function POST(req: Request) {
                 stage: "done",
                 via: "tool",
                 tool_job_id: pub.jobId,
-                gcm: dest.cmpid,
+                gcm: dest.lpId,
                 link,
                 page_id: binds.pageId,
                 campaign_id: pub.campaignId,
@@ -589,11 +590,11 @@ export async function POST(req: Request) {
             adset_id: created.adset_id,
             ad_id: created.ad_id,
             link,
-            // The shared task row's marker column carries the landingpage's cmpid on this rail.
-            gcm: dest.cmpid,
+            // The shared task row's marker column carries the landingpage id on this rail.
+            gcm: dest.lpId,
             error: null,
           });
-          send({ ok: true, stage: "done", gcm: dest.cmpid, link, page_id: binds.pageId, ...created });
+          send({ ok: true, stage: "done", gcm: dest.lpId, link, page_id: binds.pageId, ...created });
         } catch (e) {
           const err = e as FbError;
           // TOOL belt: TOOL accepted the submit but no campaign id is known — the job may be creating

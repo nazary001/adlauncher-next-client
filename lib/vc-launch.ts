@@ -7,7 +7,10 @@
 // WHICH token: the owner's pick on /tokens (slots vc.launch / vc.clone). VC has NO env default — an
 // unassigned slot is a clean config error, never another partner's bearer. NOTE: the token VC itself
 // holds (the landingpage Tracking token) is a Conversions-API-only dataset token — it cannot build
-// campaigns; the launch token is a system user with ads_management on the VC cabinets.
+// campaigns; the launch token is a system user with ads_management on the VC cabinets (23.10: system
+// user «Lecarthelaouforvc», app AV ANNA 10 — GC-for-VC-BR-742 … -762 + 10 fanpages).
+// WHICH cabinets: only VC's by name (lib/vc-link isVcAccountName) — the picker, the fire-time check and
+// the TOOL intersection all read the narrowed list, so a stray cabinet of the token is never offered.
 
 import {
   type FanPage,
@@ -28,6 +31,7 @@ import { uploadImage, uploadVideo, videoThumb, waitForVideo } from "./fb-media";
 import { resolveSlot } from "./fb-tokens";
 import { type TokenRail, slotOf } from "./fb-token-registry";
 import { TEAM } from "./team.ts";
+import { isVcAccountName } from "./vc-link";
 
 type Json = Record<string, unknown>;
 
@@ -70,6 +74,7 @@ export async function vcRail(rail: TokenRail): Promise<VcRailResult> {
   if (!r.ok || !t) return { ok: false, error: r.error ?? "no_vc_token" };
   const token = t.token;
   const cat: TokenCatalog = { token, cacheKey: t.cacheKey };
+  const vcAccounts = async (): Promise<TokenAdAccount[]> => (await tokenAdAccounts(cat)).filter((a) => isVcAccountName(a.name));
   return {
     ok: true,
     rail: {
@@ -85,8 +90,8 @@ export async function vcRail(rail: TokenRail): Promise<VcRailResult> {
       uploadImage: (accountId, buf) => uploadImage(accountId, buf, token),
       waitForVideo: (videoId) => waitForVideo(videoId, undefined, token),
       videoThumb: (videoId) => videoThumb(videoId, token),
-      tokenAdAccounts: () => tokenAdAccounts(cat),
-      isTokenAccount: (accountId) => isTokenAccount(accountId, cat),
+      tokenAdAccounts: vcAccounts,
+      isTokenAccount: async (accountId) => (await isTokenAccount(accountId, cat)) && (await vcAccounts()).some((a) => a.id === accountId),
       accountName: (accountId) => tokenAccountName(accountId, cat),
       accountPixels: (accountId) => accountPixels(accountId, cat),
       advertisablePages: () => advertisablePages(cat),

@@ -35,7 +35,7 @@ import { TOOL_MARK, toolEnsureMark } from "@/lib/tool-launch";
 import { DEFAULT_PLATFORM_CHOICE, PLATFORM_CHOICES } from "@/lib/publisher-platforms";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { AIF_VALUE_PIXEL, AV_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifOfferablePixels, avDelivery, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
-import { VC_PIXEL, isPageId, vcAdTitle, vcDelivery, vcDestination, vcLink, vcLinkSegments } from "@/lib/vc-link";
+import { VC_PIXEL, VC_READY_LINKS, isPageId, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcReadyLinkOf } from "@/lib/vc-link";
 import { VcTrackingHint } from "./vc-tracking-hint";
 import { aifFlowOf } from "@/lib/aif-link";
 import type { FanpageOption } from "./use-fanpages";
@@ -92,6 +92,10 @@ function readyLinkOptions(redirectType: string): RichOption[] {
   }
   return rows;
 }
+
+/** Picker rows of the ready VC Content Arb landingpages (lib/vc-link VC_READY_LINKS): the niche is the
+ *  section, the language the tag — "Words or Actions? Explore Your Connection Style · EN". */
+const VC_READY_OPTIONS: RichOption[] = VC_READY_LINKS.map((l) => ({ value: l.url, label: l.title, group: l.niche, tag: l.lang }));
 
 /** Human list of what a card is still missing to launch — partner-aware (mirrors isLaunchable +
  *  launchReadyOpts), so the draft-dot tooltip names the real blockers instead of a fixed string. */
@@ -565,10 +569,12 @@ function CampaignCardBase({
       ? hsFinalLink(c.link, c.pixel, hs?.acr ?? "", c)
       : ""
     : vcMode
-      ? vcLink(c.landing, vcAdTitle(c))
+      ? vcLink(c.landing)
       : fullLandingUrl(partner, c.landing, c.gcm, conversions, c.pixel);
-  // VC: the pasted link's verdict (empty = nothing pasted yet) and whether its cabinet carries VC_PIXEL.
+  // VC: the link's verdict (empty = nothing picked / pasted yet), the ready landingpage it is (null =
+  // a pasted link of another landingpage) and whether its cabinet carries VC_PIXEL.
   const vcDest = vcMode ? vcDestination(c.landing) : null;
+  const vcReady = vcMode ? vcReadyLinkOf(c.landing) : null;
   // Only on the FB Token channel: a TOOL launch has its pixel checked by TOOL (or by the route when the
   // token holds the cabinet), and a TOOL-only cabinet carries no pixel list here.
   const vcPixelMissing =
@@ -1410,24 +1416,36 @@ function CampaignCardBase({
                     </Field>
                   ) : vcMode ? (
                     <Field
-                      label="VC landingpage link"
-                      hint="paste it from VC → Search Arb → Landingpages; the ad's headline goes into adtitle"
+                      label="VC landingpage (Content Arb)"
+                      hint="pick a ready quiz or paste a Content Arb link from VC → Content Arb → Landingpages"
                       error={c.landing.trim() && vcDest && !vcDest.ok ? vcDest.error.replace(/^[a-z_]+ — /, "") : undefined}
                     >
                       <div>
+                        <div className="mb-2">
+                          <SearchSelect
+                            value={vcReady ? vcReady.url : ""}
+                            onChange={(v) => patch({ landing: v })}
+                            options={VC_READY_OPTIONS}
+                            placeholder="Pick a ready VC quiz — Dating / Money / Cars …"
+                            emptyHint="No ready VC landingpages match"
+                            ariaLabel="Ready VC landingpage"
+                            facets
+                            tagQuery
+                          />
+                        </div>
                         <TextInput
                           value={c.landing}
                           onChange={(e) => patch({ landing: e.target.value.trim() })}
                           maxLength={2000}
-                          placeholder="https://www.qualitydays.com/rsp/…/?cmpid=…"
+                          placeholder="https://www.qualitydays.com/coa/<quiz>-<id>/"
                           className="font-mono text-[12px]"
                         />
-                        {/* VC link preview — the EXACT link the launch sends (vcLinkSegments): the pasted
-                            landingpage link with this ad's headline in adtitle. */}
+                        {/* VC link preview — the EXACT link the launch sends (vcLinkSegments): the
+                            landingpage link as VC prints it, its landingpage id highlighted. */}
                         {vcDest?.ok ? (
                           <div className="mt-2 overflow-hidden rounded-lg border border-line bg-surface2/50">
                             <div className="max-h-24 select-all overflow-y-auto break-all px-3 py-2 font-mono text-[11px] leading-relaxed">
-                              {vcLinkSegments(c.landing, vcAdTitle(c)).map((seg, i) => (
+                              {vcLinkSegments(c.landing).map((seg, i) => (
                                 <span key={i} className={LINK_ROLE_CLASS[seg.role]}>
                                   {seg.text}
                                 </span>
@@ -1435,7 +1453,7 @@ function CampaignCardBase({
                             </div>
                             <div className="flex items-center justify-between gap-2 border-t border-line bg-surface/50 px-2 py-1.5">
                               <span className="select-none font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-                                VC link · cmpid {vcDest.cmpid}
+                                VC link · LP {vcDest.lpId}
                               </span>
                               <CopyLinkButton copied={copied} disabled={!linkCopyable} title="Paste a VC link first" onClick={copyLink} />
                             </div>

@@ -1200,7 +1200,7 @@ function TaskRow({
             {task.name || "Untitled campaign"}
           </p>
           <p className="mt-0.5 truncate font-mono text-[10.5px] text-faint">
-            {task.partner === "us" ? "brand" : task.partner === "av" ? "key" : task.partner === "vc" ? "cmpid" : "gcm"} {task.gcm || "—"} · {task.geo} · ${moneyLabel(task.budget)}
+            {task.partner === "us" ? "brand" : task.partner === "av" ? "key" : task.partner === "vc" ? "LP" : "gcm"} {task.gcm || "—"} · {task.geo} · ${moneyLabel(task.budget)}
             {task.bid ? ` · ${task.bid}` : ""} ·{" "}
             <OwnerChip owner={task.owner} mine={mine} />
           </p>
