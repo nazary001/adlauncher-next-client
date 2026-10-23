@@ -41,6 +41,8 @@ export type ToolSession = {
   last_check_error: string | null;
   last_used_at: string | null;
   source: string;
+  /** The team project the session is filed under (TOOL → projects: "AV", "HS", "VC"…), null = none. */
+  project: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -205,6 +207,7 @@ export function toSession(v: unknown): ToolSession {
     last_check_error: strOrNull(r.last_check_error),
     last_used_at: strOrNull(r.last_used_at),
     source: str(r.source),
+    project: strOrNull(r.project),
     created_at: str(r.created_at),
     updated_at: str(r.updated_at),
   };

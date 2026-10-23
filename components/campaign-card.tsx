@@ -35,7 +35,7 @@ import { TOOL_MARK, toolEnsureMark } from "@/lib/tool-launch";
 import { DEFAULT_PLATFORM_CHOICE, PLATFORM_CHOICES } from "@/lib/publisher-platforms";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { AIF_VALUE_PIXEL, AV_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifOfferablePixels, avDelivery, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
-import { VC_PIXEL, vcAdTitle, vcDelivery, vcDestination, vcLink, vcLinkSegments } from "@/lib/vc-link";
+import { VC_PIXEL, isPageId, vcAdTitle, vcDelivery, vcDestination, vcLink, vcLinkSegments } from "@/lib/vc-link";
 import { VcTrackingHint } from "./vc-tracking-hint";
 import { aifFlowOf } from "@/lib/aif-link";
 import type { FanpageOption } from "./use-fanpages";
@@ -273,6 +273,7 @@ function CampaignCardBase({
   toolAccounts,
   moSocRail,
   toolSessions,
+  manualPage,
   onPatch,
   onToggleCollapse,
   onDuplicate,
@@ -324,6 +325,9 @@ function CampaignCardBase({
   /** AV: the live TOOL sessions (FB profiles) per cabinet (bare-digit account id → sessions) for the
    *  card's Profile pick (owner ask 30.09). null = the roster is still loading; undefined off AV. */
   toolSessions?: ReadonlyMap<string, ToolSessionOption[]> | null;
+  /** VC through TOOL with no VC token (owner ask 23.10): there is no fanpage catalog to pick from, so
+   *  the fanpage is TYPED as its id — TOOL checks the session's access to it at publish. */
+  manualPage?: boolean;
   onPatch: (id: string, patch: Partial<Campaign>) => void;
   onToggleCollapse: (id: string) => void;
   onDuplicate: (id: string) => void;
@@ -565,8 +569,10 @@ function CampaignCardBase({
       : fullLandingUrl(partner, c.landing, c.gcm, conversions, c.pixel);
   // VC: the pasted link's verdict (empty = nothing pasted yet) and whether its cabinet carries VC_PIXEL.
   const vcDest = vcMode ? vcDestination(c.landing) : null;
+  // Only on the FB Token channel: a TOOL launch has its pixel checked by TOOL (or by the route when the
+  // token holds the cabinet), and a TOOL-only cabinet carries no pixel list here.
   const vcPixelMissing =
-    vcMode && conversions && Boolean(c.account) && Boolean(adAccounts?.some((a) => a.value === c.account)) &&
+    vcMode && !moToolRail && conversions && Boolean(c.account) && Boolean(adAccounts?.some((a) => a.value === c.account)) &&
     !pixelOptionsOf(adAccounts ?? null, c.account).some((p) => p.id === VC_PIXEL.id);
 
   // Copy is offered only once the link is COMPLETE — for gcm partners that means a claimed code, so
@@ -876,7 +882,13 @@ function CampaignCardBase({
                       : undefined
                   }
                   error={
-                    hsMode
+                    vcMode && manualPage
+                      ? c.page && !isPageId(c.page)
+                        ? "Digits only — the fanpage id"
+                        : !c.page
+                          ? "Type the fanpage id"
+                          : undefined
+                      : hsMode
                       ? c.profile && hsData && !c.page
                         ? "Pick a page"
                         : undefined
@@ -901,6 +913,16 @@ function CampaignCardBase({
                               : (noFankasOfferedNote({ hidden: hsData.pagesHidden, marked: hsData.pagesMarked }) ?? "No pages on this profile")
                       }
                       metaWhenClosed
+                    />
+                  ) : vcMode && manualPage ? (
+                    // VC through TOOL without a VC token: no fanpage catalog — the id is typed.
+                    <TextInput
+                      value={c.page}
+                      onChange={(e) => patch({ page: e.target.value.replace(/\s+/g, "") })}
+                      maxLength={30}
+                      inputMode="numeric"
+                      placeholder="Fanpage ID — digits"
+                      className="font-mono text-[12px]"
                     />
                   ) : partner.fanpagesFromToken ? (
                     <SearchSelect

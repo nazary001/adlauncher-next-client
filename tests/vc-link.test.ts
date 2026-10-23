@@ -130,3 +130,18 @@ test("the shared FB payloads carry the VC pixel + Purchase on conversions and no
   };
   assert.equal(cr.object_story_spec.video_data.call_to_action.value.link, link);
 });
+
+test("vcToolAccounts: VC's cabinets in TOOL = named GC-VD-C1-DE-* or seen by a session of the VC project", async () => {
+  const { vcToolAccounts, isPageId } = await import("../lib/vc-link.ts");
+  const rows = [
+    { account_id: "1", name: "GC-VD-C1-DE-4", sessions: [{ id: 1 }] },
+    { account_id: "2", name: "GC-VD-C1-DE-38-RSOC", sessions: [] },
+    { account_id: "3", name: "GC-HS-VD-C1-BR-7", sessions: [{ id: 2 }] },
+    { account_id: "4", name: "Willie Dumond", sessions: [{ id: 3 }] },
+    { account_id: "5", name: "GC-AV-LA-565", sessions: [{ id: 4 }] },
+  ];
+  const projects: Record<number, string | null> = { 1: "HS", 2: "HS", 3: "vc", 4: "AV" };
+  assert.deepEqual(vcToolAccounts(rows, (id) => projects[id]).map((a) => a.account_id), ["1", "2", "4"]);
+  assert.deepEqual(vcToolAccounts(rows, () => null).map((a) => a.account_id), ["1", "2"]);
+  assert.ok(isPageId("610000000000001") && !isPageId("61x") && !isPageId("1234"));
+});

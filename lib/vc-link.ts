@@ -32,6 +32,30 @@ export const VC_SALES_OBJECTIVE = "OUTCOME_SALES";
  *  on a new VC domain = one entry here. Subdomains (www.) are accepted. */
 export const VC_HOSTS: readonly string[] = ["qualitydays.com"];
 
+// ---- VC through TOOL (owner ask 23.10: "VC через TOOL без токена") -------------------------------
+// A VC campaign can launch on a TOOL session alone: the cabinet comes from TOOL, the page id is typed
+// (or picked from the VC token when one is assigned), TOOL itself checks page + pixel at publish.
+
+/** The TOOL project VC's sessions are filed under (TOOL → Sessions → project). */
+export const VC_TOOL_PROJECT = "VC";
+/** VC's cabinets by name — the ones VC's dashboard lists (GC-VD-C1-DE-4, -5, -38-RSOC, 23.10). */
+export const VC_ACCOUNT_NAME_RE = /^GC-VD-C1-DE-/i;
+
+/** A TOOL account row as GET /api/v1/accounts lists it (lib/tool-sessions-model ToolTeamAccount). */
+export type VcToolAccount = { account_id: string; name: string; sessions: readonly { id: number }[] };
+
+/**
+ * VC's cabinets among TOOL's live accounts: named like VC's (VC_ACCOUNT_NAME_RE) or seen by a session
+ * filed under the VC project. `projectOf` answers a session id's project (null = unknown / none).
+ */
+export function vcToolAccounts<T extends VcToolAccount>(accounts: readonly T[], projectOf: (sessionId: number) => string | null | undefined): T[] {
+  const isVcProject = (id: number): boolean => String(projectOf(id) ?? "").trim().toUpperCase() === VC_TOOL_PROJECT;
+  return accounts.filter((a) => VC_ACCOUNT_NAME_RE.test(String(a.name ?? "").trim()) || (a.sessions ?? []).some((s) => isVcProject(s.id)));
+}
+
+/** A typed fanpage id (the TOOL path without a VC token): digits only. */
+export const isPageId = (v: string): boolean => /^\d{5,30}$/.test(String(v ?? "").trim());
+
 /** The `cmpid` VC prints in every landingpage link (the landingpage id, e.g. "aoz37upzf0"). */
 const CMPID_RE = /^[a-z0-9]{6,32}$/i;
 

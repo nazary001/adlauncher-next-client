@@ -4,6 +4,7 @@ import { sanitizePartnerId } from "@/lib/partners";
 import { railParam, resolveMoSigner } from "@/lib/mo-soc";
 import { aifRail } from "@/lib/aif-launch";
 import { vcRail } from "@/lib/vc-launch";
+import { VC_TOOL_NO_SESSION, vcToolCatalog } from "@/lib/vc-tool";
 import { tokenAdAccounts } from "@/lib/fb-graph";
 import { filterAccountsFor } from "@/lib/acct-assignments";
 import { toolLaunchReady, toolSessionDirectory } from "@/lib/tool-run";
@@ -25,7 +26,9 @@ export const maxDuration = 60;
  *
  *   MO (in):  TOOL accounts ∩ the rail signer's token accounts ∩ filterAccountsFor(session).
  *   AIF (us): TOOL accounts ∩ the rail token's accounts ∩ filterAccountsFor(session).
- *   VC (vc):  TOOL accounts ∩ the VC token's accounts ∩ filterAccountsFor(session) (owner ask 23.10).
+ *   VC (vc):  VC's cabinets in TOOL (named GC-VD-C1-DE-* or seen by a session of TOOL's "VC" project)
+ *             ∪ (TOOL ∩ the VC token's accounts, when a token is assigned) ∩ filterAccountsFor(session) —
+ *             a TOOL session alone is enough (owner ask 23.10: VC through TOOL without a token).
  *   HS (br):  TOOL accounts ∩ filterAccountsFor(session) — the per-profile intersection happens in
  *             the card/board (LION profile bind space), not here.
  *
@@ -109,6 +112,48 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: true, ready: true, accounts: avFiltered, rows: avRows, live: liveAv }, noStore);
   }
 
+  // VC through TOOL (owner ask 23.10: "без токена"): a TOOL session alone makes VC launchable — its
+  // cabinets are the ones named like VC's or seen by a session filed under TOOL's "VC" project; when a
+  // VC token is assigned, the TOOL-visible cabinets of that token count too. The fanpage is typed on
+  // the card (or picked from the token) and TOOL itself checks page + pixel at publish.
+  if (partner === "vc") {
+    if (rail === "clone") {
+      return NextResponse.json({ ok: true, ready: false, reason: "not_available", message: "VC has no clone board yet", accounts: [], rows: [], live: 0 }, noStore);
+    }
+    const cat = await vcToolCatalog();
+    if (!cat.ok) {
+      return NextResponse.json({ ok: true, ready: false, reason: cat.reason, message: cat.message, accounts: [], rows: [], live: 0 }, noStore);
+    }
+    const liveVc = cat.live.length;
+    const ids = new Set(cat.vc.map((a) => a.account_id));
+    const r = await vcRail(rail);
+    if (r.ok) {
+      try {
+        const tokenIds = new Set((await r.rail.tokenAdAccounts()).map((a) => String(a.id).replace(/^act_/, "")));
+        for (const a of cat.live) if (tokenIds.has(a.account_id)) ids.add(a.account_id);
+      } catch {
+        /* the token catalog is a bonus here — TOOL's own VC cabinets still stand */
+      }
+    }
+    const ordered = cat.live.filter((a) => ids.has(a.account_id)).map((a) => a.account_id);
+    const vcFiltered = await filterAccountsFor(session, ordered, (id) => id);
+    if (vcFiltered.length === 0) {
+      return NextResponse.json(
+        ordered.length === 0
+          ? { ok: true, ready: false, reason: "no_live_session", message: `TOOL sees ${liveVc} live account${liveVc === 1 ? "" : "s"} but ${VC_TOOL_NO_SESSION}`, accounts: [], rows: [], live: liveVc }
+          : { ok: true, ready: false, message: "None of TOOL's live VC accounts are assigned to you — pick one of yours on /accounts", accounts: [], rows: [], live: liveVc },
+        noStore,
+      );
+    }
+    const vcById = new Map(cat.live.map((a) => [a.account_id, a]));
+    const dir = await toolSessionDirectory();
+    const vcRows: ReadyRow[] = vcFiltered.map((id) => {
+      const a = vcById.get(id);
+      return { id, name: a?.name ?? "", currency: a?.currency ?? "", sessions: toolSessionChoices(a?.sessions ?? [], dir) };
+    });
+    return NextResponse.json({ ok: true, ready: true, accounts: vcFiltered, rows: vcRows, live: liveVc }, noStore);
+  }
+
   const ready = await toolLaunchReady();
   if (!ready.ok) {
     // Key / scope / reachability / no-live-session — all before any partner catalog work.
@@ -153,27 +198,6 @@ export async function GET(req: Request) {
     } catch {
       catalogIds = [];
     }
-  } else if (partner === "vc") {
-    // VC through TOOL (owner ask 23.10): the VC token still supplies the fanpages, the pixel check and
-    // the account names — TOOL only adds the sessions — so its catalog is the account axis, like AIF.
-    if (rail === "clone") {
-      return NextResponse.json(
-        { ok: true, ready: false, reason: "not_available", message: "VC has no clone board yet", accounts: [], rows: [], live },
-        noStore,
-      );
-    }
-    const r = await vcRail(rail);
-    if (!r.ok) {
-      return NextResponse.json(
-        { ok: true, ready: false, reason: "no_live_session", message: `VC token is not assigned on /tokens (${r.error}) — TOOL still needs the VC catalog to map its accounts`, accounts: [], rows: [], live },
-        noStore,
-      );
-    }
-    try {
-      catalogIds = (await r.rail.tokenAdAccounts()).map((a) => a.id);
-    } catch {
-      catalogIds = [];
-    }
   }
 
   // TOOL ∩ partner catalog, then the owner's per-buyer assignment filter. HS has no cheap catalog
@@ -193,7 +217,7 @@ export async function GET(req: Request) {
 
   if (filtered.length === 0) {
     // Two distinct causes → two distinct, actionable sentences.
-    const label = partner === "in" ? "MO" : partner === "us" ? "AIF" : partner === "vc" ? "VC" : "HS";
+    const label = partner === "in" ? "MO" : partner === "us" ? "AIF" : "HS";
     if (intersected.length === 0) {
       // TOOL has live accounts, but none overlap this partner's cabinets (e.g. 28.09 the only live
       // session carries ActiveView cabinets) — not-ready until a session seeing this partner's is added.

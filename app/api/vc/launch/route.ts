@@ -17,6 +17,8 @@ import { FbError, withFbBudget, withParentRetry } from "@/lib/fb-graph";
 import { fetchValidatedImage } from "@/lib/fb-media";
 import { isLegacyBlobUrl, isOwnCreativeUrl } from "@/lib/creative-url";
 import { type VcRail, vcRail, vcRailEnabled } from "@/lib/vc-launch";
+import { vcToolCatalog, VC_TOOL_NO_SESSION } from "@/lib/vc-tool";
+import { localeKeysOf } from "@/lib/locale-keys";
 import { claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
 import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignments";
 import { taskWriter } from "@/lib/task-store";
@@ -34,7 +36,7 @@ import {
   type ToolCreativeInput,
   type ToolNdjsonStage,
 } from "@/lib/tool-launch";
-import { toolAccountVisible, toolDeps, toolInputFromCampaign, toolLaunchReady } from "@/lib/tool-run";
+import { toolDeps, toolInputFromCampaign } from "@/lib/tool-run";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -52,30 +54,9 @@ const FB_BUDGET_RETRIES = 8;
 // function so a pending job settles the row (slot KEPT, note "pending tool job #N").
 const TOOL_DEADLINE_MS = 265_000;
 
-// ---------- locale resolution (best-effort, non-fatal) — the VC-token twin of /api/aif/launch's ----------
-
-const localeCache = new Map<string, number | null>();
-async function resolveLocales(names: string[], rail: VcRail): Promise<number[]> {
-  const ids: number[] = [];
-  for (const raw of names) {
-    if (/\(all\)/i.test(raw)) continue; // "all" = no language restriction (broadest)
-    if (!localeCache.has(raw)) {
-      try {
-        const body = await rail.fbGet(`search?type=adlocale&limit=25&q=${encodeURIComponent(raw.replace(/[()]/g, " ").trim())}`);
-        const data = (body?.data as Array<{ key?: number; name?: string }> | undefined) ?? [];
-        const norm = (s: string) => s.toLowerCase().replace(/[^a-z]/g, "");
-        // Only an exact normalized-name match — never data[0], which would target a wrong language.
-        const hit = data.find((d) => d.name && norm(d.name) === norm(raw));
-        localeCache.set(raw, typeof hit?.key === "number" ? hit.key : null);
-      } catch {
-        // Transient throttle/network — do NOT cache (a permanent null would silently broaden later launches).
-      }
-    }
-    const key = localeCache.get(raw);
-    if (typeof key === "number") ids.push(key);
-  }
-  return [...new Set(ids)];
-}
+// ---------- languages ----------
+// Meta ad-locale keys come from a static table (lib/locale-keys) — no Graph search, so the TOOL path
+// needs no token, and a language Meta has no locale for is refused instead of silently dropped.
 
 // ---------- orchestration ----------
 
@@ -87,8 +68,10 @@ async function resolveLocales(names: string[], rail: VcRail): Promise<number[]> 
  * with its cmpid) with the ad's title written into `adtitle`, and the delivery is pinned by the server:
  * Purchase on VC_PIXEL (conversions / min-ROAS — VC fires it through the Conversions API with a value)
  * or Traffic / link clicks with no pixel. No marker pool: the landingpage's cmpid is VC's revenue key.
- * `via:"tool"` builds the same campaign through TOOL (one job; the VC token still validates the
- * cabinet, page and pixel — TOOL has no page / pixel list).
+ * `via:"tool"` builds the same campaign through TOOL (one job) and needs NO VC token (owner ask 23.10):
+ * the cabinet must be one of VC's in TOOL (named GC-VD-C1-DE-* / seen by a session of TOOL's "VC"
+ * project) or a token cabinet TOOL sees; a typed page id is accepted and TOOL checks page + pixel at
+ * publish. With a token, the token's own checks (page, pixel) still run first.
  */
 export async function POST(req: Request) {
   // Proxy-gated, but self-checks the session too (parity with /api/launch).
@@ -142,13 +125,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, stage: "parse", error: String(e) }, { status: 400 });
   }
 
-  // The VC launch signer is the OWNER'S pick on /tokens (vc.launch slot, no env default). Missing /
-  // unreadable → clean config error, never another bearer.
+  // The VC launch signer is the OWNER'S pick on /tokens (vc.launch slot, no env default). The direct
+  // Graph path cannot run without it (clean config error, never another bearer); the TOOL path can.
   const railRes = await vcRail("launch");
-  if (!railRes.ok) {
+  if (!railRes.ok && !viaTool) {
     return NextResponse.json({ ok: false, stage: "config", error: railRes.error }, { status: 400 });
   }
-  const rail = railRes.rail;
+  const rail: VcRail | null = railRes.ok ? railRes.rail : null;
+  // TOOL path: the account's TOOL-side currency (buildToolCampaign's USD guard backstop) and name.
+  let toolAcctCurrency = "USD";
+  let toolAcctName = "";
 
   const partner = partnerConfig("vc" as PartnerId);
   // Server-pinned delivery: Purchase on VC_PIXEL (conversions / min-ROAS) or Traffic / link clicks
@@ -171,20 +157,46 @@ export async function POST(req: Request) {
     if (!/^\d{5,}$/.test(pickedAccount)) {
       return NextResponse.json({ ok: false, stage: "config", error: "account_required — pick an ad account on the campaign card" }, { status: 400 });
     }
-    if (!(await rail.isTokenAccount(pickedAccount))) {
+    const tokenAccount = rail ? await rail.isTokenAccount(pickedAccount) : false;
+    if (viaTool) {
+      // TOOL must be up and see the cabinet, and the cabinet must be VC's (in TOOL) or the token's —
+      // one forced re-read on a miss (the 60 s cache may predate a session an owner just added).
+      let cat = await vcToolCatalog();
+      if (cat.ok && !cat.live.some((a) => a.account_id === pickedAccount)) cat = await vcToolCatalog(true);
+      if (!cat.ok) return NextResponse.json({ ok: false, stage: "config", error: cat.message }, { status: 400 });
+      const live = cat.live.find((a) => a.account_id === pickedAccount);
+      if (!live) {
+        return NextResponse.json(
+          { ok: false, stage: "config", error: `tool_account_unavailable — no live TOOL session sees ad account ${pickedAccount}; ${VC_TOOL_NO_SESSION}` },
+          { status: 400 },
+        );
+      }
+      if (!tokenAccount && !cat.vc.some((a) => a.account_id === pickedAccount)) {
+        return NextResponse.json(
+          { ok: false, stage: "config", error: `account_not_vc — act_${pickedAccount} (${live.name}) is not a VC cabinet in TOOL (GC-VD-C1-DE-… or a session of the "VC" project) and no VC token holds it` },
+          { status: 400 },
+        );
+      }
+      toolAcctCurrency = live.currency || "USD";
+      toolAcctName = live.name;
+    } else if (!tokenAccount) {
       return NextResponse.json({ ok: false, stage: "config", error: "account_not_allowed — the VC token cannot use this ad account" }, { status: 400 });
     }
     if (!/^\d{5,}$/.test(pickedPage)) {
-      return NextResponse.json({ ok: false, stage: "config", error: "fanpage_required — pick a fanpage on the campaign card" }, { status: 400 });
+      return NextResponse.json({ ok: false, stage: "config", error: "fanpage_required — pick (or type the id of) a fanpage on the campaign card" }, { status: 400 });
     }
-    if (!(await rail.isAdvertisablePage(pickedPage))) {
+    const tokenPage = rail ? await rail.isAdvertisablePage(pickedPage) : false;
+    if (rail && tokenPage) {
+      // DSA beneficiary/payor for EU-reaching ad sets — same rule as MO / AIF.
+      binds.pageName = await rail.advertisablePageName(pickedPage);
+    } else if (!viaTool) {
       return NextResponse.json({ ok: false, stage: "config", error: "fanpage_not_allowed — the VC token cannot advertise with this page" }, { status: 400 });
     }
-    // DSA beneficiary/payor for EU-reaching ad sets — same rule as MO / AIF.
-    binds.pageName = await rail.advertisablePageName(pickedPage);
+    // (TOOL with a page the token does not hold: TOOL checks the session's access to it at publish.)
     // A Purchase launch optimizes on VC_PIXEL — it must be shared to the cabinet, or Meta refuses the
-    // ad set only after the campaign exists (orphan). Checked here, before anything is claimed.
-    if (binds.pixelId) {
+    // ad set only after the campaign exists (orphan). Checked here when the token holds the cabinet;
+    // a TOOL-only cabinet has its pixel checked by TOOL at publish.
+    if (binds.pixelId && rail && tokenAccount) {
       const pixels = await rail.accountPixels(pickedAccount);
       if (!pixels.some((p) => p.id === binds.pixelId)) {
         return NextResponse.json(
@@ -274,27 +286,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, stage: "media", error: (e as FbError).message ?? String(e) }, { status: 400 });
   }
 
-  // TOOL channel gate — pre-stream, after every validation above: the account must be visible to a
-  // live TOOL session; read its TOOL-side currency (buildToolCampaign's USD guard backstop). A
-  // not-ready verdict is the same pre-stream JSON rejection shape.
-  let toolAcctCurrency = "USD";
-  if (viaTool) {
-    const ready = await toolLaunchReady();
-    if (!ready.ok) {
-      return NextResponse.json({ ok: false, stage: "config", error: ready.message }, { status: 400 });
-    }
-    if (!(await toolAccountVisible(pickedAccount))) {
-      return NextResponse.json(
-        {
-          ok: false,
-          stage: "config",
-          error: `tool_account_unavailable — no live TOOL session sees ad account ${pickedAccount}; an owner refreshes/adds one on Ads Manager sessions`,
-        },
-        { status: 400 },
-      );
-    }
-    toolAcctCurrency = ready.accounts.find((a) => a.account_id === pickedAccount)?.currency || "USD";
+  // Languages → Meta ad-locale keys (static table): a language Meta has no locale for is refused
+  // here, never dropped (dropping would silently target every language).
+  const locales = localeKeysOf(Array.isArray(campaign.locales) ? campaign.locales : []);
+  if (locales.unknown.length) {
+    return NextResponse.json(
+      { ok: false, stage: "config", error: `language_unsupported — Meta has no ad locale for ${locales.unknown.join(", ")}; remove it from Languages` },
+      { status: 400 },
+    );
   }
+  const localeIds = locales.ids;
 
   const serverCampaign: Campaign = { ...campaign, ...delivery };
   // The partner mark in the prefix is the ROUTE's, not the client's: a card that kept another
@@ -349,7 +350,7 @@ export async function POST(req: Request) {
             partner: "vc",
             channel: viaTool ? "vc-tool" : "vc",
             name,
-            accountName: await rail.accountName(binds.accountId).catch(() => ""),
+            accountName: toolAcctName || (rail ? await rail.accountName(binds.accountId).catch(() => "") : ""),
           });
 
           // ==========================================================================================
@@ -420,7 +421,6 @@ export async function POST(req: Request) {
               return c;
             });
 
-            const localeIds = await resolveLocales(serverCampaign.locales, rail);
             const built = buildToolCampaign(
               toolInputFromCampaign(serverCampaign, {
                 name,
@@ -503,6 +503,9 @@ export async function POST(req: Request) {
             return;
           }
 
+          // The Graph tree needs the VC token (checked before the stream: a token-less launch is TOOL-only).
+          const graph = rail;
+          if (!graph) throw new FbError("no_vc_token — the direct Graph path needs the VC token (VC · Launches)", null, 400);
           // 1) register EVERY creative on the VC account: video uploads fired first (Meta processes them
           // in parallel), then waited out one by one; images: validated bytes → adimages hash.
           progress("video");
@@ -511,10 +514,10 @@ export async function POST(req: Request) {
           for (let i = 0; i < medias.length; i++) {
             const m = medias[i];
             if (m.kind === "image") {
-              regs[i] = { kind: "image", imageHash: await rail.uploadImage(binds.accountId, imageBufs.get(i) as Buffer) };
+              regs[i] = { kind: "image", imageHash: await graph.uploadImage(binds.accountId, imageBufs.get(i) as Buffer) };
             } else {
               const suffix = medias.length > 1 ? ` · video ${i + 1}` : " · video";
-              regs[i] = { kind: "video", videoId: await rail.uploadVideo(binds.accountId, m.url, `${name}${suffix}`), thumbUrl: "" };
+              regs[i] = { kind: "video", videoId: await graph.uploadVideo(binds.accountId, m.url, `${name}${suffix}`), thumbUrl: "" };
             }
           }
           created.video_id = regs.find((r) => r.kind === "video")?.videoId ?? undefined;
@@ -523,22 +526,21 @@ export async function POST(req: Request) {
           for (let i = 0; i < medias.length; i++) {
             const r = regs[i];
             if (r.kind !== "video") continue;
-            await rail.waitForVideo(r.videoId);
+            await graph.waitForVideo(r.videoId);
             // A custom cover replaces the auto-thumbnail entirely (no thumbnail poll needed).
             const coverBuf = coverBufs.get(i);
-            if (coverBuf) r.coverHash = await rail.uploadImage(binds.accountId, coverBuf);
-            else r.thumbUrl = await rail.videoThumb(r.videoId);
+            if (coverBuf) r.coverHash = await graph.uploadImage(binds.accountId, coverBuf);
+            else r.thumbUrl = await graph.videoThumb(r.videoId);
           }
-          const localeIds = await resolveLocales(serverCampaign.locales, rail);
 
           // 2) campaign → adset → one creative+ad PER media, all ACTIVE (parity with the other rails)
           progress("campaign");
-          const camp = await rail.fbPost(`act_${binds.accountId}/campaigns`, campaignPayload(serverCampaign, name));
+          const camp = await graph.fbPost(`act_${binds.accountId}/campaigns`, campaignPayload(serverCampaign, name));
           created.campaign_id = String(camp.id);
 
           progress("adset");
           const adset = await withParentRetry(String(camp.id), () =>
-            rail.createAdset(`act_${binds.accountId}/adsets`, adsetPayload(serverCampaign, name, String(camp.id), binds, localeIds)),
+            graph.createAdset(`act_${binds.accountId}/adsets`, adsetPayload(serverCampaign, name, String(camp.id), binds, localeIds)),
           );
           created.adset_id = String(adset.id);
 
@@ -547,7 +549,7 @@ export async function POST(req: Request) {
           for (let i = 0; i < regs.length; i++) {
             const r = regs[i];
             const adName = regs.length > 1 ? `${name} · ${i + 1}` : name;
-            const creative = await rail.fbPost(
+            const creative = await graph.fbPost(
               `act_${binds.accountId}/adcreatives`,
               r.kind === "image"
                 ? imageCreativePayload(serverCampaign, adName, binds, { imageHash: r.imageHash, link })
@@ -567,7 +569,7 @@ export async function POST(req: Request) {
           for (let i = 0; i < creativeIds.length; i++) {
             const adName = creativeIds.length > 1 ? `${name} · ${i + 1}` : name;
             const ad = await withParentRetry(String(adset.id), () =>
-              rail.fbPost(`act_${binds.accountId}/ads`, adPayload(adName, String(adset.id), creativeIds[i])),
+              graph.fbPost(`act_${binds.accountId}/ads`, adPayload(adName, String(adset.id), creativeIds[i])),
             );
             // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
             if (!ad.id) throw new FbError("ad create returned no id", ad);

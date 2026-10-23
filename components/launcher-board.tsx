@@ -463,7 +463,22 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       pixels: [],
     }));
   }, [partner.avLaunch, toolReady.rows]);
-  const boardAccounts = partner.avLaunch ? avToolAccounts : adAccounts;
+  // VC through TOOL (owner ask 23.10: "без токена"): the cabinets are TOOL's VC rows (named
+  // GC-VD-C1-DE-* / seen by a session of TOOL's "VC" project, plus the token's when one is assigned),
+  // carrying the token catalog's pixels where the token holds the cabinet. null off that channel.
+  const vcToolAccountsOpt = useMemo<AdAccountOption[] | null>(() => {
+    if (!partner.vcLaunch || !graphToolActive) return null;
+    return toolReady.rows.map((r) => ({
+      value: r.id,
+      label: r.name || r.id,
+      meta: r.id,
+      subLabel: r.currency ? `${r.id} · ${r.currency}` : r.id,
+      pixels: adAccounts?.find((a) => a.value === r.id)?.pixels ?? [],
+    }));
+  }, [partner.vcLaunch, graphToolActive, toolReady.rows, adAccounts]);
+  /** VC on TOOL with no VC token: no fanpage catalog → the cards take a typed fanpage id. */
+  const vcManualPage = Boolean(partner.vcLaunch) && graphToolActive && !railSigner?.primary;
+  const boardAccounts = partner.avLaunch ? avToolAccounts : (vcToolAccountsOpt ?? adAccounts);
   // The AV card's Profile pick (owner ask 30.09: TOOL took session_id — "теперь можем сделать выбор
   // профилей"): the live TOOL sessions per cabinet, straight from the ready rows. null until the first
   // answer lands, so a card never flags its pick as unavailable while the roster is still loading.
@@ -625,7 +640,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     // over the rail's disabled button; the server refuses signer-less launches too). AV keeps this
     // gate too — its token is what pulls the fanpage, so an unassigned AV slot means no page and no
     // launchable card (owner ask 28.09).
-    if (!signerReady) return;
+    // VC on TOOL needs no VC token (owner ask 23.10) — TOOL is its signer.
+    if (!signerReady && !(partner.vcLaunch && graphToolActive)) return;
     // AV launches ONLY through TOOL (owner ask 28.09): with no live session ready there is nothing
     // to fire, and it must NEVER fall back to a token rail. Belt over the disabled Launch button.
     if (partner.avLaunch && !avOnTool) return;
@@ -1196,6 +1212,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
                 toolAccounts={toolReady.ready ? toolReady.accounts : undefined}
                 // AV: the live TOOL profiles per cabinet for the card's Profile pick (owner ask 30.09).
                 toolSessions={partner.avLaunch ? avToolSessions : undefined}
+                manualPage={vcManualPage}
                 // Соц-class channel picked (MO) → the card's name preview carries the SOC marker
                 // (alternate SYSTEM entries launch unmarked — preview stays unmarked too). TOOL
                 // drops SOC, so never show it on a TOOL wave.

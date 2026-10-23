@@ -451,7 +451,7 @@ export const PARTNERS: PartnerConfig[] = [
     fanpages: [],
     fanpagesFromToken: true,
     accountsFromToken: true,
-    launchNote: "Submits via the VC token",
+    launchNote: "Submits via the VC token or TOOL",
     pageAdLimit: 250,
     // AIF/AV parity: one campaign → one ad set → one ad per creative, ≤5 creatives.
     maxCreatives: 5,

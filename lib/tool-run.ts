@@ -119,8 +119,9 @@ export async function toolLaunchReady(force = false): Promise<ToolReadyResult> {
 // ---- session directory (owner ask 30.09: pick the FB profile a launch runs on) ------------------
 
 /** What the Profile picker shows per TOOL session: its name (av-01), the FB profile behind it and
- *  its status (only `active` sessions are offered). */
-export type ToolSessionInfo = { name: string; profile: string; status: string };
+ *  its status (only `active` sessions are offered) — plus the team project it is filed under (VC
+ *  finds its cabinets by the "VC" project, owner ask 23.10). */
+export type ToolSessionInfo = { name: string; profile: string; status: string; project: string | null };
 
 let dirCache: { at: number; val: ReadonlyMap<number, ToolSessionInfo> | null } | null = null;
 let dirInflight: Promise<ReadonlyMap<number, ToolSessionInfo> | null> | null = null;
@@ -134,7 +135,7 @@ async function computeDirectory(): Promise<ReadonlyMap<number, ToolSessionInfo> 
   const m = new Map<number, ToolSessionInfo>();
   for (const raw of r.data) {
     const s = toSession(raw);
-    if (s.id > 0) m.set(s.id, { name: s.name, profile: s.fb_user_name ?? "", status: s.status });
+    if (s.id > 0) m.set(s.id, { name: s.name, profile: s.fb_user_name ?? "", status: s.status, project: s.project });
   }
   return m;
 }

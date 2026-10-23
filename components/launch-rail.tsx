@@ -143,7 +143,8 @@ export function LaunchRail({
   // launchable card whatever the channel — this gate is really "no catalog", not "TOOL needs our
   // signer to sign". AV keeps it too: its token is exactly what pulls the fanpage (owner ask 28.09),
   // so an unassigned AV slot means no page and nothing to launch.
-  const moSignerMissing = graphRail && !signer?.primary;
+  // VC through TOOL needs no VC token (owner ask 23.10): with TOOL effective, TOOL is the signer.
+  const moSignerMissing = graphRail && !signer?.primary && !(partner.vcLaunch && graphToolActive);
   // AV launches ONLY through TOOL (owner ask 28.09): there is no FB Token fallback, so a not-ready
   // TOOL is a hard block carrying TOOL's own reason (MO/AIF instead fall back to FB Token and are
   // never blocked here). Only meaningful once the AV token is present (moSignerMissing wins first).
@@ -502,7 +503,7 @@ export function LaunchRail({
           ) : moSignerMissing ? (
             <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">
               {partner.vcLaunch
-                ? "No VC launch token yet — an owner adds one under FB tokens (menu) → VC · Launches: a system user with ads_management on the VC cabinets (the Conversions API token in VC's Tracking cannot launch)."
+                ? "No VC launch token — switch to TOOL (a session with VC's cabinets launches without one) or an owner adds a token under FB tokens (menu) → VC · Launches: a system user with ads_management on the VC cabinets (the Conversions API token in VC's Tracking cannot launch)."
                 : "No launch token is assigned for this partner — an owner assigns one under FB tokens (menu)."}
             </p>
           ) : avToolBlocked ? (
