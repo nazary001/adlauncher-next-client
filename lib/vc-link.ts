@@ -19,10 +19,6 @@ import { bidKind } from "./types";
 /** The Meta pixel (dataset) the owner set up for launcher-born VC campaigns (23.10). VC fires
  *  Purchase into it through the Conversions API — every Content Arb landingpage's Tracking names it. */
 export const VC_PIXEL = { id: "1505591128290736", name: "VC pixel" } as const;
-/** The VC landingpage's conversion event (Tracking → Conversion Event). */
-export const VC_EVENT = "Purchase";
-/** VC partner dashboard — where buyers create Content Arb landingpages and copy their links. */
-export const VC_PORTAL_URL = "https://app.valueclick.io/coa/landingpages/";
 
 /** The pixel-less VC mode: Traffic / link clicks (LINK_CLICKS, no promoted_object). */
 export const VC_TRAFFIC_OBJECTIVE = "OUTCOME_TRAFFIC";

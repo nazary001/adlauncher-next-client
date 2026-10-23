@@ -466,7 +466,7 @@ export const PARTNERS: PartnerConfig[] = [
 // clicks with no pixel; pure module (lib/av-delivery) so node --test covers it.
 export { AV_OBJECTIVE, AV_PIXEL, AV_SALES_OBJECTIVE, type AvDelivery, avAdText, avDelivery, avLockPatch } from "./av-delivery";
 // VC (ValueClick) link / pixel / delivery contract — pure module, node --test covers it.
-export { VC_EVENT, VC_PIXEL, VC_PORTAL_URL, VC_READY_LINKS, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcLockPatch, vcReadyLinkOf } from "./vc-link";
+export { VC_PIXEL, VC_READY_LINKS, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcLockPatch, vcReadyLinkOf } from "./vc-link";
 
 export function partnerConfig(id: PartnerId): PartnerConfig {
   return PARTNERS.find((p) => p.id === id) ?? PARTNERS[0];

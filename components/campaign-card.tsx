@@ -36,7 +36,6 @@ import { DEFAULT_PLATFORM_CHOICE, PLATFORM_CHOICES } from "@/lib/publisher-platf
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { AIF_VALUE_PIXEL, AV_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifOfferablePixels, avDelivery, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
 import { VC_PIXEL, VC_READY_LINKS, isPageId, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcReadyLinkOf } from "@/lib/vc-link";
-import { VcTrackingHint } from "./vc-tracking-hint";
 import { aifFlowOf } from "@/lib/aif-link";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
@@ -1459,7 +1458,6 @@ function CampaignCardBase({
                             </div>
                           </div>
                         ) : null}
-                        <VcTrackingHint />
                       </div>
                     </Field>
                   ) : avMode ? (
