@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { type Campaign, bidAmountMissing, bidKind, bidTag, normalizeRoasGoal, parseMoney, withPartnerMark } from "@/lib/types";
 import { type PartnerId, partnerConfig } from "@/lib/partners";
 import { VC_PIXEL, vcDelivery, vcDestination, vcLink } from "@/lib/vc-link";
+import { vcPbConfig, vcPbEnsureLink, vcPbLinkName } from "@/lib/vc-pb";
 import {
   type LaunchBinds,
   SUPPORTED_BID_STRATEGIES,
@@ -64,8 +65,10 @@ const TOOL_DEADLINE_MS = 265_000;
  * POST /api/vc/launch — the VC (ValueClick) launch rail. Mirrors /api/aif/launch stage for stage (same
  * NDJSON events, same Task Manager pipeline, up to 5 creatives — one campaign → one ad set → one ad
  * per creative) with the rail's own pieces: the tree is built on VC's token (/tokens VC · Launches),
- * the ad link is the buyer's VC Content Arb landingpage link as VC prints it (lib/vc-link vcDestination —
- * only VC's own domains, only …/coa/<quiz>-<id>/; a Search Arb link is refused), and the delivery is
+ * the ad link is the DE Postback tracking link (lib/vc-pb, owner 26.10) of the buyer's VC Content Arb
+ * landingpage link as VC prints it (lib/vc-link vcDestination — only VC's own domains, only
+ * …/coa/<quiz>-<id>/; a Search Arb link is refused) — it redirects there, and DE's conversions come
+ * back per campaign / ad set / ad — and the delivery is
  * pinned by the server: Purchase on VC_PIXEL (conversions / min-ROAS — VC fires it through the
  * Conversions API with a value) or Traffic / link clicks with no pixel. No marker pool: the
  * landingpage id is VC's revenue key.
@@ -298,15 +301,34 @@ export async function POST(req: Request) {
   }
   const localeIds = locales.ids;
 
+  // DE Postback (owner 26.10): the ad points at OUR tracking link for this landingpage — it logs the click
+  // (campaign / ad set / ad / placement / fbclid) and 302s to the landingpage with click_id, by which DE
+  // posts the conversions back, so the revenue splits per campaign (lib/vc-pb). Made — or found: the API
+  // answers the same link for the same landingpage — before anything is claimed or written: no tracking
+  // link = no launch (a clean refusal the task manager can retry), never an ad whose revenue nobody sees.
+  const pbCfg = vcPbConfig();
+  if (!pbCfg) {
+    return NextResponse.json(
+      { ok: false, stage: "config", error: "pb_not_configured — the DE Postback token (VC_PB_TOKEN) is not set on the server; VC launches need the tracking link" },
+      { status: 400 },
+    );
+  }
+  const landingLink = vcLink(dest.url);
+  const pb = await vcPbEnsureLink(pbCfg, landingLink, vcPbLinkName(landingLink));
+  if (!pb.ok) {
+    return NextResponse.json({ ok: false, stage: "config", error: pb.error }, { status: pb.status });
+  }
+
   const serverCampaign: Campaign = { ...campaign, ...delivery };
   // The partner mark in the prefix is the ROUTE's, not the client's: a card that kept another
   // partner's prefix across a switch still launches here as "(VC)". A TOOL-born run carries
   // `GCL TOOL - ` after the partner prefix (toolEnsureMark).
   const baseName = withPartnerMark(`${serverCampaign.namePrefix}${serverCampaign.name}`.trim(), partner.label);
   const name = viaTool ? toolEnsureMark(baseName) : baseName;
-  // The ad link: the landingpage link exactly as VC prints it (normalized) — Content Arb takes no
-  // params of ours; Meta's own fbclid is what VC matches the click by.
-  const link = vcLink(dest.url);
+  // The ad link: the DE Postback tracking link, macros and all — Meta fills them. It redirects to the
+  // landingpage exactly as VC prints it (`landingLink`) with everything Meta appends (fbclid — VC's own
+  // CAPI match) plus our click_id.
+  const link = pb.link.trackingUrl;
 
   const encoder = new TextEncoder();
   const stream = withFbBudget({ deadlineAt: Date.now() + FB_BUDGET_MS, retries: FB_BUDGET_RETRIES }, () =>
@@ -473,6 +495,8 @@ export async function POST(req: Request) {
                 tool_job_id: pub.jobId,
                 gcm: dest.lpId,
                 link,
+                landing: landingLink,
+                pb_link_id: pb.link.linkId,
                 page_id: binds.pageId,
                 campaign_id: pub.campaignId,
                 adset_id: pub.adsetId,
@@ -594,7 +618,7 @@ export async function POST(req: Request) {
             gcm: dest.lpId,
             error: null,
           });
-          send({ ok: true, stage: "done", gcm: dest.lpId, link, page_id: binds.pageId, ...created });
+          send({ ok: true, stage: "done", gcm: dest.lpId, link, landing: landingLink, pb_link_id: pb.link.linkId, page_id: binds.pageId, ...created });
         } catch (e) {
           const err = e as FbError;
           // TOOL belt: TOOL accepted the submit but no campaign id is known — the job may be creating

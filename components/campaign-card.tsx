@@ -1439,8 +1439,10 @@ function CampaignCardBase({
                           placeholder="https://www.qualitydays.com/coa/<quiz>-<id>/"
                           className="font-mono text-[12px]"
                         />
-                        {/* VC link preview — the EXACT link the launch sends (vcLinkSegments): the
-                            landingpage link as VC prints it, its landingpage id highlighted. */}
+                        {/* VC link preview — the landingpage link the ad lands on (vcLinkSegments): as
+                            VC prints it, its landingpage id highlighted. The ad itself points at the
+                            DE Postback tracking link the launch makes for it (lib/vc-pb), which
+                            redirects here with click_id — the revenue comes back per campaign. */}
                         {vcDest?.ok ? (
                           <div className="mt-2 overflow-hidden rounded-lg border border-line bg-surface2/50">
                             <div className="max-h-24 select-all overflow-y-auto break-all px-3 py-2 font-mono text-[11px] leading-relaxed">
@@ -1450,6 +1452,11 @@ function CampaignCardBase({
                                 </span>
                               ))}
                             </div>
+                            <p className="border-t border-line px-3 py-1.5 text-[11px] leading-snug text-dim">
+                              The ad points at a <span className="text-ink">DE Postback tracking link</span> made at launch
+                              (trackwow3.xyz/r/…?campaign_id=&#123;&#123;campaign.id&#125;&#125;…) — it redirects here with a
+                              click_id, so the revenue comes back per campaign, ad set and ad.
+                            </p>
                             <div className="flex items-center justify-between gap-2 border-t border-line bg-surface/50 px-2 py-1.5">
                               <span className="select-none font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
                                 VC link · LP {vcDest.lpId}

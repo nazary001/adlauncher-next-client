@@ -22,7 +22,8 @@ function toolBody(over: Partial<Campaign>) {
   const c = { ...card, ...vcDelivery(card.optimization, card.bidStrategy) };
   const kind = bidKind(c.bidStrategy);
   const raw = parseMoney(c.bidCap);
-  const link = vcLink(c.landing);
+  // The route hands TOOL the DE Postback tracking link when one is given (over.link), else the VC link.
+  const link = (over as { link?: string }).link ?? vcLink(c.landing);
   return tl.buildToolCampaign({
     name: tl.toolEnsureMark("[23/10] (VC) - tail"),
     objective: c.objective,
@@ -78,4 +79,12 @@ test("VC via TOOL · link clicks: Traffic, LINK_CLICKS, no conversion", () => {
   assert.equal(r.body.campaign.objective, "OUTCOME_TRAFFIC");
   assert.equal(r.body.adsets[0].optimization_goal, "LINK_CLICKS");
   assert.equal(r.body.adsets[0].conversion, undefined);
+});
+
+test("VC via TOOL · DE Postback (26.10): the tracking link rides on the creative verbatim, macros and all", () => {
+  const track = "https://trackwow3.xyz/r/4ydvshmxgwg5hnd4sk4fq17r?campaign_id={{campaign.id}}&adset_id={{adset.id}}&ad_id={{ad.id}}&placement={{placement}}";
+  const r = toolBody({ link: track } as Partial<Campaign>);
+  assert.ok(r.ok, r.ok ? "" : r.error);
+  if (!r.ok) return;
+  assert.equal(r.body.adsets[0].ads[0].creative.url, track);
 });
