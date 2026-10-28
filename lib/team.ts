@@ -96,8 +96,9 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     openApi: true,
     strictCampaigns: false,
     // av001–av200 uploaded by the owner 28.09 (all bound by 16.10); av201–av300 made by AV 21.10;
-    // av301–av400 added in AV's "UTM Campaign Values" 27.10 (owner ask: "добавим 100 новых кодов на AV партнера").
-    avKeysRegistered: 400,
+    // av301–av400 added in AV's "UTM Campaign Values" 27.10 (owner ask: "добавим 100 новых кодов на AV партнера");
+    // av401–av600 added there 28.10 (owner ask: "добавь 200 новых ключей … и на прод пушнешь сразу").
+    avKeysRegistered: 600,
   },
   // The second team (08.10): only the HS partner, only through LION, Facebook only. Its fanpages are
   // not in the hs-tools registry, so the fanka gate cannot judge them (probed 08.10: 0 of 10; 13.10,
