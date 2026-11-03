@@ -124,7 +124,9 @@ export type AvKnownChat = { host: string; id: string; name: string };
  * enumerated, so a chat on a subdomain OTHER than the conventional chat.<site> is known from here
  * (owner 30.09: the Chat Builder host of thecadrion.com is lp1, its first chat "Emily"; 14.10 "Dating
  * SPY", whose button hands the visitor on to the dating-apps guide with the ad's params; 16.10 "Dating
- * SPY 2", the same flow into the like-or-chat-first article with its one-button rewarded quiz). A pick is
+ * SPY 2", the same flow into the like-or-chat-first article with its one-button rewarded quiz; 03.11 the
+ * five "AR …" chats — Arabic copies, block for block, of the five English chats of lp1, built in Chat
+ * Builder with the same CTA links and utm tail). A pick is
  * checked exactly like a pasted chat — on the pick and again on every launch the host must show ads
  * — so this list only saves the paste; it never vouches for a chat.
  */
@@ -132,6 +134,12 @@ export const AV_KNOWN_CHATS: readonly AvKnownChat[] = [
   { host: "lp1.thecadrion.com", id: "6abc53bbe2e270105e4c5586", name: "Emily — AI Companion (lp1)" },
   { host: "lp1.thecadrion.com", id: "6ac8dd4d0bae90fe7e702cde", name: "Dating SPY — dating apps guide (lp1)" },
   { host: "lp1.thecadrion.com", id: "6ad2171a25c3368a5b21c66c", name: "Dating SPY 2 — like or chat first (lp1)" },
+  // Arabic copies (03.11): the flow of the English chat of the same name, every text in Arabic.
+  { host: "lp1.thecadrion.com", id: "6ae9e475426fe021c5a9a7ba", name: "AR Emily — AI Companion (lp1)" },
+  { host: "lp1.thecadrion.com", id: "6ae9e74f426fe021c5a9a7be", name: "AR TA TEST — AI Job Assistant, forklift (lp1)" },
+  { host: "lp1.thecadrion.com", id: "6ae9e8093e44ce99f107a406", name: "AR Dating SPY — dating apps guide (lp1)" },
+  { host: "lp1.thecadrion.com", id: "6ae9e8ab426fe021c5a9a7c0", name: "AR Dating SPY 2 — like or chat first (lp1)" },
+  { host: "lp1.thecadrion.com", id: "6ae9eac5426fe021c5a9a7c3", name: "AR Dating Long — 12-question dating quiz (lp1)" },
 ];
 
 const normChatHost = (h: unknown): string => String(h ?? "").trim().toLowerCase().replace(/\.+$/, "");

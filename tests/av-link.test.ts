@@ -475,14 +475,26 @@ test("known chats of our sites carry their ONE canonical address; a foreign host
   assert.deepEqual(avKnownChats([], known), []);
 });
 
-test("the shipped registry names the lp1 chats of thecadrion.com — Emily, Dating SPY (14.10) and Dating SPY 2 (16.10) — each a well-formed chat address", () => {
+test("the shipped registry names the lp1 chats of thecadrion.com — Emily, Dating SPY (14.10), Dating SPY 2 (16.10) and the five Arabic copies (03.11) — each a well-formed chat address", () => {
   const DATING_ID = "6ac8dd4d0bae90fe7e702cde";
   const DATING2_ID = "6ad2171a25c3368a5b21c66c";
+  const AR_IDS = ["6ae9e475426fe021c5a9a7ba", "6ae9e74f426fe021c5a9a7be", "6ae9e8093e44ce99f107a406", "6ae9e8ab426fe021c5a9a7c0", "6ae9eac5426fe021c5a9a7c3"];
   const lp1 = AV_KNOWN_CHATS.filter((c) => c.host === "lp1.thecadrion.com");
   assert.deepEqual(
     lp1.map((c) => c.id),
-    [LP1_ID, DATING_ID, DATING2_ID],
-    "all three chats of lp1.thecadrion.com are listed",
+    [LP1_ID, DATING_ID, DATING2_ID, ...AR_IDS],
+    "all eight chats of lp1.thecadrion.com are listed, the English ones first",
+  );
+  assert.deepEqual(
+    lp1.filter((c) => AR_IDS.includes(c.id)).map((c) => c.name),
+    [
+      "AR Emily — AI Companion (lp1)",
+      "AR TA TEST — AI Job Assistant, forklift (lp1)",
+      "AR Dating SPY — dating apps guide (lp1)",
+      "AR Dating SPY 2 — like or chat first (lp1)",
+      "AR Dating Long — 12-question dating quiz (lp1)",
+    ],
+    "every Arabic copy is named after its English original, prefixed AR",
   );
   for (const c of lp1) {
     const url = avChatUrl(`https://${c.host}/?asst=${c.id}`);
@@ -490,13 +502,10 @@ test("the shipped registry names the lp1 chats of thecadrion.com — Emily, Dati
   }
   assert.deepEqual(
     avKnownChats(["thecadrion.com"]).map((c) => c.base),
-    [
-      `https://lp1.thecadrion.com/?asst=${LP1_ID}`,
-      `https://lp1.thecadrion.com/?asst=${DATING_ID}`,
-      `https://lp1.thecadrion.com/?asst=${DATING2_ID}`,
-    ],
+    [LP1_ID, DATING_ID, DATING2_ID, ...AR_IDS].map((id) => `https://lp1.thecadrion.com/?asst=${id}`),
     "the default registry is what the card offers",
   );
+  assert.equal(new Set(AV_KNOWN_CHATS.map((c) => c.id)).size, AV_KNOWN_CHATS.length, "no chat is listed twice");
   assert.equal(
     new Set(AV_KNOWN_CHATS.map((c) => c.name)).size,
     AV_KNOWN_CHATS.length,
