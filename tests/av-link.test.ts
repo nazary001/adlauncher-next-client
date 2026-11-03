@@ -475,15 +475,16 @@ test("known chats of our sites carry their ONE canonical address; a foreign host
   assert.deepEqual(avKnownChats([], known), []);
 });
 
-test("the shipped registry names the lp1 chats of thecadrion.com — Emily, Dating SPY (14.10), Dating SPY 2 (16.10) and the five Arabic copies (03.11) — each a well-formed chat address", () => {
+test("the shipped registry names the lp1 chats of thecadrion.com — Emily, Dating SPY (14.10), Dating SPY 2 (16.10), the five Arabic and the five Spanish copies (03.11) — each a well-formed chat address", () => {
   const DATING_ID = "6ac8dd4d0bae90fe7e702cde";
   const DATING2_ID = "6ad2171a25c3368a5b21c66c";
   const AR_IDS = ["6ae9e475426fe021c5a9a7ba", "6ae9e74f426fe021c5a9a7be", "6ae9e8093e44ce99f107a406", "6ae9e8ab426fe021c5a9a7c0", "6ae9eac5426fe021c5a9a7c3"];
+  const ES_IDS = ["6ae9f40b524dade501122201", "6ae9f4856eef648850de9834", "6ae9f51d524dade501122213", "6ae9f5b5524dade50112221e", "6ae9f7a4524dade501122242"];
   const lp1 = AV_KNOWN_CHATS.filter((c) => c.host === "lp1.thecadrion.com");
   assert.deepEqual(
     lp1.map((c) => c.id),
-    [LP1_ID, DATING_ID, DATING2_ID, ...AR_IDS],
-    "all eight chats of lp1.thecadrion.com are listed, the English ones first",
+    [LP1_ID, DATING_ID, DATING2_ID, ...AR_IDS, ...ES_IDS],
+    "all thirteen chats of lp1.thecadrion.com are listed: English, then Arabic, then Spanish",
   );
   assert.deepEqual(
     lp1.filter((c) => AR_IDS.includes(c.id)).map((c) => c.name),
@@ -496,13 +497,24 @@ test("the shipped registry names the lp1 chats of thecadrion.com — Emily, Dati
     ],
     "every Arabic copy is named after its English original, prefixed AR",
   );
+  assert.deepEqual(
+    lp1.filter((c) => ES_IDS.includes(c.id)).map((c) => c.name),
+    [
+      "ES Emily — AI Companion (lp1)",
+      "ES TA TEST — AI Job Assistant, forklift (lp1)",
+      "ES Dating SPY — dating apps guide (lp1)",
+      "ES Dating SPY 2 — like or chat first (lp1)",
+      "ES Dating Long — 12-question dating quiz (lp1)",
+    ],
+    "every Spanish copy is named after its English original, prefixed ES",
+  );
   for (const c of lp1) {
     const url = avChatUrl(`https://${c.host}/?asst=${c.id}`);
     assert.equal(url.ok && url.base, `https://lp1.thecadrion.com/?asst=${c.id}`);
   }
   assert.deepEqual(
     avKnownChats(["thecadrion.com"]).map((c) => c.base),
-    [LP1_ID, DATING_ID, DATING2_ID, ...AR_IDS].map((id) => `https://lp1.thecadrion.com/?asst=${id}`),
+    [LP1_ID, DATING_ID, DATING2_ID, ...AR_IDS, ...ES_IDS].map((id) => `https://lp1.thecadrion.com/?asst=${id}`),
     "the default registry is what the card offers",
   );
   assert.equal(new Set(AV_KNOWN_CHATS.map((c) => c.id)).size, AV_KNOWN_CHATS.length, "no chat is listed twice");
