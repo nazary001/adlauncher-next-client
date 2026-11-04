@@ -146,6 +146,12 @@ export const AV_KNOWN_CHATS: readonly AvKnownChat[] = [
   { host: "lp1.thecadrion.com", id: "6ae9f51d524dade501122213", name: "ES Dating SPY — dating apps guide (lp1)" },
   { host: "lp1.thecadrion.com", id: "6ae9f5b5524dade50112221e", name: "ES Dating SPY 2 — like or chat first (lp1)" },
   { host: "lp1.thecadrion.com", id: "6ae9f7a4524dade501122242", name: "ES Dating Long — 12-question dating quiz (lp1)" },
+  // German copies (04.11): the flow of the English chat of the same name, every text in German.
+  { host: "lp1.thecadrion.com", id: "6aeadf06e3b779ea0d8ef859", name: "DE Emily — AI Companion (lp1)" },
+  { host: "lp1.thecadrion.com", id: "6aeadfa9944e71bd038a4eca", name: "DE TA TEST — AI Job Assistant, forklift (lp1)" },
+  { host: "lp1.thecadrion.com", id: "6aeae04f944e71bd038a4ecd", name: "DE Dating SPY — dating apps guide (lp1)" },
+  { host: "lp1.thecadrion.com", id: "6aeae0f3fd24c3b820a7c043", name: "DE Dating SPY 2 — like or chat first (lp1)" },
+  { host: "lp1.thecadrion.com", id: "6aeae225944e71bd038a4ed1", name: "DE Dating Long — 12-question dating quiz (lp1)" },
 ];
 
 const normChatHost = (h: unknown): string => String(h ?? "").trim().toLowerCase().replace(/\.+$/, "");

@@ -475,16 +475,17 @@ test("known chats of our sites carry their ONE canonical address; a foreign host
   assert.deepEqual(avKnownChats([], known), []);
 });
 
-test("the shipped registry names the lp1 chats of thecadrion.com — Emily, Dating SPY (14.10), Dating SPY 2 (16.10), the five Arabic and the five Spanish copies (03.11) — each a well-formed chat address", () => {
+test("the shipped registry names the lp1 chats of thecadrion.com — Emily, Dating SPY (14.10), Dating SPY 2 (16.10), the five Arabic and the five Spanish copies (03.11), the five German copies (04.11) — each a well-formed chat address", () => {
   const DATING_ID = "6ac8dd4d0bae90fe7e702cde";
   const DATING2_ID = "6ad2171a25c3368a5b21c66c";
   const AR_IDS = ["6ae9e475426fe021c5a9a7ba", "6ae9e74f426fe021c5a9a7be", "6ae9e8093e44ce99f107a406", "6ae9e8ab426fe021c5a9a7c0", "6ae9eac5426fe021c5a9a7c3"];
   const ES_IDS = ["6ae9f40b524dade501122201", "6ae9f4856eef648850de9834", "6ae9f51d524dade501122213", "6ae9f5b5524dade50112221e", "6ae9f7a4524dade501122242"];
+  const DE_IDS = ["6aeadf06e3b779ea0d8ef859", "6aeadfa9944e71bd038a4eca", "6aeae04f944e71bd038a4ecd", "6aeae0f3fd24c3b820a7c043", "6aeae225944e71bd038a4ed1"];
   const lp1 = AV_KNOWN_CHATS.filter((c) => c.host === "lp1.thecadrion.com");
   assert.deepEqual(
     lp1.map((c) => c.id),
-    [LP1_ID, DATING_ID, DATING2_ID, ...AR_IDS, ...ES_IDS],
-    "all thirteen chats of lp1.thecadrion.com are listed: English, then Arabic, then Spanish",
+    [LP1_ID, DATING_ID, DATING2_ID, ...AR_IDS, ...ES_IDS, ...DE_IDS],
+    "all eighteen chats of lp1.thecadrion.com are listed: English, then Arabic, then Spanish, then German",
   );
   assert.deepEqual(
     lp1.filter((c) => AR_IDS.includes(c.id)).map((c) => c.name),
@@ -508,13 +509,24 @@ test("the shipped registry names the lp1 chats of thecadrion.com — Emily, Dati
     ],
     "every Spanish copy is named after its English original, prefixed ES",
   );
+  assert.deepEqual(
+    lp1.filter((c) => DE_IDS.includes(c.id)).map((c) => c.name),
+    [
+      "DE Emily — AI Companion (lp1)",
+      "DE TA TEST — AI Job Assistant, forklift (lp1)",
+      "DE Dating SPY — dating apps guide (lp1)",
+      "DE Dating SPY 2 — like or chat first (lp1)",
+      "DE Dating Long — 12-question dating quiz (lp1)",
+    ],
+    "every German copy is named after its English original, prefixed DE",
+  );
   for (const c of lp1) {
     const url = avChatUrl(`https://${c.host}/?asst=${c.id}`);
     assert.equal(url.ok && url.base, `https://lp1.thecadrion.com/?asst=${c.id}`);
   }
   assert.deepEqual(
     avKnownChats(["thecadrion.com"]).map((c) => c.base),
-    [LP1_ID, DATING_ID, DATING2_ID, ...AR_IDS, ...ES_IDS].map((id) => `https://lp1.thecadrion.com/?asst=${id}`),
+    [LP1_ID, DATING_ID, DATING2_ID, ...AR_IDS, ...ES_IDS, ...DE_IDS].map((id) => `https://lp1.thecadrion.com/?asst=${id}`),
     "the default registry is what the card offers",
   );
   assert.equal(new Set(AV_KNOWN_CHATS.map((c) => c.id)).size, AV_KNOWN_CHATS.length, "no chat is listed twice");
