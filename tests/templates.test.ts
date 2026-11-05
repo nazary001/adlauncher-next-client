@@ -284,10 +284,12 @@ test("templateFieldDefsFor: the partner's own fields, one entry per key, creativ
   const av = templateFieldDefsFor({ avLaunch: true, fanpagesFromToken: true, accountsFromToken: true });
   const avKeys = av.map((d) => d.key);
   assert.ok(avKeys.includes("platforms") && avKeys.includes("toolSession") && avKeys.includes("landing") && !avKeys.includes("pixel"));
-  // VC (23.10): the pasted landingpage link rides `landing`; pixel / objective / event are pinned (vcDelivery)
+  // VC (23.10): the pasted landingpage link rides `landing`; the pixel is pinned (vcDelivery). Since 05.11 the
+  // objective + event ride with the optimization — together they are the card's mode (Purchase / Lead / clicks).
   const vcKeys = templateFieldDefsFor({ vcLaunch: true, fanpagesFromToken: true, accountsFromToken: true }).map((d) => d.key);
   assert.ok(vcKeys.includes("landing") && vcKeys.includes("optimization") && vcKeys.includes("headline"));
-  assert.ok(!vcKeys.includes("pixel") && !vcKeys.includes("objective") && !vcKeys.includes("conversionEvent") && !vcKeys.includes("link") && !vcKeys.includes("platforms"));
+  assert.ok(vcKeys.includes("objective") && vcKeys.includes("conversionEvent"));
+  assert.ok(!vcKeys.includes("pixel") && !vcKeys.includes("link") && !vcKeys.includes("platforms"));
   // the name is offered but off by default; everything else on
   const nameDef = mo.find((d) => d.key === "name");
   assert.equal(nameDef?.defaultOn, false);

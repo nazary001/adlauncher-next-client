@@ -7,20 +7,34 @@ import assert from "node:assert/strict";
 
 const {
   VC_PIXEL,
+  VC_LEAD_PIXEL,
+  VC_PIXELS,
   VC_SALES_OBJECTIVE,
+  VC_LEADS_OBJECTIVE,
   VC_TRAFFIC_OBJECTIVE,
   VC_READY_LINKS,
+  pinVcNamePrefix,
+  vcArticleTitle,
+  vcAutoName,
   vcDelivery,
   vcDestination,
   vcLink,
   vcLinkSegments,
   vcLockPatch,
+  vcModeOf,
+  vcPixelName,
   vcReadyLinkOf,
+  vcServerName,
 } = await import("../lib/vc-link.ts");
-const { makeCampaign } = await import("../lib/types.ts");
+const { makeCampaign, withPartnerMark } = await import("../lib/types.ts");
 const { adsetPayload, campaignPayload, creativePayload } = await import("../lib/fb-launch.ts");
+const { VC_OPTIMIZATIONS } = await import("../lib/catalog.ts");
+const { buildToolCampaign } = await import("../lib/tool-launch.ts");
+const { toolInputFromCampaign } = await import("../lib/tool-run.ts");
 
 const LP = "https://www.qualitydays.com/coa/words-or-actions-fn3zbpziuj/";
+/** A Content Arb link of a landingpage NOT in the ready list — its title comes from the slug. */
+const LP_OTHER = "https://www.qualitydays.com/coa/explore-your-dating-style-zz9yx8wv7u/";
 
 test("the VC pixel is the dataset the owner gave for launcher campaigns", () => {
   assert.equal(VC_PIXEL.id, "1505591128290736");
@@ -35,11 +49,145 @@ test("vcDelivery: conversions / min-ROAS = Sales + Purchase on the VC pixel; cli
   assert.equal(vcDelivery("garbage").pixel, VC_PIXEL.id);
 });
 
+// ---- the Lead mode (owner ask 05.11: «возможность заливать на событие Lead») ----------------------------
+
+test("the Lead dataset is the S-1 nik pixel the owner named; the known VC datasets carry their names", () => {
+  assert.equal(VC_LEAD_PIXEL.id, "2126539511577664");
+  assert.equal(VC_LEAD_PIXEL.name, "S-1 nik pixel");
+  assert.deepEqual(VC_PIXELS.map((p) => p.id), [VC_PIXEL.id, VC_LEAD_PIXEL.id]);
+  assert.equal(vcPixelName(VC_LEAD_PIXEL.id), "S-1 nik pixel");
+  assert.equal(vcPixelName(VC_PIXEL.id), "VC pixel");
+  assert.equal(vcPixelName("123"), "123");
+  // the card's select offers the three modes by their mode value, Lead in the middle
+  assert.deepEqual(VC_OPTIMIZATIONS.map((o) => o.value), ["conversions", "lead", "clicks"]);
+  assert.match(VC_OPTIMIZATIONS[1].label, /Lead/);
+  assert.match(VC_OPTIMIZATIONS[1].label, /S-1 nik pixel/);
+});
+
+test("vcDelivery('lead') = a Leads campaign optimizing LEAD on the S-1 nik pixel; min-ROAS still means Purchase value", () => {
+  assert.deepEqual(vcDelivery("lead"), { objective: VC_LEADS_OBJECTIVE, optimization: "conversions", pixel: VC_LEAD_PIXEL.id, conversionEvent: "LEAD" });
+  assert.equal(VC_LEADS_OBJECTIVE, "OUTCOME_LEADS");
+  // a Lead card that switches to min-ROAS optimizes purchase VALUE on the VC pixel (Lead carries no value)
+  assert.deepEqual(vcDelivery("lead", "LOWEST_COST_WITH_MIN_ROAS"), vcDelivery("conversions"));
+  // a bid cap / cost cap keeps the Lead mode
+  assert.equal(vcDelivery("lead", "LOWEST_COST_WITH_BID_CAP").conversionEvent, "LEAD");
+  assert.equal(vcDelivery("lead", "COST_CAP").objective, VC_LEADS_OBJECTIVE);
+});
+
+test("vcModeOf: the mode is read off optimization + event — LEAD under conversions is the Lead mode, anything else Purchase", () => {
+  const c = makeCampaign("m1");
+  assert.equal(vcModeOf(c), "conversions");
+  assert.equal(vcModeOf({ ...c, conversionEvent: "LEAD" }), "lead");
+  assert.equal(vcModeOf({ ...c, optimization: "clicks", conversionEvent: "LEAD" }), "clicks");
+  // another partner's draft event reads as Purchase (vcDelivery then pins PURCHASE)
+  assert.equal(vcModeOf({ ...c, conversionEvent: "CONTENT_VIEW" }), "conversions");
+  // the round trip: the mode the select shows is the mode its patch wrote
+  for (const mode of ["conversions", "lead", "clicks"] as const) {
+    assert.equal(vcModeOf({ ...c, ...vcDelivery(mode) }), mode, mode);
+  }
+});
+
 test("vcLockPatch: a fresh card converges to Purchase on the VC pixel and is idempotent", () => {
   const c = makeCampaign("c1");
   const patch = vcLockPatch(c);
   assert.deepEqual(patch, { pixel: VC_PIXEL.id });
   assert.deepEqual(vcLockPatch({ ...c, ...patch }), {});
+});
+
+test("vcLockPatch: a Lead card keeps Lead — Leads objective + LEAD on the S-1 nik pixel — and is idempotent; a stale pixel / objective converge", () => {
+  const lead = { ...makeCampaign("c3"), ...vcDelivery("lead") };
+  assert.deepEqual(vcLockPatch(lead), {});
+  // a restored Lead draft that still carries the VC pixel / Sales objective converges (the event wins)
+  const stale = { ...lead, pixel: VC_PIXEL.id, objective: VC_SALES_OBJECTIVE };
+  assert.deepEqual(vcLockPatch(stale), { objective: VC_LEADS_OBJECTIVE, pixel: VC_LEAD_PIXEL.id });
+  // a Lead card on min-ROAS snaps to Purchase on the VC pixel (value), the strategy untouched
+  const roas = { ...lead, bidStrategy: "LOWEST_COST_WITH_MIN_ROAS", bidCap: "0,3" };
+  assert.deepEqual(vcLockPatch(roas), { objective: VC_SALES_OBJECTIVE, pixel: VC_PIXEL.id, conversionEvent: "PURCHASE" });
+  // Lead → clicks drops to Traffic without a pixel; the stale LEAD event is harmless (no promoted_object)
+  const clicks = { ...lead, optimization: "clicks" as const };
+  assert.deepEqual(vcLockPatch(clicks), { objective: VC_TRAFFIC_OBJECTIVE, pixel: "" });
+});
+
+test("the shared FB payloads for a Lead card: OUTCOME_LEADS + OFFSITE_CONVERSIONS with LEAD on the S-1 nik pixel", () => {
+  const lead = { ...makeCampaign("c11"), countries: ["US"], ...vcDelivery("lead") };
+  assert.equal(campaignPayload(lead, "n").objective, "OUTCOME_LEADS");
+  const binds = { accountId: "123456", pageId: "6100", pageName: "Page", pixelId: lead.pixel };
+  const as = adsetPayload(lead, "n", "1", binds, []) as { promoted_object?: { pixel_id: string; custom_event_type: string }; optimization_goal: string };
+  assert.equal(as.optimization_goal, "OFFSITE_CONVERSIONS");
+  assert.deepEqual(as.promoted_object, { pixel_id: VC_LEAD_PIXEL.id, custom_event_type: "LEAD" });
+});
+
+test("through TOOL a Lead card builds OUTCOME_LEADS / OFFSITE_CONVERSIONS / WEBSITE LEAD on the S-1 nik pixel (inferred combo, allow_inferred)", () => {
+  const lead = { ...makeCampaign("c12"), countries: ["US"], budget: "7", bidStrategy: "LOWEST_COST_WITH_BID_CAP", bidCap: "0,50", cta: "LEARN_MORE", ...vcDelivery("lead") };
+  const input = toolInputFromCampaign(lead, {
+    name: "n",
+    pageId: "6100",
+    pixelId: lead.pixel,
+    localeIds: [],
+    creatives: [{ name: "n", media: { kind: "video", id: "v1" } as never, primaryText: "t", headline: "h", url: "https://trackwow3.xyz/r/x", cta: "LEARN_MORE" }],
+    status: "ACTIVE",
+    accountCurrency: "USD",
+  });
+  const r = buildToolCampaign(input);
+  assert.ok(r.ok, r.ok ? "" : r.error);
+  if (!r.ok) return;
+  assert.equal(r.body.campaign.objective, "OUTCOME_LEADS");
+  assert.equal(r.body.adsets[0].optimization_goal, "OFFSITE_CONVERSIONS");
+  assert.deepEqual(r.body.adsets[0].conversion, { destination_type: "WEBSITE", pixel_id: VC_LEAD_PIXEL.id, event: "LEAD" });
+  assert.deepEqual(r.body.adsets[0].bid, { amount: 0.5 });
+  // TOOL's /capabilities (05.11) confirms only LEAD_GENERATION/ON_AD under Leads — the website Lead combo rides inferred
+  assert.equal(r.body.options?.allow_inferred, true);
+});
+
+// ---- the name carries the landingpage's title (owner ask 05.11) ------------------------------------------
+
+test("vcArticleTitle: a ready landingpage's own VC title; any other Content Arb link reads its slug as words; junk = ''", () => {
+  assert.equal(vcArticleTitle(LP), "Words or Actions? Explore Your Connection Style");
+  assert.equal(vcArticleTitle("qualitydays.com/coa/explore-your-food-personality-35hkgthi0x?x=1"), "Explore Your Food Personality");
+  assert.equal(vcArticleTitle(LP_OTHER), "Explore your dating style");
+  assert.equal(vcArticleTitle("https://www.qualitydays.com/coa/money-zz9yx8wv7u/"), "Money");
+  assert.equal(vcArticleTitle("https://example.com/coa/words-or-actions-fn3zbpziuj/"), "");
+  assert.equal(vcArticleTitle("https://www.qualitydays.com/rsp/x/?cmpid=abc123defg"), "");
+  assert.equal(vcArticleTitle(""), "");
+  assert.equal(vcAutoName(LP_OTHER), "Explore your dating style - ");
+  assert.equal(vcAutoName(""), "");
+});
+
+test("pinVcNamePrefix: the partner prefix + the title as its own segment, identity-preserving", () => {
+  const base = "[05/11] (VC) - ";
+  const a = { ...makeCampaign("p1", base, "Tima"), landing: LP };
+  const b = { ...makeCampaign("p2", base, "Katya"), landing: "" };
+  const rows = [a, b];
+  const pinned = pinVcNamePrefix(rows, base);
+  assert.equal(pinned[0].namePrefix, "[05/11] (VC) - Words or Actions? Explore Your Connection Style - ");
+  assert.equal(pinned[0].name, "Tima");
+  assert.equal(pinned[1].namePrefix, base);
+  assert.equal(pinVcNamePrefix(pinned, base), pinned);
+  // the link changes → the prefix follows
+  const moved = pinVcNamePrefix([{ ...pinned[0], landing: LP_OTHER }], base);
+  assert.equal(moved[0].namePrefix, "[05/11] (VC) - Explore your dating style - ");
+  // a card born on another partner keeps only the date prefix it is given
+  assert.equal(pinVcNamePrefix([{ ...a, namePrefix: "[05/11] (MO) - " }], base)[0].namePrefix, pinned[0].namePrefix);
+});
+
+test("vcServerName: date prefix + the RESOLVED link's title + the tail; a tail that already carries the title is not doubled", () => {
+  const full = "[05/11] (VC) - Words or Actions? Explore Your Connection Style - Tima";
+  assert.equal(vcServerName("[05/11] (VC) - ", "Tima", LP), full);
+  // the client's locked prefix (title and all) is NOT the server's word — only its date part is kept
+  assert.equal(vcServerName("[05/11] (VC) - Some Stale Title - ", "Tima", LP), full);
+  // a tab that kept the title in the editable field / a buyer who typed it as a segment
+  assert.equal(vcServerName("[05/11] (VC) - ", "Words or Actions? Explore Your Connection Style - Tima", LP), full);
+  assert.equal(vcServerName("[05/11] (VC) - ", "Tima - words or actions? explore your connection style", LP), "[05/11] (VC) - Tima - words or actions? explore your connection style");
+  // a title inside a longer segment is not the title
+  assert.equal(vcServerName("[05/11] (VC) - ", "Tima Words or Actions? Explore Your Connection Style", LP), "[05/11] (VC) - Words or Actions? Explore Your Connection Style - Tima Words or Actions? Explore Your Connection Style");
+  // an empty tail = the title alone; a dotted date prefix is kept as is; no prefix grammar = no date
+  assert.equal(vcServerName("[05/11] (VC) - ", "", LP), "[05/11] (VC) - Words or Actions? Explore Your Connection Style");
+  assert.equal(vcServerName("[05.11] (VC) - ", "Tima", LP_OTHER), "[05.11] (VC) - Explore your dating style - Tima");
+  assert.equal(vcServerName("", "Tima", LP_OTHER), "Explore your dating style - Tima");
+  // the route then stamps its own partner mark into the prefix
+  assert.equal(withPartnerMark(vcServerName("[05/11] (MO) - ", "Tima", LP_OTHER), "VC"), "[05/11] (VC) - Explore your dating style - Tima");
+  // a link that is not a VC landingpage (the route refuses it earlier anyway) adds nothing
+  assert.equal(vcServerName("[05/11] (VC) - ", "Tima", "https://example.com/x"), "[05/11] (VC) - Tima");
 });
 
 test("vcLockPatch: clicks drop to Traffic without a pixel; min-ROAS keeps (and forces) conversions", () => {

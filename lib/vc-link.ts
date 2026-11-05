@@ -15,15 +15,26 @@
 // here (owner 23.10: "нужен content arb только") — such a link is refused with its own reason.
 import type { Campaign } from "./types";
 import { bidKind } from "./types";
+import { carriesOwnName } from "./own-name.ts";
 
 /** The Meta pixel (dataset) the owner set up for launcher-born VC campaigns (23.10). VC fires
  *  Purchase into it through the Conversions API — every Content Arb landingpage's Tracking names it. */
 export const VC_PIXEL = { id: "1505591128290736", name: "VC pixel" } as const;
+/** The dataset the owner named for Lead (05.11, first for the Lead clones: «на этот новый пиксель … лид
+ *  оптимизацию вместо пурчейс»): "S-1 nik pixel", BM VD Market — shared to every GC-for-VC cabinet (read 05.11
+ *  with the VC token). A Lead launch optimizes LEAD on it (vcDelivery). */
+export const VC_LEAD_PIXEL = { id: "2126539511577664", name: "S-1 nik pixel" } as const;
+/** The VC datasets the launcher knows by name (the clone board offers them; the launch pins one by event). */
+export const VC_PIXELS: readonly { id: string; name: string }[] = [VC_PIXEL, VC_LEAD_PIXEL];
+export const vcPixelName = (id: string): string => VC_PIXELS.find((p) => p.id === id)?.name ?? id;
 
 /** The pixel-less VC mode: Traffic / link clicks (LINK_CLICKS, no promoted_object). */
 export const VC_TRAFFIC_OBJECTIVE = "OUTCOME_TRAFFIC";
 /** The default VC mode: Sales, optimizing Purchase on VC_PIXEL (min-ROAS too — VC's events carry a value). */
 export const VC_SALES_OBJECTIVE = "OUTCOME_SALES";
+/** The Lead mode: a Leads campaign optimizing LEAD on VC_LEAD_PIXEL — Meta allows the LEAD event only under
+ *  OUTCOME_LEADS (lib/catalog EVENTS_BY_OBJECTIVE). */
+export const VC_LEADS_OBJECTIVE = "OUTCOME_LEADS";
 
 /** Hosts VC serves landingpages on (the dashboard's "Domain" select: QualityDays). A landingpage
  *  on a new VC domain = one entry here. Subdomains (www.) are accepted. */
@@ -117,25 +128,41 @@ export const isPageId = (v: string): boolean => /^\d{5,30}$/.test(String(v ?? ""
  *  ("fn3zbpziuj"); the slug before them is any run of lowercase words. */
 const COA_PATH_RE = /^\/coa\/((?:[a-z0-9]+-)+)([a-z0-9]{10})\/?$/;
 
-export type VcDelivery = { objective: string; optimization: Campaign["optimization"]; pixel: string; conversionEvent?: string };
+export type VcEvent = "PURCHASE" | "LEAD";
+export type VcDelivery = { objective: string; optimization: Campaign["optimization"]; pixel: string; conversionEvent?: VcEvent };
+
+/** The card's Optimization pick on the VC rail (lib/catalog VC_OPTIMIZATIONS): Purchase on VC_PIXEL
+ *  ("conversions" — a fresh card's default), Lead on VC_LEAD_PIXEL ("lead", owner ask 05.11: «возможность
+ *  заливать на событие Lead»), or Traffic / link clicks with no pixel ("clicks"). */
+export type VcMode = "conversions" | "lead" | "clicks";
+
+/** The mode a card is in, read off the two fields that encode it — the optimization (conversions /
+ *  clicks) and, for conversions, the event (LEAD = the Lead mode; anything else = Purchase). A card
+ *  of another partner's draft (optimization "conversions" + some other event) reads as Purchase. */
+export function vcModeOf(c: Pick<Campaign, "optimization" | "conversionEvent">): VcMode {
+  if (c.optimization === "clicks") return "clicks";
+  return c.conversionEvent === "LEAD" ? "lead" : "conversions";
+}
 
 /**
- * What a card's optimization (and bid strategy) means on the VC rail: conversions — and min-ROAS,
- * which always optimizes purchase value — = Sales optimizing Purchase on VC_PIXEL (a fresh card's
- * default); clicks = Traffic / link clicks with no pixel. Anything but "clicks" reads as conversions.
- * The ONE mapping the card, the locks and the launch route all use.
+ * What a card's mode (and bid strategy) means on the VC rail: Purchase — and min-ROAS, which always
+ * optimizes purchase VALUE, whatever the mode — = Sales optimizing PURCHASE on VC_PIXEL; Lead = a Leads
+ * campaign optimizing LEAD on VC_LEAD_PIXEL (the dataset VC's Lead landingpages fire into); clicks =
+ * Traffic / link clicks with no pixel. Anything else reads as Purchase. The ONE mapping the card, the
+ * locks and the launch route all use — pass vcModeOf(card) for a card.
  */
-export function vcDelivery(optimization: string, bidStrategy = ""): VcDelivery {
-  return optimization === "clicks" && bidKind(bidStrategy) !== "roas"
-    ? { objective: VC_TRAFFIC_OBJECTIVE, optimization: "clicks", pixel: "" }
-    : { objective: VC_SALES_OBJECTIVE, optimization: "conversions", pixel: VC_PIXEL.id, conversionEvent: "PURCHASE" };
+export function vcDelivery(mode: string, bidStrategy = ""): VcDelivery {
+  const roas = bidKind(bidStrategy) === "roas";
+  if (mode === "clicks" && !roas) return { objective: VC_TRAFFIC_OBJECTIVE, optimization: "clicks", pixel: "" };
+  if (mode === "lead" && !roas) return { objective: VC_LEADS_OBJECTIVE, optimization: "conversions", pixel: VC_LEAD_PIXEL.id, conversionEvent: "LEAD" };
+  return { objective: VC_SALES_OBJECTIVE, optimization: "conversions", pixel: VC_PIXEL.id, conversionEvent: "PURCHASE" };
 }
 
 /** The VC lock for one card (applyPartnerLocks): objective, optimization, pixel and event converge
- *  to vcDelivery. Empty patch = the card already conforms. */
+ *  to vcDelivery of the card's own mode. Empty patch = the card already conforms. */
 export function vcLockPatch(r: Campaign): Partial<Campaign> {
   const patch: Partial<Campaign> = {};
-  const d = vcDelivery(r.optimization, r.bidStrategy);
+  const d = vcDelivery(vcModeOf(r), r.bidStrategy);
   if (r.objective !== d.objective) patch.objective = d.objective;
   if (r.optimization !== d.optimization) patch.optimization = d.optimization;
   if (r.pixel !== d.pixel) patch.pixel = d.pixel;
@@ -211,4 +238,66 @@ export function vcLink(raw: string): string {
   return vcLinkSegments(raw)
     .map((s) => s.text)
     .join("");
+}
+// ---- the campaign name carries the landingpage's title (owner ask 05.11: «чтобы при запуске в нейминг
+// добавлялось название самой статьи») ------------------------------------------------------------------
+// The VC "article" is the Content Arb landingpage (quiz) the card points at. Its title joins the name as
+// its own " - " segment right after the partner prefix — the AV pattern (lib/av-link pinAvNamePrefix /
+// avServerName): the board pins it into the card's LOCKED prefix, the buyer types only the tail, and the
+// launch route rebuilds the same name from the RESOLVED link, so the locked part is never the client's word.
+//   [05/11] (VC) - Explore Your Dating Style - Tima
+
+const VC_DATE_PREFIX = /^\[\d{2}[./]\d{2}\]\s*\([^)]*\)\s*-\s*/;
+
+/**
+ * The landingpage's title for the campaign name: a ready landingpage's own title (VC_READY_LINKS — the
+ * name VC shows for it); any other Content Arb link reads its quiz slug as words, first letter up
+ * ("explore-your-dating-style" → "Explore your dating style"). "" = not a valid VC link.
+ */
+export function vcArticleTitle(raw: string): string {
+  const d = vcDestination(raw);
+  if (!d.ok) return "";
+  const ready = VC_READY_LINKS.find((l) => l.id === d.lpId);
+  if (ready) return ready.title;
+  const u = new URL(d.url);
+  const slug = u.pathname.slice("/coa/".length, -1 - d.lpId.length).replace(/-+$/, "");
+  const words = slug.split("-").filter(Boolean).join(" ");
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "";
+}
+
+/** The locked name part a VC card carries after the partner prefix: "<title> - " (empty without a valid link). */
+export function vcAutoName(landing: string): string {
+  const title = vcArticleTitle(landing);
+  return title ? `${title} - ` : "";
+}
+
+/**
+ * The board's name-prefix pin for VC cards (lib/types pinNamePrefix's twin): the partner prefix
+ * ("[DD/MM] (VC) - ") plus the landingpage's title as its own segment, so the card shows it under the
+ * lock, the launch bay reads it and the buyer's `name` stays the typed tail alone. Identity-preserving —
+ * the SAME array when every card already carries its prefix.
+ */
+export function pinVcNamePrefix<T extends { namePrefix: string; landing: string }>(rows: T[], base: string): T[] {
+  let changed = false;
+  const next = rows.map((c) => {
+    const want = base + vcAutoName(c.landing);
+    if (c.namePrefix === want) return c;
+    changed = true;
+    return { ...c, namePrefix: want };
+  });
+  return changed ? next : rows;
+}
+
+/**
+ * The VC campaign name the SERVER builds: the client's "[DD/MM] (VC) - " date prefix (the route then
+ * stamps its own partner mark into it), the title of the RESOLVED landingpage link as its own segment,
+ * then the buyer's typed tail. A tail that already carries the title as a whole " - " segment (a tab
+ * that kept it in the editable field, or a buyer who typed it) is not doubled.
+ */
+export function vcServerName(clientPrefix: string, clientName: string, landing: string): string {
+  const date = VC_DATE_PREFIX.exec(String(clientPrefix ?? ""))?.[0] ?? "";
+  const title = vcArticleTitle(landing);
+  const tail = String(clientName ?? "").trim();
+  if (!title || carriesOwnName(tail, title)) return `${date}${tail}`.trim();
+  return `${date}${title}${tail ? ` - ${tail}` : ""}`.trim();
 }

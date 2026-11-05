@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { type Campaign, bidAmountMissing, bidKind, bidTag, normalizeRoasGoal, parseMoney, withPartnerMark } from "@/lib/types";
 import { type PartnerId, partnerConfig } from "@/lib/partners";
-import { VC_PIXEL, vcDelivery, vcDestination, vcLink } from "@/lib/vc-link";
+import { vcDelivery, vcDestination, vcLink, vcModeOf, vcPixelName, vcServerName } from "@/lib/vc-link";
 import { vcPbConfig, vcPbEnsureLink, vcPbLinkName } from "@/lib/vc-pb";
 import {
   type LaunchBinds,
@@ -69,9 +69,11 @@ const TOOL_DEADLINE_MS = 265_000;
  * landingpage link as VC prints it (lib/vc-link vcDestination — only VC's own domains, only
  * …/coa/<quiz>-<id>/; a Search Arb link is refused) — it redirects there, and DE's conversions come
  * back per campaign / ad set / ad — and the delivery is
- * pinned by the server: Purchase on VC_PIXEL (conversions / min-ROAS — VC fires it through the
- * Conversions API with a value) or Traffic / link clicks with no pixel. No marker pool: the
- * landingpage id is VC's revenue key.
+ * pinned by the server from the card's mode (lib/vc-link vcModeOf): Purchase on VC_PIXEL (conversions /
+ * min-ROAS — VC fires it through the Conversions API with a value), Lead on VC_LEAD_PIXEL (a Leads
+ * campaign optimizing LEAD — owner ask 05.11) or Traffic / link clicks with no pixel. The campaign name
+ * carries the landingpage's title as its own segment after the partner prefix (vcServerName, owner ask
+ * 05.11). No marker pool: the landingpage id is VC's revenue key.
  * `via:"tool"` builds the same campaign through TOOL (one job) and needs NO VC token (owner ask 23.10):
  * the cabinet must be one of VC's in TOOL (named GC-for-VC-* / seen by a session of TOOL's "VC"
  * project) or a token cabinet TOOL sees; a typed page id is accepted and TOOL checks page + pixel at
@@ -141,9 +143,10 @@ export async function POST(req: Request) {
   let toolAcctName = "";
 
   const partner = partnerConfig("vc" as PartnerId);
-  // Server-pinned delivery: Purchase on VC_PIXEL (conversions / min-ROAS) or Traffic / link clicks
-  // with no pixel — whatever objective / pixel / event a stale or edited draft sent.
-  const delivery = vcDelivery(String(campaign.optimization ?? ""), String(campaign.bidStrategy ?? ""));
+  // Server-pinned delivery of the card's mode (the optimization + the event — vcModeOf): Purchase on
+  // VC_PIXEL (conversions / min-ROAS), Lead on VC_LEAD_PIXEL or Traffic / link clicks with no pixel —
+  // whatever objective / pixel a stale or edited draft sent.
+  const delivery = vcDelivery(vcModeOf(campaign), String(campaign.bidStrategy ?? ""));
   const pickedAccount = String(campaign.account ?? "").trim().replace(/^act_/, "");
   const pickedPage = String(campaign.page ?? "").trim();
   const binds: LaunchBinds = {
@@ -197,9 +200,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, stage: "config", error: "fanpage_not_allowed — the VC token cannot advertise with this page" }, { status: 400 });
     }
     // (TOOL with a page the token does not hold: TOOL checks the session's access to it at publish.)
-    // A Purchase launch optimizes on VC_PIXEL — it must be shared to the cabinet, or Meta refuses the
-    // ad set only after the campaign exists (orphan). Checked here when the token holds the cabinet;
-    // a TOOL-only cabinet has its pixel checked by TOOL at publish.
+    // A Purchase / Lead launch optimizes on its pixel (VC_PIXEL / VC_LEAD_PIXEL) — it must be shared to
+    // the cabinet, or Meta refuses the ad set only after the campaign exists (orphan). Checked here when
+    // the token holds the cabinet; a TOOL-only cabinet has its pixel checked by TOOL at publish.
     if (binds.pixelId && rail && tokenAccount) {
       const pixels = await rail.accountPixels(pickedAccount);
       if (!pixels.some((p) => p.id === binds.pixelId)) {
@@ -207,7 +210,7 @@ export async function POST(req: Request) {
           {
             ok: false,
             stage: "config",
-            error: `pixel_not_on_account — ${VC_PIXEL.name} ${VC_PIXEL.id} is not shared to act_${pickedAccount}; share it in Business Manager first (or launch with Clicks optimization)`,
+            error: `pixel_not_on_account — ${vcPixelName(binds.pixelId)} ${binds.pixelId} is not shared to act_${pickedAccount}; share it in Business Manager first (or launch with Clicks optimization)`,
           },
           { status: 400 },
         );
@@ -320,10 +323,12 @@ export async function POST(req: Request) {
   }
 
   const serverCampaign: Campaign = { ...campaign, ...delivery };
-  // The partner mark in the prefix is the ROUTE's, not the client's: a card that kept another
-  // partner's prefix across a switch still launches here as "(VC)". A TOOL-born run carries
-  // `GCL TOOL - ` after the partner prefix (toolEnsureMark).
-  const baseName = withPartnerMark(`${serverCampaign.namePrefix}${serverCampaign.name}`.trim(), partner.label);
+  // The name is the SERVER's (owner ask 05.11, vcServerName): the client's date prefix, the title of the
+  // RESOLVED landingpage as its own segment, then the buyer's typed tail (never doubled). The partner mark
+  // in the prefix is the ROUTE's, not the client's: a card that kept another partner's prefix across a
+  // switch still launches here as "(VC)". A TOOL-born run carries `GCL TOOL - ` after the partner prefix
+  // (toolEnsureMark).
+  const baseName = withPartnerMark(vcServerName(serverCampaign.namePrefix, serverCampaign.name, dest.url), partner.label);
   const name = viaTool ? toolEnsureMark(baseName) : baseName;
   // The ad link: the DE Postback tracking link, macros and all — Meta fills them. It redirects to the
   // landingpage exactly as VC prints it (`landingLink`) with everything Meta appends (fbclid — VC's own

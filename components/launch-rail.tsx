@@ -193,11 +193,13 @@ export function LaunchRail({
             {campaigns.map((c, i) => {
               const ready = launchableOf(c);
               // AV runs one of its two modes — Purchase on the AV site pixel or link clicks (avDelivery).
-              // VC the same pair — Purchase on the VC pixel or link clicks (vcDelivery).
+              // VC: Purchase on the VC pixel, Lead on the S-1 nik pixel (05.11) or link clicks (vcDelivery).
               const eventLabel = partner.avLaunch || partner.vcLaunch
                 ? c.optimization === "clicks"
                   ? "link clicks"
-                  : "Purchase"
+                  : partner.vcLaunch && c.conversionEvent === "LEAD"
+                    ? "Lead"
+                    : "Purchase"
                 : (CONVERSION_EVENTS.find((e) => e.value === c.conversionEvent)?.label ?? "");
               return (
                 <button

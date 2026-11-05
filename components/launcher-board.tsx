@@ -35,7 +35,7 @@ import { type ToolSessionOption, useToolReady } from "./use-tool-ready";
 import { CopySettingsModal } from "./copy-settings-modal";
 import { ChevronsIcon, CopyIcon, LayersIcon, PlusIcon } from "./icons";
 import { useAifTaskManager, useAvTaskManager, useTaskManager, useVcTaskManager } from "./task-manager";
-import { vcDestination } from "@/lib/vc-link";
+import { pinVcNamePrefix, vcDestination } from "@/lib/vc-link";
 import { useAvDestinations } from "./use-av-destinations";
 import { pinAvNamePrefix } from "@/lib/av-link";
 import { type HsLaunchChannel, useHsTaskManager } from "./hs-task-manager";
@@ -111,8 +111,10 @@ function normalize(rows: Campaign[], partner: PartnerConfig, reserved: Set<strin
   // wave as MO runs (live bug 23.09). HS has no prefix (LION's grammar builds its own). AV's fixed
   // prefix also carries the card's locked "<topic> | <GEO> | <lang> | " from its destination (owner
   // ask 30.09 — under the lock, the buyer types only the tail; the server rebuilds it the same way).
+  // VC's fixed prefix carries the landingpage's (quiz) title as its own segment (owner ask 05.11 — the server
+  // rebuilds it the same way from the resolved link, lib/vc-link pinVcNamePrefix / vcServerName).
   const prefix = namePrefixFor(partner, todayDDMM());
-  const pinned = partner.avLaunch ? pinAvNamePrefix(withGcm, prefix) : pinNamePrefix(withGcm, prefix);
+  const pinned = partner.avLaunch ? pinAvNamePrefix(withGcm, prefix) : partner.vcLaunch ? pinVcNamePrefix(withGcm, prefix) : pinNamePrefix(withGcm, prefix);
   return applyPartnerLocks(pinned, partner);
 }
 
@@ -923,6 +925,13 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
       // objective ↔ conversionEvent are a pair — copying one without the other would leave a
       // target with an event invalid for its objective (Meta rejects the ad set). Copy both together.
       if (keys.includes("objective") || keys.includes("conversionEvent")) {
+        patch.objective = src.objective;
+        patch.conversionEvent = src.conversionEvent;
+      }
+      // VC: the Optimization pick IS the mode — Purchase / Lead / link clicks (lib/vc-link vcModeOf) — encoded
+      // across optimization + conversionEvent (+ objective): copying it moves all three, so a Lead card's
+      // optimization never lands as Purchase on the targets.
+      if (partner.vcLaunch && keys.includes("optimization")) {
         patch.objective = src.objective;
         patch.conversionEvent = src.conversionEvent;
       }

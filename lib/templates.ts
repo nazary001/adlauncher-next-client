@@ -415,10 +415,12 @@ export const TEMPLATE_FIELD_DEFS: readonly TemplateFieldDef[] = [
   { key: "page", label: "Page / fanpage", group: "Setup", when: (p) => !p.lockedAccount || Boolean(p.fanpagesFromToken), preview: (f) => text(f.page) },
   { key: "pixel", label: "Pixel", group: "Setup", when: (p) => !p.lockedPixel && !p.avLaunch && !p.vcLaunch, preview: (f) => text(f.pixel) },
 
-  { key: "objective", label: "Objective", group: "Delivery", when: (p) => !p.aifLaunch && !p.avLaunch && !p.vcLaunch, preview: (f) => pick(OBJECTIVES)(f.objective) },
+  // VC (05.11): objective + event ride with the optimization — the three encode the card's mode (Purchase /
+  // Lead / link clicks, lib/vc-link vcModeOf); the locks re-pin the pixel from them.
+  { key: "objective", label: "Objective", group: "Delivery", when: (p) => !p.aifLaunch && !p.avLaunch, preview: (f) => pick(OBJECTIVES)(f.objective) },
   { key: "optimization", label: "Optimization", group: "Delivery", when: (p) => !p.lionLaunch, preview: (f) => pick(OPTIMIZATIONS)(f.optimization) },
   { key: "bidStrategy", label: "Bid strategy", group: "Delivery", preview: (f) => pick(BID_STRATEGIES)(f.bidStrategy) },
-  { key: "conversionEvent", label: "Conversion event", group: "Delivery", when: (p) => !p.aifLaunch && !p.avLaunch && !p.vcLaunch, preview: (f) => pick(CONVERSION_EVENTS)(f.conversionEvent) },
+  { key: "conversionEvent", label: "Conversion event", group: "Delivery", when: (p) => !p.aifLaunch && !p.avLaunch, preview: (f) => pick(CONVERSION_EVENTS)(f.conversionEvent) },
   { key: "budget", label: "Daily budget", group: "Delivery", preview: (f) => (f.budget === undefined || f.budget === "" ? "—" : `$${moneyLabel(f.budget)}`) },
   { key: "bidCap", label: "Bid cap / ROAS goal", group: "Delivery", preview: (f) => (f.bidCap === undefined || f.bidCap === "" ? "—" : f.bidStrategy === "LOWEST_COST_WITH_MIN_ROAS" ? `ROAS ${f.bidCap}` : `$${moneyLabel(f.bidCap)}`) },
 

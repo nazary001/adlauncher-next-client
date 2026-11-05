@@ -35,7 +35,7 @@ import { TOOL_MARK, toolEnsureMark } from "@/lib/tool-launch";
 import { DEFAULT_PLATFORM_CHOICE, PLATFORM_CHOICES } from "@/lib/publisher-platforms";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { AIF_VALUE_PIXEL, AV_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifOfferablePixels, avDelivery, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
-import { VC_PIXEL, VC_READY_LINKS, isPageId, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcReadyLinkOf } from "@/lib/vc-link";
+import { VC_PIXEL, VC_READY_LINKS, isPageId, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcModeOf, vcPixelName, vcReadyLinkOf } from "@/lib/vc-link";
 import { aifFlowOf } from "@/lib/aif-link";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
@@ -376,9 +376,13 @@ function CampaignCardBase({
   // ---- AV mode: MO-style token pickers, an AV destination (article / redirect path) in place of
   // the landing, an AV key in the marker slot, and Traffic / link-clicks delivery (no pixel). ----
   const avMode = Boolean(partner.avLaunch);
-  // ---- VC mode: MO-style token pickers, the pasted VC landingpage link in the landing slot, and
-  // Purchase on VC_PIXEL (min-ROAS too) or Traffic / link clicks — vcDelivery decides, never a pick. ----
+  // ---- VC mode: MO-style token pickers, the pasted VC landingpage link in the landing slot, and the
+  // card's MODE — Purchase on VC_PIXEL (min-ROAS too), Lead on VC_LEAD_PIXEL (05.11) or Traffic / link
+  // clicks — vcDelivery decides objective / pixel / event, never a pick. ----
   const vcMode = Boolean(partner.vcLaunch);
+  const vcDeliv = vcMode ? vcDelivery(vcModeOf(c), c.bidStrategy) : null;
+  const vcLead = vcDeliv?.conversionEvent === "LEAD";
+  const vcPixelLabel = vcDeliv ? `${vcPixelName(vcDeliv.pixel)} ${vcDeliv.pixel}`.trim() : "";
   // ---- HS (LION) mode: the bind cascade + locales come from LION's catalog ----
   const hsMode = Boolean(partner.lionLaunch && hs);
   const hsData = hsMode && hs ? hs.dataFor(c.profile) : undefined;
@@ -504,11 +508,12 @@ function CampaignCardBase({
   // TOOL wins over the FB-token/SOC markers when it is the effective channel (owner ask 28.09):
   // HS carries GCL TOOL in the TOKEN slot (hsNamePrefix "tool"); MO/AIF carry it right after the
   // partner prefix (toolEnsureMark), dropping any SOC marker. The server re-ensures it either way.
-  // AV's prefix already carries the locked "<topic> | <GEO> | <lang> | " (pinAvNamePrefix), so its TOOL
-  // mark goes right after the partner prefix, exactly where the server puts it (toolEnsureMark).
+  // AV's prefix already carries the locked "<topic> | <GEO> | <lang> | " (pinAvNamePrefix) and VC's the
+  // locked "<quiz title> - " (pinVcNamePrefix, 05.11), so their TOOL mark goes right after the partner
+  // prefix, exactly where the server puts it (toolEnsureMark).
   const displayPrefix = hsMode
     ? hsNamePrefix(c, hs?.acr ?? "", todaySaoPauloDDMM(), toolRail ? "tool" : hsTokenRail ? "token" : "lion")
-    : avMode && moToolRail
+    : (avMode || vcMode) && moToolRail
       ? toolEnsureMark(c.namePrefix)
       : c.namePrefix + (moToolRail ? TOOL_MARK : moSocRail ? MO_SOC_MARK : "");
   const displayName = hsMode
@@ -579,14 +584,14 @@ function CampaignCardBase({
       ? vcLink(c.landing)
       : fullLandingUrl(partner, c.landing, c.gcm, conversions, c.pixel);
   // VC: the link's verdict (empty = nothing picked / pasted yet), the ready landingpage it is (null =
-  // a pasted link of another landingpage) and whether its cabinet carries VC_PIXEL.
+  // a pasted link of another landingpage) and whether its cabinet carries the mode's pixel.
   const vcDest = vcMode ? vcDestination(c.landing) : null;
   const vcReady = vcMode ? vcReadyLinkOf(c.landing) : null;
   // Only on the FB Token channel: a TOOL launch has its pixel checked by TOOL (or by the route when the
   // token holds the cabinet), and a TOOL-only cabinet carries no pixel list here.
   const vcPixelMissing =
     vcMode && !moToolRail && conversions && Boolean(c.account) && Boolean(adAccounts?.some((a) => a.value === c.account)) &&
-    !pixelOptionsOf(adAccounts ?? null, c.account).some((p) => p.id === VC_PIXEL.id);
+    !pixelOptionsOf(adAccounts ?? null, c.account).some((p) => p.id === (vcDeliv?.pixel ?? VC_PIXEL.id));
 
   // Copy is offered only once the link is COMPLETE — for gcm partners that means a claimed code, so
   // the button never yields a "?gcm=" link with an empty code (which is also why the preview shows a
@@ -600,7 +605,8 @@ function CampaignCardBase({
     setCopied(true);
     setTimeout(() => setCopied(false), 1200);
   }
-  const eventLabel = CONVERSION_EVENTS.find((e) => e.value === c.conversionEvent)?.label ?? "";
+  // AV / VC click cards keep a stale event on the draft — the summary says what really runs.
+  const eventLabel = (avMode || vcMode) && !conversions ? "link clicks" : (CONVERSION_EVENTS.find((e) => e.value === c.conversionEvent)?.label ?? "");
   const geo = geoSummary(c.countries);
   // AV destination kind (article / redirect path / chat) — for the link-preview caption. Read off
   // the destination's address (lib/av-link avDestinationKind): a chat by its shape alone, a
@@ -724,7 +730,9 @@ function CampaignCardBase({
                       ? "prefix follows LION's format — date, buyer, redirect, geo"
                       : avMode
                         ? "locked: article topic | your geo | article language | — type your tail after it"
-                        : undefined
+                        : vcMode
+                          ? "locked: the title of the VC landingpage you picked — type your tail after it"
+                          : undefined
                   }
                 >
                   {displayPrefix ? (
@@ -970,7 +978,7 @@ function CampaignCardBase({
                         ? conversions
                           ? kind === "roas"
                             ? "min ROAS · VC sends the value"
-                            : "VC fires Purchase (Conversions API)"
+                            : `VC fires ${vcLead ? "Lead" : "Purchase"} (Conversions API)`
                           : "clicks need no pixel"
                       : aifMode
                         ? kind === "roas"
@@ -987,7 +995,7 @@ function CampaignCardBase({
                       ? undefined
                       : vcMode
                         ? vcPixelMissing
-                          ? `share ${VC_PIXEL.name} ${VC_PIXEL.id} to this cabinet in BM first (or switch to Clicks)`
+                          ? `share ${vcPixelLabel} to this cabinet in BM first (or switch to Clicks)`
                           : undefined
                       : hsMode
                       ? // Quiet until the fanka is picked — that's where the pixel step starts
@@ -1023,10 +1031,11 @@ function CampaignCardBase({
                       <LockedField value="No pixel — link clicks" hint="auto" />
                     )
                   ) : vcMode ? (
-                    // VC's pixel is never a pick either: Purchase / min-ROAS on VC_PIXEL (VC fires it through
-                    // the Conversions API), link clicks bind none — vcDelivery, pinned by the locks + route.
-                    conversions ? (
-                      <LockedField value={`${VC_PIXEL.name} · ${VC_PIXEL.id}`} hint="Purchase" mono />
+                    // VC's pixel is never a pick either: Purchase / min-ROAS on VC_PIXEL, Lead on VC_LEAD_PIXEL
+                    // (VC fires the event through the Conversions API), link clicks bind none — vcDelivery of
+                    // the card's mode, pinned by the locks + route.
+                    conversions && vcDeliv ? (
+                      <LockedField value={`${vcPixelName(vcDeliv.pixel)} · ${vcDeliv.pixel}`} hint={vcLead ? "Lead" : "Purchase"} mono />
                     ) : (
                       <LockedField value="No pixel — link clicks" hint="auto" />
                     )
@@ -1112,9 +1121,9 @@ function CampaignCardBase({
                     <LockedField value={conversions ? "Sales" : "Traffic"} hint="AV" />
                   </Field>
                 ) : vcMode ? (
-                  // VC: the objective follows the Optimization pick (vcDelivery) — Sales / Traffic.
+                  // VC: the objective follows the Optimization pick (vcDelivery) — Sales / Leads / Traffic.
                   <Field label="Objective" className="col-span-6 md:col-span-4">
-                    <LockedField value={conversions ? "Sales" : "Traffic"} hint="VC" />
+                    <LockedField value={!conversions ? "Traffic" : vcLead ? "Leads" : "Sales"} hint="VC" />
                   </Field>
                 ) : !aifMode ? (
                   <Field label="Objective" className={hsMode ? "col-span-6 md:col-span-4" : "col-span-6 md:col-span-3"}>
@@ -1147,13 +1156,21 @@ function CampaignCardBase({
                     />
                   </Field>
                 ) : vcMode ? (
+                  // The pick is the card's MODE (lib/vc-link VcMode): Purchase on the VC pixel, Lead on the S-1 nik
+                  // pixel (05.11) or link clicks — the patch writes objective / optimization / pixel / event at once.
                   <Field
                     label="Optimization"
                     className="col-span-6 md:col-span-4"
-                    hint={kind === "roas" ? "pinned by min ROAS" : conversions ? "Purchase on the VC pixel" : "Traffic — no pixel"}
+                    hint={
+                      kind === "roas"
+                        ? "pinned by min ROAS"
+                        : !conversions
+                          ? "Traffic — no pixel"
+                          : `${vcLead ? "Lead" : "Purchase"} on the ${vcPixelName(vcDeliv?.pixel ?? "")}`
+                    }
                   >
                     <Select
-                      value={kind === "roas" ? "conversions" : conversions ? "conversions" : "clicks"}
+                      value={kind === "roas" ? "conversions" : vcModeOf(c)}
                       onChange={(e) => patch({ ...vcDelivery(e.target.value, c.bidStrategy) })}
                       options={VC_OPTIMIZATIONS}
                       disabled={kind === "roas"}

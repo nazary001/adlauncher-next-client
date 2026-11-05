@@ -68,9 +68,11 @@ export const AV_OPTIMIZATIONS: Option[] = [
   { value: "clicks", label: "Link clicks" },
 ];
 
-/** VC's two delivery modes (lib/vc-link vcDelivery): Purchase on the VC pixel, or Traffic / link clicks. */
+/** VC's three delivery modes (lib/vc-link VcMode / vcDelivery): Purchase on the VC pixel, Lead on the
+ *  S-1 nik pixel (owner ask 05.11), or Traffic / link clicks. The value is the card's mode (vcModeOf). */
 export const VC_OPTIMIZATIONS: Option[] = [
   { value: "conversions", label: "Purchase (VC pixel)" },
+  { value: "lead", label: "Lead (S-1 nik pixel)" },
   { value: "clicks", label: "Link clicks" },
 ];
 

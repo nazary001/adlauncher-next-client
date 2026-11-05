@@ -17,7 +17,7 @@
 import type { Campaign } from "./types";
 import { bidKind, makeCampaign, moneyLabel, normalizeRoasGoal, parseMoney } from "./types";
 import { SUPPORTED_BID_STRATEGIES } from "./fb-launch";
-import { VC_PIXEL, VC_SALES_OBJECTIVE } from "./vc-link";
+import { VC_LEAD_PIXEL, VC_LEADS_OBJECTIVE, VC_PIXEL, VC_SALES_OBJECTIVE, vcPixelName } from "./vc-link";
 import { carriesOwnName } from "./own-name.ts";
 
 type Json = Record<string, unknown>;
@@ -32,14 +32,12 @@ const list = (v: unknown): Json[] => (Array.isArray(v) ? v.map(rec) : []);
 const edge = (v: unknown): Json[] => list(rec(v).data);
 const strs = (v: unknown): string[] => (Array.isArray(v) ? v.map(str).filter(Boolean) : []);
 
-/** The dataset the owner named for the Lead clones (05.11): "S-1 nik pixel", BM VD Market — shared to every
- *  GC-for-VC cabinet (read 05.11 with the VC token). */
-export const VC_LEAD_PIXEL = { id: "2126539511577664", name: "S-1 nik pixel" } as const;
-/** Lead clones run as a Leads campaign: Meta allows LEAD only there (lib/catalog EVENTS_BY_OBJECTIVE). */
-export const VC_LEADS_OBJECTIVE = "OUTCOME_LEADS";
-/** The VC datasets the board offers (the server accepts any pixel the cabinet carries). */
+/** The Lead dataset ("S-1 nik pixel", 05.11), the Leads objective and the pixel names live with the launch
+ *  contract since the launcher's own Lead mode pins the same dataset (lib/vc-link) — re-exported for the
+ *  board and its tests. */
+export { VC_LEAD_PIXEL, VC_LEADS_OBJECTIVE, vcPixelName };
+/** The VC datasets the board offers, the Lead one first (the server accepts any pixel the cabinet carries). */
 export const VC_CLONE_PIXELS: readonly { id: string; name: string }[] = [VC_LEAD_PIXEL, VC_PIXEL];
-export const vcPixelName = (id: string): string => VC_CLONE_PIXELS.find((p) => p.id === id)?.name ?? id;
 
 export type VcCloneEvent = "LEAD" | "PURCHASE";
 export const VC_CLONE_EVENTS: readonly { value: VcCloneEvent; label: string }[] = [

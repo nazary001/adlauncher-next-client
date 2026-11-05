@@ -85,9 +85,11 @@ export type PartnerConfig = {
   /** ValueClick (VC, lib/vc-*): a direct Graph launch on VC's OWN token (slots vc.launch/vc.clone, no
    *  env default) or through TOOL onto a VC CONTENT-ARB landingpage — a ready one (VC_READY_LINKS) or
    *  the link the buyer copies from VC's dashboard (…qualitydays.com/coa/<quiz>-<id>/), kept in
-   *  Campaign.landing and launched as is. VC fires Purchase (with value) into VC_PIXEL through the
-   *  Conversions API, so delivery is Purchase on it (default, min-ROAS allowed) or Traffic / link
-   *  clicks with no pixel (vcDelivery, applyPartnerLocks + the route). No marker pool. */
+   *  Campaign.landing and launched as is. VC fires Purchase (with value) — or, on a Lead landingpage,
+   *  Lead — into the landingpage's pixel through the Conversions API, so delivery is the card's MODE:
+   *  Purchase on VC_PIXEL (default, min-ROAS allowed), Lead on VC_LEAD_PIXEL (05.11) or Traffic / link
+   *  clicks with no pixel (vcDelivery, applyPartnerLocks + the route). The fixed name prefix carries the
+   *  landingpage's title (pinVcNamePrefix, 05.11). No marker pool. */
   vcLaunch?: boolean;
   /** Not built out yet → the switcher renders this partner disabled ("in development"). */
   inDevelopment?: boolean;
@@ -466,7 +468,7 @@ export const PARTNERS: PartnerConfig[] = [
 // clicks with no pixel; pure module (lib/av-delivery) so node --test covers it.
 export { AV_OBJECTIVE, AV_PIXEL, AV_SALES_OBJECTIVE, type AvDelivery, avAdText, avDelivery, avLockPatch } from "./av-delivery";
 // VC (ValueClick) link / pixel / delivery contract — pure module, node --test covers it.
-export { VC_PIXEL, VC_READY_LINKS, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcLockPatch, vcReadyLinkOf } from "./vc-link";
+export { VC_LEAD_PIXEL, VC_PIXEL, VC_READY_LINKS, pinVcNamePrefix, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcLockPatch, vcModeOf, vcReadyLinkOf } from "./vc-link";
 
 export function partnerConfig(id: PartnerId): PartnerConfig {
   return PARTNERS.find((p) => p.id === id) ?? PARTNERS[0];
@@ -511,7 +513,8 @@ export function launchReadyOpts(p: PartnerConfig): {
     // dead-lock them, so readiness never gates on it for AIF.
     // AV's pixel is never a pick: Purchase binds AV_PIXEL, link clicks bind none (avDelivery, pinned
     // by the locks) — nothing for readiness to gate on.
-    // VC's pixel is never a pick either: Purchase / min-ROAS bind VC_PIXEL, clicks none (vcDelivery).
+    // VC's pixel is never a pick either: Purchase / min-ROAS bind VC_PIXEL, Lead binds VC_LEAD_PIXEL
+    // (05.11), clicks none (vcDelivery of the card's mode).
     pixel: (Boolean(p.accountsFromToken) && !p.aifLaunch && !p.avLaunch && !p.vcLaunch) || Boolean(p.lionLaunch),
     // Marker-pool partners (MO gcm / AIF brand) need a claimed code before the card counts as
     // ready — a card whose code hasn't loaded (registry unreachable / pre-load window) must not
@@ -646,8 +649,8 @@ export function applyPartnerLocks(rows: Campaign[], p: PartnerConfig): Campaign[
       Object.assign(patch, avLockPatch(r));
     }
     if (p.vcLaunch) {
-      // VC: Purchase on VC_PIXEL (conversions / min-ROAS — a fresh card's default) or Traffic / link
-      // clicks with no pixel; the route re-pins it all (vcDelivery).
+      // VC: Purchase on VC_PIXEL (conversions / min-ROAS — a fresh card's default), Lead on VC_LEAD_PIXEL
+      // (05.11) or Traffic / link clicks with no pixel; the route re-pins it all (vcDelivery of the mode).
       Object.assign(patch, vcLockPatch(r));
     }
     if (Object.keys(patch).length === 0) return r;
