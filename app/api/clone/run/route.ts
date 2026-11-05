@@ -53,6 +53,8 @@ import {
 // sessions service instead of direct Graph — USD money + ROAS coefficient, everything PAUSED.
 import { buildToolCampaign, runToolMedia, runToolPublish, toolEnsureMark, type ToolMediaRefOut } from "@/lib/tool-launch";
 import { toolAccountVisible, toolDeps, toolInputFromCampaign, toolLaunchReady } from "@/lib/tool-run";
+// VC (05.11): the VC clone board's run — the VC token reads the source, the recreate rides the VC token or TOOL.
+import { runVcClone } from "@/lib/vc-clone-run";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -132,6 +134,9 @@ export async function POST(req: Request) {
   } catch {
     return NextResponse.json({ ok: false, error: "bad_json" }, { status: 400 });
   }
+  // VC (05.11): its own clone run (lib/vc-clone-run) — the same fb.clone kind / task rows / NDJSON contract,
+  // the VC token (VC · Clones, else VC · Launches) reads the source, the recreate rides the VC token or TOOL.
+  if (partnerConfig(partnerId).vcLaunch) return runVcClone(session, { edits: edits as unknown[], taskIds, via });
   if (edits.length === 0) return NextResponse.json({ ok: false, error: "no_clones" }, { status: 400 });
   if (edits.length > 200) return NextResponse.json({ ok: false, error: "too_many", max: 200 }, { status: 400 });
   // Target bid strategies (per-row ROAS ↔ cap ↔ lowest switch, owner ask 09-01): only the
@@ -146,10 +151,6 @@ export async function POST(req: Request) {
   const partner = partnerConfig(partnerId);
   if (!partner.fanpagesFromToken) {
     return NextResponse.json({ ok: false, error: "partner_not_launchable" }, { status: 400 });
-  }
-  // VC (23.10) has no clone rail — refuse rather than fall into the MO flow below (MO signer, gcm).
-  if (partner.vcLaunch) {
-    return NextResponse.json({ ok: false, error: "clone_not_available — VC campaigns launch from the launcher board" }, { status: 400 });
   }
   // The partner picks the RAIL: AV clones ride the AV token, the AV key registry and a
   // destination+key link rewrite (no pixel tail — AV's site script fires AV_PIXEL); AIF clones ride the AIF token, the aif-maps brand

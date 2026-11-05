@@ -24,7 +24,7 @@ export type QueueScope = (typeof QUEUE_SCOPES)[number];
  *  ROUTE HANDLER in-process and reading its reply:
  *   mo.launch → POST /api/launch · aif.launch → /api/aif/launch · av.launch → /api/av/launch
  *   vc.launch → /api/vc/launch
- *   fb.clone → /api/clone/run (MO / AIF / AV — the body's partnerId picks the rail)
+ *   fb.clone → /api/clone/run (MO / AIF / AV / VC — the body's partnerId picks the rail)
  *   hs.lion → /api/hs/launch · hs.token → /api/hs/token-launch · hs.tool → /api/hs/tool-launch */
 export const HANDLER_KINDS = ["mo.launch", "aif.launch", "av.launch", "vc.launch", "fb.clone", "hs.lion", "hs.token", "hs.tool"] as const;
 /** Kinds a wave ROUTE enqueues itself, one job per validated shot (09.10: every rail on the queue).
@@ -52,8 +52,9 @@ export const SCOPE_KINDS: Record<QueueScope, readonly QueueKind[]> = {
   mo: ["mo.launch", "fb.clone", "tool.follow"],
   aif: ["aif.launch", "fb.clone", "tool.follow"],
   av: ["av.launch", "fb.clone", "tool.follow"],
-  // VC (23.10): its launch (Graph or TOOL) and a TOOL job's follow-up — no clone board yet.
-  vc: ["vc.launch", "tool.follow"],
+  // VC (23.10): its launch (Graph or TOOL), its clones (05.11 — fb.clone with partnerId "vc", the VC token or
+  // TOOL) and a TOOL job's follow-up.
+  vc: ["vc.launch", "fb.clone", "tool.follow"],
   hs: ["hs.lion", "hs.token", "hs.tool", "hs.dup", "hs.jurar", "hs.tokendup", "hs.tokenjurar", "hs.tooldup", "hs.dup.follow", "hs.jurar.follow", "tool.follow"],
   gg: ["gg.launch", "gg.clone", "gg.juro"],
   sn: ["sn.launch"],

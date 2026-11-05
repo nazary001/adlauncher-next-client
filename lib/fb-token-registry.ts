@@ -65,7 +65,7 @@ export const SLOT_META: Record<SlotId, SlotMeta> = {
   "av.launch": { partner: "av", rail: "launch", title: "Launches", hint: "AV launcher board", pool: false },
   "av.clone": { partner: "av", rail: "clone", title: "Clones", hint: "AV clone board", pool: false },
   "vc.launch": { partner: "vc", rail: "launch", title: "Launches", hint: "VC launcher board", pool: false },
-  "vc.clone": { partner: "vc", rail: "clone", title: "Clones", hint: "Reserved — VC has no clone board yet", pool: false },
+  "vc.clone": { partner: "vc", rail: "clone", title: "Clones", hint: "VC clone board · reads the sources and builds the copies (unassigned = the Launches token)", pool: false },
 };
 
 export const slotOf = (partner: TokenPartner, rail: TokenRail): SlotId => `${partner}.${rail}` as SlotId;

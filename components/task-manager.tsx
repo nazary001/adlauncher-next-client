@@ -13,6 +13,7 @@ import { UploadingNotice } from "./upload-guard";
 import { type Campaign, bidTag, moneyLabel } from "@/lib/types";
 import { type PartnerId, partnerConfig } from "@/lib/partners";
 import type { CloneEdit } from "@/lib/clone";
+import type { VcCloneEdit } from "@/lib/vc-clone";
 import {
   type EffStatus,
   type LaunchTask,
@@ -142,7 +143,8 @@ export type EnqueueArgs = {
 
 export type CloneEnqueueArgs = {
   partnerId: PartnerId;
-  edit: CloneEdit;
+  /** The MO/AIF/AV clone edit, or a VC clone edit (lib/vc-clone, 05.11) — the clone route reads it by partnerId. */
+  edit: CloneEdit | VcCloneEdit;
   /** MO clone signer: "soc:<name>" — forwarded in the queued job body to the clone handler verbatim
    *  (the system token is retired there; MO clones without a signer are rejected server-side). AIF/AV
    *  send none. */

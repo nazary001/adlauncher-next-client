@@ -5,7 +5,8 @@
 // partners' data can never bleed.
 //
 // WHICH token: the owner's pick on /tokens (slots vc.launch / vc.clone). VC has NO env default — an
-// unassigned slot is a clean config error, never another partner's bearer. NOTE: the token VC itself
+// unassigned slot is a clean config error, never another partner's bearer. The clone board (05.11) signs
+// with VC · Clones when one is assigned, else with VC · Launches (vcCloneRail — one system user serves both). NOTE: the token VC itself
 // holds (the landingpage Tracking token) is a Conversions-API-only dataset token — it cannot build
 // campaigns; the launch token is a system user with ads_management on the VC cabinets (23.10: system
 // user «Lecarthelaouforvc», app AV ANNA 10 — GC-for-VC-BR-742 … -762 + 10 fanpages).
@@ -99,4 +100,15 @@ export async function vcRail(rail: TokenRail): Promise<VcRailResult> {
       advertisablePageName: (pageId) => advertisablePageName(pageId, cat),
     },
   };
+}
+
+/** The clone board's rail (owner ask 05.11): VC · Clones when the owner assigned one, else VC · Launches —
+ *  one VC system user serves both, so an unassigned clone slot is not a refusal. Reads the sources AND
+ *  builds the copies (and, through TOOL, still reads the sources). */
+export async function vcCloneRail(): Promise<VcRailResult> {
+  const clone = await vcRail("clone");
+  if (clone.ok) return clone;
+  const launch = await vcRail("launch");
+  if (launch.ok) return launch;
+  return { ok: false, error: "no_token — no token is assigned to VC · Clones or VC · Launches; an owner assigns one under FB tokens (menu → FB tokens)" };
 }

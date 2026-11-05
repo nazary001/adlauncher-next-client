@@ -3,7 +3,7 @@ import { sessionFromCookieHeader } from "@/lib/session";
 import { sanitizePartnerId } from "@/lib/partners";
 import { railParam, resolveMoSigner } from "@/lib/mo-soc";
 import { aifRail } from "@/lib/aif-launch";
-import { vcRail } from "@/lib/vc-launch";
+import { vcCloneRail, vcRail } from "@/lib/vc-launch";
 import { VC_TOOL_NO_SESSION, vcToolCatalog } from "@/lib/vc-tool";
 import { tokenAdAccounts } from "@/lib/fb-graph";
 import { filterAccountsFor } from "@/lib/acct-assignments";
@@ -116,17 +116,16 @@ export async function GET(req: Request) {
   // cabinets are the ones named like VC's or seen by a session filed under TOOL's "VC" project; when a
   // VC token is assigned, the TOOL-visible cabinets of that token count too. The fanpage is typed on
   // the card (or picked from the token) and TOOL itself checks page + pixel at publish.
+  // The clone rail (05.11) asks the same question: a VC clone through TOOL recreates the source in ITS cabinet,
+  // which a live TOOL session must see (the source itself is read with the VC token — lib/vc-clone-run).
   if (partner === "vc") {
-    if (rail === "clone") {
-      return NextResponse.json({ ok: true, ready: false, reason: "not_available", message: "VC has no clone board yet", accounts: [], rows: [], live: 0 }, noStore);
-    }
     const cat = await vcToolCatalog();
     if (!cat.ok) {
       return NextResponse.json({ ok: true, ready: false, reason: cat.reason, message: cat.message, accounts: [], rows: [], live: 0 }, noStore);
     }
     const liveVc = cat.live.length;
     const ids = new Set(cat.vc.map((a) => a.account_id));
-    const r = await vcRail(rail);
+    const r = rail === "clone" ? await vcCloneRail() : await vcRail(rail);
     if (r.ok) {
       try {
         const tokenIds = new Set((await r.rail.tokenAdAccounts()).map((a) => String(a.id).replace(/^act_/, "")));

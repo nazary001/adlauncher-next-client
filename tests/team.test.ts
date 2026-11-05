@@ -237,6 +237,7 @@ test("launch queue: glo-02 may only hand over and run hs.lion", () => {
     ["av", "av.launch"],
     ["av", "fb.clone"],
     ["vc", "vc.launch"],
+    ["vc", "fb.clone"],
   ] as const) {
     assert.equal(teamAllowsJob(scope, kind, GLO1), true, `${scope}/${kind}`);
   }
@@ -375,14 +376,15 @@ test("the first team's store namespace is empty — its S3 keys stay what they w
   assert.equal(teamNamespace(GLO2), "glo-02");
 });
 
-test("VC (ValueClick, 23.10): glo-01 only; its scope queues its launch (token or TOOL) and a TOOL follow-up — no clone, no other rail's kind", () => {
+test("VC (ValueClick, 23.10 / clones 05.11): glo-01 only; its scope queues its launch (token or TOOL), its clones (fb.clone) and a TOOL follow-up — no other rail's kind", () => {
   assert.equal(routeNeed("/api/vc/launch"), "partner:vc");
   assert.equal(routeNeed("/api/vc"), "partner:vc");
   assert.equal(teamAllowsPath("/api/vc/fanpages", GLO1), true);
   assert.equal(teamAllowsPath("/api/vc/fanpages", GLO2), false);
   assert.equal(teamAllowsJob("vc", "vc.launch", GLO1), true);
   assert.equal(teamAllowsJob("vc", "tool.follow", GLO1), true);
-  for (const kind of ["fb.clone", "mo.launch", "av.launch", "hs.lion"]) assert.equal(teamAllowsJob("vc", kind, GLO1), false, `vc/${kind}`);
+  assert.equal(teamAllowsJob("vc", "fb.clone", GLO1), true);
+  for (const kind of ["mo.launch", "av.launch", "hs.lion"]) assert.equal(teamAllowsJob("vc", kind, GLO1), false, `vc/${kind}`);
   for (const scope of ["mo", "aif", "av", "hs"]) assert.equal(teamAllowsJob(scope, "vc.launch", GLO1), false, `${scope}/vc.launch`);
   assert.equal(teamAllowsJob("vc", "vc.launch", GLO2), false);
 });

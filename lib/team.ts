@@ -290,8 +290,8 @@ const GRAPH_SCOPE_KINDS: Record<string, readonly string[]> = {
   mo: ["mo.launch", "fb.clone", "tool.follow"],
   aif: ["aif.launch", "fb.clone", "tool.follow"],
   av: ["av.launch", "fb.clone", "tool.follow"],
-  // VC (23.10): its launch (VC token or TOOL) and a TOOL job's follow-up — no clone board yet.
-  vc: ["vc.launch", "tool.follow"],
+  // VC (23.10): its launch (VC token or TOOL), its clones (05.11, fb.clone) and a TOOL job's follow-up.
+  vc: ["vc.launch", "fb.clone", "tool.follow"],
 };
 const PLATFORM_SCOPE_KINDS: Record<string, readonly string[]> = {
   gg: ["gg.launch", "gg.clone", "gg.juro"],
