@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { type Campaign, bidAmountMissing, bidKind, bidTag, normalizeRoasGoal, parseMoney, withPartnerMark } from "@/lib/types";
 import { type PartnerId, partnerConfig } from "@/lib/partners";
-import { vcDelivery, vcDestination, vcLink, vcModeOf, vcPixelName, vcServerName } from "@/lib/vc-link";
+import { VC_LEAD_PIXEL, VC_PIXEL, vcDelivery, vcDestination, vcLink, vcModeOf, vcPixelName, vcReadyEventMismatch, vcServerName } from "@/lib/vc-link";
 import { vcPbConfig, vcPbEnsureLink, vcPbLinkName } from "@/lib/vc-pb";
 import {
   type LaunchBinds,
@@ -229,6 +229,23 @@ export async function POST(req: Request) {
   const dest = vcDestination(String(campaign.landing ?? ""));
   if (!dest.ok) {
     return NextResponse.json({ ok: false, stage: "config", error: dest.error }, { status: 400 });
+  }
+  // A READY landingpage fires ONE event (its VC Tracking, lib/vc-link VC_READY_LINKS): a launch optimizing the
+  // other one would wait for an event the page never sends — refused here, before any write (05.11).
+  {
+    const fires = vcReadyEventMismatch({
+      optimization: delivery.optimization,
+      conversionEvent: delivery.conversionEvent ?? "",
+      bidStrategy: String(campaign.bidStrategy ?? ""),
+      landing: dest.url,
+    });
+    if (fires) {
+      const want = fires === "LEAD" ? `Lead (${VC_LEAD_PIXEL.name})` : `Purchase (${VC_PIXEL.name})`;
+      return NextResponse.json(
+        { ok: false, stage: "config", error: `event_mismatch — this landingpage's VC Tracking fires ${fires === "LEAD" ? "Lead" : "Purchase"}, not ${delivery.conversionEvent === "LEAD" ? "Lead" : "Purchase"}; launch it with the ${want} optimization (or Link clicks)` },
+        { status: 400 },
+      );
+    }
   }
   if (medias.length === 0 || medias.some((m) => !m.url)) {
     return NextResponse.json({ ok: false, stage: "media", error: "media_required" }, { status: 400 });

@@ -335,6 +335,9 @@ type ReadyOpts = {
   roasPixel?: string;
   /** AV: the name body is the locked destination part inside the prefix — the typed tail may be empty. */
   nameOptional?: boolean;
+  /** A partner's own whole-card check (VC: the optimization agrees with the event the picked ready
+   *  landingpage fires — lib/vc-link vcReadyEventMismatch); false = not ready. */
+  fit?: (c: Campaign) => boolean;
 };
 
 /** A usable ad destination — http(s) and no whitespace inside. */
@@ -356,8 +359,10 @@ export function isReady(c: Campaign, opts: ReadyOpts = {}): boolean {
     adText = false,
     roasPixel = "",
     nameOptional = false,
+    fit,
   } = opts;
   if ((!nameOptional && !c.name.trim()) || c.countries.length === 0) return false;
+  if (fit && !fit(c)) return false;
   if (profile && !c.profile) return false;
   if (landing && !c.landing) return false;
   if (landing && landingValid && !landingValid(c.landing)) return false;

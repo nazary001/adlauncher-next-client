@@ -6,7 +6,7 @@ import { bidKind } from "./types";
 import { type AifFlow, AIF_RW_BASE, aifFlowOf, aifLinkSegments } from "./aif-link";
 import { AV_KEY_POOL_MAX, avKeyCode, avLinkSegments } from "./av-link";
 import { avLockPatch } from "./av-delivery";
-import { VC_PIXEL, vcDestination, vcLinkSegments, vcLockPatch } from "./vc-link";
+import { VC_PIXEL, vcDestination, vcLinkSegments, vcLockPatch, vcReadyEventMismatch } from "./vc-link";
 import { TEAM } from "./team.ts";
 
 export type Bound = { id: string; name: string };
@@ -468,7 +468,7 @@ export const PARTNERS: PartnerConfig[] = [
 // clicks with no pixel; pure module (lib/av-delivery) so node --test covers it.
 export { AV_OBJECTIVE, AV_PIXEL, AV_SALES_OBJECTIVE, type AvDelivery, avAdText, avDelivery, avLockPatch } from "./av-delivery";
 // VC (ValueClick) link / pixel / delivery contract — pure module, node --test covers it.
-export { VC_LEAD_PIXEL, VC_PIXEL, VC_READY_LINKS, pinVcNamePrefix, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcLockPatch, vcModeOf, vcReadyLinkOf } from "./vc-link";
+export { VC_LEAD_PIXEL, VC_PIXEL, VC_READY_LINKS, pinVcNamePrefix, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcLockPatch, vcModeOf, vcReadyEventMismatch, vcReadyLinkOf, vcReadyMode } from "./vc-link";
 
 export function partnerConfig(id: PartnerId): PartnerConfig {
   return PARTNERS.find((p) => p.id === id) ?? PARTNERS[0];
@@ -499,12 +499,16 @@ export function launchReadyOpts(p: PartnerConfig): {
   roasPixel: string;
   nameOptional: boolean;
   landingValid?: (v: string) => boolean;
+  fit?: (c: Campaign) => boolean;
 } {
   return {
     // AIF reuses the landing slot for its free-typed destination slug — required all the same.
     // VC keeps its pasted landingpage link there and it must be a real VC link (vcDestination).
     landing: p.usesGcm || Boolean(p.aifLaunch) || Boolean(p.avLaunch) || Boolean(p.vcLaunch),
     ...(p.vcLaunch ? { landingValid: (v: string) => vcDestination(v).ok } : {}),
+    // VC (05.11): a ready landingpage fires ONE event (its VC Tracking) — a card optimizing the other one
+    // is held until the Optimization agrees (the card names it; the route refuses it too).
+    ...(p.vcLaunch ? { fit: (c: Campaign) => !vcReadyEventMismatch(c) } : {}),
     profile: p.usesProfile,
     page: Boolean(p.fanpagesFromToken) || Boolean(p.lionLaunch),
     account: Boolean(p.accountsFromToken) || Boolean(p.lionLaunch),

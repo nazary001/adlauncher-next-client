@@ -158,6 +158,24 @@ export function vcDelivery(mode: string, bidStrategy = ""): VcDelivery {
   return { objective: VC_SALES_OBJECTIVE, optimization: "conversions", pixel: VC_PIXEL.id, conversionEvent: "PURCHASE" };
 }
 
+/** The mode a ready landingpage's VC Tracking asks for (its `event`, 05.11): Lead → "lead", else Purchase. */
+export const vcReadyMode = (event: VcReadyLink["event"]): VcMode => (event === "LEAD" ? "lead" : "conversions");
+
+/**
+ * A READY landingpage whose VC Tracking fires one event, launched to optimize the other — the ad set would
+ * wait for an event the page never sends (a Black Friday quiz fires Lead into the S-1 nik pixel; a Purchase
+ * launch on it optimizes PURCHASE on the VC pixel). "" = they agree, or nothing to compare: link clicks
+ * optimize no pixel event, and a landingpage outside the ready list fires who-knows-what. Else the event the
+ * page fires — the card names it under Optimization, readiness holds the card, the route refuses the launch.
+ */
+export function vcReadyEventMismatch(c: Pick<Campaign, "optimization" | "conversionEvent" | "bidStrategy" | "landing">): VcReadyLink["event"] | "" {
+  const ready = vcReadyLinkOf(c.landing);
+  if (!ready) return "";
+  const d = vcDelivery(vcModeOf(c), c.bidStrategy);
+  if (!d.conversionEvent) return "";
+  return d.conversionEvent === ready.event ? "" : ready.event;
+}
+
 /** The VC lock for one card (applyPartnerLocks): objective, optimization, pixel and event converge
  *  to vcDelivery of the card's own mode. Empty patch = the card already conforms. */
 export function vcLockPatch(r: Campaign): Partial<Campaign> {

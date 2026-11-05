@@ -35,7 +35,7 @@ import { TOOL_MARK, toolEnsureMark } from "@/lib/tool-launch";
 import { DEFAULT_PLATFORM_CHOICE, PLATFORM_CHOICES } from "@/lib/publisher-platforms";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { AIF_VALUE_PIXEL, AV_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifOfferablePixels, avDelivery, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
-import { VC_PIXEL, VC_READY_LINKS, isPageId, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcModeOf, vcPixelName, vcReadyLinkOf } from "@/lib/vc-link";
+import { VC_LEAD_PIXEL, VC_PIXEL, VC_READY_LINKS, isPageId, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcModeOf, vcPixelName, vcReadyEventMismatch, vcReadyLinkOf, vcReadyMode } from "@/lib/vc-link";
 import { aifFlowOf } from "@/lib/aif-link";
 import type { FanpageOption } from "./use-fanpages";
 import type { HsCatalog } from "./use-hs";
@@ -122,6 +122,11 @@ function missingRequirements(
   if (opts.page && !c.page) m.push(partner.pageLabel.toLowerCase());
   if (opts.landing && !c.landing) m.push(partner.vcLaunch ? "VC link" : partner.aifLaunch || partner.avLaunch ? "destination" : "landing");
   else if (opts.landing && opts.landingValid && !opts.landingValid(c.landing)) m.push("a valid VC link");
+  // VC: the picked ready landingpage fires one event — the optimization must agree (vcReadyEventMismatch)
+  if (partner.vcLaunch) {
+    const fires = vcReadyEventMismatch(c);
+    if (fires) m.push(fires === "LEAD" ? "the Lead optimization (this quiz fires Lead)" : "the Purchase optimization (this quiz fires Purchase)");
+  }
   if (opts.gcm && !c.gcm) m.push(partner.avLaunch ? "AV key" : partner.aifLaunch ? "brand" : "gcm code");
   if (opts.profile && !c.profile) m.push("profile");
   if (opts.link && !isHttpUrl(c.link)) m.push("link");
@@ -383,6 +388,9 @@ function CampaignCardBase({
   const vcDeliv = vcMode ? vcDelivery(vcModeOf(c), c.bidStrategy) : null;
   const vcLead = vcDeliv?.conversionEvent === "LEAD";
   const vcPixelLabel = vcDeliv ? `${vcPixelName(vcDeliv.pixel)} ${vcDeliv.pixel}`.trim() : "";
+  // The event the picked READY landingpage fires when it is not the one the card optimizes ("" = agree /
+  // nothing to compare) — said under Optimization, holds readiness, refused by the route.
+  const vcFires = vcMode ? vcReadyEventMismatch(c) : "";
   // ---- HS (LION) mode: the bind cascade + locales come from LION's catalog ----
   const hsMode = Boolean(partner.lionLaunch && hs);
   const hsData = hsMode && hs ? hs.dataFor(c.profile) : undefined;
@@ -1168,6 +1176,13 @@ function CampaignCardBase({
                           ? "Traffic — no pixel"
                           : `${vcLead ? "Lead" : "Purchase"} on the ${vcPixelName(vcDeliv?.pixel ?? "")}`
                     }
+                    error={
+                      vcFires === "LEAD"
+                        ? `this quiz's VC Tracking fires Lead into the ${VC_LEAD_PIXEL.name} — pick Lead (${VC_LEAD_PIXEL.name})${kind === "roas" ? "; min ROAS always optimizes Purchase value" : ""}`
+                        : vcFires === "PURCHASE"
+                          ? `this quiz's VC Tracking fires Purchase into the ${VC_PIXEL.name} — pick Purchase (${VC_PIXEL.name})`
+                          : undefined
+                    }
                   >
                     <Select
                       value={kind === "roas" ? "conversions" : vcModeOf(c)}
@@ -1452,7 +1467,14 @@ function CampaignCardBase({
                         <div className="mb-2">
                           <SearchSelect
                             value={vcReady ? vcReady.url : ""}
-                            onChange={(v) => patch({ landing: v })}
+                            onChange={(v) => {
+                              // The landingpage's VC Tracking decides the event (05.11): a Lead quiz puts the card in
+                              // the Lead mode, a Purchase one back on Purchase — unless the card optimizes link clicks
+                              // (no pixel event) or min-ROAS (Purchase value by definition; the mismatch is then named).
+                              const ready = VC_READY_LINKS.find((l) => l.url === v);
+                              const follows = ready && vcModeOf(c) !== "clicks" && kind !== "roas";
+                              patch({ landing: v, ...(follows ? vcDelivery(vcReadyMode(ready.event), c.bidStrategy) : {}) });
+                            }}
                             options={VC_READY_OPTIONS}
                             placeholder="Pick a ready VC quiz — Dating / Money / Cars …"
                             emptyHint="No ready VC landingpages match"

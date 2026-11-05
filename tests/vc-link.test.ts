@@ -23,10 +23,12 @@ const {
   vcLockPatch,
   vcModeOf,
   vcPixelName,
+  vcReadyEventMismatch,
   vcReadyLinkOf,
+  vcReadyMode,
   vcServerName,
 } = await import("../lib/vc-link.ts");
-const { makeCampaign, withPartnerMark } = await import("../lib/types.ts");
+const { isReady, makeCampaign, withPartnerMark } = await import("../lib/types.ts");
 const { adsetPayload, campaignPayload, creativePayload } = await import("../lib/fb-launch.ts");
 const { VC_OPTIMIZATIONS } = await import("../lib/catalog.ts");
 const { buildToolCampaign } = await import("../lib/tool-launch.ts");
@@ -85,6 +87,34 @@ test("vcModeOf: the mode is read off optimization + event — LEAD under convers
   for (const mode of ["conversions", "lead", "clicks"] as const) {
     assert.equal(vcModeOf({ ...c, ...vcDelivery(mode) }), mode, mode);
   }
+});
+
+test("vcReadyMode / vcReadyEventMismatch: a ready landingpage's VC Tracking event vs the card's optimization", () => {
+  const BF = "https://www.qualitydays.com/coa/what-is-your-black-friday-shopping-superpower-d3k4c7b7ek/";
+  assert.equal(vcReadyMode("LEAD"), "lead");
+  assert.equal(vcReadyMode("PURCHASE"), "conversions");
+  const purchase = { ...makeCampaign("r1"), ...vcDelivery("conversions") };
+  const lead = { ...makeCampaign("r2"), ...vcDelivery("lead") };
+  const clicks = { ...makeCampaign("r3"), ...vcDelivery("clicks") };
+  // a Black Friday quiz fires Lead: a Purchase card is told so, a Lead card agrees, clicks optimize no event
+  assert.equal(vcReadyEventMismatch({ ...purchase, landing: BF }), "LEAD");
+  assert.equal(vcReadyEventMismatch({ ...lead, landing: BF }), "");
+  assert.equal(vcReadyEventMismatch({ ...clicks, landing: BF }), "");
+  // min-ROAS optimizes Purchase value whatever the mode — still a mismatch on a Lead quiz
+  assert.equal(vcReadyEventMismatch({ ...lead, landing: BF, bidStrategy: "LOWEST_COST_WITH_MIN_ROAS", bidCap: "0,3" }), "LEAD");
+  // the 23.10 nine fire Purchase: a Lead card is told so, a Purchase card agrees
+  assert.equal(vcReadyEventMismatch({ ...lead, landing: LP }), "PURCHASE");
+  assert.equal(vcReadyEventMismatch({ ...purchase, landing: LP }), "");
+  // a landingpage outside the ready list (or no link) fires who-knows-what — nothing to compare
+  assert.equal(vcReadyEventMismatch({ ...lead, landing: LP_OTHER }), "");
+  assert.equal(vcReadyEventMismatch({ ...purchase, landing: "" }), "");
+  // readiness holds a mismatched card through the partner's `fit` check (lib/partners launchReadyOpts for VC)
+  const opts = { landing: true, landingValid: (v: string) => vcDestination(v).ok, page: true, account: true, fit: (c: { optimization: "conversions" | "clicks"; conversionEvent: string; bidStrategy: string; landing: string }) => !vcReadyEventMismatch(c) };
+  const base = { ...purchase, name: "Tima", countries: ["US"], page: "6100", account: "123456" };
+  assert.equal(isReady({ ...base, landing: LP }, opts), true);
+  assert.equal(isReady({ ...base, landing: BF }, opts), false);
+  assert.equal(isReady({ ...base, landing: BF, ...vcDelivery("lead") }, opts), true);
+  assert.equal(isReady({ ...base, landing: BF, ...vcDelivery("clicks") }, opts), true);
 });
 
 test("vcLockPatch: a fresh card converges to Purchase on the VC pixel and is idempotent", () => {
