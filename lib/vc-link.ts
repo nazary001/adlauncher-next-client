@@ -32,8 +32,11 @@ export const VC_HOSTS: readonly string[] = ["qualitydays.com"];
 // ---- the ready Content Arb landingpages (owner ask 23.10: "все активные вот эти ссылки … сразу по
 // дефолту добавь в автовыбор чтобы готовые были на партнере VC") ----------------------------------
 // Every landingpage VC's Content Arb list showed ACTIVE on 23.10 (the 9 "Creation Failed" rows have no
-// link), each with Tracking = VC_PIXEL + Purchase, each answering 200 in English. A pick only fills the
-// card's link field — any other VC Content Arb link can still be pasted. A new landingpage = one row.
+// link), each with Tracking = VC_PIXEL + Purchase, each answering 200 in English — plus the three
+// Black Friday landingpages the owner created on 05.11 (ask: «3 последние лендинга которые я создал по
+// black friday, добавь их в наш адлаунчер»), whose Tracking (read in VC 05.11) fires LEAD into the
+// S-1 nik pixel 2126539511577664 instead: `event` tells the two apart. A pick only fills the card's
+// link field — any other VC Content Arb link can still be pasted. A new landingpage = one row.
 
 export type VcReadyLink = {
   /** The link exactly as VC prints it (Landingpage → Link). */
@@ -44,18 +47,28 @@ export type VcReadyLink = {
   niche: string;
   /** The landingpage's name after the niche. */
   title: string;
+  /** The event the landingpage's VC Tracking fires through the Conversions API: the 23.10 nine fire
+   *  PURCHASE into VC_PIXEL; the Black Friday three (05.11) fire LEAD into the S-1 nik pixel
+   *  2126539511577664 — a launch on them should optimize THAT event on THAT dataset. */
+  event: "PURCHASE" | "LEAD";
   lang: "EN";
 };
 
-const ready = (slug: string, id: string, niche: string, title: string): VcReadyLink => ({
+const ready = (slug: string, id: string, niche: string, title: string, event: VcReadyLink["event"] = "PURCHASE"): VcReadyLink => ({
   url: `https://www.qualitydays.com/coa/${slug}-${id}/`,
   id,
   niche,
   title,
+  event,
   lang: "EN",
 });
 
 export const VC_READY_LINKS: readonly VcReadyLink[] = [
+  // Black Friday (owner 05.11) — VC Tracking: pixel 2126539511577664 "S-1 nik pixel" + Lead; each 200, en-US
+  ready("what-is-your-black-friday-shopping-superpower", "d3k4c7b7ek", "Black Friday / Shopping", "What Is Your Black Friday Shopping Superpower?", "LEAD"),
+  ready("are-you-a-smart-planner-or-a-spontaneous-shopper", "kcvhp9yt0f", "Black Friday / Shopping", "Are You a Smart Planner or a Spontaneous Shopper?", "LEAD"),
+  ready("what-does-your-black-friday-shopping-style-reveal-about-you", "yqj0on8cgc", "Black Friday / Shopping", "What Does Your Black Friday Shopping Style Reveal About You?", "LEAD"),
+  // 23.10 — VC Tracking: VC_PIXEL + Purchase
   ready("words-or-actions", "fn3zbpziuj", "Relationships", "Words or Actions? Explore Your Connection Style"),
   ready("ready-for-dating-or-a-new-relationship", "gvohy56eu6", "Dating", "Ready for Dating or a New Relationship?"),
   ready("explore-your-dating-style", "j4erziw09v", "Dating", "Explore Your Dating Style"),

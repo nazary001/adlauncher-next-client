@@ -104,7 +104,7 @@ test("vcLinkSegments: base / quiz slug / the landingpage id tagged / tail", () =
 });
 
 test("VC_READY_LINKS: every ready landingpage is a valid Content Arb link whose id is its own", () => {
-  assert.equal(VC_READY_LINKS.length, 9);
+  assert.equal(VC_READY_LINKS.length, 12);
   const ids = new Set<string>();
   for (const l of VC_READY_LINKS) {
     const d = vcDestination(l.url);
@@ -112,10 +112,20 @@ test("VC_READY_LINKS: every ready landingpage is a valid Content Arb link whose 
     assert.equal(d.ok && d.url, l.url);
     assert.equal(d.ok && d.lpId, l.id);
     assert.ok(l.niche && l.title && l.lang === "EN", l.url);
+    assert.ok(l.event === "PURCHASE" || l.event === "LEAD", l.url);
     assert.ok(!ids.has(l.id), `duplicate ${l.id}`);
     ids.add(l.id);
   }
   assert.equal(vcReadyLinkOf(LP)?.id, "fn3zbpziuj");
+  // The three Black Friday landingpages (05.11) fire LEAD into the S-1 nik pixel per their VC Tracking;
+  // the nine of 23.10 fire PURCHASE into the VC pixel.
+  for (const id of ["d3k4c7b7ek", "kcvhp9yt0f", "yqj0on8cgc"]) assert.equal(VC_READY_LINKS.find((l) => l.id === id)?.event, "LEAD", id);
+  assert.equal(VC_READY_LINKS.filter((l) => l.event === "PURCHASE").length, 9);
+  const bf = vcReadyLinkOf("https://www.qualitydays.com/coa/what-is-your-black-friday-shopping-superpower-d3k4c7b7ek/");
+  assert.equal(bf?.title, "What Is Your Black Friday Shopping Superpower?");
+  assert.equal(bf?.niche, "Black Friday / Shopping");
+  assert.equal(vcReadyLinkOf("https://www.qualitydays.com/coa/are-you-a-smart-planner-or-a-spontaneous-shopper-kcvhp9yt0f/")?.id, "kcvhp9yt0f");
+  assert.equal(vcReadyLinkOf("https://www.qualitydays.com/coa/what-does-your-black-friday-shopping-style-reveal-about-you-yqj0on8cgc/")?.id, "yqj0on8cgc");
   assert.equal(vcReadyLinkOf("qualitydays.com/coa/words-or-actions-fn3zbpziuj?x=1")?.id, "fn3zbpziuj");
   assert.equal(vcReadyLinkOf("https://www.qualitydays.com/coa/some-other-quiz-abcdefghij/"), null);
   assert.equal(vcReadyLinkOf(""), null);

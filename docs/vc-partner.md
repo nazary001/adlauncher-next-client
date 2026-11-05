@@ -16,8 +16,14 @@ holds Pixel-ID + token + event (every active Content Arb landingpage on 23.10: p
 
 **Ready landingpages** (`VC_READY_LINKS`, owner 23.10: «все активные … сразу по дефолту добавь в автовыбор»): the 9
 landingpages VC listed *Active* on 23.10 (Relationships, 2× Dating, Fashion, Food, Home / Lifestyle, Money / Finance,
-Automotive, Career / Jobs; all EN, all 200). The card's **"Pick a ready VC quiz"** list fills the link field; any other
-Content Arb link can still be pasted. A new landingpage = one `ready(…)` row in `lib/vc-link.ts`.
+Automotive, Career / Jobs; all EN, all 200) — plus the three **Black Friday** landingpages the owner created on 05.11
+(ask: «3 последние лендинга которые я создал по black friday, добавь их в наш адлаунчер»): `d3k4c7b7ek` *What Is Your
+Black Friday Shopping Superpower?*, `kcvhp9yt0f` *Are You a Smart Planner or a Spontaneous Shopper?*, `yqj0on8cgc` *What
+Does Your Black Friday Shopping Style Reveal About You?* (niche "Black Friday / Shopping", EN, all 200). Their VC Tracking
+fires **Lead** into the S-1 nik pixel 2126539511577664, not Purchase into the VC pixel — each row carries `event`
+(PURCHASE / LEAD), the picker tags them "EN · Lead" and the card's field hint says so: a launch on them should optimize
+the Lead event on that dataset. The card's **"Pick a ready VC quiz"** list fills the link field; any other Content Arb
+link can still be pasted. A new landingpage = one `ready(…)` row in `lib/vc-link.ts`.
 
 ## In the launcher (`lib/vc-link.ts`, `lib/vc-launch.ts`, `app/api/vc/*`)
 

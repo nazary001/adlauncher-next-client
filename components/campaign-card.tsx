@@ -93,8 +93,16 @@ function readyLinkOptions(redirectType: string): RichOption[] {
 }
 
 /** Picker rows of the ready VC Content Arb landingpages (lib/vc-link VC_READY_LINKS): the niche is the
- *  section, the language the tag — "Words or Actions? Explore Your Connection Style · EN". */
-const VC_READY_OPTIONS: RichOption[] = VC_READY_LINKS.map((l) => ({ value: l.url, label: l.title, group: l.niche, tag: l.lang }));
+ *  section, the language the tag — "Words or Actions? Explore Your Connection Style · EN". A landingpage
+ *  whose VC Tracking fires Lead (the Black Friday ones, 05.11) is tagged "EN · Lead" in the warn tone, so
+ *  the buyer sees it needs the Lead event, not VC's default Purchase; "lead" in the search box finds them. */
+const VC_READY_OPTIONS: RichOption[] = VC_READY_LINKS.map((l) => ({
+  value: l.url,
+  label: l.title,
+  group: l.niche,
+  tag: l.event === "LEAD" ? `${l.lang} · Lead` : l.lang,
+  tagTone: l.event === "LEAD" ? ("warn" as const) : undefined,
+}));
 
 /** Human list of what a card is still missing to launch — partner-aware (mirrors isLaunchable +
  *  launchReadyOpts), so the draft-dot tooltip names the real blockers instead of a fixed string. */
@@ -1416,7 +1424,11 @@ function CampaignCardBase({
                   ) : vcMode ? (
                     <Field
                       label="VC landingpage (Content Arb)"
-                      hint="pick a ready quiz or paste a Content Arb link from VC → Content Arb → Landingpages"
+                      hint={
+                        vcReady?.event === "LEAD"
+                          ? "this landingpage's VC Tracking fires Lead into the S-1 nik pixel 2126539511577664 — optimize the Lead event on it, not Purchase"
+                          : "pick a ready quiz or paste a Content Arb link from VC → Content Arb → Landingpages"
+                      }
                       error={c.landing.trim() && vcDest && !vcDest.ok ? vcDest.error.replace(/^[a-z_]+ — /, "") : undefined}
                     >
                       <div>
