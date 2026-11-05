@@ -4,6 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   AV_KEY_POOL_MAX,
+  AV_KNOWN_ARTICLES,
   AV_KNOWN_CHATS,
   avArticleTitle,
   avAutoName,
@@ -20,6 +21,7 @@ import {
   avKeyLaunchable,
   avKeyOfLink,
   avKeysUploadFiles,
+  avKnownArticles,
   avKnownChats,
   avLaunchableCount,
   avLink,
@@ -534,6 +536,66 @@ test("the shipped registry names the lp1 chats of thecadrion.com — Emily, Dati
     new Set(AV_KNOWN_CHATS.map((c) => c.name)).size,
     AV_KNOWN_CHATS.length,
     "every chat has its own name, so the card's pills tell them apart",
+  );
+});
+
+test("known articles of our sites carry their bare destination; a foreign site, a subdomain, the home page or a damaged path is left out", () => {
+  const known = [
+    { site: "thecadrion.com", path: "/51-ways-to-make-money-online/", name: "part 1" },
+    { site: "THECADRION.COM.", path: "/make-money-with-just-your-phone?utm_source=x#top", name: "phone (query and hash dropped)" },
+    { site: "elsewhere.com", path: "/51-ways-to-make-money-online", name: "not ours" },
+    { site: "lp1.thecadrion.com", path: "/51-ways-to-make-money-online", name: "a subdomain is no site of articles" },
+    { site: "thecadrion.com", path: "/", name: "the home page" },
+    { site: "thecadrion.com", path: "/" + "a".repeat(301), name: "damaged path (longer than a page's path can be)" },
+  ];
+  assert.deepEqual(avKnownArticles(["thecadrion.com"], known), [
+    { site: "thecadrion.com", path: "/51-ways-to-make-money-online", name: "part 1", base: "https://thecadrion.com/51-ways-to-make-money-online" },
+    { site: "thecadrion.com", path: "/make-money-with-just-your-phone", name: "phone (query and hash dropped)", base: "https://thecadrion.com/make-money-with-just-your-phone" },
+  ]);
+  assert.deepEqual(avKnownArticles([], known), []);
+  assert.deepEqual(avKnownArticles(["elsewhere.com"], known).map((a) => a.name), ["not ours"]);
+});
+
+test("the shipped registry names the ten money-cluster pages of thecadrion.com (05.11): the five parts of '51 Ways to Make Money Online' in order, then the five guides it links — each a live-shaped article address", () => {
+  const PATHS = [
+    "/51-ways-to-make-money-online",
+    "/51-ways-to-make-money-online-part-2",
+    "/51-ways-to-make-money-online-part-3",
+    "/51-ways-to-make-money-online-part-4",
+    "/51-ways-to-make-money-online-part-5",
+    "/make-money-with-just-your-phone",
+    "/make-money-online-with-no-money",
+    "/passive-income-ideas-online",
+    "/make-money-online-as-a-student",
+    "/work-from-home-jobs-no-experience",
+  ];
+  assert.deepEqual(AV_KNOWN_ARTICLES.map((a) => a.path), PATHS);
+  assert.ok(AV_KNOWN_ARTICLES.every((a) => a.site === "thecadrion.com"));
+  assert.deepEqual(
+    AV_KNOWN_ARTICLES.slice(0, 5).map((a) => a.name),
+    [
+      "51 Ways · Part 1 (ways 1–10, freelance skills)",
+      "51 Ways · Part 2 (11–20, selling products)",
+      "51 Ways · Part 3 (21–30, content and audience)",
+      "51 Ways · Part 4 (31–40, apps and gigs)",
+      "51 Ways · Part 5 (41–51, remote jobs)",
+    ],
+    "the parts are numbered so a buyer launches the first page, not a middle one, unless they mean to",
+  );
+  assert.deepEqual(
+    avKnownArticles(["thecadrion.com"]).map((a) => a.base),
+    PATHS.map((p) => `https://thecadrion.com${p}`),
+    "the default registry is what the card offers, bare (the utm tail is the link builder's)",
+  );
+  assert.equal(new Set(AV_KNOWN_ARTICLES.map((a) => a.path)).size, AV_KNOWN_ARTICLES.length, "no page is listed twice");
+  assert.equal(new Set(AV_KNOWN_ARTICLES.map((a) => a.name)).size, AV_KNOWN_ARTICLES.length, "every page has its own name, so the card's pills tell them apart");
+  // the locked campaign-name part these pages give (no -geo-lang pair in the slug: the GEO is the card's, no language)
+  assert.equal(avAutoName("https://thecadrion.com/51-ways-to-make-money-online", ["US"]), "51 ways to make money online | US | ");
+  assert.equal(avAutoName("https://thecadrion.com/51-ways-to-make-money-online-part-2", ["US", "CA"]), "51 ways to make money online part 2 | US+CA | ");
+  assert.equal(avAutoName("https://thecadrion.com/make-money-with-just-your-phone", []), "make money with just your phone | ");
+  assert.equal(
+    avLink("https://thecadrion.com/51-ways-to-make-money-online", "av601"),
+    "https://thecadrion.com/51-ways-to-make-money-online?utm_source=facebook&utm_medium={{campaign.id}}&utm_campaign=av601&utm_term={{adset.id}}&utm_content={{ad.id}}",
   );
 });
 

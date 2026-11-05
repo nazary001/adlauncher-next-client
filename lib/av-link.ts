@@ -201,6 +201,47 @@ export function avKnownChats(siteDomains: string[], known: readonly AvKnownChat[
   return knownChatsOf(rootSites(siteDomains), known).map(({ host, id, name, base }) => ({ host, id, name, base }));
 }
 
+/** An article of ours on an AV site, offered with one click on the Article tab: its site, its path
+ *  and the short name the card's pill shows. */
+export type AvKnownArticle = { site: string; path: string; name: string };
+
+/**
+ * The articles the card offers with one click (the Article tab's "Our articles" pills). The sitemap
+ * search lists EVERY page of the site — the ones built for launches are named here so a buyer does not
+ * hunt for them (owner 05.11: "давай в лаунчер добавим теперь эти статьи наши все"): the paginated
+ * "51 Ways to Make Money Online" listicle of thecadrion.com — five parts of ten ways, each ending in a
+ * rewarded "Continue reading" card into the next — and the five guides it cross-links. A pick is
+ * checked exactly like a pasted article (the page must answer on the site, on the pick and again on
+ * every launch), so this list only saves the search; it never vouches for a page.
+ */
+export const AV_KNOWN_ARTICLES: readonly AvKnownArticle[] = [
+  { site: "thecadrion.com", path: "/51-ways-to-make-money-online", name: "51 Ways · Part 1 (ways 1–10, freelance skills)" },
+  { site: "thecadrion.com", path: "/51-ways-to-make-money-online-part-2", name: "51 Ways · Part 2 (11–20, selling products)" },
+  { site: "thecadrion.com", path: "/51-ways-to-make-money-online-part-3", name: "51 Ways · Part 3 (21–30, content and audience)" },
+  { site: "thecadrion.com", path: "/51-ways-to-make-money-online-part-4", name: "51 Ways · Part 4 (31–40, apps and gigs)" },
+  { site: "thecadrion.com", path: "/51-ways-to-make-money-online-part-5", name: "51 Ways · Part 5 (41–51, remote jobs)" },
+  { site: "thecadrion.com", path: "/make-money-with-just-your-phone", name: "Phone only — 12 ways that pay" },
+  { site: "thecadrion.com", path: "/make-money-online-with-no-money", name: "No money — 12 free ways to start" },
+  { site: "thecadrion.com", path: "/passive-income-ideas-online", name: "Passive income — 14 ideas" },
+  { site: "thecadrion.com", path: "/make-money-online-as-a-student", name: "Students and teens — 12 safe options" },
+  { site: "thecadrion.com", path: "/work-from-home-jobs-no-experience", name: "Work-from-home jobs, no experience" },
+];
+
+/** The known articles of our sites (a site itself — never a subdomain of one), each with its bare
+ *  destination (avDestinationBase); an article of a site that is not ours, or whose path is not a
+ *  page's, is left out. */
+export function avKnownArticles(siteDomains: string[], known: readonly AvKnownArticle[] = AV_KNOWN_ARTICLES): Array<AvKnownArticle & { base: string }> {
+  const sites = new Set(siteDomains.map(normChatHost).filter(Boolean));
+  const out: Array<AvKnownArticle & { base: string }> = [];
+  for (const a of known) {
+    const site = normChatHost(a.site);
+    if (!sites.has(site)) continue;
+    const b = avDestinationBase(`https://${site}${String(a.path ?? "").trim()}`);
+    if (b.ok && b.host === site && b.path !== "/") out.push({ site, path: b.path, name: a.name, base: b.base });
+  }
+  return out;
+}
+
 export type AvDestinationKind = "article" | "redirect" | "chat";
 
 /**

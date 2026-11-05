@@ -112,6 +112,22 @@ ActiveView не отдаёт список чатов по API, а поддоме
 английские статьи с тем же utm-хвостом. Английские TA TEST и EN Dating Long в реестре нет — их
 адрес вставляется вручную.
 
+## Известные статьи (кнопки во вкладке Article)
+
+Поиск во вкладке **Article** идёт по живому sitemap сайта (там все ~120 страниц), а статьи,
+сделанные под запуски, перечислены в коде: `AV_KNOWN_ARTICLES` в `lib/av-link.ts` (site, path,
+имя). Вкладка показывает их кнопками «Our articles: …» над полем вставки; клик кладёт голый адрес
+статьи в поле и запускает ту же проверку, что и вставка (страница должна отвечать на сайте), при
+запуске сервер проверяет заново. Реестр избавляет от поиска, за страницу не ручается.
+
+Сейчас в реестре 10 страниц `thecadrion.com` (05.11): пять частей листикла «51 Ways to Make Money
+Online» (`/51-ways-to-make-money-online`, `…-part-2` … `…-part-5`; каждая часть заканчивается
+rewarded-карточкой «Continue reading» на следующую — запускать обычно первую) и пять связанных
+гайдов: `/make-money-with-just-your-phone`, `/make-money-online-with-no-money`,
+`/passive-income-ideas-online`, `/make-money-online-as-a-student`,
+`/work-from-home-jobs-no-experience`. Монетизация страниц описана в
+`GC-coding/activeview/articles/money/README.md`. Новая статья = строка в `AV_KNOWN_ARTICLES`.
+
 ## Вопросы к ActiveView, от которых зависит отчётность
 
 - Ключи **UTM Campaign Values** (`av001…`) привязаны к сайту и автоматически отключаются, если по

@@ -16,6 +16,7 @@ import {
   avDestinationBase,
   avDestinationKind,
   avFieldTab,
+  avKnownArticles,
   avKnownChats,
   avMappingLabel,
   avPinAfterPick,
@@ -314,11 +315,14 @@ export function AvDestinationField({
           </Notice>
         ) : null}
 
-        {/* paste any AV destination URL — validated for shape + host, then checked on the server */}
+        {/* our own articles in one click (lib/av-link AV_KNOWN_ARTICLES — checked like a paste), then
+            paste any AV destination URL — validated for shape + host, then checked on the server */}
         <PasteCheck
           label="Destination URL"
           placeholder="…or paste an AV article URL"
           value={value}
+          suggestions={siteDomains ? avKnownArticles(siteDomains).map((a) => ({ label: a.name, url: a.base, title: a.base })) : []}
+          suggestionsLabel="Our articles:"
           shape={(raw) => avDestinationBase(raw)}
           foreign={(host) =>
             siteDomains && !siteDomains.some((d) => host === d || host.endsWith(`.${d}`))
@@ -386,6 +390,7 @@ function PasteCheck({
   placeholder,
   value,
   suggestions,
+  suggestionsLabel,
   shape,
   foreign,
   check,
@@ -405,6 +410,8 @@ function PasteCheck({
   /** Addresses offered in one click (the AI chat tab: our known chats) — a click fills the box and
    *  runs the very check a paste does, so a pick is never taken on trust. */
   suggestions?: { label: string; url: string; title?: string }[];
+  /** The words before the pills (which addresses they are) — "Our chats:" unless said otherwise. */
+  suggestionsLabel?: string;
   shape: (raw: string) => Shape;
   /** Why this host is none of ours, or null — a foreign host never needs a round trip. */
   foreign: (host: string) => string | null;
@@ -473,7 +480,7 @@ function PasteCheck({
     <div className="flex flex-col gap-1.5">
       {suggestions && suggestions.length > 0 ? (
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[11px] text-faint">Our chats:</span>
+          <span className="text-[11px] text-faint">{suggestionsLabel ?? "Our chats:"}</span>
           {suggestions.map((s) => {
             const on = value === s.url;
             return (
