@@ -210,11 +210,14 @@ export type AvKnownArticle = { site: string; path: string; name: string };
  * search lists EVERY page of the site — the ones built for launches are named here so a buyer does not
  * hunt for them (owner 05.11: "давай в лаунчер добавим теперь эти статьи наши все"): the paginated
  * "51 Ways to Make Money Online" listicle of thecadrion.com — five parts of ten ways, each ending in a
- * rewarded "Continue reading" card into the next — and the five guides it cross-links. A pick is
- * checked exactly like a pasted article (the page must answer on the site, on the pick and again on
- * every launch), so this list only saves the search; it never vouches for a page.
+ * rewarded "Continue reading" card into the next — and the five guides it cross-links; first, the
+ * one-page version of the same 51 ways (06.11, owner: "эти 2 статьи … добавь в наш адлаунчер на прод
+ * по AV партнеру" — a banner after every way, a rewarded offer window at way 4). A pick is checked
+ * exactly like a pasted article (the page must answer on the site, on the pick and again on every
+ * launch), so this list only saves the search; it never vouches for a page.
  */
 export const AV_KNOWN_ARTICLES: readonly AvKnownArticle[] = [
+  { site: "thecadrion.com", path: "/make-money-online-51-ways", name: "51 Ways · all 51 on one page" },
   { site: "thecadrion.com", path: "/51-ways-to-make-money-online", name: "51 Ways · Part 1 (ways 1–10, freelance skills)" },
   { site: "thecadrion.com", path: "/51-ways-to-make-money-online-part-2", name: "51 Ways · Part 2 (11–20, selling products)" },
   { site: "thecadrion.com", path: "/51-ways-to-make-money-online-part-3", name: "51 Ways · Part 3 (21–30, content and audience)" },
