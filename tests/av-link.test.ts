@@ -556,33 +556,14 @@ test("known articles of our sites carry their bare destination; a foreign site, 
   assert.deepEqual(avKnownArticles(["elsewhere.com"], known).map((a) => a.name), ["not ours"]);
 });
 
-test("the shipped registry names the money pages of thecadrion.com: the one-page '51 Ways' (06.11) first, then the five parts of the paginated listicle in order and the five guides it links (05.11) — each a live-shaped article address", () => {
-  const PATHS = [
-    "/make-money-online-51-ways",
-    "/51-ways-to-make-money-online",
-    "/51-ways-to-make-money-online-part-2",
-    "/51-ways-to-make-money-online-part-3",
-    "/51-ways-to-make-money-online-part-4",
-    "/51-ways-to-make-money-online-part-5",
-    "/make-money-with-just-your-phone",
-    "/make-money-online-with-no-money",
-    "/passive-income-ideas-online",
-    "/make-money-online-as-a-student",
-    "/work-from-home-jobs-no-experience",
-  ];
+test("the shipped registry names only the two '51 Ways' pages of thecadrion.com (owner 09.11: «оставь всего 2 … все остальные удали») — the one-page version first, then part 1 of the paginated listicle — each a live-shaped article address", () => {
+  const PATHS = ["/make-money-online-51-ways", "/51-ways-to-make-money-online"];
   assert.deepEqual(AV_KNOWN_ARTICLES.map((a) => a.path), PATHS);
   assert.ok(AV_KNOWN_ARTICLES.every((a) => a.site === "thecadrion.com"));
-  assert.equal(AV_KNOWN_ARTICLES[0].name, "51 Ways · all 51 on one page", "the one-page version is the first pill (owner 06.11)");
   assert.deepEqual(
-    AV_KNOWN_ARTICLES.slice(1, 6).map((a) => a.name),
-    [
-      "51 Ways · Part 1 (ways 1–10, freelance skills)",
-      "51 Ways · Part 2 (11–20, selling products)",
-      "51 Ways · Part 3 (21–30, content and audience)",
-      "51 Ways · Part 4 (31–40, apps and gigs)",
-      "51 Ways · Part 5 (41–51, remote jobs)",
-    ],
-    "the parts are numbered so a buyer launches the first page, not a middle one, unless they mean to",
+    AV_KNOWN_ARTICLES.map((a) => a.name),
+    ["51 Ways · all 51 on one page", "51 Ways · Part 1 (ways 1–10, freelance skills)"],
+    "the one-page version is the first pill (owner 06.11)",
   );
   assert.deepEqual(
     avKnownArticles(["thecadrion.com"]).map((a) => a.base),

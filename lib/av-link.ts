@@ -215,19 +215,13 @@ export type AvKnownArticle = { site: string; path: string; name: string };
  * по AV партнеру" — a banner after every way, a rewarded offer window at way 4). A pick is checked
  * exactly like a pasted article (the page must answer on the site, on the pick and again on every
  * launch), so this list only saves the search; it never vouches for a page.
+ * Owner 09.11: «оставь там всего 2 … ссылки (make-money-online-51-ways, 51-ways-to-make-money-online),
+ * все остальные удали» · «просто удали из списка те статьи» — parts 2–5 and the five guides are off
+ * the pills (still on the site and in the sitemap search).
  */
 export const AV_KNOWN_ARTICLES: readonly AvKnownArticle[] = [
   { site: "thecadrion.com", path: "/make-money-online-51-ways", name: "51 Ways · all 51 on one page" },
   { site: "thecadrion.com", path: "/51-ways-to-make-money-online", name: "51 Ways · Part 1 (ways 1–10, freelance skills)" },
-  { site: "thecadrion.com", path: "/51-ways-to-make-money-online-part-2", name: "51 Ways · Part 2 (11–20, selling products)" },
-  { site: "thecadrion.com", path: "/51-ways-to-make-money-online-part-3", name: "51 Ways · Part 3 (21–30, content and audience)" },
-  { site: "thecadrion.com", path: "/51-ways-to-make-money-online-part-4", name: "51 Ways · Part 4 (31–40, apps and gigs)" },
-  { site: "thecadrion.com", path: "/51-ways-to-make-money-online-part-5", name: "51 Ways · Part 5 (41–51, remote jobs)" },
-  { site: "thecadrion.com", path: "/make-money-with-just-your-phone", name: "Phone only — 12 ways that pay" },
-  { site: "thecadrion.com", path: "/make-money-online-with-no-money", name: "No money — 12 free ways to start" },
-  { site: "thecadrion.com", path: "/passive-income-ideas-online", name: "Passive income — 14 ideas" },
-  { site: "thecadrion.com", path: "/make-money-online-as-a-student", name: "Students and teens — 12 safe options" },
-  { site: "thecadrion.com", path: "/work-from-home-jobs-no-experience", name: "Work-from-home jobs, no experience" },
 ];
 
 /** The known articles of our sites (a site itself — never a subdomain of one), each with its bare
