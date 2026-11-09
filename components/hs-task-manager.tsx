@@ -956,8 +956,9 @@ export function HsTaskManagerProvider({ children, user }: { children: React.Reac
         refuse("no creatives on the card");
         return;
       }
-      if (channel === "token" && media.length > 10) {
-        refuse("the FB Token rail builds at most 10 ads per campaign — trim the creatives or use the LION rail");
+      // The FB Token and TOOL rails take at most 10 creatives (lib/hs-token-launch HS_TOKEN_MAX_CREATIVES).
+      if ((channel === "token" || channel === "tool") && media.length > 10) {
+        refuse(`the ${channel === "tool" ? "TOOL" : "FB Token"} rail builds at most 10 ads per campaign — trim the creatives or use the LION rail`);
         return;
       }
 

@@ -8,7 +8,7 @@ import {
   hsFullName,
   todaySaoPauloDDMM,
 } from "@/lib/hs-launch";
-import { LION_ACR, LionError, lionAccountPixels, lionConfigured, lionProfileData } from "@/lib/lion";
+import { type LionProfile, LION_ACR, LionError, lionAccountPixels, lionConfigured, lionProfileData, lionProfiles } from "@/lib/lion";
 import { hsPageRefusal, reportPagesUsed } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { taskWriter } from "@/lib/task-store";
@@ -23,8 +23,11 @@ import {
   runToolMedia,
   runToolPublish,
   toolEnsureMark,
+  toolPersonaSession,
+  toolSessionChoices,
 } from "@/lib/tool-launch";
-import { toolAccountVisible, toolDeps, toolInputFromCampaign, toolLaunchReady } from "@/lib/tool-run";
+import { toolAccountVisible, toolDeps, toolInputFromCampaign, toolLaunchReady, toolSessionDirectory } from "@/lib/tool-run";
+import { toolSessionsWhere } from "@/lib/team";
 
 export const runtime = "nodejs";
 // Modelled on /api/hs/token-launch (maxDuration 300): the whole run — media register + poll to
@@ -164,13 +167,32 @@ export async function POST(req: Request): Promise<Response> {
   // read instead of letting the run die inside the stream.
   if (!(await toolAccountVisible(c.account))) {
     return bad(
-      "account_not_visible_to_tool — no live TOOL session sees this ad account; an owner refreshes/adds one on Ads Manager sessions (or launch it on the LION API rail)",
+      `account_not_visible_to_tool — no live TOOL session sees this ad account; an owner refreshes/adds one on ${toolSessionsWhere()} (or launch it on the LION API rail)`,
     );
   }
 
   const accountId = acctKey(c.account);
   const pageId = c.page;
   const pixelId = c.pixel;
+
+  // The TOOL session: the one whose FB profile is this LION profile's persona — the FB user LION's own
+  // create/ would act as, so the page and pixel are ones that user holds (GLO-02, 09.11: all eight
+  // GLO-HS-02-n sessions see every DRGC account, and without a pick TOOL takes any of them). No match
+  // (persona unknown, no such session, a directory TOOL would not list) → TOOL picks by account, as
+  // before. Every read here is cached (profiles 10 min, readiness + directory 60 s); none may fail the launch.
+  let toolSessionId: number | null = null;
+  try {
+    const [profiles, live, dir] = await Promise.all([
+      lionProfiles().catch((): LionProfile[] => []),
+      toolLaunchReady(),
+      toolSessionDirectory(),
+    ]);
+    const persona = profiles.find((p) => p.slug === c.profile)?.name ?? "";
+    const seenBy = live.ok ? (live.accounts.find((a) => a.account_id === accountId)?.sessions ?? []) : [];
+    toolSessionId = toolPersonaSession(toolSessionChoices(seenBy, dir), persona);
+  } catch {
+    toolSessionId = null;
+  }
 
   // Locales: the card stores the profile's FB locale ids as strings; unknown ids (profile switched
   // under the card) are dropped, same as the LION rail's payload builder.
@@ -264,7 +286,11 @@ export async function POST(req: Request): Promise<Response> {
           ...(cr.name ? { name: cr.name } : {}),
           ...(cr.cover ? { coverUrl: cr.cover } : {}),
         }));
-        const media = await runToolMedia(toolDeps, accountId, items, { deadlineAt, onStage });
+        const media = await runToolMedia(toolDeps, accountId, items, {
+          deadlineAt,
+          onStage,
+          ...(toolSessionId ? { sessionId: toolSessionId } : {}), // the persona's session uploads too
+        });
         if (!media.ok) {
           // No campaign exists → give the slot back.
           if (acctSlot) await releaseAcctSlot(acctSlot.documentId);
@@ -299,6 +325,7 @@ export async function POST(req: Request): Promise<Response> {
             status: "ACTIVE", // launch → born PAUSED then activated last (options.activate)
             adsetStartTime: startTime,
             accountCurrency: currency,
+            ...(toolSessionId ? { sessionId: toolSessionId } : {}),
           }),
         );
         if (!built.ok) {

@@ -30,7 +30,7 @@ import {
 } from "@/lib/catalog";
 import { hsFinalLink, hsLinkSegments, hsNamePrefix, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { hsReadyLinkOf, hsReadyLinksFor } from "@/lib/hs-ready-links";
-import { TEAM } from "@/lib/team";
+import { TEAM, toolSessionsWhere } from "@/lib/team";
 import { TOOL_MARK, toolEnsureMark } from "@/lib/tool-launch";
 import { DEFAULT_PLATFORM_CHOICE, PLATFORM_CHOICES } from "@/lib/publisher-platforms";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
@@ -827,7 +827,7 @@ function CampaignCardBase({
                                 (hsData.accounts?.length ?? 0) > 0 &&
                                 hsAccountOptions.length === 0
                               ? toolRail
-                                ? "No accounts here are visible to a live TOOL session — use the LION API rail (or an owner refreshes the session on Ads Manager sessions)"
+                                ? `No accounts here are visible to a live TOOL session — use the LION API rail (or an owner refreshes the session on ${toolSessionsWhere()})`
                                 : "No accounts here are visible to our FB token — use the LION API rail (or another profile)"
                               : "No accounts on this profile"
                       }

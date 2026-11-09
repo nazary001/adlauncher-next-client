@@ -9,6 +9,7 @@ import { tokenAdAccounts } from "@/lib/fb-graph";
 import { filterAccountsFor } from "@/lib/acct-assignments";
 import { toolLaunchReady, toolSessionDirectory } from "@/lib/tool-run";
 import { type ToolSessionChoice, toolSessionChoices } from "@/lib/tool-launch";
+import { teamHsToolAccount, toolSessionsWhere } from "@/lib/team";
 
 export const runtime = "nodejs";
 // The MO/AIF catalog read is a paginated Graph sweep (warm from cache); the TOOL /accounts + /me
@@ -29,8 +30,11 @@ export const maxDuration = 60;
  *   VC (vc):  VC's cabinets in TOOL (named GC-for-VC-* or seen by a session of TOOL's "VC" project)
  *             ∪ (TOOL ∩ the VC token's accounts, when a token is assigned) ∩ filterAccountsFor(session) —
  *             a TOOL session alone is enough (owner ask 23.10: VC through TOOL without a token).
- *   HS (br):  TOOL accounts ∩ filterAccountsFor(session) — the per-profile intersection happens in
- *             the card/board (LION profile bind space), not here.
+ *   HS (br):  TOOL accounts named like the team's HS accounts (lib/team hsToolAccounts: GC-HS-* on
+ *             glo-01, DRGC-VD-C1-BR-* on glo-02) ∩ filterAccountsFor(session) — the per-profile
+ *             intersection happens in the card/board (LION profile bind space), not here.
+ *   (?partner= goes through sanitizePartnerId: a partner this team does not work with is read as the
+ *   team's default — on glo-02 every answer is HS's.)
  *
  * Any session (buyers launch through TOOL — NOT owner-gated). Response:
  *   { ok, ready, reason?, message?, accounts: string[] (bare digits), rows: {id,name,currency}[], live }
@@ -187,14 +191,16 @@ export async function GET(req: Request) {
   }
 
   // TOOL ∩ partner catalog, then the owner's per-buyer assignment filter. HS has no cheap catalog
-  // (LION lists accounts per profile only), so its axis is the HS cabinet NAME — every HS account is
-  // "GC-HS-…" (302/302 on glo-01). Without it a TOOL session carrying ANOTHER partner's cabinets
-  // (av-01 → GC-AV-LA-*, live 28.09) lit the HS TOOL segment with 11 accounts that no LION profile
-  // holds — an enabled rail with an empty picker. The card still intersects with the profile.
+  // (LION lists accounts per profile only), so its axis is the team's HS cabinet NAME (lib/team
+  // hsToolAccounts) — every glo-01 HS account is "GC-HS-…" (302/302), every glo-02 one
+  // "DRGC-VD-C1-BR-…" (51/51 in TOOL team 3, 09.11). Without it a TOOL session carrying ANOTHER
+  // partner's cabinets (av-01 → GC-AV-LA-*, live 28.09) lit the HS TOOL segment with 11 accounts that
+  // no LION profile holds — an enabled rail with an empty picker — and a GLO-HS-02-n session's own
+  // personal account would inflate the count. The card still intersects with the profile.
   const canon = (id: string): string => String(id).replace(/^act_/, "");
   const intersected =
     catalogIds === null
-      ? ready.accounts.filter((a) => /^GC-HS-/i.test(String(a.name ?? "").trim())).map((a) => a.account_id)
+      ? ready.accounts.filter((a) => teamHsToolAccount(a.name)).map((a) => a.account_id)
       : (() => {
           const cat = new Set(catalogIds.map(canon));
           return liveIds.filter((id) => cat.has(id));
@@ -212,7 +218,7 @@ export async function GET(req: Request) {
           ok: true,
           ready: false,
           reason: "no_live_session",
-          message: `TOOL sees ${live} live account${live === 1 ? "" : "s"} but none of ${label}'s — an owner adds a TOOL session that sees ${label}'s cabinets on Ads Manager sessions`,
+          message: `TOOL sees ${live} live account${live === 1 ? "" : "s"} but none of ${label}'s — an owner adds a TOOL session that sees ${label}'s cabinets on ${toolSessionsWhere()}`,
           accounts: [],
           rows: [],
           live,

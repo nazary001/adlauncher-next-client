@@ -24,6 +24,7 @@ import {
 } from "./tool-sessions";
 import { type ToolTeamAccount, hasScope, toSession, toTeamAccount } from "./tool-sessions-model";
 import { type Campaign, bidKind, normalizeRoasGoal, parseMoney } from "./types";
+import { toolSessionsWhere } from "./team";
 import type { ToolBid, ToolBuildInput, ToolCreativeInput, ToolDeps } from "./tool-launch";
 
 // ---- the injected dependency object (real transport + real clock) ------------------------------
@@ -94,7 +95,7 @@ async function computeReady(): Promise<ToolReadyResult> {
   if (rows.length === 0) {
     // GET /accounts is empty exactly when the only session is expired (live 26.09) — the actionable
     // read for a buyer is "an owner refreshes a session", not "TOOL is broken".
-    return { ok: false, reason: "no_live_session", message: "No live TOOL session — an owner refreshes one on Ads Manager sessions" };
+    return { ok: false, reason: "no_live_session", message: `No live TOOL session — an owner refreshes one on ${toolSessionsWhere()}` };
   }
   return { ok: true, accounts: rows };
 }
@@ -186,8 +187,9 @@ export type ToolInputExtras = {
   /** Meta platforms the ad set runs on (the AV card's pick, parsed by lib/publisher-platforms).
    *  Passed ONLY by the AV route — every other rail omits it and keeps its placements as they are. */
   platforms?: readonly string[];
-  /** The TOOL session (FB profile) the AV card picked (toolSessionPick, validated against the
-   *  account's live sessions by the route). Absent = Auto — TOOL picks by account. */
+  /** The TOOL session (FB profile) the launch runs on: the AV card's pick (toolSessionPick, validated
+   *  against the account's live sessions by the route), or on HS the session of the LION profile's own
+   *  persona (toolPersonaSession, 09.11). Absent = Auto — TOOL picks by account. */
   sessionId?: number;
 };
 

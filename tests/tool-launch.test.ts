@@ -807,3 +807,23 @@ test("toolSessionChoices: the sessions that see an account, live ones only, labe
   // A session missing from the directory keeps its /accounts name; junk ids are dropped.
   assert.deepEqual(tl.toolSessionChoices([{ id: 20, name: "av-07" }, { id: 0, name: "x" }], dir), [{ id: 20, name: "av-07", profile: "" }]);
 });
+
+test("toolPersonaSession: the HS TOOL launch runs on the session of the LION profile's own persona — only when exactly one live session is that persona", () => {
+  // GLO-02 on 09.11: all 8 GLO-HS-02-n sessions see every DRGC account; LION's glo-02-1 is "Адель Иванова".
+  const choices = [
+    { id: 39, name: "GLO-HS-02-1", profile: "Адель Иванова" },
+    { id: 40, name: "GLO-HS-02-2", profile: "Ольга Афанасьева" },
+    { id: 60, name: "GLO-HS-02-5", profile: "Bobi Mim" },
+  ];
+  assert.equal(tl.toolPersonaSession(choices, "Адель Иванова"), 39);
+  // case / spacing do not matter (LION and TOOL spell the same FB name)
+  assert.equal(tl.toolPersonaSession(choices, "  bobi   MIM "), 60);
+  // no persona known, or none of the sessions is that persona → null (TOOL picks by account, as before)
+  assert.equal(tl.toolPersonaSession(choices, ""), null);
+  assert.equal(tl.toolPersonaSession(choices, null), null);
+  assert.equal(tl.toolPersonaSession(choices, "Даша Медведева"), null);
+  // a directory-less pick (profile "") never matches
+  assert.equal(tl.toolPersonaSession([{ id: 39, name: "GLO-HS-02-1", profile: "" }], "Адель Иванова"), null);
+  // two sessions of the same persona → ambiguous → null, never a guess
+  assert.equal(tl.toolPersonaSession([...choices, { id: 70, name: "GLO-HS-02-1b", profile: "Адель Иванова" }], "Адель Иванова"), null);
+});

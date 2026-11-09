@@ -11,6 +11,7 @@ import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "@/lib/acct-assignme
 import { LionError, lionAccountPixels, lionConfigured, lionProfileData } from "@/lib/lion";
 import { toolEnsureMark } from "@/lib/tool-launch";
 import { toolLaunchReady } from "@/lib/tool-run";
+import { hsGeoRails, toolSessionsWhere } from "@/lib/team";
 import type { HsToolDupShot } from "@/lib/hs-tool-dup-shot";
 import { acceptServerJobs, pumpLane, selfOrigin } from "@/lib/launch-queue-run";
 
@@ -155,7 +156,7 @@ export async function POST(req: Request): Promise<NextResponse> {
     // locales — spec §2.5). Any row carrying a geo/locale override refuses the WHOLE wave BY NAME
     // before a single row is stamped — never a silent clone on the SOURCE's geo.
     if (parseGeoOverride(raw?.countries, raw?.locales)) {
-      return bad("TOOL cannot change geo on a duplicate — use LION API or FB Token for geo tests");
+      return bad(`TOOL cannot change geo on a duplicate — use ${hsGeoRails()} for geo tests`);
     }
     const strategyOverride = String(raw?.bidStrategyOverride ?? "").trim();
     if (strategyOverride && !SUPPORTED_BID_STRATEGIES.has(strategyOverride)) return bad("bid_strategy_invalid");
@@ -203,7 +204,7 @@ export async function POST(req: Request): Promise<NextResponse> {
     }
     if (blind.length > 0) {
       return bad(
-        `account_not_visible_to_tool — no live TOOL session sees ${blind.join(", ")}; an owner refreshes/adds one on Ads Manager sessions (or clone those rows on the LION API rail)`,
+        `account_not_visible_to_tool — no live TOOL session sees ${blind.join(", ")}; an owner refreshes/adds one on ${toolSessionsWhere()} (or clone those rows on the LION API rail)`,
       );
     }
     // TOOL money is USD (spec §3) — refuse BY NAME any target whose TOOL-roster currency is a known

@@ -13,7 +13,7 @@ import { lionWireSuffix, withOwnAcr } from "@/lib/hs-clone-name";
 import { carriesOwnName } from "@/lib/own-name";
 import { BID_STRATEGIES, geoSummary } from "@/lib/catalog";
 import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from "@/lib/hs-launch";
-import { TOOL_MARK } from "@/lib/tool-launch";
+import { TOOL_MARK, stripToolMark } from "@/lib/tool-launch";
 import { juroEnsureMark, juroLionStrategyAccepted } from "@/lib/juro";
 import { makeGate } from "@/lib/launch-guards";
 import { useWaveHold, type WaveRail } from "./wave-hold";
@@ -26,7 +26,7 @@ import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-de
 import { hiddenFankasNote, hiddenFankasWhy, noFankasOfferedNote } from "@/lib/hs-page-gate";
 import { type HsAutofillPatch, autofillNote, autofillRows, autofillTakes, undoAutofill } from "@/lib/hs-autofill";
 import type { PartnerId } from "@/lib/partners";
-import { TEAM, teamHas } from "@/lib/team";
+import { TEAM, foreignTeamAcr, teamHas } from "@/lib/team";
 import {
   ChevronDownIcon,
   CopyIcon,
@@ -57,12 +57,17 @@ const WAVE_MEMORY_KEY = "adlauncher.hs.clone.wave";
 const hid = (id: string) => `hsc:${id}`;
 
 // Which HS launch channels this build's team has (lib/team). glo-01 carries all three; a lion-only
-// team (glo-02) has no FB-token or TOOL rail — those pollers park and the channel control hides.
+// team has no FB-token or TOOL rail — those pollers park and the channel control hides (glo-02:
+// LION + TOOL since 09.11, never a token).
 // Build-time constants, so the hooks that read them stay unconditional.
 const HAS_TOKEN_RAIL = teamHas("channel:token");
 const HAS_TOOL_RAIL = teamHas("channel:tool");
 /** More than the always-present LION channel exists → render the channel control; else hide it. */
 const SHOW_CHANNELS = HAS_TOKEN_RAIL || HAS_TOOL_RAIL;
+/** The channel control's columns: one per channel the team has (literal classes — Tailwind). */
+const CHANNEL_COLS = HAS_TOKEN_RAIL && HAS_TOOL_RAIL ? "grid-cols-3" : "grid-cols-2";
+/** Where a geo test goes when TOOL refuses one: the rails this team has that CAN change geo. */
+const GEO_RAILS = HAS_TOKEN_RAIL ? "LION API or FB Token" : "LION API";
 
 /** One source campaign row: LION-read facts + the editable overrides. */
 type Row = {
@@ -144,17 +149,17 @@ function origBidLabel(info: NonNullable<Row["info"]>): string {
  *  `[DD/MM] (ACR) API[ (CLONE)] - (LABEL) - [CODES] - [LANG] - ...` stays fixed (re-dated to
  *  today, "(CLONE)" ensured, the acronym set to THIS team's — a source may be another team's
  *  campaign; that part LION owns), while the free-text TAIL after it is the
- *  buyer's to replace. A source's channel marker ("TOKEN - ", sits right before the tail) is
- *  STRIPPED here: the marker states how a run was CREATED, so the clone re-earns it only from
+ *  buyer's to replace. A source's channel marker ("TOKEN - " / "GCL TOOL - ", sits right before
+ *  the tail) is STRIPPED here: the marker states how a run was CREATED, so the clone re-earns it only from
  *  the rail it fires on — never by inheritance. Unparseable names fall back to
  *  everything-is-tail (marker-stripped all the same). */
 function splitLionName(sourceName: string, ddmm: string): { prefix: string; tail: string } {
   const m = splitHsGrammar(sourceName);
-  if (!m) return { prefix: "", tail: stripTokenMark(sourceName) };
+  if (!m) return { prefix: "", tail: stripToolMark(stripTokenMark(sourceName)) };
   let prefix = m.prefix.replace(/^\[\d{2}\/\d{2}\]/, `[${ddmm}]`);
   if (!/\(CLONE\)/.test(prefix)) prefix = prefix.replace(/API/, "API (CLONE)");
   // The clone is this team's, whoever launched the source (lib/hs-clone-name withOwnAcr).
-  return { prefix: withOwnAcr(prefix, TEAM.label), tail: stripTokenMark(m.tail.trim()) };
+  return { prefix: withOwnAcr(prefix, TEAM.label), tail: stripToolMark(stripTokenMark(m.tail.trim())) };
 }
 
 /** Default tail = the source's old tail + " - <owner>" (the buyer duplicating it), matching the
@@ -971,6 +976,10 @@ export function HsCloneBoard({
   // TOOL cannot change geo/locale on a duplicate (owner ask 28.09) — a row carrying either override
   // is blocked before any fire; the buyer moves it to LION API or FB Token for a geo test.
   const toolGeoRows = toolRail ? validRows.filter((r) => r.countries.length > 0 || r.locales.length > 0).length : 0;
+  // TOOL reads the SOURCE through this team's own TOOL sessions, which only see the team's accounts
+  // (GLO-02, 09.11: GLO-HS-02-n see DRGC-* only) — a source another launcher team made is out of
+  // their reach and its clone would die inside TOOL. LION reads any team's source: switch rail.
+  const toolForeignRows = toolRail ? validRows.filter((r) => foreignTeamAcr(r.info?.name) !== null) : [];
 
   const fireBlocked =
     !bindsReady ||
@@ -982,6 +991,7 @@ export function HsCloneBoard({
     strategyUnsupported > 0 ||
     hiddenRows > 0 ||
     toolGeoRows > 0 ||
+    toolForeignRows.length > 0 ||
     limits.staleBuild;
 
   const switchToJuro = () => {
@@ -1305,7 +1315,7 @@ export function HsCloneBoard({
                 {/* The channel control only renders when the team has more than LION (lib/team) —
                     a lion-only team (glo-02) has no FB-token / TOOL rail, so there is nothing to pick. */}
                 {SHOW_CHANNELS ? (
-                <div className="grid grid-cols-3 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
+                <div className={`grid ${CHANNEL_COLS} overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5`}>
                   {[
                     { key: "lion" as const, label: "LION API", ready: true, down: false, hint: undefined as string | undefined },
                     {
@@ -1719,10 +1729,18 @@ export function HsCloneBoard({
               ) : null}
               {toolGeoRows > 0 ? (
                 <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
-                  TOOL cannot change geo on a duplicate — use LION API or FB Token for geo tests.{" "}
+                  TOOL cannot change geo on a duplicate — use {GEO_RAILS} for geo tests.{" "}
                   <span className="font-semibold">{toolGeoRows}</span> row
                   {toolGeoRows === 1 ? " has" : "s have"} a geo/language override — clear{" "}
                   {toolGeoRows === 1 ? "it" : "them"} or switch rail.
+                </p>
+              ) : null}
+              {toolForeignRows.length > 0 ? (
+                <p className="animate-pop-in text-center text-[11px] font-semibold leading-relaxed text-warn">
+                  {toolForeignRows.length} source{toolForeignRows.length === 1 ? " is" : "s are"} another team&apos;s campaign (
+                  {[...new Set(toolForeignRows.map((r) => foreignTeamAcr(r.info?.name)))].join(", ")}) — {TEAM.label}&apos;s TOOL
+                  sessions can&apos;t read {toolForeignRows.length === 1 ? "it" : "them"}. Clone{" "}
+                  {toolForeignRows.length === 1 ? "it" : "them"} on LION API or remove {toolForeignRows.length === 1 ? "that row" : "those rows"}.
                 </p>
               ) : null}
               <p className="text-center text-[10.5px] leading-relaxed text-faint">
@@ -2559,7 +2577,7 @@ export function HsCloneBoard({
           }))}
           localeOptions={autofillLocales}
           strategyOptions={strategyOptions}
-          geoLocked={toolRail ? "TOOL cannot change geo on a duplicate — fire on LION API or FB Token for a geo test" : null}
+          geoLocked={toolRail ? `TOOL cannot change geo on a duplicate — fire on ${GEO_RAILS} for a geo test` : null}
           maxCopies={MAX_COPIES}
           defaultCopies={copiesN}
           onClose={() => setAutofillOpen(false)}

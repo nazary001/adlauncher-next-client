@@ -75,6 +75,11 @@ export type TeamConfig = {
   /** AV keys av001…avN registered in ActiveView's "UTM Campaign Values" — the launchable AV pool
    *  (lib/av-launch; the server env AV_KEYS_REGISTERED can only raise it). 0 = nothing launchable. */
   avKeysRegistered: number;
+  /** The team's HS ad accounts BY NAME, as a TOOL session lists them (GET /accounts): the HS TOOL
+   *  rail's account axis (app/api/tool/ready). TOOL has no partner field and a session also lists its
+   *  persona's personal account and, on a shared key, another partner's cabinets — the name is what
+   *  tells the team's HS business accounts apart (the card then intersects with the LION profile). */
+  hsToolAccounts: RegExp;
 };
 
 const TEAMS: Record<TeamId, TeamConfig> = {
@@ -100,8 +105,11 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     // av401–av600 added there 28.10 (owner ask: "добавь 200 новых ключей … и на прод пушнешь сразу");
     // av601–av800 added there 06.11 (owner ask: "добавь туда 200 новых ключей срочно").
     avKeysRegistered: 800,
+    // every HS account of the first team is "GC-HS-…" (302/302 on glo-01, 28.09); a session carrying
+    // ActiveView's GC-AV-LA-* cabinets (av-01, live 28.09) must not light the HS TOOL segment.
+    hsToolAccounts: /^GC-HS-/i,
   },
-  // The second team (08.10): only the HS partner, only through LION, Facebook only. Its fanpages are
+  // The second team (08.10): only the HS partner, through LION — and since 09.11 TOOL — Facebook only. Its fanpages are
   // not in the hs-tools registry, so the fanka gate cannot judge them (probed 08.10: 0 of 10; 13.10,
   // after the registry got its per-team lists: `?team=glo-02` answers 0 rows, the team's 5 fanpages
   // are in no list). Turn `pagesRegistry` on only once the registry lists them — the gate hides
@@ -111,7 +119,9 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     label: "GLO-02",
     partners: ["br"],
     defaultPartner: "br",
-    hsChannels: ["lion"],
+    // TOOL (owner ask 09.11: «реализуй им на выбор тоже чтобы было tool и так как есть сейчас по лиону»):
+    // the team's own TOOL key (TOOL team 3, sessions GLO-HS-02-1…8). No FB token — never "token".
+    hsChannels: ["lion", "tool"],
     platforms: [],
     ownerTools: ["accounts", "users"],
     pagesRegistry: false,
@@ -126,6 +136,9 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     openApi: false,
     strictCampaigns: true,
     avKeysRegistered: 0,
+    // TOOL team 3 on 09.11: 51 DRGC-VD-C1-BR-* (the same accounts LION's glo-02 profiles hold) + each
+    // GLO-HS-02-n session's persona-named personal account, which this leaves out (personalAccounts).
+    hsToolAccounts: /^DRGC-VD-C1-BR-/i,
   },
 };
 
@@ -193,7 +206,9 @@ const API_NEEDS: ReadonlyArray<readonly [string, Need]> = [
   ["/api/hs", "partner:br"],
   ["/api/hs-tasks", "partner:br"],
   ["/api/tool", "channel:tool"],
-  ["/api/tool-sessions", "channel:tool"],
+  // The TOOL session console's API (create / update / delete sessions) follows its page /sessions —
+  // an owner tool. Launching through TOOL does not need it (09.11: glo-02 got TOOL launches only).
+  ["/api/tool-sessions", "tool:sessions"],
   ["/api/fb-tokens", "fbTokens"],
   // The server-side launch queue serves every rail; what a JOB may be is teamAllowsJob below.
   ["/api/launch-queue", "always"],
@@ -331,6 +346,19 @@ export const teamPagesQuery = (team: TeamConfig = TEAM): string => `?team=${team
 // team is the slug's own prefix ("glo-02-3"), so the separation is enforced by us, on that prefix.
 const TEAM_SLUG = /^(glo-\d+)-/i;
 
+/** Where an owner refreshes / adds a TOOL session, for the sentences that send them there: the
+ *  launcher's own console (/sessions) on a team that has it, else TOOL itself (glo-02, 09.11). */
+export const toolSessionsWhere = (team: TeamConfig = TEAM): string =>
+  team.ownerTools.includes("sessions") ? "Ads Manager sessions" : "TOOL (tool.gctracking.xyz)";
+
+/** The HS rails that CAN change geo on a clone, named for a sentence (TOOL /duplicates cannot). */
+export const hsGeoRails = (team: TeamConfig = TEAM): string =>
+  team.hsChannels.includes("token") ? "LION API or FB Token" : "LION API";
+
+/** Is this TOOL-listed ad account (by its name) one of the team's HS accounts (hsToolAccounts)? */
+export const teamHsToolAccount = (accountName: string | null | undefined, team: TeamConfig = TEAM): boolean =>
+  team.hsToolAccounts.test(String(accountName ?? "").trim());
+
 /** Does this profile belong to the team? Un-prefixed pools (globecoders-RENT-*) are the first team's. */
 export function teamOwnsProfile(slug: string, team: TeamConfig = TEAM): boolean {
   const s = String(slug ?? "").trim();
@@ -378,6 +406,15 @@ const NAME_ACR = /^\s*\[\d{2}\/\d{2}\]\s*\(([A-Za-z]+-\d+)\)/;
 export function campaignNameAcr(name: string | null | undefined): string | null {
   const m = NAME_ACR.exec(String(name ?? ""));
   return m ? m[1].toUpperCase() : null;
+}
+
+/** The OTHER launcher team a campaign name says launched it ("GLO-01" on a glo-02 build), or null —
+ *  the team's own, a non-launcher acronym, or none at all. A TOOL clone reads its source through the
+ *  team's own TOOL sessions, which only see the team's accounts (09.11: GLO-HS-02-n see DRGC-* only). */
+export function foreignTeamAcr(name: string | null | undefined, team: TeamConfig = TEAM): string | null {
+  const acr = campaignNameAcr(name);
+  if (!acr || acr === team.label.toUpperCase()) return null;
+  return TEAM_IDS.some((id) => id !== team.id && TEAMS[id].label.toUpperCase() === acr) ? acr : null;
 }
 
 export type CampaignTeam = "own" | "foreign" | "unknown";

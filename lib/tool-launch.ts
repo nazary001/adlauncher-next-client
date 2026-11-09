@@ -668,6 +668,22 @@ export function toolSessionChoices(
   return out.sort((a, b) => a.name.localeCompare(b.name, "en", { numeric: true }));
 }
 
+const samePerson = (v: string | null | undefined): string => String(v ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+
+/**
+ * The TOOL session an HS launch runs on: the one whose FB profile IS the LION profile's persona — the
+ * same FB user LION's own create/ would act as, so its pages and pixel are the ones that user holds
+ * (GLO-02, 09.11: all eight GLO-HS-02-n sessions see every DRGC account; without a pick TOOL takes
+ * any of them). null — persona unknown, no session is that persona, or more than one is (never a
+ * guess): the request then carries no session_id and TOOL picks by account, as it always did.
+ */
+export function toolPersonaSession(choices: readonly ToolSessionChoice[], persona: string | null | undefined): number | null {
+  const want = samePerson(persona);
+  if (!want) return null;
+  const hits = choices.filter((c) => samePerson(c.profile) === want);
+  return hits.length === 1 ? hits[0].id : null;
+}
+
 // ================================================================================================
 // 5. buildToolDuplicate — one-target DuplicateRequest (spec §2.1(d)). copies:1; status/ad_status =
 //    the desired status. Money USD, bid a coefficient or cap by the target strategy.

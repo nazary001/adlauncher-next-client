@@ -30,6 +30,9 @@ import { useAcctLimits, windowMinutes } from "./use-acct-limit";
 const HS_TOKEN_RAIL = teamHas("channel:token");
 const HS_TOOL_RAIL = teamHas("channel:tool");
 const HS_RAIL_CHOICE = HS_TOKEN_RAIL || HS_TOOL_RAIL;
+/** One column per offered rail (literal classes — Tailwind scans for them): glo-01 three, glo-02
+ *  (LION + TOOL since 09.11) two. */
+const HS_RAIL_COLS = HS_TOKEN_RAIL && HS_TOOL_RAIL ? "grid-cols-3" : "grid-cols-2";
 
 export function LaunchRail({
   campaigns,
@@ -299,7 +302,7 @@ export function LaunchRail({
                   segment is disabled with the server's reason as its tooltip; a stale "tool" pick
                   with the rail not ready falls back to LION at fire time (board's effective rule).
                   A segment exists only for a rail THIS team has (token/tool — lib/team). */}
-              <div className="grid grid-cols-3 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
+              <div className={`grid ${HS_RAIL_COLS} overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5`}>
                 {(
                   [
                     { key: "lion" as const, label: "LION API", ready: true, title: undefined as string | undefined },

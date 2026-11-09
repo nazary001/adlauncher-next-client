@@ -8,6 +8,8 @@ import path from "node:path";
 import {
   DEFAULT_TEAM,
   campaignNameAcr,
+  foreignTeamAcr,
+  hsGeoRails,
   judgeCampaign,
   routeNeed,
   teamAcrProblem,
@@ -15,6 +17,8 @@ import {
   teamAllowsJob,
   teamAllowsPath,
   teamConfig,
+  teamHsToolAccount,
+  toolSessionsWhere,
   teamHas,
   teamMayUseCampaign,
   teamNamespace,
@@ -34,13 +38,19 @@ test("teamConfig: unset is the first team, a typo is refused instead of silently
   assert.throws(() => teamConfig("glo-03"), /names no team/);
 });
 
-test("glo-01 keeps everything it had; glo-02 is HS through LION on Facebook only", () => {
+test("glo-01 keeps everything it had; glo-02 is HS through LION or TOOL on Facebook only", () => {
   assert.deepEqual([...GLO1.partners], ["br", "in", "us", "av", "vc"]);
   assert.equal(GLO1.defaultPartner, "in");
   assert.deepEqual([...GLO1.hsChannels], ["lion", "token", "tool"]);
   assert.deepEqual([...GLO2.partners], ["br"]);
   assert.equal(GLO2.defaultPartner, "br");
-  assert.deepEqual([...GLO2.hsChannels], ["lion"]);
+  // TOOL for glo-02 (owner ask 09.11: «реализуй им на выбор тоже чтобы было tool и так как есть сейчас по
+  // лиону») — its own TOOL key (TOOL team 3, sessions GLO-HS-02-*). Still no FB token of its own.
+  assert.deepEqual([...GLO2.hsChannels], ["lion", "tool"]);
+  assert.equal(teamHas("channel:tool", GLO2), true);
+  assert.equal(teamHas("channel:token", GLO2), false);
+  // the TOOL session console stays the first team's owner tool — glo-02 manages its sessions in TOOL itself
+  assert.equal(teamHas("tool:sessions", GLO2), false);
   assert.deepEqual([...GLO2.platforms], []);
   assert.deepEqual([...GLO2.ownerTools], ["accounts", "users"]);
   // Team logins (owner ask 20.10): every team's owners manage their own logins from the launcher.
@@ -62,6 +72,29 @@ test("glo-01 keeps everything it had; glo-02 is HS through LION on Facebook only
 test("AV keys registered in ActiveView: glo-01 av001…av800 (av201–av300 made by AV 21.10, av301–av400 added 27.10, av401–av600 added 28.10, av601–av800 added 06.11), glo-02 none", () => {
   assert.equal(GLO1.avKeysRegistered, 800);
   assert.equal(GLO2.avKeysRegistered, 0, "glo-02 has no AV partner — nothing launchable");
+});
+
+test("the HS cabinets a TOOL session may launch into, by name: GC-HS-* on glo-01, DRGC-VD-C1-BR-* on glo-02 — never a persona's personal account", () => {
+  // glo-01: 302/302 HS accounts are GC-HS-…; a TOOL session carrying another partner's (GC-AV-LA-*) must not light HS
+  assert.equal(teamHsToolAccount("GC-HS-VD-C1-BR-1", GLO1), true);
+  assert.equal(teamHsToolAccount(" gc-hs-x ", GLO1), true);
+  assert.equal(teamHsToolAccount("GC-AV-LA-565", GLO1), false);
+  assert.equal(teamHsToolAccount("DRGC-VD-C1-BR-583", GLO1), false);
+  // glo-02: TOOL team 3 (09.11) — 51 DRGC-VD-C1-BR-* + one personal account per GLO-HS-02-n session
+  assert.equal(teamHsToolAccount("DRGC-VD-C1-BR-583", GLO2), true);
+  assert.equal(teamHsToolAccount("drgc-vd-c1-br-608", GLO2), true);
+  assert.equal(teamHsToolAccount("Адель Иванова", GLO2), false);
+  assert.equal(teamHsToolAccount("Bobi Mim", GLO2), false);
+  assert.equal(teamHsToolAccount("GC-HS-VD-C1-BR-1", GLO2), false);
+  assert.equal(teamHsToolAccount("", GLO2), false);
+  assert.equal(teamHsToolAccount(null, GLO2), false);
+});
+
+test("sentences that send a buyer elsewhere name only what the team has: the session console, the geo rails", () => {
+  assert.equal(toolSessionsWhere(GLO1), "Ads Manager sessions");
+  assert.equal(toolSessionsWhere(GLO2), "TOOL (tool.gctracking.xyz)");
+  assert.equal(hsGeoRails(GLO1), "LION API or FB Token");
+  assert.equal(hsGeoRails(GLO2), "LION API");
 });
 
 // ---- every route and page of the app is classified -------------------------------------------------
@@ -100,7 +133,7 @@ test("glo-01 reaches every route of the app — nothing changes for the first te
   assert.equal(teamAllowsPath("/api/some-route-added-later", GLO1), true);
 });
 
-test("glo-02 reaches exactly the HS-through-LION surface", () => {
+test("glo-02 reaches exactly the HS surface: LION, and TOOL launches / clones (09.11)", () => {
   const allowed = ROUTES.filter((r) => teamAllowsPath(r, GLO2));
   assert.deepEqual(allowed, [
     "/",
@@ -123,6 +156,8 @@ test("glo-02 reaches exactly the HS-through-LION surface", () => {
     "/api/hs/profiles",
     "/api/hs/sources",
     "/api/hs/status",
+    "/api/hs/tool-duplicate",
+    "/api/hs/tool-launch",
     "/api/launch-queue",
     "/api/launch-queue/cron",
     "/api/launch-queue/pump",
@@ -130,6 +165,7 @@ test("glo-02 reaches exactly the HS-through-LION surface", () => {
     "/api/templates",
     "/api/templates/x",
     "/api/templates/x/use",
+    "/api/tool/ready",
     "/api/users",
     "/api/users/x",
     "/api/wave-status",
@@ -163,10 +199,9 @@ test("glo-02: the other partners, channels, platforms and owner tools are refuse
     "/api/hs/token-jurar",
     "/api/hs/token-status",
     "/api/hs/token-cron",
-    "/api/hs/tool-launch",
-    "/api/hs/tool-duplicate",
-    "/api/tool/ready",
+    "/api/tool-sessions",
     "/api/tool-sessions/abc/check",
+    "/api/tool-sessions/jobs/7",
     "/api/fb-tokens/signers",
     "/api/google/launch",
     "/api/google-tasks",
@@ -198,7 +233,10 @@ test("a path is matched by whole segments, with or without a trailing slash", ()
   assert.equal(routeNeed("/api/launch-queue/pump"), "always");
   assert.equal(routeNeed("/api/launch-tasks"), "graph");
   assert.equal(routeNeed("/api/tool/ready"), "channel:tool");
-  assert.equal(routeNeed("/api/tool-sessions/jobs/7"), "channel:tool");
+  assert.equal(routeNeed("/api/hs/tool-duplicate"), "channel:tool");
+  // the TOOL session console's API follows its page (/sessions): an owner tool, not the launch channel
+  assert.equal(routeNeed("/api/tool-sessions/jobs/7"), "tool:sessions");
+  assert.equal(routeNeed("/api/tool-sessions"), "tool:sessions");
   assert.equal(routeNeed("/"), "always");
   // assets and framework internals are not pages of ours — never refused
   assert.equal(routeNeed("/icon.svg"), null);
@@ -208,11 +246,11 @@ test("a path is matched by whole segments, with or without a trailing slash", ()
   assert.equal(routeNeed("/google-thing"), null);
 });
 
-test("launch queue: glo-02 may only hand over and run hs.lion", () => {
+test("launch queue: glo-02 may hand over and run hs.lion and hs.tool — never the token rail", () => {
   assert.equal(teamAllowsJob("hs", "hs.lion", GLO2), true);
+  assert.equal(teamAllowsJob("hs", "hs.tool", GLO2), true);
   for (const [scope, kind] of [
     ["hs", "hs.token"],
-    ["hs", "hs.tool"],
     ["hs", "mo.launch"],
     ["hs", "nonsense"],
     ["mo", "mo.launch"],
@@ -245,9 +283,11 @@ test("launch queue: glo-02 may only hand over and run hs.lion", () => {
   assert.equal(teamAllowsJob("hs", "mo.launch", GLO1), false);
 });
 
-test("launch queue, the 09.10 kinds: glo-02 runs the LION duplicate / JURO submits and their follow-ups — never the token / TOOL clone rails, a TOOL follow-up or a platform; glo-01 everything, each scope its own kinds", () => {
-  for (const kind of ["hs.dup", "hs.jurar", "hs.dup.follow", "hs.jurar.follow"]) assert.equal(teamAllowsJob("hs", kind, GLO2), true, `glo-02 hs/${kind}`);
-  for (const kind of ["hs.tokendup", "hs.tokenjurar", "hs.tooldup", "tool.follow"]) assert.equal(teamAllowsJob("hs", kind, GLO2), false, `glo-02 hs/${kind}`);
+test("launch queue, the 09.10 kinds: glo-02 runs the LION duplicate / JURO submits, the TOOL clones (09.11) and their follow-ups — never the token rails or a platform; glo-01 everything, each scope its own kinds", () => {
+  for (const kind of ["hs.dup", "hs.jurar", "hs.dup.follow", "hs.jurar.follow", "hs.tooldup", "tool.follow"]) {
+    assert.equal(teamAllowsJob("hs", kind, GLO2), true, `glo-02 hs/${kind}`);
+  }
+  for (const kind of ["hs.tokendup", "hs.tokenjurar"]) assert.equal(teamAllowsJob("hs", kind, GLO2), false, `glo-02 hs/${kind}`);
   for (const [scope, kind] of [
     ["sn", "sn.launch"],
     ["gg", "gg.clone"],
@@ -322,6 +362,19 @@ test("campaign names: the acronym LION stamps at the head, and only there", () =
   assert.equal(campaignNameAcr("my copy of (GLO-01) winner"), null);
   assert.equal(campaignNameAcr(""), null);
   assert.equal(campaignNameAcr(null), null);
+});
+
+test("foreignTeamAcr: the OTHER launcher team a source name says it came from (a TOOL clone reads its source through the team's own TOOL sessions, which never see another team's accounts)", () => {
+  const G1 = "[06/10] (GLO-01) API - (#ADX [HIGH]) - [US] - a";
+  const G2 = "[06/10] (GLO-02) API (CLONE) - (#ADX [HIGH]) - [BR] - GCL TOOL - b";
+  assert.equal(foreignTeamAcr(G1, GLO2), "GLO-01");
+  assert.equal(foreignTeamAcr(G2, GLO1), "GLO-02");
+  // the team's own, a non-launcher acronym, a hand-made name — nothing to say
+  assert.equal(foreignTeamAcr(G2, GLO2), null);
+  assert.equal(foreignTeamAcr(G1, GLO1), null);
+  assert.equal(foreignTeamAcr("[06/10] (ABC-03) API - c", GLO2), null);
+  assert.equal(foreignTeamAcr("Summer sale 2026", GLO2), null);
+  assert.equal(foreignTeamAcr(null, GLO2), null);
 });
 
 test("whose campaign: glo-02 must prove a campaign is its own, glo-01 only loses the other launcher team's", () => {

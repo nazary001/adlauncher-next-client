@@ -633,7 +633,8 @@ export function parseTokenCreatives(
 ): { creatives: HsTokenCreative[] } | { error: string } {
   if (!Array.isArray(raw) || raw.length === 0) return { error: "creatives_required" };
   if (raw.length > HS_TOKEN_MAX_CREATIVES) {
-    return { error: `too_many_creatives — the FB Token rail builds at most ${HS_TOKEN_MAX_CREATIVES} ads per campaign; use the LION rail for bigger decks` };
+    // Shared by the FB Token and TOOL rails (both parse here) — the sentence names neither.
+    return { error: `too_many_creatives — this rail builds at most ${HS_TOKEN_MAX_CREATIVES} ads per campaign; use the LION rail for bigger decks` };
   }
   const creatives: HsTokenCreative[] = [];
   for (const item of raw as unknown[]) {
