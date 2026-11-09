@@ -1208,6 +1208,17 @@ function TaskRow({
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
+          {/* AV: a finished campaign opens the clone board on its id (owner ask 09.11 — the AV board has no
+              other way in: no stats tool hands AV ids over the way it does for MO). */}
+          {done && task.partner === "av" && task.result?.campaignId ? (
+            <a
+              href={`/clone?partner=av&ids=${encodeURIComponent(String(task.result.campaignId))}`}
+              data-tip="Clone this campaign — a new campaign on a new AV key"
+              className="tip rounded-md border border-accent/35 bg-accent/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#9db8ff] transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              Clone
+            </a>
+          ) : null}
           <span className="font-mono text-[10.5px] tabular-nums text-faint">{fmtElapsed(elapsed)}</span>
           {canRetry ? (
             <button

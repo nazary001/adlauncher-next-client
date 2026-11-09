@@ -21,3 +21,23 @@ export function sourceMediaLink(media: SourceMedia): string {
   const link = cta?.value?.link;
   return typeof link === "string" ? link : "";
 }
+
+/**
+ * The Meta platforms the SOURCE ad set runs on (targeting.publisher_platforms), for an AV clone built
+ * through TOOL (owner ask 09.11: «сделай чтобы работал через Tool»): an AV launch picks its platforms on
+ * the card (Facebook only by default, lib/publisher-platforms), and its clone keeps them — TOOL's
+ * targeting.publisher_platforms takes the same words. No list on the source = automatic placements = [].
+ * Words are lower-cased and deduped; anything that is not a plain word is dropped (TOOL refuses
+ * an unknown platform by name). The Graph clone needs none of this: its ad set rebuilds the placement from
+ * the row's FULL/COMPLIANCE code.
+ */
+export function sourcePlatformsOf(targeting: unknown): string[] {
+  const list = (targeting as { publisher_platforms?: unknown } | null | undefined)?.publisher_platforms;
+  if (!Array.isArray(list)) return [];
+  const out: string[] = [];
+  for (const p of list) {
+    const w = typeof p === "string" ? p.trim().toLowerCase() : "";
+    if (/^[a-z_]+$/.test(w) && !out.includes(w)) out.push(w);
+  }
+  return out;
+}

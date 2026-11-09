@@ -12,6 +12,7 @@ import { adPayload, adsetPayload, campaignPayload, type LaunchBinds } from "./fb
 // TOOL channel (owner ask 28.09) — type-only: the wire shapes the extractors below emit, consumed by
 // lib/tool-launch's buildToolCampaign / runToolMedia. No runtime coupling to that leaf.
 import type { ToolMediaItem, ToolMediaRefOut } from "./tool-launch";
+import { sourcePlatformsOf } from "./av-clone";
 
 type Json = Record<string, unknown>;
 
@@ -35,6 +36,10 @@ export type SourceDetail = {
   pixelId: string;
   /** First reusable media found on the source's ads (video preferred), null when none. */
   media: SourceMedia | null;
+  /** The source ad set's targeting.publisher_platforms (lib/av-clone sourcePlatformsOf; [] =
+   *  automatic placements) — read only when fetchSourceDetail is asked for it (the AV clone through
+   *  TOOL, owner ask 09.11); undefined otherwise. */
+  platforms?: string[];
 };
 
 const SRC_FIELDS = [
@@ -153,8 +158,11 @@ export function extractAdMedia(ad: Json): SourceMedia | null {
 
 /** Pull the source campaign's objective + first ad set's delivery + first reusable ad media.
  *  `token` selects the Graph bearer (MO launch token by default; the AIF rail passes its own). */
-export async function fetchSourceDetail(campaignId: string, token?: string): Promise<SourceDetail> {
-  const obj = await fbGet(`${campaignId}?fields=${encodeURIComponent(SRC_FIELDS)}`, token);
+export async function fetchSourceDetail(campaignId: string, token?: string, opts: { platforms?: boolean } = {}): Promise<SourceDetail> {
+  // `platforms` (the AV clone through TOOL) also reads the ad set's targeting — the field
+  // /api/clone/sources already reads on the same tree; every other caller keeps SRC_FIELDS as it was.
+  const fields = opts.platforms ? SRC_FIELDS.replace("{bid_strategy,optimization_goal,promoted_object}", "{bid_strategy,optimization_goal,promoted_object,targeting}") : SRC_FIELDS;
+  const obj = await fbGet(`${campaignId}?fields=${encodeURIComponent(fields)}`, token);
   const adset = (((obj.adsets as { data?: Json[] } | undefined)?.data?.[0] ?? {}) as Json);
   const ads = ((obj.ads as { data?: Json[] } | undefined)?.data ?? []) as Json[];
   // Scan the campaign's ads for the first with reusable media — a video (inline video_data or
@@ -181,6 +189,7 @@ export async function fetchSourceDetail(campaignId: string, token?: string): Pro
     accountId: String(obj.account_id ?? "").replace(/^act_/, ""),
     pixelId: typeof promoted.pixel_id === "string" ? promoted.pixel_id : "",
     media,
+    ...(opts.platforms ? { platforms: sourcePlatformsOf(adset.targeting) } : {}),
   };
 }
 

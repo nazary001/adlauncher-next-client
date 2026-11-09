@@ -56,23 +56,10 @@ export async function GET(req: Request) {
   // AV has no FB token yet, but a live TOOL session sees its ActiveView cabinets, which carry the
   // NAME prefix GC-AV-. So AV's account axis here is the TOOL-visible accounts named GC-AV-… (no
   // partner catalog to intersect — TOOL is AV's only account source), then the buyer's assignment
-  // filter. Clones still can NOT run through TOOL: a clone must READ the source campaign, and only
-  // the AV token can do that (TOOL sessions are the HS team's, they cannot see AV's source).
+  // filter. The clone rail asks the same question (owner ask 09.11: «сделай чтобы работал через Tool»):
+  // the AV token READS the source campaign (TOOL cannot), TOOL builds the clone in a GC-AV cabinet a
+  // live session sees — so rail=clone answers exactly like rail=launch.
   if (partner === "av") {
-    if (rail === "clone") {
-      return NextResponse.json(
-        {
-          ok: true,
-          ready: false,
-          reason: "not_available",
-          message: "AV clones read the source campaign with the AV token — add it on /tokens (TOOL cannot read sources)",
-          accounts: [],
-          rows: [],
-          live: 0,
-        },
-        noStore,
-      );
-    }
     const readyAv = await toolLaunchReady();
     if (!readyAv.ok) {
       return NextResponse.json({ ok: true, ready: false, reason: readyAv.reason, message: readyAv.message, accounts: [], rows: [], live: 0 }, noStore);

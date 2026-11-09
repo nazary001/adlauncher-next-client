@@ -33,7 +33,7 @@ import {
   todayPrefixDDMM,
 } from "@/lib/types";
 import { BID_STRATEGIES, OS_OPTIONS, countryName, geoSummary } from "@/lib/catalog";
-import { TOOL_MARK, toolEnsureMark } from "@/lib/tool-launch";
+import { TOOL_MARK, stripToolMark, toolEnsureMark } from "@/lib/tool-launch";
 import { AIF_VALUE_PIXEL, type PartnerId, aifOfferablePixels, partnerConfig, pickAifPixel } from "@/lib/partners";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { teamHas } from "@/lib/team";
@@ -117,6 +117,15 @@ function snapAvRoasRow(row: CloneRow): CloneRow {
   const bidStrategy = "LOWEST_COST_WITHOUT_CAP";
   const budget = moneyCentsLabel(budgetOnStrategyChange(row.bidStrategy, bidStrategy, row.budget, row.source.originalBudget));
   return { ...row, bidStrategy, roasGoal: "", budget };
+}
+
+/** Every AV source is TOOL-born ("… (AV) - GCL TOOL - <topic> | …"), so its tail would carry that mark into
+ *  the clone's editable name — shown twice next to the locked prefix on TOOL, and kept on a clone the AV
+ *  FB token builds. The clone gets the mark of ITS OWN channel at fire time (toolEnsureMark on TOOL, the
+ *  server re-ensures it), so the seeded tail starts without it (09.11). AV only — MO/AIF untouched. */
+function dropAvToolMark(row: CloneRow): CloneRow {
+  const name = stripToolMark(row.name);
+  return name === row.name ? row : { ...row, name };
 }
 
 /** Column heading with the underline rule + an optional right-aligned count chip. */
@@ -262,7 +271,9 @@ function CloneInner({
   // such a session, so MO/AIF stay on FB Token until an owner adds one on Ads Manager sessions. A
   // stale "tool" pick with the rail not ready falls back to FB Token (same rule as the HS board).
   const CHANNEL_LS = `adlauncher.clone.${partnerId}.channel`;
-  const [channel, setChannel] = useState<"token" | "tool">("token");
+  // AV starts on TOOL (owner ask 09.11: «сделай чтобы работал через Tool» — AV launches build only there,
+  // the AV token just reads the source and lists the fanpage); every other partner starts on FB Token.
+  const [channel, setChannel] = useState<"token" | "tool">(avMode ? "tool" : "token");
   useEffect(() => {
     try {
       const v = localStorage.getItem(CHANNEL_LS);
@@ -282,14 +293,13 @@ function CloneInner({
       /* storage disabled */
     }
   };
-  // AV clones can't run through TOOL — TOOL has no way to READ the source campaign (owner ask
-  // 28.09): the ready endpoint answers partner=av&rail=clone with ready:false / not_available and a
-  // message pointing at the AV token on /tokens. We still POLL it (so the TOOL segment shows that
-  // message as its disabled tooltip) but AV never FIRES through it.
+  // AV clones through TOOL (owner ask 09.11): the AV token READS the source (TOOL cannot), TOOL builds the
+  // clone in a GC-AV cabinet a live session sees — /api/tool/ready?partner=av&rail=clone answers like
+  // the launch rail (the GC-AV cabinets ∩ the buyer's /accounts).
   const toolReady = useToolReady(partnerId, "clone", HAS_TOOL_RAIL);
   /** The channel that actually fires: a "tool" pick only holds while the rail is READY (else the
-   *  segment is disabled and the fire falls back to FB Token). AV never fires through TOOL. */
-  const onTool = !avMode && channel === "tool" && toolReady.ready;
+   *  segment is disabled and the fire falls back to FB Token). */
+  const onTool = channel === "tool" && toolReady.ready;
   // /api/tool/ready returns BARE digits; our catalog account values are bare digits too, but strip
   // any "act_" defensively so the TOOL filter matches regardless of spelling.
   const bareId = (v: string): string => v.replace(/^act_/, "");
@@ -537,7 +547,7 @@ function CloneInner({
   /** Snap a freshly seeded row for the active partner: AV min-ROAS sources drop to lowest cost
    *  (see snapAvRoasRow); MO/AIF rows pass through untouched. Stable (avMode is fixed for the
    *  board's life) so it doesn't churn the loadIds callback. */
-  const avSnap = useCallback((r: CloneRow): CloneRow => (avMode ? snapAvRoasRow(r) : r), [avMode]);
+  const avSnap = useCallback((r: CloneRow): CloneRow => (avMode ? snapAvRoasRow(dropAvToolMark(r)) : r), [avMode]);
 
   /** (Re)load real sources for a set of ids from Facebook. Used by the Retry button — an event
    *  handler, so the synchronous loading/error flips are fine here. */
@@ -759,10 +769,9 @@ function CloneInner({
 
             {/* launch channel (owner ask 28.09): our FB Token (the default Graph rail) vs the HS
                 team's TOOL service. TOOL unlocks only when a live session sees this partner's
-                accounts (useToolReady) — today only HS has one, so MO/AIF stay on FB Token until an
-                owner adds a session on Ads Manager sessions. AV shows the switch too, but its TOOL
-                segment is always disabled: TOOL cannot READ the source campaign, so AV clones stay
-                on the AV FB token (the disabled tooltip / caption carries that reason). */}
+                accounts (useToolReady) — MO/AIF stay on FB Token until an owner adds a session on
+                Ads Manager sessions. AV starts on TOOL (owner ask 09.11): the AV token reads the
+                source, TOOL builds the clone in a GC-AV cabinet. */}
             <div className="flex flex-col gap-1">
               <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Launch channel</span>
               <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
@@ -803,12 +812,12 @@ function CloneInner({
                 })}
               </div>
               <p className="text-center text-[10px] leading-relaxed text-faint">
-                {avMode
-                  ? toolReady.message || "AV clones read the source with the AV token — TOOL cannot read sources"
-                  : onTool
-                    ? `Launches through TOOL · ${toolReady.accounts.size} account${toolReady.accounts.size === 1 ? "" : "s"} · marks names “${TOOL_MARK.trim()}”`
-                    : channel === "tool" && !toolReady.ready
-                      ? toolReady.message || "TOOL not ready — firing on FB Token"
+                {onTool
+                  ? `Launches through TOOL · ${toolReady.accounts.size} account${toolReady.accounts.size === 1 ? "" : "s"} · marks names “${TOOL_MARK.trim()}”${avMode ? " · the AV token only reads the source" : ""}`
+                  : channel === "tool" && !toolReady.ready
+                    ? toolReady.message || "TOOL not ready — firing on FB Token"
+                    : avMode
+                      ? "Builds on the AV FB token"
                       : "Builds on our FB token"}
               </p>
             </div>
@@ -902,9 +911,10 @@ function CloneInner({
                       ) : null}
                     </div>
                     {avMode ? (
-                      // AV page carries no Meta pixel — the clone optimizes for link clicks, so
-                      // there is nothing to pick (the run route forces pixelId="").
-                      <LockedRow label="Pixel" value="No pixel — link clicks" />
+                      // Nothing to pick: the clone follows its SOURCE (avDelivery, since 30.09) — a
+                      // Purchase source clones as Purchase on the AV site pixel, a link-click source
+                      // as link clicks with no pixel (the run route sets it, a row's pick is ignored).
+                      <LockedRow label="Pixel" value="AV site pixel · as the source" />
                     ) : isTargetAccount ? (
                       <div className="flex flex-col gap-1 px-1.5 py-1">
                         <span
@@ -942,10 +952,10 @@ function CloneInner({
               <p className="px-0.5 text-[10.5px] leading-relaxed text-faint">
                 {avMode
                   ? accountMissing
-                    ? "Pick the destination explicitly: the fanpage and the account. “From each source” keeps every clone in its source campaign’s own account; a concrete account re-builds the whole batch there. AV runs on Traffic / link clicks — no pixel. Any row can override these with its own Destination."
+                    ? "Pick the destination explicitly: the fanpage and the account. “From each source” keeps every clone in its source campaign’s own account; a concrete account re-builds the whole batch there. AV clones follow their source: Purchase on the AV site pixel, or link clicks. Any row can override these with its own Destination."
                     : isTargetAccount
-                      ? "Rows on the defaults are re-built in the picked account: the source video/image is re-uploaded there (adds a “Migrating media” step). AV optimizes for link clicks — no pixel."
-                      : "Rows on the defaults are created in their source campaign’s own ad account (its video/image lives there). AV optimizes for link clicks — no pixel. Only the fanpage applies to them."
+                      ? "Rows on the defaults are re-built in the picked account: the source video/image is re-uploaded there (adds a “Migrating media” step). AV clones follow their source: Purchase on the AV site pixel, or link clicks."
+                      : "Rows on the defaults are created in their source campaign’s own ad account (its video/image lives there). AV clones follow their source: Purchase on the AV site pixel, or link clicks. Only the fanpage applies to them."
                   : accountMissing
                     ? "Pick the destination explicitly: the fanpage and the account. “From each source” keeps every clone in its source campaign’s own account; a concrete account re-builds the whole batch there. Any row can override these with its own Destination."
                     : isTargetAccount
@@ -1220,8 +1230,17 @@ function CloneInner({
                 <div>
                   <p className="text-[14px] font-medium text-ink">No campaigns received</p>
                   <p className="mt-1 text-[12px] text-dim">
-                    Open this page from the <span className="text-ink">Clone</span> button in the stats tool —
-                    the campaigns to duplicate arrive by id in the link.
+                    {avMode ? (
+                      <>
+                        Open this page from <span className="text-ink">Clone</span> on a finished row in{" "}
+                        <span className="text-ink">AV Tasks</span> — the campaign to duplicate arrives by id in the link.
+                      </>
+                    ) : (
+                      <>
+                        Open this page from the <span className="text-ink">Clone</span> button in the stats tool —
+                        the campaigns to duplicate arrive by id in the link.
+                      </>
+                    )}
                   </p>
                 </div>
                 <button
@@ -1449,14 +1468,14 @@ function CloneInner({
                           )}
                           {partner.accountsFromToken ? (
                             avMode ? (
-                              // AV page has no Meta pixel — the clone runs on link clicks (the run
-                              // route forces pixelId=""), so there is nothing to pick per row.
+                              // Nothing to pick per row: the clone follows its SOURCE (avDelivery) —
+                              // Purchase on the AV site pixel, or link clicks with no pixel.
                               <span
                                 className="flex h-8 items-center gap-1.5 rounded-md border border-dashed border-line px-2 font-mono text-[11px] text-faint"
-                                title="AV runs on Traffic / link clicks — the page carries no pixel"
+                                title="AV clones follow their source: Purchase on the AV site pixel (1830814271425766), or link clicks with no pixel"
                               >
                                 <LockIcon className="h-3 w-3 shrink-0" />
-                                No pixel · link clicks
+                                AV pixel · as the source
                               </span>
                             ) : target ? (
                               <SearchSelect

@@ -169,10 +169,22 @@ export async function POST(req: Request) {
   if (av && !avRailEnabled()) {
     return NextResponse.json({ ok: false, error: "av_rail_disabled" }, { status: 404 });
   }
-  // AV has no TOOL channel: its cabinets live on AV's own FB token, the TOOL sessions are the HS
-  // team's Ads Manager sessions. A crafted via:"tool" is refused rather than silently rerouted.
-  if (av && via === "tool") {
-    return NextResponse.json({ ok: false, error: "tool_not_available — AV clones run on the AV token only" }, { status: 400 });
+  // AV clones through TOOL (owner ask 09.11: «сделай чтобы работал через Tool»): the AV token READS the
+  // source (TOOL cannot), TOOL BUILDS the clone in a GC-AV cabinet a live TOOL session sees — the same
+  // split as AV launches (owner 28.09: «через сам токен только фанку тянуть»; the AV token also lists the
+  // fanpage). Everything AV-specific stays: the source's destination re-resolved, a fresh AV key in a
+  // rebuilt link, Purchase on AV_PIXEL or link clicks (avDelivery). A cabinet a live TOOL session
+  // sees, named GC-AV-… — found in the TOOL roster (one forced refresh on a miss), as /api/av/launch does.
+  const avTool = av && via === "tool";
+  const avToolCabinet = async (accountId: string): Promise<{ currency: string; name: string } | null> => {
+    const find = (r: Awaited<ReturnType<typeof toolLaunchReady>>) =>
+      r.ok ? r.accounts.find((a) => a.account_id === accountId && /^GC-AV-/i.test(String(a.name ?? "").trim())) : undefined;
+    const row = find(await toolLaunchReady()) ?? find(await toolLaunchReady(true));
+    return row ? { currency: row.currency || "USD", name: String(row.name ?? "") } : null;
+  };
+  if (avTool) {
+    const ready = await toolLaunchReady();
+    if (!ready.ok) return NextResponse.json({ ok: false, error: ready.message }, { status: 400 });
   }
   // WHICH bearer builds is the OWNER'S pick on /tokens (clone slots; env defaults while unassigned,
   // no env default for AV) — the AV rail on its token, the AIF rail on its token, the MO rail on the
@@ -264,6 +276,16 @@ export async function POST(req: Request) {
       if (px) targets.get(acct)!.add(px);
     }
     for (const [acct, pixelIds] of targets) {
+      // An AV clone through TOOL builds in a cabinet TOOL sees (the AV token only reads the source).
+      if (avTool) {
+        if (!(await avToolCabinet(acct))) {
+          return NextResponse.json(
+            { ok: false, error: `tool_account_unavailable — no live TOOL session sees a GC-AV cabinet ${acct}; an owner refreshes/adds one on Ads Manager sessions` },
+            { status: 400 },
+          );
+        }
+        continue;
+      }
       if (!(await acctOk(acct))) {
         return NextResponse.json(
           { ok: false, error: "account_not_allowed — the launch token cannot use this ad account" },
@@ -368,7 +390,8 @@ export async function POST(req: Request) {
           let src = detailCache.get(edit.campaignId);
           if (!src) {
             progress("source");
-            src = await fetchSourceDetail(edit.campaignId, railToken);
+            // An AV clone through TOOL keeps the source's platforms (TOOL's targeting takes the list).
+            src = await fetchSourceDetail(edit.campaignId, railToken, avTool ? { platforms: true } : {});
             detailCache.set(edit.campaignId, src);
           }
           const media = src.media;
@@ -498,7 +521,9 @@ export async function POST(req: Request) {
             if (d.conversionEvent) campaign.conversionEvent = d.conversionEvent;
             campaign.pixel = d.pixel;
             editBinds.pixelId = d.pixel;
-            if (d.pixel && !(await pixelsOf(binds.accountId)).some((p) => p.id === d.pixel)) {
+            // Through TOOL the cabinet is TOOL's, not necessarily the AV token's: TOOL's own validation
+            // answers for the pixel there (as on /api/av/launch's TOOL path).
+            if (!avTool && d.pixel && !(await pixelsOf(binds.accountId)).some((p) => p.id === d.pixel)) {
               throw new FbError(
                 `pixel_not_on_account — Purchase clones run on ${AV_PIXEL.name} (${AV_PIXEL.id}); share it to act_${binds.accountId} in Business Manager first`,
                 { campaignId: edit.campaignId },
@@ -554,7 +579,15 @@ export async function POST(req: Request) {
           // fire time (force-refreshes once on a miss) BEFORE any slot/marker claim, so a not-ready
           // rail burns nothing. Live 28.09 only HS accounts exist on TOOL, so MO/AIF cabinets stay
           // not-visible until a session that sees them is added on Ads Manager sessions.
-          if (via === "tool" && !(await toolAccountVisible(binds.accountId))) {
+          // AV: the cabinet must be a GC-AV one a live session sees (its roster row also names it + its currency).
+          const avCab = avTool ? await avToolCabinet(binds.accountId) : null;
+          if (avTool && !avCab) {
+            throw new FbError(
+              `tool_account_unavailable — no live TOOL session sees a GC-AV cabinet act_${binds.accountId}; an owner refreshes/adds one on Ads Manager sessions`,
+              { campaignId: edit.campaignId },
+            );
+          }
+          if (via === "tool" && !avTool && !(await toolAccountVisible(binds.accountId))) {
             throw new FbError(
               `account act_${binds.accountId} is not visible to any live TOOL session — an owner adds/refreshes one on Ads Manager sessions`,
               { campaignId: edit.campaignId },
@@ -566,8 +599,8 @@ export async function POST(req: Request) {
           // USD ONLY when the roster row is genuinely missing (a 60s-roster refresh race; TOOL's own
           // validate step re-checks currency regardless). Live 28.09 every TOOL account is USD, so
           // this is latent until an MO/AIF (non-USD) cabinet becomes TOOL-visible.
-          let toolAcctCurrency = "USD";
-          if (via === "tool") {
+          let toolAcctCurrency = avCab?.currency || "USD";
+          if (via === "tool" && !avCab) {
             const roster = await toolLaunchReady();
             if (roster.ok) toolAcctCurrency = roster.accounts.find((a) => a.account_id === binds.accountId)?.currency || "USD";
           }
@@ -579,9 +612,9 @@ export async function POST(req: Request) {
           acctSlot = await claimAcctSlot(binds.accountId, {
             user: session.username,
             partner: av ? "av" : aif ? "us" : "in",
-            channel: av ? "av-clone" : via === "tool" ? (aif ? "aif-tool-clone" : "tool-clone") : aif ? "aif-clone" : "clone",
+            channel: av ? (avTool ? "av-tool-clone" : "av-clone") : via === "tool" ? (aif ? "aif-tool-clone" : "tool-clone") : aif ? "aif-clone" : "clone",
             name: edit.name,
-            accountName: await acctNameOf(binds.accountId).catch(() => ""),
+            accountName: avCab?.name || (await acctNameOf(binds.accountId).catch(() => "")),
           });
 
           // Cross-account: re-home the media in the target account BEFORE claiming a gcm — a failed
@@ -642,9 +675,13 @@ export async function POST(req: Request) {
             // The rebuilt destination link: fresh gcm/brand + the build account's pixel, byte-for-byte
             // the same rewrite the Graph creative uses (swapGcm+swapPixel for MO, swapBrand+swapPixel
             // for AIF; swapPixel no-ops for pixel-less click clones).
-            const toolRewrite = aif
-              ? (l: string) => swapPixel(swapBrand(l, gcm), editBinds.pixelId)
-              : (l: string) => swapPixel(swapGcm(l, gcm), editBinds.pixelId);
+            // AV: the link is REBUILT from the resolved destination + the fresh key, exactly as on the
+            // Graph creative below (the source's own tracking tail is discarded).
+            const toolRewrite = av
+              ? () => avLink(avBase, gcm)
+              : aif
+                ? (l: string) => swapPixel(swapBrand(l, gcm), editBinds.pixelId)
+                : (l: string) => swapPixel(swapGcm(l, gcm), editBinds.pixelId);
             const toolCreative = toolCreativeFromSource(media, toolRewrite);
 
             // Media: same-account reuses the source's own account-local asset directly (valid — the
@@ -676,8 +713,11 @@ export async function POST(req: Request) {
                 pageId: editBinds.pageId,
                 pixelId: editBinds.pixelId,
                 localeIds,
-                status: "PAUSED",
+                // AV clones go live like the AV Graph clone and every AV launch (TOOL creates PAUSED and
+                // activates on full success); the MO/AIF TOOL clones stay PAUSED (owner spec 28.09).
+                status: av ? "ACTIVE" : "PAUSED",
                 accountCurrency: toolAcctCurrency,
+                ...(av ? { platforms: src.platforms ?? [] } : {}),
                 creatives: [
                   {
                     name: edit.name,
@@ -725,7 +765,9 @@ export async function POST(req: Request) {
                 const note = `pending tool job #${run.jobId ?? "?"} — check Ads Manager sessions → Jobs`;
                 if (claim.documentId) {
                   const patch = { notes: note, ...(created.campaign_id ? { campaign_id: created.campaign_id } : {}) };
-                  if (aif) await backfillBrand(claim.documentId, patch);
+                  // AV's key registry settle is best-effort, as everywhere on the AV rail.
+                  if (av) await backfillAvKey(claim.gcm, { notes: note, ...(created.campaign_id ? { campaign_id: String(created.campaign_id) } : {}) }).catch(() => {});
+                  else if (aif) await backfillBrand(claim.documentId, patch);
                   else await backfillGcm(claim.documentId, patch, claim.gcm);
                 }
                 settled = true;
@@ -816,12 +858,17 @@ export async function POST(req: Request) {
           if (!av) await reportPagesUsed(aif ? "us" : "in", [{ pageId: editBinds.pageId, delta: 1 }]);
 
           if (av) {
-            await backfillAvKey(claim.gcm, {
+            const avBackfill = backfillAvKey(claim.gcm, {
               campaign_id: String(created.campaign_id),
               adset_id: String(created.adset_id),
               ad_id: String(created.ad_id),
-              ad_count: 1,
+              ad_count: Array.isArray(created.ad_ids) ? created.ad_ids.length : 1,
+              ...(avTool && created.tool_job_id != null ? { notes: `cloned via TOOL job #${created.tool_job_id}` } : {}),
             });
+            // Through TOOL the clone is already LIVE (TOOL activated it): a registry hiccup must never
+            // report it failed (the catch would retire its key) — best-effort, as on /api/av/launch.
+            if (avTool) await avBackfill.catch(() => {});
+            else await avBackfill;
           } else if (aif) {
             await backfillBrand(claim.documentId, {
               campaign_id: created.campaign_id,
@@ -871,7 +918,8 @@ export async function POST(req: Request) {
             const note = `pending tool job #${toolSubmittedJob} — check Ads Manager sessions → Jobs`;
             if (claim?.documentId) {
               const patch = { notes: note };
-              if (aif) await backfillBrand(claim.documentId, patch).catch(() => {});
+              if (av) await backfillAvKey(claim.gcm, patch).catch(() => {});
+              else if (aif) await backfillBrand(claim.documentId, patch).catch(() => {});
               else await backfillGcm(claim.documentId, patch, claim.gcm).catch(() => {});
             }
             settled = true;
