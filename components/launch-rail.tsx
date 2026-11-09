@@ -542,7 +542,8 @@ export function LaunchRail({
                   : graphToolActive
                     ? "Queued to Task Manager · TOOL builds the ads"
                     : "Queued to Task Manager · goes live on create"
-                : `${partner.launchNote} · needs a creative`}
+                : // HS: the note names the rail the wave will ride (it said "through LION" with TOOL picked)
+                  `${partner.lionLaunch && nameChannel === "tool" ? "Submits through TOOL" : partner.lionLaunch && nameChannel === "token" ? "Submits via our FB token" : partner.launchNote} · needs a creative`}
             </p>
           )}
         </div>
