@@ -982,7 +982,7 @@ export function HsCloneBoard({
     strategyUnsupported > 0 ||
     hiddenRows > 0 ||
     toolGeoRows > 0 ||
-    limits.staleBuild;
+    limits.reloadRequired;
 
   const switchToJuro = () => {
     changeMode("juro");

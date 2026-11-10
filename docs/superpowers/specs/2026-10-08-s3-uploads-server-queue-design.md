@@ -257,12 +257,21 @@ when the owner ships, or a deploy is rolled back).
   leave a stranded lane waiting with nobody told.
 * **A hand-off still running from a tab survives the update too.** Creatives upload and the hand-off
   request go to the production address — the new build — which accepts them as they are. The one
-  thing that would cut it is a reload, so while a hand-off is in flight the stale-build banner asks
-  to wait ("Do NOT reload yet — N campaigns are still being handed over") and its Reload button is
-  disabled; the leave-page confirm (`useUnloadGuard`) stands behind it.
-* **What an update still costs a buyer:** the stale-build guard (owner rule 08-18) pauses launching
-  in tabs older than the deployment until they reload, and a reload empties the board — cards that
-  were prepared but not launched are lost. Everything already handed over is unaffected.
+  thing that would cut it is a reload, so while a hand-off is in flight the update card
+  (`components/update-notice`) asks to wait ("Do NOT reload yet — N campaigns are still being handed
+  over") and its Reload button is disabled; the leave-page confirm (`useUnloadGuard`) stands behind it.
+* **What an update costs a buyer — since 10.11.2026, nothing by default.** A tab older than the
+  deployment is only OFFERED the update: a small card under the header's right edge that folds into
+  a header chip. It keeps launching against the new server (which re-judges every launch with its
+  own gates), and the new bundle arrives with the tab's next reload — the buyer's own click, asked
+  twice, because a reload empties the board (cards that were prepared but not launched are lost).
+  Only a deploy that raises `WIRE_LEVEL` (`lib/build-update`: a change under which an older tab's
+  requests would be misread, or a tab-only rule that must hold at once) locks launching in older
+  tabs until they reload. Tabs opened before 10.11 run the old code, which locks itself on any
+  `build` mismatch — so `GET /api/acct-limit` now names the release in `release: { build, level }`
+  and blanks `build` while the wire is still theirs. (Until 10.11 the stale-build guard — owner rule
+  08-18 — paused launching in EVERY older tab after EVERY deploy.) Everything already handed over is
+  unaffected either way.
 
 Bench: `_e2e/_adl_queue_update.mts` runs two servers — U1 an update mid-wave as two builds (the old
 build hands over, the new one finishes, each job exactly once), U2 an instance killed mid-job (the

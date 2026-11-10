@@ -635,9 +635,10 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     // Pool exhausted → nothing may launch: stale card previews would only burn failed claims
     // (the rail button is disabled too; the server-side claim is the last-resort guard).
     if (poolExhausted) return;
-    // A tab older than the deployed build has outdated gates — launching is locked until reload
-    // (the banner explains; the rail button is disabled too).
-    if (limits.staleBuild) return;
+    // A deploy that changed the wire this tab speaks (lib/build-update) — launching is locked until
+    // the reload (the update card explains; the rail button is disabled too). An ordinary deploy
+    // locks nothing: the tab keeps launching, the server judges every launch with its own gates.
+    if (limits.reloadRequired) return;
     // No token for this rail (nothing assigned on /tokens, no env default): nothing fires (belt
     // over the rail's disabled button; the server refuses signer-less launches too). AV keeps this
     // gate too — its token is what pulls the fanpage, so an unassigned AV slot means no page and no

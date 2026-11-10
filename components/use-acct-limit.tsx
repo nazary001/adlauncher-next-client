@@ -12,9 +12,10 @@ import {
 import type { RichOption } from "@/lib/catalog";
 import { useAifTaskManager, useAvTaskManager, useTaskManager, useVcTaskManager } from "./task-manager";
 import { useHsTaskManager } from "./hs-task-manager";
-import { useHandoffDemand, useHandoffItems, useHandoffPending } from "./launch-handoff";
-import { uploadingLabel } from "./upload-guard";
+import { useHandoffDemand, useHandoffItems } from "./launch-handoff";
+import { UpdateNoticeProvider } from "./update-notice";
 import { type QueueHealth, sweepLateMinutes } from "@/lib/launch-queue-types";
+import { type UpdateState, liveRelease, releaseOf, updateState, worseUpdate } from "@/lib/build-update";
 
 // Client mirror of the per-account launch limit (5 campaigns / 15 min, window anchored at the
 // first launch — owner rule 2026-08-18). One provider (app layout) polls /api/acct-limit and
@@ -43,9 +44,10 @@ export type AcctLimits = {
    *  launch click awaits this so the wave partition never runs on a ≤30s-old cache. `queued` is the
    *  server's per-account count of jobs still QUEUED (spec §4.5), folded into the wave gate too. */
   fetchFresh: () => Promise<{ accounts: Record<string, AcctLimitInfo>; skew: number; queued: Record<string, number> } | null>;
-  /** This tab runs a bundle OLDER than the deployed server — its launch gates are outdated, so
-   *  every launch surface hard-blocks until the tab reloads. */
-  staleBuild: boolean;
+  /** Another build is live AND it raised the wire level this tab speaks (lib/build-update) — every
+   *  launch surface locks until the tab reloads. An ordinary deploy never sets it: the tab is only
+   *  offered the update (components/update-notice) and keeps launching. */
+  reloadRequired: boolean;
 };
 
 /** Canonical account key, client copy (the server lib is server-only): strip act_, trim. */
@@ -71,7 +73,7 @@ const EMPTY: AcctLimits = {
   resetAtFor: () => null,
   refresh: () => {},
   fetchFresh: async () => null,
-  staleBuild: false,
+  reloadRequired: false,
 };
 
 const Ctx = createContext<AcctLimits>(EMPTY);
@@ -127,7 +129,8 @@ const FOCUS_THROTTLE_MS = 5_000;
 
 export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<State>({ limit: 5, windowMs: DEFAULT_WINDOW_MS, accounts: {}, skew: 0, queued: {} });
-  const [staleBuild, setStaleBuild] = useState(false);
+  // This tab against the live release: nothing / an offer / a must — and which build said so.
+  const [update, setUpdate] = useState<{ state: UpdateState; build: string }>({ state: "current", build: "" });
   // Whole minutes the server queue's sweep is late while jobs wait (null = nothing to say).
   const [sweepLate, setSweepLate] = useState<number | null>(null);
   const lastFetch = useRef(0);
@@ -151,16 +154,24 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
         limit?: number;
         windowMs?: number;
         build?: string;
+        release?: unknown;
         accounts?: Record<string, AcctLimitInfo>;
         queued?: Record<string, number>;
         queue?: QueueHealth | null;
       } | null;
       if (!d?.ok || typeof d.accounts !== "object") return null; // 502/registry blip — next tick retries
       stopped401.current = false;
-      // Build-stamp check: this bundle vs the server answering. A mismatch means the tab
-      // predates a deploy — its gates are outdated, so launching locks until a reload.
-      const own = process.env.NEXT_PUBLIC_BUILD_STAMP ?? "";
-      if (own && typeof d.build === "string" && d.build && d.build !== own) setStaleBuild(true);
+      // Release check: this bundle vs the server answering (lib/build-update). Another build live =
+      // the tab predates a deploy: it is offered the update and keeps working; only a deploy that
+      // raised the wire level locks launching until the reload. The env read is LITERAL on purpose.
+      const live = liveRelease(d);
+      const seen = updateState(releaseOf(process.env.NEXT_PUBLIC_BUILD_STAMP), live);
+      if (seen !== "current" && live) {
+        setUpdate((prev) => {
+          const state = worseUpdate(prev.state, seen);
+          return state === prev.state && live.build === prev.build ? prev : { state, build: live.build };
+        });
+      }
       const next = {
         limit: Number(d.limit) || 5,
         windowMs: Number(d.windowMs) || DEFAULT_WINDOW_MS,
@@ -264,15 +275,17 @@ export function AcctLimitProvider({ children }: { children: React.ReactNode }) {
       resetAtFor: (id) => live(id)?.resetAt ?? null,
       refresh,
       fetchFresh: load,
-      staleBuild,
+      reloadRequired: update.state === "required",
     };
-  }, [state, pending, refresh, load, staleBuild]);
+  }, [state, pending, refresh, load, update.state]);
 
   return (
     <Ctx.Provider value={value}>
-      {staleBuild ? <StaleBuildBanner /> : null}
       {sweepLate != null ? <SweepLateNotice minutes={sweepLate} /> : null}
-      {children}
+      {/* "A new version is live": the small card under the header's right edge + the header chip. */}
+      <UpdateNoticeProvider state={update.state} build={update.build}>
+        {children}
+      </UpdateNoticeProvider>
     </Ctx.Provider>
   );
 }
@@ -294,53 +307,6 @@ function SweepLateNotice({ minutes }: { minutes: number }) {
         <span className="font-semibold">The server queue&apos;s check is {minutes} min late.</span> Launches that are
         already running continue; queued ones may not start on their own. If this stays, tell the owner.
       </span>
-    </div>
-  );
-}
-
-/** Full-width red banner pinned under the header once the deployed build outruns this tab.
- *  Launching is hard-blocked everywhere while it shows — reload is the only way forward. */
-function StaleBuildBanner() {
-  // A hand-off still running FROM this tab (creatives uploading, the request not yet answered) dies
-  // with a reload — and the new build accepts it as it is. So while one is in flight the banner asks
-  // to wait instead of offering the reload.
-  const inFlight = useHandoffPending();
-  return (
-    <div className="fixed inset-x-0 top-[var(--hdr-h,4rem)] z-[90] flex justify-center px-4">
-      <div
-        role="alert"
-        className={
-          "pointer-events-auto flex w-full max-w-[1440px] items-center gap-3 rounded-xl border " +
-          "border-danger/50 bg-[#2a0f14] px-4 py-3 text-[13px] font-semibold text-danger " +
-          "shadow-[0_12px_40px_rgba(0,0,0,0.55)]"
-        }
-      >
-        <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-danger" />
-        {inFlight > 0 ? (
-          <span>
-            A newer version of Ad Launcher is live. Do NOT reload yet — {uploadingLabel(inFlight)} from this tab;
-            reload once every one of them reads “with the server”.
-          </span>
-        ) : (
-          <span>
-            A newer version of Ad Launcher is live — this tab&apos;s launch limits are outdated, so launching is
-            paused here. Launches already with the server keep running.
-          </span>
-        )}
-        <button
-          type="button"
-          disabled={inFlight > 0}
-          onClick={() => window.location.reload()}
-          className={
-            "ml-auto shrink-0 rounded-lg border border-danger/50 bg-danger/15 px-3 py-1.5 " +
-            "text-[12px] font-bold text-danger transition-colors hover:bg-danger/25 " +
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50 " +
-            "disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-danger/15"
-          }
-        >
-          {inFlight > 0 ? "Wait…" : "Reload now"}
-        </button>
-      </div>
     </div>
   );
 }
