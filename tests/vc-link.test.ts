@@ -282,14 +282,14 @@ test("vcLinkSegments: base / quiz slug / the landingpage id tagged / tail", () =
 });
 
 test("VC_READY_LINKS: every ready landingpage is a valid Content Arb link whose id is its own", () => {
-  assert.equal(VC_READY_LINKS.length, 12);
+  assert.equal(VC_READY_LINKS.length, 27);
   const ids = new Set<string>();
   for (const l of VC_READY_LINKS) {
     const d = vcDestination(l.url);
     assert.ok(d.ok, l.url);
     assert.equal(d.ok && d.url, l.url);
     assert.equal(d.ok && d.lpId, l.id);
-    assert.ok(l.niche && l.title && l.lang === "EN", l.url);
+    assert.ok(l.niche && l.title && ["EN", "ES", "PT"].includes(l.lang), l.url);
     assert.ok(l.event === "PURCHASE" || l.event === "LEAD", l.url);
     assert.ok(!ids.has(l.id), `duplicate ${l.id}`);
     ids.add(l.id);
@@ -307,6 +307,51 @@ test("VC_READY_LINKS: every ready landingpage is a valid Content Arb link whose 
   assert.equal(vcReadyLinkOf("qualitydays.com/coa/words-or-actions-fn3zbpziuj?x=1")?.id, "fn3zbpziuj");
   assert.equal(vcReadyLinkOf("https://www.qualitydays.com/coa/some-other-quiz-abcdefghij/"), null);
   assert.equal(vcReadyLinkOf(""), null);
+});
+
+test("VC_READY_LINKS: the 10.11 quizzes — five niches, each in EN / ES / PT, each firing Lead", () => {
+  // [language, niche, the link as VC prints it, the quiz's public title]
+  const rows: [string, string, string, string][] = [
+    ["EN", "Astrology / Zodiac", "https://www.qualitydays.com/coa/are-you-more-fire-earth-air-or-water-l9yz5jh8al/", "Are You More Fire, Earth, Air, or Water?"],
+    ["ES", "Astrology / Zodiac", "https://www.qualitydays.com/coa/eres-mas-fuego-tierra-aire-o-agua-5m5zpgj36a/", "¿Eres más fuego, tierra, aire o agua?"],
+    ["PT", "Astrology / Zodiac", "https://www.qualitydays.com/coa/voce-e-mais-fogo-terra-ar-ou-agua-lni5wgxefh/", "Você é mais fogo, terra, ar ou água?"],
+    ["EN", "Love / Relationships", "https://www.qualitydays.com/coa/are-you-a-romantic-dreamer-or-a-practical-partner-afisuync73/", "Are You a Romantic Dreamer or a Practical Partner?"],
+    ["ES", "Love / Relationships", "https://www.qualitydays.com/coa/eres-un-alma-romantica-o-un-corazon-practico-l470bp8ioz/", "¿Eres un alma romántica o un corazón práctico?"],
+    ["PT", "Love / Relationships", "https://www.qualitydays.com/coa/no-amor-voce-sonha-alto-ou-tem-os-pes-no-chao-9xih0kcl3c/", "No amor, você sonha alto ou tem os pés no chão?"],
+    ["EN", "Numerology / Life Path", "https://www.qualitydays.com/coa/what-does-your-birthday-number-represent-63lpxyt9f6/", "What Does Your Birthday Number Represent?"],
+    ["ES", "Numerology / Life Path", "https://www.qualitydays.com/coa/que-representa-tu-numero-de-cumpleanos-azumevchez/", "¿Qué representa tu número de cumpleaños?"],
+    ["PT", "Numerology / Life Path", "https://www.qualitydays.com/coa/o-que-o-seu-numero-de-aniversario-representa-1582t0n3uf/", "O que o seu número de aniversário representa?"],
+    ["EN", "Tarot / Intuition", "https://www.qualitydays.com/coa/are-you-more-the-star-the-sun-or-the-empress-iizi7oluss/", "Are You More The Star, The Sun, or The Empress?"],
+    ["ES", "Tarot / Intuition", "https://www.qualitydays.com/coa/eres-mas-la-estrella-el-sol-o-la-emperatriz-v114lsuae4/", "¿Eres más La Estrella, El Sol o La Emperatriz?"],
+    ["PT", "Tarot / Intuition", "https://www.qualitydays.com/coa/voce-e-mais-a-estrela-o-sol-ou-a-imperatriz-0t3j63tlvo/", "Você é mais a Estrela, o Sol ou a Imperatriz?"],
+    ["EN", "Self-Care / Inner Balance", "https://www.qualitydays.com/coa/are-you-a-cozy-evening-or-outdoor-escape-person-9219428wfo/", "Are You a Cozy Evening or Outdoor Escape Person?"],
+    ["ES", "Self-Care / Inner Balance", "https://www.qualitydays.com/coa/eres-de-noches-acogedoras-o-de-escapadas-al-aire-libre-0tda2xyfd5/", "¿Eres de noches acogedoras o de escapadas al aire libre?"],
+    ["PT", "Self-Care / Inner Balance", "https://www.qualitydays.com/coa/voce-e-do-tipo-noite-aconchegante-ou-aventura-ao-ar-livre-y83zpkdt2f/", "Você é do tipo noite aconchegante ou aventura ao ar livre?"],
+  ];
+  const purchase = { ...makeCampaign("q1"), ...vcDelivery("conversions") };
+  const lead = { ...makeCampaign("q2"), ...vcDelivery("lead") };
+  for (const [lang, niche, url, title] of rows) {
+    const l = vcReadyLinkOf(url);
+    assert.ok(l, url);
+    assert.equal(l.url, url);
+    assert.equal(l.lang, lang, url);
+    assert.equal(l.niche, niche, url);
+    assert.equal(l.title, title, url);
+    // their VC Tracking (read in VC 10.11): S-1 nik pixel + Lead — a Lead card agrees, a Purchase card is told
+    assert.equal(l.event, "LEAD", url);
+    assert.equal(vcReadyEventMismatch({ ...lead, landing: url }), "", url);
+    assert.equal(vcReadyEventMismatch({ ...purchase, landing: url }), "LEAD", url);
+    // the campaign name carries the quiz's own title, in the quiz's language — accents, ¿ and commas as they are,
+    // and a tail that already holds the title is not doubled
+    assert.equal(vcArticleTitle(url), title);
+    assert.equal(vcServerName("[10/11] (VC) - ", "Tima", url), `[10/11] (VC) - ${title} - Tima`);
+    assert.equal(vcServerName("[10/11] (VC) - ", `${title} - Tima`, url), `[10/11] (VC) - ${title} - Tima`);
+  }
+  // a niche is one picker section holding its three languages, EN first
+  for (const niche of new Set(rows.map((r) => r[1])))
+    assert.deepEqual(VC_READY_LINKS.filter((l) => l.niche === niche).map((l) => l.lang), ["EN", "ES", "PT"], niche);
+  // every earlier ready landingpage is English
+  assert.equal(VC_READY_LINKS.filter((l) => l.lang === "EN").length, 17);
 });
 
 test("the shared FB payloads carry the VC pixel + Purchase on conversions and nothing on clicks", () => {

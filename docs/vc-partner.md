@@ -25,6 +25,16 @@ fires **Lead** into the S-1 nik pixel 2126539511577664, not Purchase into the VC
 the Lead event on that dataset. The card's **"Pick a ready VC quiz"** list fills the link field; any other Content Arb
 link can still be pasted. A new landingpage = one `ready(…)` row in `lib/vc-link.ts`.
 
+**10.11 — fifteen more** (owner: «создай новые квизы под нашего партнера VC», «сделай еще на испанском вариант и на
+порту», «добавь нам в лаунчер, чтобы можно было на них запускать»): five personality quizzes — *Astrology / Zodiac*,
+*Love / Relationships*, *Numerology / Life Path*, *Tarot / Intuition*, *Self-Care / Inner Balance* — each in English
+(en-US), Spanish (es-US, neutral Latin American) and Brazilian Portuguese (pt-BR). Each row carries `lang`
+(EN / ES / PT); a niche is one picker section with its three languages, tagged "EN · Lead" / "ES · Lead" /
+"PT · Lead". All fifteen: VC Tracking = S-1 nik pixel 2126539511577664 + **Lead** (so a pick switches the card to the
+Lead mode, like the Black Friday ones), each answered 200 with its own quiz on 10.11. The row's title is the quiz's
+public title, so the campaign name carries it in the quiz's language
+(`[10/11] (VC) - ¿Eres más fuego, tierra, aire o agua? - <tail>`).
+
 ## In the launcher (`lib/vc-link.ts`, `lib/vc-launch.ts`, `app/api/vc/*`)
 
 | | |

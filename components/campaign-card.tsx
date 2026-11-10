@@ -94,8 +94,9 @@ function readyLinkOptions(redirectType: string): RichOption[] {
 
 /** Picker rows of the ready VC Content Arb landingpages (lib/vc-link VC_READY_LINKS): the niche is the
  *  section, the language the tag — "Words or Actions? Explore Your Connection Style · EN". A landingpage
- *  whose VC Tracking fires Lead (the Black Friday ones, 05.11) is tagged "EN · Lead" in the warn tone, so
- *  the buyer sees it needs the Lead event, not VC's default Purchase; "lead" in the search box finds them. */
+ *  whose VC Tracking fires Lead (the Black Friday ones, 05.11; the 10.11 quizzes, which also come in Spanish
+ *  and Portuguese — "ES · Lead", "PT · Lead") is tagged "EN · Lead" in the warn tone, so the buyer sees it
+ *  needs the Lead event, not VC's default Purchase; "lead" / "es" / "pt" in the search box finds them. */
 const VC_READY_OPTIONS: RichOption[] = VC_READY_LINKS.map((l) => ({
   value: l.url,
   label: l.title,

@@ -46,8 +46,9 @@ export const VC_HOSTS: readonly string[] = ["qualitydays.com"];
 // link), each with Tracking = VC_PIXEL + Purchase, each answering 200 in English — plus the three
 // Black Friday landingpages the owner created on 05.11 (ask: «3 последние лендинга которые я создал по
 // black friday, добавь их в наш адлаунчер»), whose Tracking (read in VC 05.11) fires LEAD into the
-// S-1 nik pixel 2126539511577664 instead: `event` tells the two apart. A pick only fills the card's
-// link field — any other VC Content Arb link can still be pasted. A new landingpage = one row.
+// S-1 nik pixel 2126539511577664 instead: `event` tells the two apart — plus the fifteen quizzes of 10.11
+// (five niches × EN / ES / PT, all Lead into the same S-1 nik pixel): `lang` tells those apart. A pick only
+// fills the card's link field — any other VC Content Arb link can still be pasted. A new landingpage = one row.
 
 export type VcReadyLink = {
   /** The link exactly as VC prints it (Landingpage → Link). */
@@ -62,19 +63,47 @@ export type VcReadyLink = {
    *  PURCHASE into VC_PIXEL; the Black Friday three (05.11) fire LEAD into the S-1 nik pixel
    *  2126539511577664 — a launch on them should optimize THAT event on THAT dataset. */
   event: "PURCHASE" | "LEAD";
-  lang: "EN";
+  /** The language the quiz is written in (its VC locale: en-US / es-US / pt-BR) — the picker's tag. */
+  lang: "EN" | "ES" | "PT";
 };
 
-const ready = (slug: string, id: string, niche: string, title: string, event: VcReadyLink["event"] = "PURCHASE"): VcReadyLink => ({
+const ready = (
+  slug: string,
+  id: string,
+  niche: string,
+  title: string,
+  event: VcReadyLink["event"] = "PURCHASE",
+  lang: VcReadyLink["lang"] = "EN",
+): VcReadyLink => ({
   url: `https://www.qualitydays.com/coa/${slug}-${id}/`,
   id,
   niche,
   title,
   event,
-  lang: "EN",
+  lang,
 });
 
 export const VC_READY_LINKS: readonly VcReadyLink[] = [
+  // 10.11 — five personality quizzes, each in English, Spanish (es-US, neutral Latin American) and
+  // Portuguese (pt-BR) (owner: «создай новые квизы под нашего партнера VC», then «сделай еще на испанском
+  // вариант и на порту», then «добавь нам в лаунчер, чтобы можно было на них запускать»). VC Tracking of all
+  // fifteen: pixel 2126539511577664 "S-1 nik pixel" + Lead; each answered 200 with its quiz on 10.11. The
+  // title is the quiz's own public title, so the campaign name carries it in the quiz's language.
+  ready("are-you-more-fire-earth-air-or-water", "l9yz5jh8al", "Astrology / Zodiac", "Are You More Fire, Earth, Air, or Water?", "LEAD"),
+  ready("eres-mas-fuego-tierra-aire-o-agua", "5m5zpgj36a", "Astrology / Zodiac", "¿Eres más fuego, tierra, aire o agua?", "LEAD", "ES"),
+  ready("voce-e-mais-fogo-terra-ar-ou-agua", "lni5wgxefh", "Astrology / Zodiac", "Você é mais fogo, terra, ar ou água?", "LEAD", "PT"),
+  ready("are-you-a-romantic-dreamer-or-a-practical-partner", "afisuync73", "Love / Relationships", "Are You a Romantic Dreamer or a Practical Partner?", "LEAD"),
+  ready("eres-un-alma-romantica-o-un-corazon-practico", "l470bp8ioz", "Love / Relationships", "¿Eres un alma romántica o un corazón práctico?", "LEAD", "ES"),
+  ready("no-amor-voce-sonha-alto-ou-tem-os-pes-no-chao", "9xih0kcl3c", "Love / Relationships", "No amor, você sonha alto ou tem os pés no chão?", "LEAD", "PT"),
+  ready("what-does-your-birthday-number-represent", "63lpxyt9f6", "Numerology / Life Path", "What Does Your Birthday Number Represent?", "LEAD"),
+  ready("que-representa-tu-numero-de-cumpleanos", "azumevchez", "Numerology / Life Path", "¿Qué representa tu número de cumpleaños?", "LEAD", "ES"),
+  ready("o-que-o-seu-numero-de-aniversario-representa", "1582t0n3uf", "Numerology / Life Path", "O que o seu número de aniversário representa?", "LEAD", "PT"),
+  ready("are-you-more-the-star-the-sun-or-the-empress", "iizi7oluss", "Tarot / Intuition", "Are You More The Star, The Sun, or The Empress?", "LEAD"),
+  ready("eres-mas-la-estrella-el-sol-o-la-emperatriz", "v114lsuae4", "Tarot / Intuition", "¿Eres más La Estrella, El Sol o La Emperatriz?", "LEAD", "ES"),
+  ready("voce-e-mais-a-estrela-o-sol-ou-a-imperatriz", "0t3j63tlvo", "Tarot / Intuition", "Você é mais a Estrela, o Sol ou a Imperatriz?", "LEAD", "PT"),
+  ready("are-you-a-cozy-evening-or-outdoor-escape-person", "9219428wfo", "Self-Care / Inner Balance", "Are You a Cozy Evening or Outdoor Escape Person?", "LEAD"),
+  ready("eres-de-noches-acogedoras-o-de-escapadas-al-aire-libre", "0tda2xyfd5", "Self-Care / Inner Balance", "¿Eres de noches acogedoras o de escapadas al aire libre?", "LEAD", "ES"),
+  ready("voce-e-do-tipo-noite-aconchegante-ou-aventura-ao-ar-livre", "y83zpkdt2f", "Self-Care / Inner Balance", "Você é do tipo noite aconchegante ou aventura ao ar livre?", "LEAD", "PT"),
   // Black Friday (owner 05.11) — VC Tracking: pixel 2126539511577664 "S-1 nik pixel" + Lead; each 200, en-US
   ready("what-is-your-black-friday-shopping-superpower", "d3k4c7b7ek", "Black Friday / Shopping", "What Is Your Black Friday Shopping Superpower?", "LEAD"),
   ready("are-you-a-smart-planner-or-a-spontaneous-shopper", "kcvhp9yt0f", "Black Friday / Shopping", "Are You a Smart Planner or a Spontaneous Shopper?", "LEAD"),
