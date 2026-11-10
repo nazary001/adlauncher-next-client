@@ -4,7 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import type { UpdateState } from "@/lib/build-update";
 import { useHandoffPending } from "./launch-handoff";
 import { uploadingLabel } from "./upload-guard";
-import { AlertIcon, RetryIcon, SparklesIcon, XIcon } from "./icons";
+import { AlertIcon, RetryIcon, SparklesIcon } from "./icons";
 
 // "A new version is live" — the small card under the header's right edge and the chip in the header
 // it folds into (owner ask 10.11: «не такая огромная плашка а аккуратная … сверху справа на экране,
@@ -13,11 +13,14 @@ import { AlertIcon, RetryIcon, SparklesIcon, XIcon } from "./icons";
 // locked until the reload — and a reload empties the board.
 //
 // Two states (lib/build-update):
-//   available — an offer. Nothing is locked: the tab keeps launching against the new server and the
-//               card tucks itself into the chip after a few seconds.
+//   available — an offer. Nothing is locked: the tab keeps launching against the new server.
 //   required  — the deploy changed the wire this tab speaks. Launch buttons lock (the boards read
-//               useAcctLimits().reloadRequired); the card stays until it is folded by hand.
-// Either way the reload is the user's own click, asked twice: the board is not kept through it.
+//               useAcctLimits().reloadRequired).
+// The card never leaves by itself and it breathes a glow until it is answered (owner 10.11, after
+// the first live deploy: «чтобы эта плашка со временем сама по себе не закрывалась а чтобы просто
+// было кнопка релоад и лейтер … чтобы она подсвечивалась мигала чтобы привлекала внимание»): two
+// buttons — Reload, asked twice because the board is not kept through it, and Later, which folds the
+// card into the header chip (that keeps pulsing, and opens the card again).
 
 type Notice = {
   state: UpdateState;
@@ -33,8 +36,6 @@ function useUpdateNotice(): Notice {
   return useContext(Ctx);
 }
 
-/** How long an offer stays open before it folds itself into the chip (hovering it holds it). */
-const AUTO_FOLD_MS = 12_000;
 /** How long the Reload button stays armed after the first press. */
 const ARMED_MS = 6_000;
 
@@ -84,10 +85,13 @@ function ChipButton({ state, open, onClick, className }: { state: UpdateState; o
       aria-label={`${name} — ${open ? "hide" : "show"}`}
       data-tip={open ? undefined : name}
       className={
-        "tip tip-b animate-pop-in h-9 w-9 shrink-0 items-center justify-center rounded-full border " +
+        // update-chip (globals.css): pops in, then — while the card is folded — rings out a pulse so
+        // the waiting update is not forgotten.
+        "tip tip-b update-chip h-9 w-9 shrink-0 items-center justify-center rounded-full border " +
         "transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 " +
+        (open ? "" : "is-waiting ") +
         (required
-          ? "border-danger/40 bg-danger/10 text-danger hover:border-danger/60 hover:bg-danger/20 focus-visible:ring-danger/40 "
+          ? "is-required border-danger/40 bg-danger/10 text-danger hover:border-danger/60 hover:bg-danger/20 focus-visible:ring-danger/40 "
           : "border-accent/40 bg-accent/10 text-[#9db8ff] hover:border-accent/60 hover:bg-accent/20 focus-visible:ring-accent/40 ") +
         className
       }
@@ -105,15 +109,6 @@ function UpdateCard({ required, onFold }: { required: boolean; onFold: () => voi
   // Reload is asked twice: the card appears on its own, possibly under a cursor on its way to the
   // Launch bay, and a reload costs the whole board (cards and creatives live in the tab only).
   const [armed, setArmed] = useState(false);
-  const [held, setHeld] = useState(false);
-
-  // An offer must not sit on the Launch bay: it folds itself into the header chip. A must stays.
-  const autoFold = !required && !held && !armed;
-  useEffect(() => {
-    if (!autoFold) return;
-    const t = setTimeout(onFold, AUTO_FOLD_MS);
-    return () => clearTimeout(t);
-  }, [autoFold, onFold]);
 
   useEffect(() => {
     if (!armed) return;
@@ -128,39 +123,30 @@ function UpdateCard({ required, onFold }: { required: boolean; onFold: () => voi
     window.location.reload();
   };
 
-  const tone = required
-    ? {
-        card: "border-danger/40 shadow-[0_18px_50px_rgba(0,0,0,0.5),0_0_36px_rgba(248,113,113,0.12)]",
-        tile: "border-danger/30 bg-danger/10 text-danger",
-        bar: "bg-danger/50",
-      }
-    : {
-        card: "border-accent/35 shadow-[0_18px_50px_rgba(0,0,0,0.5),0_0_36px_rgba(61,127,255,0.14)]",
-        tile: "border-accent/30 bg-gradient-to-br from-accent/25 to-accent2/25 text-[#9db8ff]",
-        bar: "bg-gradient-to-r from-accent to-accent2",
-      };
-
   return (
     <div
       role={required ? "alert" : "status"}
       aria-live={required ? "assertive" : "polite"}
       data-update-notice={required ? "required" : "available"}
-      onMouseEnter={() => setHeld(true)}
-      onMouseLeave={() => setHeld(false)}
-      onFocus={() => setHeld(true)}
-      onBlur={() => setHeld(false)}
       className={
+        // update-card (globals.css): drops in, then breathes its glow — accent for an offer, red for
+        // a must — until Reload or Later answers it.
         // z-[35]: over the boards and the sticky sub-navs, under the header's own popovers (user menu,
         // limit panel — the header is z-40) and under every drawer / modal / the hand-off screen.
-        "animate-drop-in fixed right-3 top-[calc(var(--hdr-h,4rem)+0.625rem)] z-[35] w-[min(330px,calc(100vw-1.5rem))] " +
-        "overflow-hidden rounded-2xl border bg-surface/95 p-3.5 backdrop-blur-md " +
+        "update-card fixed right-3 top-[calc(var(--hdr-h,4rem)+0.625rem)] z-[35] w-[min(330px,calc(100vw-1.5rem))] " +
+        "rounded-2xl border bg-surface/95 p-3.5 backdrop-blur-md " +
         // Under the header's right edge at every width: the header row is max-w-[1440px] px-3 / sm:px-6.
         "sm:right-[max(1.5rem,calc((100%_-_1440px)_/_2_+_1.5rem))] " +
-        tone.card
+        (required ? "is-required" : "")
       }
     >
       <div className="flex items-start gap-3">
-        <span className={"flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border " + tone.tile}>
+        <span
+          className={
+            "update-card-tile flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border " +
+            (required ? "border-danger/30 bg-danger/10 text-danger" : "border-accent/30 bg-gradient-to-br from-accent/25 to-accent2/25 text-[#9db8ff]")
+          }
+        >
           {required ? <AlertIcon className="h-4 w-4" /> : <SparklesIcon className="h-4 w-4" />}
         </span>
         <div className="min-w-0 flex-1">
@@ -171,17 +157,6 @@ function UpdateCard({ required, onFold }: { required: boolean; onFold: () => voi
               : "Keep working — this tab stays on its version. Reload when your board is launched: a reload clears it."}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={onFold}
-          aria-label="Hide"
-          className={
-            "-mr-1 -mt-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-faint transition-colors " +
-            "hover:bg-raise hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-          }
-        >
-          <XIcon className="h-3.5 w-3.5" />
-        </button>
       </div>
 
       {waiting ? (
@@ -217,22 +192,13 @@ function UpdateCard({ required, onFold }: { required: boolean; onFold: () => voi
           type="button"
           onClick={onFold}
           className={
-            "h-8 rounded-lg px-2.5 text-[12px] font-medium text-dim transition-colors hover:bg-raise hover:text-ink " +
+            "h-8 rounded-lg border border-line2 px-3 text-[12px] font-medium text-dim transition-colors hover:bg-raise hover:text-ink " +
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           }
         >
           Later
         </button>
       </div>
-
-      {/* The auto-fold's clock, as a hairline running out along the card's bottom edge. */}
-      {autoFold ? (
-        <span
-          aria-hidden="true"
-          className={"absolute inset-x-0 bottom-0 h-px origin-left " + tone.bar}
-          style={{ animation: `handoff-countdown ${AUTO_FOLD_MS}ms linear forwards` }}
-        />
-      ) : null}
     </div>
   );
 }
