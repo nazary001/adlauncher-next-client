@@ -10,9 +10,13 @@ export type RichOption = {
   /** When set, the option renders on TWO lines: label on top, this muted line below (e.g. an
    *  account's id). The tag then sits at the right of the second line. */
   subLabel?: string;
-  /** Right-aligned status tag on the option row (e.g. fanka fill "12/250", "FARM"); not searched. */
+  /** Right-aligned status tag on the option row (e.g. fanka fill "12/250", "FARM", a landing's "ES").
+   *  Searched by its words only: "es" / "lead" find an "ES · Lead" row (lib/option-filter). */
   tag?: string;
   tagTone?: "dim" | "ok" | "warn" | "danger";
+  /** The language segment of the picker's filter bar this option falls under, when its tag says more
+   *  than the language — a VC quiz tagged "ES · Lead" is in the "ES" segment. Defaults to the tag. */
+  segment?: string;
   /** Unpickable but still listed (e.g. a fanka at its ad limit): renders translucent, ignores
    *  clicks, keyboard nav skips over it. */
   disabled?: boolean;

@@ -1,11 +1,83 @@
 "use client";
 
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { CheckIcon, SearchIcon, XIcon } from "./icons";
 import type { RichOption } from "@/lib/catalog";
+import { facetBar, filterOptions } from "@/lib/option-filter";
 
-/** Niche chip in the facet bar — glassy pill with a count badge; active = accent gradient glow. */
+// The faceted menu (niches + languages) in numbers. Wide enough, it is a column of niches beside the
+// list — every niche one aligned line, the menu one fixed size; narrower (the dense grid pickers, a
+// field at the screen's edge) the niches are a single line of chips that scrolls sideways.
+const RAIL_MENU_W = 680; // a menu with a niche column opens at least this wide (viewport allowing)
+const RAIL_MIN_W = 560; // …and below this there is no room for the column
+const RAIL_W = 176;
+const RAIL_ROW_H = 25;
+const BODY_MAX_H = 384; // fifteen niches in sight without scrolling the column
+const OPTION_H = 32;
+
+/** Ref for a one-line strip: the mouse wheel scrolls it sideways (a native listener — React's wheel
+ *  events are passive, and the page behind the menu must not scroll instead). */
+function wheelX(el: HTMLDivElement | null) {
+  if (!el) return;
+  const onWheel = (e: WheelEvent) => {
+    if (el.scrollWidth <= el.clientWidth || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+    e.preventDefault();
+    el.scrollLeft += e.deltaY;
+  };
+  el.addEventListener("wheel", onWheel, { passive: false });
+  return () => el.removeEventListener("wheel", onWheel);
+}
+
+/** A niche in the menu's left column: the name, and how many rows it would show right now (0 = dimmed,
+ *  still in its place — the column never reshuffles under the hand). */
+function RailItem({
+  active,
+  onPick,
+  count,
+  children,
+}: {
+  active: boolean;
+  onPick: () => void;
+  count: number;
+  children: string;
+}) {
+  return (
+    <button
+      type="button"
+      tabIndex={-1}
+      title={children}
+      onMouseDown={(e) => {
+        // preventDefault keeps focus in the search input (blur would close the list).
+        e.preventDefault();
+        onPick();
+      }}
+      className={
+        "relative flex w-full items-center justify-between gap-2 rounded-md py-1 pl-2.5 pr-1.5 text-left " +
+        "text-[11.5px] leading-[17px] transition-colors duration-100 " +
+        (active
+          ? "bg-accent/15 font-medium text-[#a8bfff]"
+          : count === 0
+            ? "text-faint/70 hover:bg-raise/50"
+            : "text-dim hover:bg-raise/70 hover:text-ink")
+      }
+    >
+      {active ? <span className="absolute inset-y-1.5 left-0 w-[2px] rounded-full bg-accent" /> : null}
+      <span className="truncate">{children}</span>
+      <span
+        className={
+          "shrink-0 font-mono text-[10px] tabular-nums " +
+          (active ? "text-[#c3d2ff]" : count === 0 ? "text-faint/50" : "text-faint")
+        }
+      >
+        {count}
+      </span>
+    </button>
+  );
+}
+
+/** Niche chip of the one-line strip (the narrow menu) — glassy pill with a count badge; active = accent
+ *  gradient glow. */
 function NicheChip({
   active,
   onPick,
@@ -27,7 +99,7 @@ function NicheChip({
         onPick();
       }}
       className={
-        "group/chip flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium " +
+        "group/chip flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-[11px] font-medium " +
         "transition-all duration-150 active:scale-[0.94] " +
         (active
           ? "border-accent/50 bg-gradient-to-b from-accent/25 to-accent2/15 text-[#a8bfff] " +
@@ -50,14 +122,17 @@ function NicheChip({
   );
 }
 
-/** Language segment button — lives in the compact segmented control at the bar's right edge. */
+/** Language segment button — lives in the compact segmented control above the list; the small number
+ *  is how many rows that language would show under the picked niche and the typed query. */
 function LangSeg({
   active,
   onPick,
+  count,
   children,
 }: {
   active: boolean;
   onPick: () => void;
+  count?: number;
   children: React.ReactNode;
 }) {
   return (
@@ -69,14 +144,17 @@ function LangSeg({
         onPick();
       }}
       className={
-        "rounded-full px-2 py-[3px] font-mono text-[10px] font-semibold uppercase tracking-wide " +
-        "transition-all duration-150 " +
+        "flex shrink-0 items-baseline gap-1 whitespace-nowrap rounded-full px-2 py-[3px] font-mono text-[10px] " +
+        "font-semibold uppercase tracking-wide transition-all duration-150 " +
         (active
           ? "bg-accent/25 text-[#a8bfff] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
-          : "text-faint hover:text-ink")
+          : count === 0
+            ? "text-faint/50 hover:text-dim"
+            : "text-faint hover:text-ink")
       }
     >
       {children}
+      {count != null ? <span className="text-[9px] font-medium tabular-nums opacity-60">{count}</span> : null}
     </button>
   );
 }
@@ -108,11 +186,11 @@ export function SearchSelect({
   metaWhenClosed?: boolean;
   /** Amber "required" accent on the field (missing destination picks etc.). */
   warn?: boolean;
-  /** Facet bar at the top of the list: clickable chips for every `group` (niche) and every
-   *  distinct `tag` (language) with counts — built for catalogs that will keep growing. Chip
-   *  filters compose with the typed query. */
+  /** Filters in the menu: every `group` (niche) as a line of the left column, every language
+   *  (`segment`, else `tag`) as a segment above the list, each with the number of rows it would show —
+   *  built for catalogs that keep growing (lib/option-filter). They compose with the typed query. */
   facets?: boolean;
-  /** A typed query that IS one of the tags filters by that tag alone ("pt" → the Portuguese rows).
+  /** A typed query that IS a word of a tag filters by that tag alone ("pt" → the Portuguese rows).
    *  For a list whose tag is a language and whose labels would match it by accident — "Captcha"
    *  holds "pt". Off by default: every other list keeps matching such a query everywhere. */
   tagQuery?: boolean;
@@ -127,7 +205,7 @@ export function SearchSelect({
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const [groupFilter, setGroupFilter] = useState<string | null>(null);
-  const [tagFilter, setTagFilter] = useState<string | null>(null);
+  const [segFilter, setSegFilter] = useState<string | null>(null);
   // Measured content height → the list animates its size on every filter change (height:auto
   // can't transition, so an explicit pixel height is kept in sync via ResizeObserver).
   const [listH, setListH] = useState<number | null>(null);
@@ -138,14 +216,15 @@ export function SearchSelect({
   const inputRef = useRef<HTMLInputElement>(null);
 
   // The list renders in a portal so it's never clipped by a modal's overflow. Position it in
-  // viewport coords under the field (or above it when the space below is short).
-  const computePos = () => {
+  // viewport coords under the field (or above it when the space below is short — the menu with
+  // niches and languages is the taller one, so it turns upward sooner).
+  const computePos = useCallback(() => {
     const r = rootRef.current?.getBoundingClientRect();
     if (!r) return;
     const spaceBelow = window.innerHeight - r.bottom;
-    const up = spaceBelow < 280 && r.top > spaceBelow;
+    const up = spaceBelow < (facets ? 440 : 280) && r.top > spaceBelow;
     setPos({ left: r.left, width: r.width, top: up ? r.top : r.bottom, up });
-  };
+  }, [facets]);
 
   function openList() {
     computePos();
@@ -168,7 +247,7 @@ export function SearchSelect({
       window.removeEventListener("resize", computePos);
       ro.disconnect();
     };
-  }, [open]);
+  }, [open, computePos]);
 
   const opts: RichOption[] = options.map((o) =>
     typeof o === "string" ? { value: o, label: o } : o,
@@ -187,44 +266,21 @@ export function SearchSelect({
     : /^\d{6,}$/.test(value)
       ? ""
       : value;
-  const q = query.trim().toLowerCase();
-  // Searchable by label, meta, value (fanpages: the page id), group (landing niche) and the
-  // exact tag ("es" → Spanish landings without also matching every label containing "es").
-  // Facet chips (group / tag) compose with the typed query.
-  const tagOnly = Boolean(tagQuery) && q !== "" && opts.some((o) => o.tag?.toLowerCase() === q);
-  const filtered = opts.filter(
-    (o) =>
-      (!groupFilter || o.group === groupFilter) &&
-      (!tagFilter || o.tag === tagFilter) &&
-      (!q ||
-        (tagOnly
-          ? o.tag?.toLowerCase() === q
-          : o.label.toLowerCase().includes(q) ||
-            o.meta?.toLowerCase().includes(q) ||
-            o.value.toLowerCase().includes(q) ||
-            o.group?.toLowerCase().includes(q) ||
-            o.tag?.toLowerCase() === q)),
-  );
-
-  // Facet inventories with counts — stable totals so chips don't jump around while filtering.
-  const groupFacets: Array<[string, number]> = [];
-  const tagFacets: Array<[string, number]> = [];
-  if (facets) {
-    const gc = new Map<string, number>();
-    const tc = new Map<string, number>();
-    for (const o of opts) {
-      if (o.group) gc.set(o.group, (gc.get(o.group) ?? 0) + 1);
-      if (o.tag) tc.set(o.tag, (tc.get(o.tag) ?? 0) + 1);
-    }
-    groupFacets.push(...gc);
-    tagFacets.push(...tc);
-  }
+  // Searchable by label, meta, value (fanpages: the page id), group (landing niche) and the tag's
+  // words ("es" → Spanish landings). The niche and the language picked in the menu compose with it.
+  const filter = { query, group: groupFilter, segment: segFilter, tagQuery };
+  const filtered = filterOptions(opts, filter);
+  // The menu's niches and languages, each with the number of rows it would show right now.
+  const bar = facets ? facetBar(opts, filter) : null;
+  const groupFacets = bar && bar.groups.length > 1 ? bar.groups : [];
+  const segFacets = bar && bar.segments.length > 1 ? bar.segments : [];
+  const anyGroup = bar && groupFacets.length ? filterOptions(opts, { ...filter, group: null }).length : 0;
 
   function closeList() {
     setOpen(false);
     setQuery("");
     setGroupFilter(null);
-    setTagFilter(null);
+    setSegFilter(null);
     setListH(null); // reopening starts at natural size (no stale height to glide from)
   }
 
@@ -289,6 +345,29 @@ export function SearchSelect({
     } else if (e.key === "Escape") {
       closeList();
     }
+  }
+
+  // The open menu's box. With niches to pick from it opens wide enough for their column (never narrower
+  // than the field, never past the viewport's edge); the dense grid variant keeps its own width rule.
+  let menu: { width: number; rail: boolean; bodyH: number } | null = null;
+  if (open && pos) {
+    const room = window.innerWidth - pos.left - 8;
+    const width = sm
+      ? Math.min(Math.max(pos.width, 320), room)
+      : groupFacets.length
+        ? Math.max(pos.width, Math.min(RAIL_MENU_W, room))
+        : pos.width;
+    // Room on the side the menu opens to, less its gap, a margin and the language row.
+    const avail = (pos.up ? pos.top : window.innerHeight - pos.top) - 16 - (segFacets.length ? 38 : 0);
+    const natural = Math.max(
+      (groupFacets.length + 1) * RAIL_ROW_H + 8,
+      opts.length * OPTION_H + groupFacets.length * RAIL_ROW_H + 8,
+    );
+    menu = {
+      width,
+      rail: groupFacets.length > 0 && width >= RAIL_MIN_W,
+      bodyH: Math.min(natural, Math.max(160, Math.min(BODY_MAX_H, avail))),
+    };
   }
 
   return (
@@ -375,16 +454,14 @@ export function SearchSelect({
         </button>
       ) : null}
 
-      {open && pos
+      {open && pos && menu
         ? createPortal(
             <div
               onMouseDown={(e) => e.preventDefault()}
               style={{
                 position: "fixed",
                 left: pos.left,
-                // The dense variant sits in a ~230px grid cell — its list opens wider (names + ids
-                // + fill badges stay readable), clamped to the viewport edge.
-                width: sm ? Math.min(Math.max(pos.width, 320), window.innerWidth - pos.left - 8) : pos.width,
+                width: menu.width,
                 ...(pos.up ? { bottom: window.innerHeight - pos.top + 6 } : { top: pos.top + 6 }),
                 zIndex: 120,
               }}
@@ -393,15 +470,62 @@ export function SearchSelect({
                 (pos.up ? "animate-drop-in-up" : "animate-drop-in")
               }
             >
-              {facets && (groupFacets.length > 0 || tagFacets.length > 1) ? (
-                <div className="relative border-b border-line px-2.5 pb-2.5 pt-2">
+              {segFacets.length || (groupFacets.length && !menu.rail) ? (
+                <div className="relative border-b border-line">
                   {/* Soft cockpit backdrop: raised gradient + a faint accent bloom top-left. */}
                   <span className="pointer-events-none absolute inset-0 bg-gradient-to-b from-raise/60 to-transparent" />
                   <span className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_12%_0%,rgba(61,127,255,0.10),transparent_55%)]" />
-                  <div className="relative flex items-start justify-between gap-2">
-                    <div className="flex flex-1 flex-wrap gap-1.5">
+                  {segFacets.length ? (
+                    // One row: the languages, and how much of the catalog the list shows now.
+                    <div className="relative flex items-center gap-2 px-2 py-1.5">
+                      <div
+                        ref={wheelX}
+                        data-facet="segments"
+                        className="flex min-w-0 items-center gap-0.5 overflow-x-auto rounded-full border border-line bg-surface p-[3px] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] [scrollbar-width:none]"
+                      >
+                        <LangSeg
+                          active={!segFilter}
+                          onPick={() => {
+                            setSegFilter(null);
+                            setActive(0);
+                          }}
+                        >
+                          All
+                        </LangSeg>
+                        {segFacets.map((f) => (
+                          <LangSeg
+                            key={f.name}
+                            active={segFilter === f.name}
+                            count={f.count}
+                            onPick={() => {
+                              setSegFilter((cur) => (cur === f.name ? null : f.name));
+                              setActive(0);
+                            }}
+                          >
+                            {f.name}
+                          </LangSeg>
+                        ))}
+                      </div>
+                      <span data-facet="shown" className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-faint">
+                        {filtered.length === opts.length ? opts.length : `${filtered.length} / ${opts.length}`}
+                      </span>
+                    </div>
+                  ) : null}
+                  {groupFacets.length && !menu.rail ? (
+                    // No room for the column: the niches on ONE line that scrolls sideways (wheel or
+                    // drag) — never a cloud of wrapped chips pushing the list off the screen.
+                    <div
+                      ref={wheelX}
+                      data-facet="strip"
+                      className={
+                        "relative flex gap-1.5 overflow-x-auto pl-2 pr-7 [scrollbar-width:none] " +
+                        "[mask-image:linear-gradient(to_right,#000_calc(100%-28px),transparent)] " +
+                        (segFacets.length ? "pb-2" : "py-2")
+                      }
+                    >
                       <NicheChip
                         active={!groupFilter}
+                        count={anyGroup}
                         onPick={() => {
                           setGroupFilter(null);
                           setActive(0);
@@ -409,70 +533,82 @@ export function SearchSelect({
                       >
                         All
                       </NicheChip>
-                      {groupFacets.map(([g, n]) => (
+                      {groupFacets.map((g) => (
                         <NicheChip
-                          key={g}
-                          active={groupFilter === g}
-                          count={n}
+                          key={g.name}
+                          active={groupFilter === g.name}
+                          count={g.count}
                           onPick={() => {
-                            setGroupFilter((cur) => (cur === g ? null : g));
+                            setGroupFilter((cur) => (cur === g.name ? null : g.name));
                             setActive(0);
                           }}
                         >
-                          {g}
+                          {g.name}
                         </NicheChip>
                       ))}
                     </div>
-                    {tagFacets.length > 1 ? (
-                      <div className="flex shrink-0 items-center gap-0.5 self-start rounded-full border border-line bg-surface p-[3px] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-                        <LangSeg
-                          active={!tagFilter}
-                          onPick={() => {
-                            setTagFilter(null);
-                            setActive(0);
-                          }}
-                        >
-                          All
-                        </LangSeg>
-                        {tagFacets.map(([t]) => (
-                          <LangSeg
-                            key={t}
-                            active={tagFilter === t}
-                            onPick={() => {
-                              setTagFilter((cur) => (cur === t ? null : t));
-                              setActive(0);
-                            }}
-                          >
-                            {t}
-                          </LangSeg>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
+                  ) : null}
                 </div>
               ) : null}
+              {/* With the niche column the body is ONE fixed size: picking a niche never moves the
+                  column under the pointer (a menu that opens upward would otherwise jump). */}
+              <div className="flex" style={menu.rail ? { height: menu.bodyH } : undefined}>
+                {menu.rail ? (
+                  <div
+                    data-facet="rail"
+                    style={{ width: RAIL_W }}
+                    className="shrink-0 overflow-y-auto border-r border-line bg-gradient-to-b from-raise/40 to-transparent p-1"
+                  >
+                    <RailItem
+                      active={!groupFilter}
+                      count={anyGroup}
+                      onPick={() => {
+                        setGroupFilter(null);
+                        setActive(0);
+                      }}
+                    >
+                      All
+                    </RailItem>
+                    {groupFacets.map((g) => (
+                      <RailItem
+                        key={g.name}
+                        active={groupFilter === g.name}
+                        count={g.count}
+                        onPick={() => {
+                          setGroupFilter((cur) => (cur === g.name ? null : g.name));
+                          setActive(0);
+                        }}
+                      >
+                        {g.name}
+                      </RailItem>
+                    ))}
+                  </div>
+                ) : null}
               <div
                 ref={listRef}
                 id={id ? `${id}-listbox` : undefined}
                 role="listbox"
-                style={listH != null ? { height: listH } : undefined}
-                className="max-h-72 overflow-y-auto transition-[height] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
+                style={menu.rail ? undefined : listH != null ? { height: listH } : undefined}
+                className={
+                  "min-w-0 flex-1 overflow-y-auto " +
+                  (menu.rail ? "" : "max-h-72 transition-[height] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]")
+                }
               >
                 <div ref={innerRef}>
-                  {/* Keyed by the chip filters: flipping a chip remounts the rows so the stagger
-                      cascade replays; typing keeps the DOM stable (no flashing while searching). */}
-                  <div key={`${groupFilter ?? ""}|${tagFilter ?? ""}`} className="p-1">
+                  {/* Keyed by the menu's filters: picking a niche or a language remounts the rows so the
+                      stagger cascade replays; typing keeps the DOM stable (no flashing while searching). */}
+                  <div key={`${groupFilter ?? ""}|${segFilter ?? ""}`} className="p-1">
             {filtered.length === 0 ? (
               <div className="animate-pop-in flex flex-col items-start gap-1.5 px-3 py-3">
                 <p className="text-[12px] text-faint">{emptyHint}</p>
-                {groupFilter || tagFilter ? (
+                {groupFilter || segFilter ? (
                   <button
                     type="button"
                     tabIndex={-1}
                     onMouseDown={(e) => {
                       e.preventDefault();
                       setGroupFilter(null);
-                      setTagFilter(null);
+                      setSegFilter(null);
                       setActive(0);
                     }}
                     className="text-[11.5px] font-medium text-[#9db8ff] transition-colors hover:text-ink"
@@ -485,12 +621,13 @@ export function SearchSelect({
               filtered.map((o, i) => (
                 <Fragment key={o.value}>
                   {/* Section header whenever the (contiguous) group changes — landing niches etc.
-                      Headers are decoration only: keyboard nav walks the flat filtered list.
-                      Hidden while a niche chip is active (one group → the chip IS the header). */}
+                      Headers are decoration only: keyboard nav walks the flat filtered list. It
+                      sticks to the list's top while its rows scroll by, so a long list always says
+                      which niche is on screen. Hidden while a niche is picked (it IS the header). */}
                   {o.group && !groupFilter && (i === 0 || filtered[i - 1].group !== o.group) ? (
                     <p
                       style={{ animationDelay: `${Math.min(i, 14) * 16}ms` }}
-                      className="animate-row-in px-2.5 pb-1 pt-2.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-faint"
+                      className="animate-row-in sticky top-0 z-[1] bg-surface px-2.5 pb-1 pt-2.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-faint"
                     >
                       {o.group}
                     </p>
@@ -512,7 +649,7 @@ export function SearchSelect({
                       if (!o.disabled) setActive(i);
                     }}
                     className={
-                      "animate-row-in flex flex-col gap-0.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors duration-100 " +
+                      "animate-row-in flex scroll-mt-8 flex-col gap-0.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors duration-100 " +
                       (o.disabled
                         ? "cursor-not-allowed text-dim opacity-40"
                         : "cursor-pointer " + (i === active ? "bg-accent/10 text-ink" : "text-dim"))
@@ -546,13 +683,15 @@ export function SearchSelect({
                       if (!o.disabled) setActive(i);
                     }}
                     className={
-                      "animate-row-in flex items-center justify-between gap-3 rounded-lg px-2.5 py-2 text-[13px] transition-colors duration-100 " +
+                      "animate-row-in flex scroll-mt-8 items-center justify-between gap-3 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors duration-100 " +
                       (o.disabled
                         ? "cursor-not-allowed text-dim opacity-40"
                         : "cursor-pointer " + (i === active ? "bg-accent/10 text-ink" : "text-dim"))
                     }
                   >
-                    <span className="truncate">{o.label}</span>
+                    <span className="truncate" title={o.label}>
+                      {o.label}
+                    </span>
                     <span className="flex shrink-0 items-center gap-2">
                       {o.meta ? (
                         <span className="font-mono text-[11px] text-faint">{o.meta}</span>
@@ -571,6 +710,7 @@ export function SearchSelect({
             )}
                   </div>
                 </div>
+              </div>
               </div>
             </div>,
             document.body,

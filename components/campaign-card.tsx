@@ -96,11 +96,13 @@ function readyLinkOptions(redirectType: string): RichOption[] {
  *  section, the language the tag — "Words or Actions? Explore Your Connection Style · EN". A landingpage
  *  whose VC Tracking fires Lead (the Black Friday ones, 05.11; the 10.11 quizzes, which also come in Spanish
  *  and Portuguese — "ES · Lead", "PT · Lead") is tagged "EN · Lead" in the warn tone, so the buyer sees it
- *  needs the Lead event, not VC's default Purchase; "lead" / "es" / "pt" in the search box finds them. */
+ *  needs the Lead event, not VC's default Purchase; "lead" / "es" / "pt" in the search box finds them.
+ *  The menu's language row is the language alone (`segment`): "EN" is every English quiz, Lead or not. */
 const VC_READY_OPTIONS: RichOption[] = VC_READY_LINKS.map((l) => ({
   value: l.url,
   label: l.title,
   group: l.niche,
+  segment: l.lang,
   tag: l.event === "LEAD" ? `${l.lang} · Lead` : l.lang,
   tagTone: l.event === "LEAD" ? ("warn" as const) : undefined,
 }));
