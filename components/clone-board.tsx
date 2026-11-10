@@ -681,7 +681,7 @@ function CloneInner({
    *  (the source is reused by id), so the hand-off is instant and the tab can be closed right after.
    *  Each clone carries ITS row's destination (own or the batch defaults). */
   const duplicate = () => {
-    if (destinationMissing || acctBlocked || fankaOver || bidMissingCount > 0 || signerMissing || limits.staleBuild || avKeysUnregistered)
+    if (destinationMissing || acctBlocked || fankaOver || bidMissingCount > 0 || signerMissing || limits.reloadRequired || avKeysUnregistered)
       return; // the button is disabled too — belt and suspenders
     let queued = 0;
     for (const r of rows) {
@@ -1049,7 +1049,7 @@ function CloneInner({
                     fankaOver ||
                     bidMissingCount > 0 ||
                     signerMissing ||
-                    limits.staleBuild ||
+                    limits.reloadRequired ||
                     avKeysUnregistered
                   }
                   className={

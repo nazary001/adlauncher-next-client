@@ -13,6 +13,7 @@ import { SnapTaskManagerButton } from "./snap-task-manager";
 import { TiktokTaskManagerButton } from "./tiktok-task-manager";
 import { UserMenu, type SessionUser } from "./user-menu";
 import { TeamBadge } from "./team-badge";
+import { UpdateChip } from "./update-notice";
 import { GOOGLE_ENABLED, SNAP_ENABLED, TIKTOK_ENABLED, partnerConfig, type PartnerId } from "@/lib/partners";
 import { TEAM, teamHas } from "@/lib/team";
 
@@ -247,6 +248,9 @@ export function Header({
           {!pinned ? <AcctLimitWidget /> : null}
         </div>
         <div className="order-2 ml-auto flex shrink-0 items-center gap-1.5 sm:gap-2 lg:order-3 lg:ml-0">
+          {/* "A new version is live" — nothing on a current tab; from a deploy until the reload, the
+              chip the update card folds into (and opens from). */}
+          <UpdateChip />
           {/* The active rail's queue button: Snapchat and Google each have their own compact
               manager; on FB, HS (LION submits) has its own manager, everyone else shares the team
               Tasks queue. Every provider stays mounted in the app layout, so the hidden queue keeps

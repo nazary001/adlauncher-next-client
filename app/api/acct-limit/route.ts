@@ -3,6 +3,7 @@ import { sessionFromCookieHeader } from "@/lib/session";
 import { acctLimitSnapshot } from "@/lib/acct-limit";
 import { queueHealth, queuedDemandByAccount } from "@/lib/launch-queue-store";
 import type { QueueHealth } from "@/lib/launch-queue-types";
+import { legacyBuildField, releaseOf } from "@/lib/build-update";
 
 export const runtime = "nodejs";
 
@@ -35,10 +36,14 @@ export async function GET(req: Request): Promise<NextResponse> {
     } catch {
       queue = null;
     }
+    // `release` = this deployment's build stamp + the wire level it speaks (lib/build-update): a tab
+    // whose own stamp differs shows the small "update available" notice and KEEPS launching; only a
+    // tab of a lower wire level must reload first. `build` is the same stamp for the bundles from
+    // before 10.11.2026, which lock themselves on any mismatch — blank while the wire is still theirs.
+    // The env read is LITERAL on purpose (next.config `env` values are build-time replacements).
+    const release = releaseOf(process.env.NEXT_PUBLIC_BUILD_STAMP);
     return NextResponse.json(
-      // `build` = this deployment's build stamp: a client whose inlined stamp differs is a
-      // stale tab and must reload before launching (its pre-flight gates are outdated).
-      { ok: true, build: process.env.NEXT_PUBLIC_BUILD_STAMP ?? "", ...snap, queued, queue },
+      { ok: true, build: legacyBuildField(release), release, ...snap, queued, queue },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (e) {

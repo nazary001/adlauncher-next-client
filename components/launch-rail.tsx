@@ -480,7 +480,7 @@ export function LaunchRail({
             <button
               type="button"
               onClick={onLaunch}
-              disabled={readyCount === 0 || gcmBlocked || moSignerMissing || avToolBlocked || limits.staleBuild || launching}
+              disabled={readyCount === 0 || gcmBlocked || moSignerMissing || avToolBlocked || limits.reloadRequired || launching}
               className={
                 "animate-pop-in group flex h-11 w-full items-center justify-center gap-2 rounded-xl " +
                 "bg-gradient-to-b from-launch2 to-launch text-[13.5px] font-bold text-[#032e20] " +
@@ -501,9 +501,11 @@ export function LaunchRail({
               after the reset or move them to another account.
             </p>
           ) : null}
-          {limits.staleBuild ? (
+          {limits.reloadRequired ? (
+            // Only a deploy that changed the wire this tab speaks (lib/build-update) — an ordinary
+            // update leaves the button alone and the tab keeps launching.
             <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">
-              A newer version is live — reload this tab to launch (its limit gates are outdated).
+              This update changed how launches are sent — reload this tab to launch.
             </p>
           ) : moSignerMissing ? (
             <p className="text-center text-[11px] font-semibold leading-relaxed text-danger">
