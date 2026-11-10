@@ -530,6 +530,84 @@ body {
   animation: handoff-countdown 4s linear forwards;
 }
 
+/* ---------- update notice (components/update-notice.tsx) ----------
+   "A new version is live" has to be noticed (owner ask 10.11: «чтобы она подсвечивалась мигала
+   чтобы привлекала внимание»): the card drops in and then breathes a glow — accent for an offer, red
+   for a must — until Reload or Later answers it, and its icon tile pulses with it; folded, the
+   header chip keeps ringing out a pulse. Under reduced motion all of it settles on the resting
+   frame (the block below). The border colour and the shadow live here, not in utilities: the glow
+   animates both. */
+.update-card {
+  --ug: 61, 127, 255;
+  --ug2: 124, 92, 255;
+  border-color: rgba(var(--ug), 0.4);
+  box-shadow:
+    0 18px 50px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(var(--ug), 0.12),
+    0 0 22px rgba(var(--ug), 0.16);
+  transform-origin: top right;
+  animation:
+    drop-in 0.18s ease-out both,
+    update-glow 1.5s ease-in-out 0.18s infinite;
+}
+.update-card.is-required {
+  --ug: 248, 113, 113;
+  --ug2: 248, 113, 113;
+}
+@keyframes update-glow {
+  0%,
+  100% {
+    border-color: rgba(var(--ug), 0.4);
+    box-shadow:
+      0 18px 50px rgba(0, 0, 0, 0.5),
+      0 0 0 1px rgba(var(--ug), 0.12),
+      0 0 22px rgba(var(--ug), 0.16);
+  }
+  50% {
+    border-color: rgba(var(--ug), 1);
+    box-shadow:
+      0 18px 50px rgba(0, 0, 0, 0.5),
+      0 0 0 2px rgba(var(--ug), 0.6),
+      0 0 44px rgba(var(--ug), 0.65),
+      0 0 96px rgba(var(--ug2), 0.35);
+  }
+}
+.update-card-tile {
+  animation: update-tile 1.5s ease-in-out 0.18s infinite;
+}
+@keyframes update-tile {
+  0%,
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+  50% {
+    transform: scale(1.1);
+    filter: brightness(1.45);
+  }
+}
+.update-chip {
+  --ug: 61, 127, 255;
+  animation: pop-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.update-chip.is-required {
+  --ug: 248, 113, 113;
+}
+.update-chip.is-waiting {
+  animation:
+    pop-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) both,
+    update-ping 1.6s ease-out 0.3s infinite;
+}
+@keyframes update-ping {
+  0% {
+    box-shadow: 0 0 0 0 rgba(var(--ug), 0.75);
+  }
+  75%,
+  100% {
+    box-shadow: 0 0 0 12px rgba(var(--ug), 0);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
