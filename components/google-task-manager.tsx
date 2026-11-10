@@ -629,7 +629,7 @@ export function GoogleTaskManagerButton() {
       onClick={() => setOpen(true)}
       aria-label="Open Google Task Manager"
       className={
-        "relative flex h-9 items-center gap-2 rounded-full border px-3 text-[13px] font-medium " +
+        "relative flex h-10 shrink-0 items-center gap-2 rounded-full border px-3 text-[13px] font-medium " +
         "transition-all duration-200 active:scale-[0.96] focus-visible:outline-none " +
         "focus-visible:ring-2 focus-visible:ring-launch/40 " +
         tone
@@ -641,7 +641,7 @@ export function GoogleTaskManagerButton() {
           <span className="animate-pulse-soft absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-launch2" />
         ) : null}
       </span>
-      <span className="hidden whitespace-nowrap md:max-lg:inline min-[1360px]:inline">Google tasks</span>
+      <span className="hdr-s2 whitespace-nowrap">Google tasks</span>
       {badge > 0 ? (
         <span
           key={badge}

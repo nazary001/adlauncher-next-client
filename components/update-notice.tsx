@@ -87,7 +87,7 @@ function ChipButton({ state, open, onClick, className }: { state: UpdateState; o
       className={
         // update-chip (globals.css): pops in, then — while the card is folded — rings out a pulse so
         // the waiting update is not forgotten.
-        "tip tip-b update-chip h-9 w-9 shrink-0 items-center justify-center rounded-full border " +
+        "tip tip-b update-chip h-10 w-10 shrink-0 items-center justify-center rounded-full border " +
         "transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 " +
         (open ? "" : "is-waiting ") +
         (required
@@ -97,7 +97,7 @@ function ChipButton({ state, open, onClick, className }: { state: UpdateState; o
       }
     >
       <RetryIcon className="h-4 w-4" />
-      <span className={"animate-pulse-soft absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full " + (required ? "bg-danger" : "bg-accent")} />
+      <span className={"animate-pulse-soft absolute right-2 top-2 h-1.5 w-1.5 rounded-full " + (required ? "bg-danger" : "bg-accent")} />
     </button>
   );
 }

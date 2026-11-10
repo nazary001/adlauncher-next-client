@@ -91,7 +91,7 @@ export function AcctLimitWidget() {
         aria-expanded={open}
         data-tip={hottest ? undefined : `Account launch limits — ${limits.limit} campaigns / ${windowMinutes(limits)} min per account`}
         className={
-          "tip tip-b flex h-9 items-center gap-2 rounded-lg border px-3 font-mono text-[12px] " +
+          "tip tip-b flex h-10 shrink-0 items-center gap-2 whitespace-nowrap rounded-full border px-3.5 font-mono text-[12px] " +
           "font-semibold tabular-nums transition-all duration-150 active:scale-[0.97] " +
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
           tone
@@ -105,7 +105,7 @@ export function AcctLimitWidget() {
             </span>
             <span className="opacity-75">{fmtCountdown(hottest.resetAt, limits.skew)}</span>
             {fullCount > 0 ? (
-              <span className="rounded-md bg-danger/20 px-1.5 py-0.5 text-[10px] uppercase tracking-wide">
+              <span className="hdr-s5 rounded-full bg-danger/20 px-1.5 py-0.5 text-[10px] uppercase tracking-wide">
                 {fullCount} full
               </span>
             ) : null}

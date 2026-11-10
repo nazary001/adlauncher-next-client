@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { TEAM } from "@/lib/team";
+import { HEADER_PREFIT_SCRIPT } from "@/lib/header-fit";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -30,7 +31,12 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        {children}
+        {/* Fits the board's header to the window while the HTML is still being parsed, so the first
+            paint is already the layout that fits (lib/header-fit). Must stay AFTER the page. */}
+        <script dangerouslySetInnerHTML={{ __html: HEADER_PREFIT_SCRIPT }} />
+      </body>
     </html>
   );
 }

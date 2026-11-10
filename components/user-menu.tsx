@@ -54,11 +54,11 @@ export function UserMenu({ user }: { user: SessionUser }) {
 
   const identity = (
     <>
-      <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-accent/20 font-mono text-[10px] font-semibold text-[#9db8ff]">
+      <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-accent/20 font-mono text-[11px] font-semibold text-[#9db8ff] ring-1 ring-inset ring-accent/25">
         {initial}
       </span>
       <span
-        className="hidden max-w-[110px] truncate text-[12.5px] font-medium text-dim md:max-lg:inline min-[1440px]:inline"
+        className="hdr-s1 max-w-[120px] truncate text-[12.5px] font-medium text-dim"
         title={user.username}
       >
         {user.username}
@@ -66,6 +66,8 @@ export function UserMenu({ user }: { user: SessionUser }) {
     </>
   );
 
+  // The quick sign-out. An owner also has it in their menu, so theirs folds away when the header is
+  // at its tightest (squeeze step 5, lib/header-fit); a designer's is the only one and always stays.
   const logoutBtn = (
     <button
       type="button"
@@ -73,7 +75,7 @@ export function UserMenu({ user }: { user: SessionUser }) {
       disabled={busy}
       data-tip="Sign out"
       aria-label="Sign out"
-      className="tip tip-b flex h-7 w-7 items-center justify-center rounded-full text-faint transition-colors hover:bg-raise hover:text-danger disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      className={`tip tip-b flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-faint transition-colors hover:bg-raise hover:text-danger disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${user.owner ? "hdr-s5" : ""}`}
     >
       <LogoutIcon className="h-4 w-4" />
     </button>
@@ -82,7 +84,7 @@ export function UserMenu({ user }: { user: SessionUser }) {
   // Non-owners keep the plain chip — no menu to open, nothing changes for them.
   if (!user.owner) {
     return (
-      <div className="flex h-9 items-center gap-2 rounded-full border border-line bg-surface pl-2 pr-1">
+      <div className="flex h-10 shrink-0 items-center gap-2 rounded-full border border-line bg-surface pl-2 pr-[3px]">
         {identity}
         {logoutBtn}
       </div>
@@ -98,14 +100,14 @@ export function UserMenu({ user }: { user: SessionUser }) {
 
   return (
     <div ref={boxRef} className="relative">
-      <div className="flex h-9 items-center gap-1 rounded-full border border-line bg-surface pl-1 pr-1">
+      <div className="flex h-10 items-center gap-0.5 rounded-full border border-line bg-surface p-[3px]">
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
           aria-haspopup="menu"
           className={
-            "flex h-7 items-center gap-2 rounded-full pl-1 pr-1.5 transition-colors " +
+            "flex h-8 items-center gap-2 rounded-full pl-1 pr-1.5 transition-colors " +
             "hover:bg-raise focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
             (open ? "bg-raise" : "")
           }

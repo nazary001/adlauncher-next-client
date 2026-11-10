@@ -134,12 +134,13 @@ export function HsTokenStatusWidget() {
         aria-expanded={open}
         title="HS launch tokens — health & failover"
         className={
-          "flex h-9 items-center gap-2 rounded-full border px-3 text-[12px] font-medium transition-colors duration-150 " +
+          "flex h-10 shrink-0 items-center gap-2 whitespace-nowrap rounded-full border px-3.5 text-[12px] font-medium transition-colors duration-150 " +
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
           pillTone
         }
       >
         <FacebookMark className="h-3.5 w-3.5 text-[#5f9bf0]" />
-        <span className="hidden md:inline lg:hidden xl:inline">Tokens</span>
+        <span className="hdr-s2">Tokens</span>
         <span className="flex items-center gap-1">
           {tokens.map((t) => (
             <span
@@ -152,11 +153,11 @@ export function HsTokenStatusWidget() {
             />
           ))}
         </span>
-        {failedOver ? <span className="hidden font-semibold sm:inline">T2</span> : null}
+        {failedOver ? <span className="hdr-s5 font-semibold">T2</span> : null}
       </button>
 
       {open ? (
-        <div className="animate-pop-in absolute right-0 top-11 z-50 w-[320px] max-sm:fixed max-sm:inset-x-3 max-sm:top-[calc(var(--hdr-h,4rem)+8px)] max-sm:w-auto rounded-2xl border border-line bg-surface p-3 shadow-[0_24px_60px_rgba(0,0,0,0.55)]">
+        <div className="animate-pop-in absolute right-0 top-12 z-50 w-[320px] max-sm:fixed max-sm:inset-x-3 max-sm:top-[calc(var(--hdr-h,4rem)+8px)] max-sm:w-auto rounded-2xl border border-line bg-surface p-3 shadow-[0_24px_60px_rgba(0,0,0,0.55)]">
           <p className="px-1 pb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-faint">
             HS launch tokens
           </p>

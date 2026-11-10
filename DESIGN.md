@@ -30,6 +30,21 @@ Card:  01 · name · status dot · collapsed summary · duplicate/remove/collaps
        TARGETING  geo multi (presets World·LATAM·EU·Africa·T1) / languages / cat / placement / age / os
 ```
 
+### Header: one control height, and it fits itself (10.11)
+
+- Every control in the header is **40px** tall; the partner switcher and the platform tabs are 40px
+  tracks holding 32px segments, the user chip is the same track. Pills everywhere (the launch-limit
+  readout included); a hairline of the brand gradient runs under the bar.
+- The header is **measured, not breakpointed** (`lib/header-fit.ts` — the layouts and the walk;
+  `useHeaderFit` in `components/header.tsx` — the measuring; `hdr-*` rules in `app/globals.css`).
+  What the row holds changes under the same window (HS adds the token pool, a launch window grows
+  the limit readout, a deploy adds the update chip), so it tries: one line squeezed step by step →
+  two lines, each squeezed on its own → wrapping, and keeps the roomiest that fits. A new header
+  element only has to say when it folds: `hdr-s1`…`hdr-s5` = "on screen until squeeze step N".
+- The server's HTML is fitted by an inline script before the first paint (`HEADER_PREFIT_SCRIPT`,
+  mounted in `app/layout.tsx`), so a reload does not jump.
+- Tooltips (`.tip`) are `display: none` until hovered — a transparent bubble still widened the page.
+
 ## Behavior shipped in this phase (UI-level, no backend)
 
 - Add / duplicate / remove / collapse cards; duplicate is the primary workflow (clone waves).
