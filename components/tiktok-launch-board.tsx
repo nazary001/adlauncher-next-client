@@ -4,7 +4,10 @@
 // campaign CARDS under LION's own "Campaign Launcher" header (Autofill / + / −) on the left, a
 // sticky "Launch bay" on the right (per-card readiness, total/day, Preview → Launch). Copies are
 // whole cards — Autofill makes N of card 01, + duplicates the last one — never a per-card
-// multiplier: one card = one campaign, LION's launcher texture. Like every LION rail
+// multiplier: one card = one campaign, LION's launcher texture. Autofill has a second job (team
+// ask 11.11, the FB clone board's "Autofill all rows" for cards): "Change all campaigns" — the
+// ticked fields of one form (geo, landing, name tag, budget, bid, …) land on every picked card,
+// with ONE Undo in the banner under the header (lib/tiktok-autofill). Like every LION rail
 // the create is SERVER-side: one POST /api/tiktok/launch stamps the rows and an after() pump sends
 // every campaign to LION and settles what LION built, so once the wave is accepted the tab is safe
 // to close. Videos upload to OUR S3 bucket through the shared manager the moment they are attached
@@ -30,9 +33,10 @@ import { WAVE_ACCEPTED_NOTE, WAVE_HELD_NOTE, WAVE_RELEASED_NOTE } from "./wave-h
 import { makeGate } from "@/lib/launch-guards";
 import { moneyLabel, parseMoney } from "@/lib/types";
 import { tiktokBidPlan, tiktokResolvePixel, type TiktokLaunchShotIn } from "@/lib/tiktok-launch";
+import { type TiktokAutofillPatch, tiktokAutofillCards, tiktokAutofillNote, undoTiktokAutofill } from "@/lib/tiktok-autofill";
 import { ensureCreativeUploaded, uploadCreativeBlob } from "./creative-uploads";
 import { handoffBegin, handoffPatch } from "./launch-handoff";
-import { ChevronDownIcon, CopyIcon, EyeIcon, MinusIcon, PlusIcon, SparklesIcon } from "./icons";
+import { ChevronDownIcon, CopyIcon, EyeIcon, MinusIcon, PlusIcon, SparklesIcon, UndoIcon, XIcon } from "./icons";
 import {
   FIRST_TT_CARD_ID,
   TiktokLaunchCard,
@@ -79,6 +83,9 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
   const [fireNote, setFireNote] = useState<string | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [autofillOpen, setAutofillOpen] = useState(false);
+  // The last "Change all campaigns": the cards it changed as they were before, and what it set —
+  // the banner under the header offers ONE Undo of it.
+  const [autofillDone, setAutofillDone] = useState<{ before: TiktokCard[]; patch: TiktokAutofillPatch; note: string; changed: number; skipped: number } | null>(null);
   const [identities, setIdentities] = useState<RememberedIdentity[]>([]);
   const fireGate = useRef(makeGate());
   const hlTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -170,6 +177,26 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
     setAutofillOpen(false);
     if (firing) return;
     setCards((cs) => [...cs, ...built].slice(0, MAX_CARDS));
+    setPreviewed(false);
+  };
+  // Autofill, "Change all campaigns": the ticked fields of one form land on every picked card. A
+  // changed queued / failed card is a fresh draft again and a held one keeps its hold — the same
+  // rule as an edit on the card itself (rearm above); what was NOT ticked stays as each card has it.
+  const applyAutofillAll = (p: TiktokAutofillPatch, ids: string[]) => {
+    setAutofillOpen(false);
+    if (firing) return;
+    const res = tiktokAutofillCards(cards, p, new Set(ids));
+    setCards(res.cards);
+    setAutofillDone({ before: cards.filter((c, i) => res.cards[i] !== c), patch: p, note: tiktokAutofillNote(p), changed: res.changed, skipped: res.skipped });
+    if (res.changed > 0) setPreviewed(false);
+  };
+  // Undo puts back only what that autofill set, on the cards it changed — a field edited by hand
+  // since stays, and a card added since is not touched.
+  const undoLastAutofill = () => {
+    if (!autofillDone || firing) return;
+    const { before, patch: p } = autofillDone;
+    setCards((cs) => undoTiktokAutofill(cs, before, p));
+    setAutofillDone(null);
     setPreviewed(false);
   };
   const toggleCollapse = (id: string) => setCards((cs) => cs.map((c) => (c.id === id ? { ...c, collapsed: !c.collapsed } : c)));
@@ -407,14 +434,14 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
                   <span className="rounded-md border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[11px] text-dim">{cards.length}</span>
                   <span className="rounded-md border border-line bg-surface2 px-1.5 py-0.5 text-[10.5px] text-faint">TikTok</span>
                 </div>
-                <p className="mt-1 max-w-[60ch] text-[11.5px] leading-snug text-faint">One card is one campaign. Fill the first, then copy it — Autofill makes many at once.</p>
+                <p className="mt-1 max-w-[60ch] text-[11.5px] leading-snug text-faint">One card is one campaign. Fill the first, then Autofill: it makes copies — and changes geo, landing, tag or anything else on all of them at once.</p>
               </div>
               <div className="ml-auto flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setAutofillOpen(true)}
-                  disabled={cards.length >= MAX_CARDS || firing}
-                  title="Make copies of campaign 01"
+                  disabled={firing}
+                  title="Change geo, landing, tag and the rest on every campaign at once — or make copies of campaign 01"
                   className="flex h-9 items-center gap-1.5 rounded-lg border border-line bg-surface2 px-3 text-[13px] font-medium text-dim transition-all duration-150 hover:border-accent/50 hover:text-ink active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 >
                   <SparklesIcon className="h-4 w-4" />
@@ -443,6 +470,35 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
                 </button>
               </div>
             </div>
+
+            {autofillDone ? (
+              <div role="status" data-autofill-banner className="animate-pop-in flex flex-wrap items-center gap-2 rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 text-[11.5px] leading-snug text-[#9db8ff]">
+                <SparklesIcon className="h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 flex-1">
+                  {autofillDone.changed > 0
+                    ? `Autofill set ${autofillDone.note} on ${autofillDone.changed} campaign${autofillDone.changed === 1 ? "" : "s"}`
+                    : "Autofill changed nothing — the picked campaigns already had these values"}
+                  {autofillDone.skipped > 0 ? ` · ${autofillDone.skipped} skipped (on their way out)` : ""}.
+                </span>
+                <button
+                  type="button"
+                  onClick={undoLastAutofill}
+                  disabled={autofillDone.changed === 0 || firing}
+                  className="inline-flex h-6 items-center gap-1 rounded-md border border-accent/40 bg-surface px-2 text-[11px] font-semibold text-[#9db8ff] transition-colors hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                >
+                  <UndoIcon className="h-3 w-3" />
+                  Undo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAutofillDone(null)}
+                  aria-label="Dismiss"
+                  className="inline-flex h-6 w-6 items-center justify-center rounded-md text-faint transition-colors hover:bg-raise hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                >
+                  <XIcon className="h-3 w-3" />
+                </button>
+              </div>
+            ) : null}
 
             {view.map((v, i) => (
               <TiktokLaunchCard
@@ -651,7 +707,19 @@ export function TiktokLaunchBoard({ user }: { user?: SessionUser }) {
         </div>
       </div>
 
-      <TiktokAutofillModal open={autofillOpen && !firing} source={cards[0] ?? null} room={MAX_CARDS - cards.length} onClose={() => setAutofillOpen(false)} onCreate={applyAutofill} />
+      <TiktokAutofillModal
+        open={autofillOpen && !firing}
+        cards={cards}
+        names={Object.fromEntries(view.map((v) => [v.card.id, v.target?.name ?? ""]))}
+        room={MAX_CARDS - cards.length}
+        advertiserOptions={advertiserOptions}
+        configs={configs}
+        landings={landings}
+        identities={identities}
+        onClose={() => setAutofillOpen(false)}
+        onCreate={applyAutofill}
+        onApply={applyAutofillAll}
+      />
     </>
   );
 }

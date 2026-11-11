@@ -318,7 +318,7 @@ function Section({ id, title, blurb, left, locked, children }: { id?: string; ti
 
 /** An on/off option as a switch with its consequence spelled out (a real checkbox underneath, so
  *  the keyboard and screen readers get a native control). */
-function SwitchTile({ label, desc, checked, onChange }: { label: string; desc: string; checked: boolean; onChange: (on: boolean) => void }) {
+export function SwitchTile({ label, desc, checked, onChange }: { label: string; desc: string; checked: boolean; onChange: (on: boolean) => void }) {
   return (
     <label className={"flex cursor-pointer items-start gap-3 rounded-xl border px-3 py-2.5 transition-colors duration-150 " + (checked ? "border-accent/45 bg-accent/[0.08]" : "border-line bg-surface2/50 hover:border-line2")}>
       <input type="checkbox" role="switch" checked={checked} onChange={(e) => onChange(e.target.checked)} aria-label={label} className="peer sr-only" />
