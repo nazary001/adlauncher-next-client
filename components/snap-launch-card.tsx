@@ -44,6 +44,7 @@ import {
   snapBidKind,
   snapCampaignName,
   snapCurrencySymbol,
+  snapDirectLabel,
   snapDirectLanding,
   snapGoalNeedsPixel,
   snapLandingBase,
@@ -620,7 +621,7 @@ export function SnapLaunchCard({
                 const on = direct?.id === l.id;
                 return (
                   <button key={l.id} type="button" onClick={() => patch({ landingUrl: l.url })} aria-pressed={on} title={l.url} className={"rounded-md border px-2 py-1 text-[11px] font-medium transition-all duration-150 active:scale-95 " + (on ? "border-[#FFFC00]/50 bg-[#FFFC00]/10 text-[#f3f0a3]" : "border-line bg-surface2 text-dim hover:border-line2 hover:text-ink")}>
-                    {l.niche}
+                    {snapDirectLabel(l)}
                   </button>
                 );
               })}

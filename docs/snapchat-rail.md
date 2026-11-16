@@ -176,10 +176,16 @@ Storage на оригинал файла. Она отдаёт 200 без авт�
 - **Партнёр `stone`** (`SNAP_UTM_SOURCE = "stone"`) даёт три вещи:
   1. **Лендинги.** Во-первых, его quiz/captcha-страницы на доменах вида fast-flow, которые байер
      **вставляет** в карточку. Там работает «browser killer»: переход из in-app браузера Snapchat в
-     браузер телефона. Во-вторых, **две прямые статьи** брифа 16.09, которые выбираются в один клик
-     (`SNAP_DIRECT_LANDINGS`):
-     - `dmi`, «Digital marketing»: `https://azmvhs.com/v/dmi-online-marketing-course/`
-     - `cars`, «Cars»: `https://azmvhs.com/v/auto-financing-by-ford/`
+     браузер телефона. Во-вторых, **прямые страницы** без гейта, которые выбираются в один клик
+     (`SNAP_DIRECT_LANDINGS`; на кнопке написан язык, `snapDirectLabel`):
+     - `dmi`, «Digital marketing · EN»: `https://azmvhs.com/v/dmi-online-marketing-course/` (бриф 16.09)
+     - `cars`, «Cars · EN»: `https://azmvhs.com/v/auto-financing-by-ford/` (бриф 16.09)
+     - `dmi-pt`, «Digital marketing · PT»: `https://fast-flow.org/htd/digital-marketing/pt/` (с 16.11)
+     - `cars-pt`, «Cars · PT»: `https://fast-flow.org/htd/cars/pt/` (с 16.11)
+
+     `/htd/<ниша>/<язык>/` — прямой маршрут партнёра: редирект на статью этой ниши на этом языке
+     (статью выбирает партнёр). Добавлен 16.11: до этого в ряду были только английские статьи, и
+     кампании на Бразилию с португальскими креативами ушли на английские страницы.
   2. **Пул ключей** `glo-snp_001…glo-snp_500` (до 23.09 их было 100). Одна кампания держит один ключ.
   3. **Дневной отчёт о доходе по ключам** через LION:
      `GET {LION_BASE}/api/high-adx-cluster-utms/snapchat-report/?date=YYYY-MM-DD` (Bearer `LION_TOKEN`).
@@ -467,7 +473,7 @@ creative+ad с именами `<имя> #1`, `#2`, `#3` (номер = позиц
 | **Brand name** | ≤32 символа | `SNAP_BRAND_NAME` | Обязателен. |
 | **Call to action** (`SNAP_CTAS`) | MORE, SHOP_NOW, SIGN_UP, APPLY_NOW, VIEW, READ, GET_NOW, TRY, SHOW, WATCH | `MORE` | |
 | **Minimum age** (`SNAP_MIN_AGES`) | 18 / 21 / 25 | 18 | |
-| **Countries** | ISO-2, пресеты `SNAP_GEO_PRESETS` | `["US"]` | Пресеты: US · Anglo (US CA GB AU NZ IE) · LATAM (17) · Franco (FR BE CH LU MC CA) · EU (27). **Worldwide у Snap нет**, `WW` отклоняется. |
+| **Countries** | ISO-2, пресеты `SNAP_GEO_PRESETS` | `["US"]` | Пресеты: US · Anglo (US CA GB AU NZ IE) · LATAM (15, без BO и PY) · Franco (FR BE CH LU MC CA) · EU (27). **Worldwide у Snap нет**, `WW` отклоняется. Страны, где Snap не продаёт рекламу (`SNAP_UNSOLD_COUNTRIES` = BO, PY), отклоняются до запуска: Snap отвечает на них `E2401 … You can't run Snap Ads in py` только на ad squad, когда оболочка кампании уже создана и ключ потрачен. |
 | **Devices** (`SNAP_DEVICE_OPTIONS`) | Android only · iOS only · All devices | **Android only** | Просьба партнёра (21.09): «browser killer» работает на Android, и отчисления считаются по этому трафику. «All» = поле `devices` вообще не отправляется. Значение пишется именно `"iOS"`. |
 | **Landing** | вставленный https-URL или кнопка **Direct** | пусто | См. §8. |
 | **Copies** | 1…20 (`SNAP_MAX_COPIES`) | 1 | N кампаний = N ключей. |
@@ -496,7 +502,7 @@ creative+ad с именами `<имя> #1`, `#2`, `#3` (номер = позиц
    ⚠️ В Ads Manager **нельзя** включать «auto URL parameters»: они перепишут наши utm.
 4. В карточке `snapLandingSegments` раскрашивает превью (база / utm / ключ / `ScCid`), кнопка
    **Copy** копирует ссылку.
-5. Кнопки **Direct** (`SNAP_DIRECT_LANDINGS`) просто подставляют URL статьи в поле. Дальше ссылка
+5. Кнопки **Direct** (`SNAP_DIRECT_LANDINGS`) просто подставляют URL страницы в поле. Дальше ссылка
    собирается так же, как для вставленной.
 
 ### Ниша (для имени)

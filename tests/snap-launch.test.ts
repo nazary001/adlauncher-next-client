@@ -31,7 +31,9 @@ import {
   snapMoneyText,
   snapNicheFromLanding,
   snapDirectLanding,
+  snapDirectLabel,
   SNAP_DIRECT_LANDINGS,
+  SNAP_UNSOLD_COUNTRIES,
   snapShotTaskId,
   type SnapLaunchShotIn,
   type SnapResolved,
@@ -78,6 +80,11 @@ test("vocabulary: three bid strategies (no MIN_ROAS), five goals, PIXEL_* need a
   assert.deepEqual(SNAP_GEO_PRESETS.map((p) => p.label), ["US", "Anglo", "LATAM", "Franco", "EU"]);
   assert.deepEqual(SNAP_GEO_PRESETS[1].codes, ["US", "CA", "GB", "AU", "NZ", "IE"]);
   assert.equal(SNAP_GEO_PRESETS[4].codes.length, 27);
+  // Snap sells no ads in Bolivia / Paraguay (E2401, live 08.10 and 03.11): no preset may pick them.
+  const latam = SNAP_GEO_PRESETS[2].codes;
+  assert.equal(latam.length, 15);
+  assert.ok(!latam.includes("BO") && !latam.includes("PY"));
+  assert.ok(SNAP_GEO_PRESETS.every((p) => p.codes.every((c) => !SNAP_UNSOLD_COUNTRIES.includes(c))));
 });
 
 test("micro money: decimal comma/point, cents rounding, min/max in the human unit", () => {
@@ -112,6 +119,12 @@ test("geo wire: lower-cased ISO-2 for Snap, upper-cased label, WW and junk refus
   assert.ok("refusal" in ww && /worldwide/i.test(ww.refusal));
   const junk = snapGeoWire(["USA"]);
   assert.ok("refusal" in junk && /USA/.test(junk.refusal));
+  // A country Snap does not sell in is refused HERE: at the ad squad Snap answers E2401 only after
+  // the campaign shell exists and the key is spent (seven empty shells on 03.11).
+  const unsold = snapGeoWire(["AR", "py", "BO"]);
+  assert.ok("refusal" in unsold && /PY, BO/.test(unsold.refusal) && /does not sell/i.test(unsold.refusal));
+  const one = snapGeoWire(["PY"]);
+  assert.ok("refusal" in one && /in PY\b/.test(one.refusal));
 });
 
 test("task ids are deterministic per wave: snl-<wave>-NN", () => {
@@ -272,17 +285,30 @@ test("snapNicheFromLanding reads the niche word past the partner's gate/language
   assert.equal(snapNicheFromLanding("https://azmvhs.com/v/dmi-online-marketing-course/"), "Digital marketing"); // direct article (29.09)
   assert.equal(snapNicheFromLanding("https://azmvhs.com/v/auto-financing-by-ford/?utm_source=x"), "Cars");
   assert.equal(snapNicheFromLanding("https://azmvhs.com/v/some-other-article/"), "Some other article"); // not a direct pick → read from the path
+  // `htd` is the partner's DIRECT route (no gate) — live campaigns of 23.10 were named "(SNP) Htd - US".
+  assert.equal(snapNicheFromLanding("https://fast-flow.org/htd/cars/es/"), "Cars");
+  assert.equal(snapNicheFromLanding("https://fast-flow.org/htd/digital-marketing/en/"), "Digital marketing");
   assert.equal(snapNicheFromLanding("https://fast-flow.org/ht/quiz-2/pt-br/"), "Fast flow"); // nothing but gate words → the domain
   assert.equal(snapNicheFromLanding("https://fast-flow.org/"), "Fast flow");
   assert.equal(snapNicheFromLanding("http://fast-flow.org/ht/cars/"), ""); // not https → no landing at all
   assert.equal(snapNicheFromLanding("not a url"), "");
 });
 
-test("the partner's two direct articles are one-click landings on the same wire as a pasted link", () => {
-  assert.deepEqual(SNAP_DIRECT_LANDINGS.map((l) => [l.id, l.niche, l.url]), [
-    ["dmi", "Digital marketing", "https://azmvhs.com/v/dmi-online-marketing-course/"],
-    ["cars", "Cars", "https://azmvhs.com/v/auto-financing-by-ford/"],
+test("the partner's direct pages are one-click landings on the same wire as a pasted link, each named with its language", () => {
+  assert.deepEqual(SNAP_DIRECT_LANDINGS.map((l) => [l.id, l.niche, l.lang, l.url]), [
+    ["dmi", "Digital marketing", "EN", "https://azmvhs.com/v/dmi-online-marketing-course/"],
+    ["cars", "Cars", "EN", "https://azmvhs.com/v/auto-financing-by-ford/"],
+    ["dmi-pt", "Digital marketing", "PT", "https://fast-flow.org/htd/digital-marketing/pt/"],
+    ["cars-pt", "Cars", "PT", "https://fast-flow.org/htd/cars/pt/"],
   ]);
+  assert.deepEqual(SNAP_DIRECT_LANDINGS.map(snapDirectLabel), ["Digital marketing · EN", "Cars · EN", "Digital marketing · PT", "Cars · PT"]);
+  assert.equal(snapDirectLanding("https://fast-flow.org/htd/cars/pt/?utm_campaign=glo-snp_001")?.id, "cars-pt");
+  assert.equal(snapDirectLanding("https://fast-flow.org/htd/cars/en/"), null); // only the listed pages are one-click
+  assert.equal(snapNicheFromLanding("https://fast-flow.org/htd/digital-marketing/pt/"), "Digital marketing");
+  const pt = snapLaunchWire(shot({ landingUrl: SNAP_DIRECT_LANDINGS[3].url }), resolved);
+  if ("refusal" in pt) throw new Error(pt.refusal);
+  assert.equal(pt.niche, "Cars");
+  assert.equal(pt.wire.ads[0].creative.web_view_properties.url, "https://fast-flow.org/htd/cars/pt/?utm_source=stone&utm_campaign=glo-snp_003");
   assert.equal(snapDirectLanding("https://azmvhs.com/v/auto-financing-by-ford/")?.id, "cars");
   assert.equal(snapDirectLanding("https://azmvhs.com/v/auto-financing-by-ford/?utm_campaign=glo-snp_001")?.id, "cars"); // pasted query ignored
   assert.equal(snapDirectLanding("https://fast-flow.org/ht/captcha-1/cars/en/"), null);

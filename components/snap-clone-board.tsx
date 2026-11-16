@@ -50,6 +50,7 @@ import {
   snapCloneRefs,
   snapCurrencySymbol,
   snapDeviceShort,
+  snapDirectLabel,
   snapDirectLanding,
   snapGoalLabel,
   snapGoalNeedsPixel,
@@ -1112,7 +1113,7 @@ function CloneRowPanel({
                   <span className="mr-1 select-none font-mono text-[10px] uppercase tracking-[0.14em] text-faint">Direct</span>
                   {SNAP_DIRECT_LANDINGS.map((l) => (
                     <button key={l.id} type="button" onClick={() => patch({ landingUrl: l.url })} aria-pressed={direct?.id === l.id} title={l.url} className={"rounded-md border px-2 py-1 text-[11px] font-medium transition-all active:scale-95 " + (direct?.id === l.id ? "border-[#FFFC00]/50 bg-[#FFFC00]/10 text-[#f3f0a3]" : "border-line bg-surface2 text-dim hover:border-line2 hover:text-ink")}>
-                      {l.niche}
+                      {snapDirectLabel(l)}
                     </button>
                   ))}
                 </div>

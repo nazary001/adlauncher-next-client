@@ -42,18 +42,29 @@ export function snapKeyPool(): string[] {
 // ---------- partner landings ----------
 
 // The landing is the buyer's PASTED URL — the partner's quiz/captcha pages on fast-flow-like domains
-// break Snapchat's in-app browser, "as on Facebook" (owner rule 22.09) — or one of the partner's two
-// DIRECT articles of the 16.09 brief, back as one-click picks (owner ask 29.09: "верни по директу
-// запуски на снеп чат — те 2 статьи, что они нам изначально давали; то, что есть, оставляем").
-// Either way the card appends only Snap's tags.
+// break Snapchat's in-app browser, "as on Facebook" (owner rule 22.09) — or one of the partner's
+// DIRECT pages, one-click picks: the two English articles of the 16.09 brief (owner ask 29.09: "верни
+// по директу запуски на снеп чат — те 2 статьи, что они нам изначально давали; то, что есть,
+// оставляем") and, since 16.11, the Portuguese direct route of the same two niches (owner ask 16.11:
+// eight BR campaigns with Portuguese creatives had been launched on the English articles — the only
+// ones this row offered — and Snap rejected ads over the page). Either way the card appends only
+// Snap's tags.
 
-export type SnapDirectLanding = { id: "dmi" | "cars"; niche: string; url: string };
+export type SnapDirectLanding = { id: "dmi" | "cars" | "dmi-pt" | "cars-pt"; niche: string; lang: "EN" | "PT"; url: string };
 
-/** The partner's direct articles (brief 16.09). The niche names the campaigns as it did then. */
+/** The partner's direct pages. EN = the articles of the 16.09 brief; PT = the partner's direct route
+ *  (`/htd/<niche>/pt/`, the "Direct" link of LION's Campaign URL Builder), which lands on a Portuguese
+ *  article of that niche — read live 16.11. The niche names the campaigns as it did on 16.09. */
 export const SNAP_DIRECT_LANDINGS: readonly SnapDirectLanding[] = [
-  { id: "dmi", niche: "Digital marketing", url: "https://azmvhs.com/v/dmi-online-marketing-course/" },
-  { id: "cars", niche: "Cars", url: "https://azmvhs.com/v/auto-financing-by-ford/" },
+  { id: "dmi", niche: "Digital marketing", lang: "EN", url: "https://azmvhs.com/v/dmi-online-marketing-course/" },
+  { id: "cars", niche: "Cars", lang: "EN", url: "https://azmvhs.com/v/auto-financing-by-ford/" },
+  { id: "dmi-pt", niche: "Digital marketing", lang: "PT", url: "https://fast-flow.org/htd/digital-marketing/pt/" },
+  { id: "cars-pt", niche: "Cars", lang: "PT", url: "https://fast-flow.org/htd/cars/pt/" },
 ];
+
+/** The pick's button text — the language is part of it, so an English page is never taken for a
+ *  local one ("Cars · PT"). */
+export const snapDirectLabel = (l: SnapDirectLanding): string => `${l.niche} · ${l.lang}`;
 
 /**
  * The landing as the wire takes it: https only, a real hostname, and any pasted query/hash
@@ -83,9 +94,9 @@ export function snapDirectLanding(raw: string): SnapDirectLanding | null {
   return b ? (SNAP_DIRECT_LANDINGS.find((l) => l.url === b.base) ?? null) : null;
 }
 
-/** Path segments that are the partner's gate/route words, not the niche: `ht`, `htai`, `v`, `r`,
- *  `captcha-1`, `age-gate`, `quiz…`, a language code (`en`, `pt-br`). */
-const LANDING_GATE_SEG = /^(?:[a-z]{1,2}|htai|[a-z]{2}-[a-z]{2}|\d+|captcha(?:-\w+)?|age-gate|quiz(?:-\w+)?|gate(?:-\w+)?)$/i;
+/** Path segments that are the partner's gate/route words, not the niche: `ht`, `htai`, `htd` (the
+ *  direct route), `v`, `r`, `captcha-1`, `age-gate`, `quiz…`, a language code (`en`, `pt-br`). */
+const LANDING_GATE_SEG = /^(?:[a-z]{1,2}|htai|htd|[a-z]{2}-[a-z]{2}|\d+|captcha(?:-\w+)?|age-gate|quiz(?:-\w+)?|gate(?:-\w+)?)$/i;
 export const SNAP_NICHE_MAX = 40;
 
 /**
@@ -258,11 +269,18 @@ export const SNAP_CTAS: readonly { value: string; label: string }[] = [
 ] as const;
 const CTA_SET = new Set(SNAP_CTAS.map((c) => c.value));
 
-/** Geo presets. Snap has NO worldwide token — every ad squad names its countries. */
+/** Countries Snapchat sells no ads in — its answers, live: "E2401 … You can't run Snap Ads in bo."
+ *  (08.10) and "… in py." (03.11). Snap says so only at the AD SQUAD, when the campaign shell already
+ *  exists and the key is spent, so the geo wire refuses them first. Not Snap's full list — the two it
+ *  has refused us; add a code here when it refuses another. */
+export const SNAP_UNSOLD_COUNTRIES: readonly string[] = ["BO", "PY"];
+
+/** Geo presets. Snap has NO worldwide token — every ad squad names its countries. LATAM is without
+ *  Bolivia and Paraguay since 16.11 (SNAP_UNSOLD_COUNTRIES): with them every launch of the preset failed. */
 export const SNAP_GEO_PRESETS: readonly { label: string; codes: string[] }[] = [
   { label: "US", codes: ["US"] },
   { label: "Anglo", codes: ["US", "CA", "GB", "AU", "NZ", "IE"] },
-  { label: "LATAM", codes: ["AR", "BO", "CL", "CO", "CR", "DO", "EC", "GT", "HN", "MX", "NI", "PA", "PE", "PR", "PY", "SV", "UY"] },
+  { label: "LATAM", codes: ["AR", "CL", "CO", "CR", "DO", "EC", "GT", "HN", "MX", "NI", "PA", "PE", "PR", "SV", "UY"] },
   { label: "Franco", codes: ["FR", "BE", "CH", "LU", "MC", "CA"] },
   {
     label: "EU",
@@ -377,6 +395,8 @@ export function snapGeoWire(geo: unknown): { geos: { country_code: string }[]; l
   if (codes.includes("WW")) return { refusal: "Snapchat has no worldwide token — pick the countries (or a preset)" };
   const bad = codes.filter((c) => !/^[A-Z]{2}$/.test(c));
   if (bad.length) return { refusal: `Unknown country code${bad.length === 1 ? "" : "s"}: ${bad.join(", ")}` };
+  const unsold = codes.filter((c) => SNAP_UNSOLD_COUNTRIES.includes(c));
+  if (unsold.length) return { refusal: `Snapchat does not sell ads in ${unsold.join(", ")} — remove ${unsold.length === 1 ? "it" : "them"} from the countries` };
   return { geos: codes.map((c) => ({ country_code: c.toLowerCase() })), label: codes.join("+") };
 }
 
