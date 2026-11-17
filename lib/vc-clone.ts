@@ -1,24 +1,27 @@
-// VC (ValueClick) clones — the PURE contract of the VC clone board (owner ask 05.11.2026: «нужно
-// сделать клоны всех активных кампаний на этот новый пиксель [S-1 nik pixel 2126539511577664] …
-// Бид ставь 0.5 везде, в нейминг к существующему неймингу добавь слово Lead и ставь все клоны на
-// лид оптимизацию вместо пурчейс»).
+// VC (ValueClick) clones — the PURE contract of the VC cloner (first built for the owner ask of 05.11.2026:
+// «нужно сделать клоны всех активных кампаний на этот новый пиксель [S-1 nik pixel 2126539511577664] …
+// Бид ставь 0.5 везде … ставь все клоны на лид оптимизацию вместо пурчейс»; made a full cloner on 17.11:
+// «сделай его нормальным так как у нас и на других партнерах со всем функционалом, чтобы можно было акк
+// выбрать»).
 //
-// A VC clone is a faithful RECREATE of a live VC campaign in its own cabinet — the same ad link (the
-// DE Postback tracking link: Meta fills its macros with the clone's own ids, so DE's revenue splits
-// per clone, lib/vc-pb), the same page, the same targeting, every reusable ad of the source — with
-// what the board sets on top: the pixel it optimizes on, the event (Lead = OUTCOME_LEADS, Purchase =
-// OUTCOME_SALES — lib/catalog EVENTS_BY_OBJECTIVE: Meta refuses LEAD under Sales), the bid, the budget
-// and a suffix on the name. No marker pool (VC has none); same-account only (media is account-local).
-// Built on the VC token (direct Graph) or through TOOL (one job) — lib/vc-clone-run, server.
+// A VC clone is a RECREATE of a live VC campaign — the same ad link (the DE Postback tracking link: Meta
+// fills its macros with the clone's own ids, so DE's revenue splits per clone, lib/vc-pb) and every
+// reusable ad of the source — with what the buyer sets on the shared clone board (components/clone-board)
+// on top: the cabinet it is built in (the source's own, or another VC cabinet — the media is moved there),
+// the page it advertises with, the pixel and the event it optimizes (as the source, or Lead = OUTCOME_LEADS,
+// or Purchase = OUTCOME_SALES — lib/catalog EVENTS_BY_OBJECTIVE: Meta refuses LEAD under Sales), the
+// targeting, the bid, the budget and the name. No marker pool (VC has none). Built on the VC token (direct
+// Graph) or through TOOL (one job) — lib/vc-clone-run, server.
 //
 // PURE: relative imports of other leaf modules only, so `node --test tests/vc-clone.test.ts` runs it
 // straight off disk.
 
 import type { Campaign } from "./types";
 import { bidKind, makeCampaign, moneyLabel, normalizeRoasGoal, parseMoney } from "./types";
+import type { CloneSource } from "./clone";
 import { SUPPORTED_BID_STRATEGIES } from "./fb-launch";
-import { VC_LEAD_PIXEL, VC_LEADS_OBJECTIVE, VC_PIXEL, VC_SALES_OBJECTIVE, vcPixelName } from "./vc-link";
-import { carriesOwnName } from "./own-name.ts";
+import { LOCALE_KEYS, localeKeysOf } from "./locale-keys";
+import { VC_LEAD_PIXEL, VC_LEADS_OBJECTIVE, VC_PIXEL, VC_SALES_OBJECTIVE, VC_TRAFFIC_OBJECTIVE, vcPixelName } from "./vc-link";
 
 type Json = Record<string, unknown>;
 const rec = (v: unknown): Json => (v && typeof v === "object" && !Array.isArray(v) ? (v as Json) : {});
@@ -31,61 +34,52 @@ const list = (v: unknown): Json[] => (Array.isArray(v) ? v.map(rec) : []);
 /** A Graph edge ({data: [...]}) as a list. */
 const edge = (v: unknown): Json[] => list(rec(v).data);
 const strs = (v: unknown): string[] => (Array.isArray(v) ? v.map(str).filter(Boolean) : []);
+const sameList = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
+/** An ad account id as digits ("act_" dropped). */
+const acct = (v: unknown): string => str(v).trim().replace(/^act_/, "");
 
 /** The Lead dataset ("S-1 nik pixel", 05.11), the Leads objective and the pixel names live with the launch
  *  contract since the launcher's own Lead mode pins the same dataset (lib/vc-link) — re-exported for the
  *  board and its tests. */
 export { VC_LEAD_PIXEL, VC_LEADS_OBJECTIVE, vcPixelName };
-/** The VC datasets the board offers, the Lead one first (the server accepts any pixel the cabinet carries). */
+/** The VC datasets the board knows by name, the Lead one first (the server accepts any pixel the cabinet carries). */
 export const VC_CLONE_PIXELS: readonly { id: string; name: string }[] = [VC_LEAD_PIXEL, VC_PIXEL];
 
-export type VcCloneEvent = "LEAD" | "PURCHASE";
+/** What a clone optimizes: what its SOURCE does (the cloner's default — a faithful copy), or Lead / Purchase
+ *  forced on every clone of the batch (the 05.11 ask: Purchase campaigns re-born as Lead). */
+export type VcCloneEvent = "LEAD" | "PURCHASE" | "SOURCE";
 export const VC_CLONE_EVENTS: readonly { value: VcCloneEvent; label: string }[] = [
-  { value: "LEAD", label: "Lead" },
-  { value: "PURCHASE", label: "Purchase" },
+  { value: "SOURCE", label: "As each source" },
+  { value: "LEAD", label: `Lead · ${VC_LEAD_PIXEL.name}` },
+  { value: "PURCHASE", label: `Purchase · ${VC_PIXEL.name}` },
 ];
-export const isVcCloneEvent = (v: unknown): v is VcCloneEvent => v === "LEAD" || v === "PURCHASE";
+export const isVcCloneEvent = (v: unknown): v is VcCloneEvent => v === "LEAD" || v === "PURCHASE" || v === "SOURCE";
 
-export type VcCloneDelivery = { objective: string; optimization: "conversions"; conversionEvent: VcCloneEvent };
+/** `conversionEvent` "" and `pixel` "" = a click clone (Traffic / link clicks, no promoted pixel). */
+export type VcCloneDelivery = { objective: string; optimization: "conversions" | "clicks"; conversionEvent: string; pixel: string };
 
-/** What the clone optimizes: Lead → a Leads campaign optimizing LEAD on the pixel; Purchase → Sales
- *  optimizing PURCHASE (the VC launch's own mode). Both are website conversions. */
-export function vcCloneDelivery(event: VcCloneEvent): VcCloneDelivery {
-  return event === "PURCHASE"
-    ? { objective: VC_SALES_OBJECTIVE, optimization: "conversions", conversionEvent: "PURCHASE" }
-    : { objective: VC_LEADS_OBJECTIVE, optimization: "conversions", conversionEvent: "LEAD" };
-}
-
-/** The board's batch settings — every selected source rides these. `budget` "" = the source's own. */
-export type VcCloneSettings = {
-  pixelId: string;
-  event: VcCloneEvent;
-  /** "" = the source's own strategy. */
-  bidStrategy: string;
-  /** The $ cap / ROAS goal in the board's spelling ("0,50"); "" with an inherited strategy = the source's own. */
-  bidCap: string;
-  budget: string;
-  /** Joined to the source's name as its own " - " segment ("Lead"); "" = the name as is. */
-  suffix: string;
-};
-
-/** The owner's ask of 05.11, as the board's defaults: Lead on the S-1 pixel, bid cap $0,50, " - Lead". */
-export const VC_CLONE_DEFAULTS: VcCloneSettings = {
-  pixelId: VC_LEAD_PIXEL.id,
-  event: "LEAD",
-  bidStrategy: "LOWEST_COST_WITH_BID_CAP",
-  bidCap: "0,50",
-  budget: "",
-  suffix: "Lead",
-};
-
-/** The clone's name: the source's name with the suffix as its own " - " segment — once (a source that
- *  already ends in it, in any case, is not suffixed twice); no suffix = the source's name. */
-export function vcCloneName(sourceName: string, suffix: string): string {
-  const base = str(sourceName).trim();
-  const tag = str(suffix).trim();
-  if (!tag) return base;
-  return carriesOwnName(base, tag) ? base : `${base} - ${tag}`;
+/**
+ * What the clone optimizes and on which dataset BY DEFAULT (a picked pixel replaces `pixel`): Lead → a Leads
+ * campaign optimizing LEAD on the S-1 nik pixel; Purchase → Sales optimizing PURCHASE on the VC pixel (the
+ * two modes of a VC launch, lib/vc-link vcDelivery); as the source → the source's own objective, event and
+ * pixel — a link-click source (or one that promotes no pixel event) stays a click clone with no pixel.
+ */
+export function vcCloneDelivery(
+  event: VcCloneEvent,
+  src?: Pick<VcCloneSource, "objective" | "optimizationGoal" | "conversionEvent" | "pixelId">,
+): VcCloneDelivery {
+  if (event === "PURCHASE") return { objective: VC_SALES_OBJECTIVE, optimization: "conversions", conversionEvent: "PURCHASE", pixel: VC_PIXEL.id };
+  if (event === "LEAD" || !src) return { objective: VC_LEADS_OBJECTIVE, optimization: "conversions", conversionEvent: "LEAD", pixel: VC_LEAD_PIXEL.id };
+  const promoted = Boolean(src.pixelId && src.conversionEvent);
+  if (src.optimizationGoal === "LINK_CLICKS" || !promoted) {
+    return {
+      objective: src.objective || VC_TRAFFIC_OBJECTIVE,
+      optimization: "clicks",
+      conversionEvent: promoted ? src.conversionEvent : "",
+      pixel: promoted ? src.pixelId : "",
+    };
+  }
+  return { objective: src.objective || VC_SALES_OBJECTIVE, optimization: "conversions", conversionEvent: src.conversionEvent, pixel: src.pixelId };
 }
 
 /** One ad of the source as the board shows it: what it is (video / static image / nothing reusable), the
@@ -192,7 +186,7 @@ export function vcCloneSourceOf(tree: Json, accountName = ""): VcCloneSource {
   const ads = edge(tree.ads).map(vcAdFacts);
   return {
     campaignId: str(tree.id),
-    accountId: str(tree.account_id).replace(/^act_/, ""),
+    accountId: acct(tree.account_id),
     accountName: str(accountName),
     name: str(tree.name),
     status: str(tree.effective_status) || str(tree.status),
@@ -217,72 +211,147 @@ export function vcCloneSourceOf(tree: Json, accountName = ""): VcCloneSource {
   };
 }
 
+/** The language names (lib/catalog LOCALES) a source's locale ids spell — what the board's Targeting editor
+ *  shows for it. A name counts when Meta's keys for it are all among the ids; ids the table has no name for
+ *  are simply not shown (an untouched row still ships the source's ids as they are — vcRowEdit). */
+export function vcLocaleNames(ids: readonly number[]): string[] {
+  const have = new Set(ids);
+  const out: string[] = [];
+  for (const [name, keys] of Object.entries(LOCALE_KEYS)) {
+    if (keys && keys.length > 0 && keys.every((k) => have.has(k))) out.push(name);
+  }
+  return out;
+}
+
+/** A VC source as the shared clone board's row source (lib/clone CloneSource) — the board seeds, shows and
+ *  edits it exactly like an MO / AIF / AV one; the VC facts it also needs (the source's cabinet, page,
+ *  pixel, ads) ride along under `vc`. */
+export function vcBoardSource(v: VcCloneSource): CloneSource & { vc: VcCloneSource } {
+  return {
+    campaignId: v.campaignId,
+    name: v.name,
+    countries: [...v.countries],
+    locales: vcLocaleNames(v.localeIds),
+    category: v.category,
+    placement: v.placement,
+    ageMin: v.ageMin,
+    userOs: v.userOs,
+    originalBudget: v.budget,
+    originalRoas: v.bidCap,
+    bidStrategy: v.bidStrategy,
+    objective: v.objective,
+    optimization: v.optimizationGoal === "LINK_CLICKS" ? "clicks" : "conversions",
+    conversionEvent: v.conversionEvent,
+    redirectType: "",
+    creatives: v.ads.filter((a) => a.kind !== "none").map((a) => ({ videoId: a.adId, thumbUrl: "" })),
+    vc: v,
+  };
+}
+
 /** One clone to build, as the board hands it to the queue (fb.clone, partnerId "vc") and the clone route
- *  reads it back. Client-safe (no server deps). */
+ *  reads it back. Client-safe (no server deps). Every optional field left out keeps the SOURCE's own value. */
 export type VcCloneEdit = {
   /** The SOURCE campaign (digits). */
   campaignId: string;
-  /** The source's own cabinet (digits) — display / launch-limit demand only; the server re-reads it. */
+  /** The cabinet the clone is BUILT in (digits). "" = the source's own. Every edit queued before 17.11
+   *  names the source's own cabinet here (it was a display field then), so an older job still lands where
+   *  it always did. A cabinet other than the source's = the media is moved there first. */
   accountId: string;
   name: string;
   budget: string;
   /** "" = the source's own. */
   bidStrategy: string;
   bidCap: string;
+  /** The dataset the clone optimizes on. "" = the event's own (Lead → S-1 nik pixel, Purchase → VC pixel,
+   *  as the source → the source's). */
   pixelId: string;
   event: VcCloneEvent;
+  /** The page the clone advertises with. "" / absent = the source's. */
+  pageId?: string;
+  /** Targeting the buyer changed on the row — an absent field keeps the source's. */
+  countries?: string[];
+  /** Language NAMES (lib/catalog LOCALES; ids through lib/locale-keys). Absent = the source's locale ids as targeted. */
+  locales?: string[];
+  category?: string;
+  placement?: string;
+  ageMin?: string;
+  userOs?: "all" | "android";
 };
 
-/** The board's settings applied to one source. `name` = the row's own typed name, else the suffixed
- *  source name. A lowest-cost strategy carries no bid; an inherited strategy with no typed bid keeps the
- *  source's own. */
-export function vcCloneEditOf(src: VcCloneSource, s: VcCloneSettings, name?: string): VcCloneEdit {
-  const bidStrategy = str(s.bidStrategy).trim() || src.bidStrategy;
-  const typed = str(s.bidCap).trim();
+/** Where a clone lands and what it promotes, resolved against its source. */
+export type VcCloneBinds = {
+  /** The cabinet the clone is built in (digits). */
+  accountId: string;
+  pageId: string;
+  /** "" for a click clone. */
+  pixelId: string;
+  /** Built in a cabinet other than the source's — its video / image must be moved there. */
+  cross: boolean;
+};
+
+/** The edit's delivery: its event against the source (vcCloneDelivery). */
+export function vcCloneDeliveryOf(edit: Pick<VcCloneEdit, "event">, src: VcCloneSource): VcCloneDelivery {
+  return vcCloneDelivery(isVcCloneEvent(edit.event) ? edit.event : "SOURCE", src);
+}
+
+/** The cabinet, page and pixel a clone is built with: the edit's picks, the source's own for whatever it
+ *  leaves empty; the pixel is the picked one, else the delivery's default — none for a click clone. */
+export function vcCloneBinds(edit: Pick<VcCloneEdit, "accountId" | "pageId" | "pixelId" | "event">, src: VcCloneSource): VcCloneBinds {
+  const accountId = acct(edit.accountId) || src.accountId;
+  const d = vcCloneDeliveryOf(edit, src);
   return {
-    campaignId: src.campaignId,
-    accountId: src.accountId,
-    name: name ?? vcCloneName(src.name, s.suffix),
-    budget: str(s.budget).trim() || src.budget,
-    bidStrategy,
-    bidCap: bidKind(bidStrategy) === "none" ? "" : typed || (bidStrategy === src.bidStrategy ? src.bidCap : ""),
-    pixelId: str(s.pixelId).trim(),
-    event: s.event,
+    accountId,
+    pageId: str(edit.pageId).trim() || src.pageId,
+    pixelId: d.conversionEvent ? str(edit.pixelId).trim() || d.pixel : "",
+    cross: accountId !== src.accountId,
   };
 }
 
+/** The ad set's Meta locale ids: the source's own as targeted, or — when the buyer changed the row's
+ *  languages — the keys of the picked names (`unknown` = names Meta has no ad locale for: a refusal). */
+export function vcCloneLocaleIds(edit: Pick<VcCloneEdit, "locales">, src: Pick<VcCloneSource, "localeIds">): { ids: number[]; unknown: string[] } {
+  if (!Array.isArray(edit.locales)) return { ids: [...src.localeIds], unknown: [] };
+  return localeKeysOf(edit.locales);
+}
+
 /** The Campaign the launch payload builders (lib/fb-launch) and the TOOL normalizer (lib/tool-run) take:
- *  the clone's delivery / bid / budget over the source's targeting, page and cabinet. */
+ *  the clone's delivery / bid / budget / destination, the row's targeting over the source's. */
 export function vcCloneCampaign(edit: VcCloneEdit, src: VcCloneSource): Campaign {
   const c = makeCampaign(edit.campaignId, "", str(edit.name).trim()); // namePrefix "" → fullName === edit.name
-  const d = vcCloneDelivery(edit.event);
+  const d = vcCloneDeliveryOf(edit, src);
+  const b = vcCloneBinds(edit, src);
   c.objective = d.objective;
   c.optimization = d.optimization;
   c.conversionEvent = d.conversionEvent;
   c.bidStrategy = str(edit.bidStrategy).trim() || src.bidStrategy;
   c.bidCap = bidKind(c.bidStrategy) === "none" ? "" : str(edit.bidCap).trim();
   c.budget = str(edit.budget).trim() || src.budget;
-  c.countries = [...src.countries];
-  c.locales = []; // the source's locale IDS ride beside the Campaign (adsetPayload's localeIds)
-  c.category = src.category;
-  c.placement = src.placement;
-  c.ageMin = src.ageMin;
-  c.userOs = src.userOs;
-  c.pixel = str(edit.pixelId).trim();
-  c.account = src.accountId;
-  c.page = src.pageId;
+  c.countries = Array.isArray(edit.countries) ? edit.countries.map((x) => str(x).trim().toUpperCase()).filter(Boolean) : [...src.countries];
+  c.locales = []; // the locale IDS ride beside the Campaign (vcCloneLocaleIds → adsetPayload's localeIds)
+  // The buyer's pick wins, but a source that DECLARED a special category never silently loses it (the
+  // shared clone rule, lib/clone-run cloneToCampaign).
+  c.category = str(edit.category) || src.category;
+  c.placement = str(edit.placement) || src.placement;
+  c.ageMin = str(edit.ageMin) || src.ageMin;
+  c.userOs = edit.userOs === "android" || edit.userOs === "all" ? edit.userOs : src.userOs;
+  c.pixel = b.pixelId;
+  c.account = b.accountId;
+  c.page = b.pageId;
   return c;
 }
 
 /** Why this clone must NOT be built (null = fine) — judged BEFORE any claim or write, so nothing is
  *  burned or orphaned over it. Same rules as the launch routes (supported strategy, a bid for a cap /
- *  ROAS, the ROAS band, the $1 budget floor, a geo) plus the VC clone's own (a known event, a pixel,
- *  Lead never on min-ROAS — VALUE optimizes purchase value — a page and a reusable ad on the source). */
+ *  ROAS, the ROAS band, the $1 budget floor, a geo, known languages) plus the VC clone's own (a known
+ *  event, a pixel for a conversion clone, min-ROAS only on Purchase — VALUE optimizes purchase value —
+ *  a page and a reusable ad on the source). */
 export function vcCloneRefusal(edit: VcCloneEdit, src: VcCloneSource): string | null {
-  if (!isVcCloneEvent(edit.event)) return "event_invalid — pick Lead or Purchase";
-  if (!/^\d{10,20}$/.test(str(edit.pixelId).trim())) return "pixel_required — pick the pixel the clones optimize on";
+  if (!isVcCloneEvent(edit.event)) return "event_invalid — pick Lead, Purchase or as the source";
   if (!str(edit.name).trim()) return "name_required — the clone needs a name";
+  if (str(edit.accountId).trim() && !/^\d{5,}$/.test(acct(edit.accountId))) return "account_invalid — pick the cabinet the clone is built in";
   const c = vcCloneCampaign(edit, src);
+  const b = vcCloneBinds(edit, src);
+  if (c.conversionEvent && !/^\d{10,20}$/.test(b.pixelId)) return "pixel_required — pick the pixel the clone optimizes on";
   if (!SUPPORTED_BID_STRATEGIES.has(c.bidStrategy)) {
     return `bid_strategy_invalid — ${c.bidStrategy} can't be rebuilt; switch the row's bid strategy`;
   }
@@ -297,8 +366,14 @@ export function vcCloneRefusal(edit: VcCloneEdit, src: VcCloneSource): string | 
     return "bid_required — a bid / cost cap needs an amount (0,50 = $0.50)";
   }
   if (parseMoney(c.budget) < 1) return "budget_too_low — daily budget must be at least $1";
-  if (c.countries.length === 0) return "source has no country targeting to clone";
-  if (!src.pageId) return "source page unknown — the source's ads carry no page";
+  if (c.countries.length === 0) return Array.isArray(edit.countries) ? "geo_required — pick at least one country" : "source has no country targeting to clone";
+  const badGeo = c.countries.find((x) => x !== "WW" && !/^[A-Z]{2}$/.test(x));
+  if (badGeo) return `geo_invalid — "${badGeo}" is not a country code`;
+  const loc = vcCloneLocaleIds(edit, src);
+  if (loc.unknown.length) return `locale_unknown — Meta has no ad locale for: ${loc.unknown.join(", ")}`;
+  if (!/^\d{5,}$/.test(b.pageId)) {
+    return str(edit.pageId).trim() ? "fanpage_invalid — pick the fanpage the clone advertises with" : "source page unknown — the source's ads carry no page; pick a fanpage";
+  }
   if (!src.ads.some((a) => a.kind !== "none")) return "source has no reusable video or image ad";
   return null;
 }
@@ -311,6 +386,68 @@ export function isVcCloneEdit(raw: unknown): raw is VcCloneEdit {
   if (!/^\d{5,}$/.test(str(e.campaignId))) return false;
   if (typeof e.name !== "string") return false;
   if (!isVcCloneEvent(e.event)) return false;
-  for (const k of ["accountId", "budget", "bidStrategy", "bidCap", "pixelId"]) if (e[k] != null && typeof e[k] !== "string") return false;
+  for (const k of ["accountId", "budget", "bidStrategy", "bidCap", "pixelId", "pageId", "category", "placement", "ageMin"]) {
+    if (e[k] != null && typeof e[k] !== "string") return false;
+  }
+  for (const k of ["countries", "locales"]) {
+    if (e[k] != null && !(Array.isArray(e[k]) && (e[k] as unknown[]).every((x) => typeof x === "string"))) return false;
+  }
+  if (e.userOs != null && e.userOs !== "all" && e.userOs !== "android") return false;
   return true;
+}
+
+/** A row of the shared clone board, as the VC edit reads it: the buyer's values in the board's spelling and
+ *  the row's EFFECTIVE destination (its own picks over the batch Settings). */
+export type VcRowPick = {
+  name: string;
+  budget: string;
+  bidStrategy: string;
+  /** The row's Bid column — a $ cap or a ROAS goal, by ITS strategy. */
+  bid: string;
+  countries: string[];
+  /** Language names, as the Targeting editor holds them. */
+  locales: string[];
+  category: string;
+  placement: string;
+  ageMin: string;
+  /** Cabinet digits; "" or the board's "From each source" pick = the source's own. */
+  accountId: string;
+  /** Page id; "" or the "From each source" pick = the source's. */
+  pageId: string;
+  /** "" = the event's own dataset. */
+  pixelId: string;
+  event: VcCloneEvent;
+  /** "" = as each source. */
+  userOs: "" | "all" | "android";
+};
+
+const idOrEmpty = (v: string): string => (/^\d{5,}$/.test(acct(v)) ? acct(v) : "");
+
+/**
+ * The edit a board row ships. Only what the buyer CHANGED rides as an override — an untouched row is a
+ * faithful copy (the source's geo, age, placement and its locale ids exactly as targeted, not a name round
+ * trip). The cabinet is always named (the queue meters the launch limit by it): the picked one, else the
+ * source's own.
+ */
+export function vcRowEdit(src: VcCloneSource, row: VcRowPick): VcCloneEdit {
+  const bidStrategy = str(row.bidStrategy).trim() || src.bidStrategy;
+  const pageId = idOrEmpty(row.pageId);
+  const edit: VcCloneEdit = {
+    campaignId: src.campaignId,
+    accountId: idOrEmpty(row.accountId) || src.accountId,
+    name: str(row.name).trim(),
+    budget: str(row.budget).trim() || src.budget,
+    bidStrategy,
+    bidCap: bidKind(bidStrategy) === "none" ? "" : str(row.bid).trim(),
+    pixelId: /^\d{10,20}$/.test(str(row.pixelId).trim()) ? str(row.pixelId).trim() : "",
+    event: row.event,
+  };
+  if (pageId && pageId !== src.pageId) edit.pageId = pageId;
+  if (!sameList(row.countries, src.countries)) edit.countries = [...row.countries];
+  if (!sameList(row.locales, vcLocaleNames(src.localeIds))) edit.locales = [...row.locales];
+  if (row.category !== src.category) edit.category = row.category;
+  if (row.placement !== src.placement) edit.placement = row.placement;
+  if (row.ageMin !== src.ageMin) edit.ageMin = row.ageMin;
+  if (row.userOs && row.userOs !== src.userOs) edit.userOs = row.userOs;
+  return edit;
 }

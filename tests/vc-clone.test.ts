@@ -1,8 +1,9 @@
 // Node's built-in runner (v24 strips types natively): `node --test tests/vc-clone.test.ts`.
-// VC (ValueClick) clones — the pure contract behind the VC clone board (owner ask 05.11: clones of every
-// ACTIVE VC campaign onto the "S-1 nik pixel", bid cap $0,50, " - Lead" on the name, Lead optimization
-// instead of Purchase): the source read off a Graph campaign tree, the board's settings applied to it,
-// the Campaign the launch payload builders get, the refusals, and the TOOL body.
+// VC (ValueClick) clones — the pure contract behind the VC cloner (owner ask 05.11: clones of every ACTIVE
+// VC campaign onto the "S-1 nik pixel", bid cap $0,50, Lead optimization instead of Purchase; owner ask
+// 17.11: a full cloner like the other partners' — the cabinet, the page, the pixel, the targeting per row):
+// the source read off a Graph campaign tree, a board row turned into the edit, where the clone lands, the
+// Campaign the launch payload builders get, the refusals, and the TOOL body.
 import "./_resolve-hook.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -12,6 +13,7 @@ const { VC_PIXEL } = await import("../lib/vc-link.ts");
 const { adsetPayload, campaignPayload } = await import("../lib/fb-launch.ts");
 const { cloneCreativePayload } = await import("../lib/clone-run.ts");
 const tl = await import("../lib/tool-launch.ts");
+const cloneLib = await import("../lib/clone.ts");
 const { bidKind, normalizeRoasGoal, parseMoney } = await import("../lib/types.ts");
 
 const TRACK = "https://trackwow3.xyz/r/82ptkvx42wrsjuxag75hlol4?campaign_id={{campaign.id}}&adset_id={{adset.id}}&ad_id={{ad.id}}&placement={{placement}}";
@@ -80,32 +82,67 @@ function tree(over: Record<string, unknown> = {}) {
   };
 }
 
-test("the Lead pixel is the dataset the owner named (S-1 nik pixel) and the defaults are the owner's ask", () => {
+type Src = ReturnType<typeof vc.vcCloneSourceOf>;
+type Pick = Parameters<typeof vc.vcRowEdit>[1];
+
+/** A board row seeded from a source and left untouched (what components/clone-board seeds for it). */
+function rowOf(s: Src, over: Partial<Pick> = {}): Pick {
+  return {
+    name: "[17/11] (CLONE) - (VC) - [EN] - AV - Tima - FOOD",
+    budget: s.budget,
+    bidStrategy: s.bidStrategy,
+    bid: s.bidCap,
+    countries: [...s.countries],
+    locales: vc.vcLocaleNames(s.localeIds),
+    category: s.category,
+    placement: s.placement,
+    ageMin: s.ageMin,
+    accountId: "",
+    pageId: "",
+    pixelId: "",
+    event: "SOURCE",
+    userOs: "",
+    ...over,
+  };
+}
+
+/** The 05.11 batch (Lead on the S-1 pixel, bid cap $0,50) as a row. */
+const LEAD: Partial<Pick> = { event: "LEAD", bidStrategy: "LOWEST_COST_WITH_BID_CAP", bid: "0,50", name: "[26/10] (VC) - [EN] - AV - Tima - FOOD - Lead" };
+
+/** A link-click source: Traffic, no promoted pixel. */
+const clickTree = () => tree({ objective: "OUTCOME_TRAFFIC", bid_strategy: "LOWEST_COST_WITHOUT_CAP", adsets: { data: [{ optimization_goal: "LINK_CLICKS", targeting: { geo_locations: { countries: ["US"] } } }] } });
+
+test("the Lead pixel is the dataset the owner named (S-1 nik pixel); the board offers as-the-source, Lead and Purchase", () => {
   assert.equal(vc.VC_LEAD_PIXEL.id, "2126539511577664");
-  assert.deepEqual(vc.VC_CLONE_DEFAULTS, { pixelId: vc.VC_LEAD_PIXEL.id, event: "LEAD", bidStrategy: "LOWEST_COST_WITH_BID_CAP", bidCap: "0,50", budget: "", suffix: "Lead" });
   assert.deepEqual(
     vc.VC_CLONE_PIXELS.map((p) => p.id),
     [vc.VC_LEAD_PIXEL.id, VC_PIXEL.id],
+  );
+  assert.deepEqual(
+    vc.VC_CLONE_EVENTS.map((e) => e.value),
+    ["SOURCE", "LEAD", "PURCHASE"],
   );
   assert.equal(vc.vcPixelName(VC_PIXEL.id), VC_PIXEL.name);
   assert.equal(vc.vcPixelName("123"), "123");
 });
 
-test("vcCloneDelivery: Lead = OUTCOME_LEADS + LEAD (Meta refuses LEAD under Sales); Purchase = OUTCOME_SALES + PURCHASE", () => {
-  assert.deepEqual(vc.vcCloneDelivery("LEAD"), { objective: "OUTCOME_LEADS", optimization: "conversions", conversionEvent: "LEAD" });
-  assert.deepEqual(vc.vcCloneDelivery("PURCHASE"), { objective: "OUTCOME_SALES", optimization: "conversions", conversionEvent: "PURCHASE" });
+test("vcCloneDelivery: Lead = OUTCOME_LEADS + LEAD on the S-1 pixel (Meta refuses LEAD under Sales); Purchase = OUTCOME_SALES + PURCHASE on the VC pixel; as the source = the source's own", () => {
+  assert.deepEqual(vc.vcCloneDelivery("LEAD"), { objective: "OUTCOME_LEADS", optimization: "conversions", conversionEvent: "LEAD", pixel: vc.VC_LEAD_PIXEL.id });
+  assert.deepEqual(vc.vcCloneDelivery("PURCHASE"), { objective: "OUTCOME_SALES", optimization: "conversions", conversionEvent: "PURCHASE", pixel: VC_PIXEL.id });
+  const purchase = vc.vcCloneSourceOf(tree());
+  assert.deepEqual(vc.vcCloneDelivery("SOURCE", purchase), { objective: "OUTCOME_SALES", optimization: "conversions", conversionEvent: "PURCHASE", pixel: VC_PIXEL.id });
+  const lead = vc.vcCloneSourceOf(
+    tree({ objective: "OUTCOME_LEADS", adsets: { data: [{ optimization_goal: "OFFSITE_CONVERSIONS", promoted_object: { pixel_id: "2126539511577664", custom_event_type: "LEAD" }, targeting: { geo_locations: { countries: ["US"] } } }] } }),
+  );
+  assert.deepEqual(vc.vcCloneDelivery("SOURCE", lead), { objective: "OUTCOME_LEADS", optimization: "conversions", conversionEvent: "LEAD", pixel: "2126539511577664" });
+  // a link-click source stays a click clone with no pixel; forcing Lead on it makes it a Lead clone
+  const clicks = vc.vcCloneSourceOf(clickTree());
+  assert.deepEqual(vc.vcCloneDelivery("SOURCE", clicks), { objective: "OUTCOME_TRAFFIC", optimization: "clicks", conversionEvent: "", pixel: "" });
+  assert.equal(vc.vcCloneDelivery("LEAD", clicks).objective, "OUTCOME_LEADS");
   assert.equal(vc.isVcCloneEvent("LEAD"), true);
+  assert.equal(vc.isVcCloneEvent("SOURCE"), true);
   assert.equal(vc.isVcCloneEvent("lead"), false);
   assert.equal(vc.isVcCloneEvent(""), false);
-});
-
-test("vcCloneName: the suffix joins the name as its own segment, once, whatever the case; no suffix = the name as is", () => {
-  assert.equal(vc.vcCloneName("[26/10] (VC) - [EN] - AV - Tima - FOOD", "Lead"), "[26/10] (VC) - [EN] - AV - Tima - FOOD - Lead");
-  assert.equal(vc.vcCloneName("[26/10] (VC) - [EN] - AV - Tima - FOOD - Lead", "Lead"), "[26/10] (VC) - [EN] - AV - Tima - FOOD - Lead");
-  assert.equal(vc.vcCloneName("[26/10] (VC) - X - LEAD", "Lead"), "[26/10] (VC) - X - LEAD");
-  assert.equal(vc.vcCloneName("[26/10] (VC) - Leadership", "Lead"), "[26/10] (VC) - Leadership - Lead");
-  assert.equal(vc.vcCloneName("  [26/10] (VC) - X  ", ""), "[26/10] (VC) - X");
-  assert.equal(vc.vcCloneName("[26/10] (VC) - X", "  Lead  "), "[26/10] (VC) - X - Lead");
 });
 
 test("vcAdFacts: a static image ad (link_data), a video ad (its CTA link), an Advantage+ feed, and an ad with nothing reusable", () => {
@@ -176,7 +213,9 @@ test("vcCloneSourceOf: the live tree becomes the board's source row (account dig
   assert.deepEqual(s2.localeIds, [6, 16]);
 
   // a legacy ad-set-budget source, a click source with no pixel, no ads
-  const s3 = vc.vcCloneSourceOf(tree({ daily_budget: undefined, bid_strategy: undefined, adsets: { data: [{ daily_budget: "1000", bid_strategy: "LOWEST_COST_WITHOUT_CAP", optimization_goal: "LINK_CLICKS", targeting: { geo_locations: { countries: ["BR", "MX"] } } }] }, ads: { data: [] } }));
+  const s3 = vc.vcCloneSourceOf(
+    tree({ daily_budget: undefined, bid_strategy: undefined, adsets: { data: [{ daily_budget: "1000", bid_strategy: "LOWEST_COST_WITHOUT_CAP", optimization_goal: "LINK_CLICKS", targeting: { geo_locations: { countries: ["BR", "MX"] } } }] }, ads: { data: [] } }),
+  );
   assert.equal(s3.budget, "10");
   assert.equal(s3.bidStrategy, "LOWEST_COST_WITHOUT_CAP");
   assert.equal(s3.bidCap, "");
@@ -187,33 +226,106 @@ test("vcCloneSourceOf: the live tree becomes the board's source row (account dig
   assert.deepEqual(s3.ads, []);
 });
 
-test("vcCloneEditOf: the owner's defaults on a source = Lead on the S-1 pixel, bid cap 0,50, the source's budget, ' - Lead' on the name", () => {
+test("vcLocaleNames + vcBoardSource: the source as the shared clone board's row source — its locale ids spelled as names, the VC facts along", () => {
+  assert.deepEqual(vc.vcLocaleNames([6, 16]), ["English (US)", "Portuguese (Brazil)"]);
+  assert.deepEqual(vc.vcLocaleNames([]), []);
+  assert.deepEqual(vc.vcLocaleNames([21]), []); // "Chinese (traditional)" needs both of its keys
+  assert.deepEqual(vc.vcLocaleNames([21, 22, 999999]), ["Chinese (traditional)"]);
+  const s = vc.vcCloneSourceOf(tree(), "GC-for-VC-BR-742");
+  const b = vc.vcBoardSource(s);
+  assert.equal(b.campaignId, s.campaignId);
+  assert.equal(b.name, s.name);
+  assert.deepEqual(b.countries, ["US"]);
+  assert.deepEqual(b.locales, []);
+  assert.equal(b.originalBudget, "7");
+  assert.equal(b.originalRoas, "2");
+  assert.equal(b.bidStrategy, "LOWEST_COST_WITH_BID_CAP");
+  assert.equal(b.optimization, "conversions");
+  assert.equal(b.conversionEvent, "PURCHASE");
+  assert.equal(b.redirectType, "");
+  assert.equal(b.creatives.length, 2);
+  assert.equal(b.vc, s);
+  assert.equal(vc.vcBoardSource(vc.vcCloneSourceOf(clickTree())).optimization, "clicks");
+});
+
+test("vcRowEdit: an untouched row is a faithful copy in the source's own cabinet — no override rides the edit", () => {
   const s = vc.vcCloneSourceOf(tree());
-  const e = vc.vcCloneEditOf(s, vc.VC_CLONE_DEFAULTS);
-  assert.deepEqual(e, {
+  assert.deepEqual(vc.vcRowEdit(s, rowOf(s)), {
     campaignId: "52564425188380",
     accountId: "1203001234567890",
-    name: "[26/10] (VC) - [EN] - AV - Tima - FOOD - Lead",
+    name: "[17/11] (CLONE) - (VC) - [EN] - AV - Tima - FOOD",
     budget: "7",
     bidStrategy: "LOWEST_COST_WITH_BID_CAP",
-    bidCap: "0,50",
-    pixelId: vc.VC_LEAD_PIXEL.id,
-    event: "LEAD",
+    bidCap: "2",
+    pixelId: "",
+    event: "SOURCE",
   });
-  // a budget override, a typed name, lowest cost drops the bid, an inherited strategy keeps the source's own bid
-  const e2 = vc.vcCloneEditOf(s, { ...vc.VC_CLONE_DEFAULTS, budget: "12", bidStrategy: "LOWEST_COST_WITHOUT_CAP" }, "My clone");
-  assert.equal(e2.budget, "12");
-  assert.equal(e2.name, "My clone");
-  assert.equal(e2.bidStrategy, "LOWEST_COST_WITHOUT_CAP");
-  assert.equal(e2.bidCap, "");
-  const e3 = vc.vcCloneEditOf(s, { ...vc.VC_CLONE_DEFAULTS, bidStrategy: "", bidCap: "" });
-  assert.equal(e3.bidStrategy, "LOWEST_COST_WITH_BID_CAP");
-  assert.equal(e3.bidCap, "2");
+  // the board's "From each source" picks are the source's own too
+  assert.deepEqual(vc.vcRowEdit(s, rowOf(s, { accountId: "source", pageId: "source" })), vc.vcRowEdit(s, rowOf(s)));
+  // a source with locale ids the table has no name for keeps them: nothing to override
+  const odd = vc.vcCloneSourceOf(tree({ adsets: { data: [{ targeting: { locales: [6, 999999], geo_locations: { countries: ["US"] } } }] } }));
+  assert.equal(vc.vcRowEdit(odd, rowOf(odd)).locales, undefined);
+  assert.deepEqual(vc.vcCloneLocaleIds(vc.vcRowEdit(odd, rowOf(odd)), odd), { ids: [6, 999999], unknown: [] });
+});
+
+test("vcRowEdit: what the buyer changed rides as an override — the cabinet, the page, the pixel, the event, the targeting, the bid", () => {
+  const s = vc.vcCloneSourceOf(tree());
+  const e = vc.vcRowEdit(
+    s,
+    rowOf(s, {
+      accountId: "act_1203009999999999",
+      pageId: "610000000000002",
+      pixelId: "2126539511577664",
+      event: "LEAD",
+      countries: ["BR", "MX"],
+      locales: ["Portuguese (Brazil)"],
+      placement: "COMPLIANCE",
+      ageMin: "25",
+      userOs: "android",
+      budget: "12,00",
+      bidStrategy: "LOWEST_COST_WITHOUT_CAP",
+      bid: "0,50",
+    }),
+  );
+  assert.equal(e.accountId, "1203009999999999");
+  assert.equal(e.pageId, "610000000000002");
+  assert.equal(e.pixelId, "2126539511577664");
+  assert.equal(e.event, "LEAD");
+  assert.deepEqual(e.countries, ["BR", "MX"]);
+  assert.deepEqual(e.locales, ["Portuguese (Brazil)"]);
+  assert.equal(e.placement, "COMPLIANCE");
+  assert.equal(e.ageMin, "25");
+  assert.equal(e.userOs, "android");
+  assert.equal(e.budget, "12,00");
+  assert.equal(e.bidStrategy, "LOWEST_COST_WITHOUT_CAP");
+  assert.equal(e.bidCap, ""); // lowest cost carries no bid
+  // the source's own page / OS picked again is no override; a garbage pixel never rides
+  const same = vc.vcRowEdit(s, rowOf(s, { pageId: PAGE, userOs: "all", pixelId: "abc" }));
+  assert.equal(same.pageId, undefined);
+  assert.equal(same.userOs, undefined);
+  assert.equal(same.pixelId, "");
+});
+
+test("vcCloneBinds: where the clone lands — the picks over the source's own; another cabinet is a cross-account clone; a click clone promotes no pixel", () => {
+  const s = vc.vcCloneSourceOf(tree());
+  assert.deepEqual(vc.vcCloneBinds(vc.vcRowEdit(s, rowOf(s)), s), { accountId: s.accountId, pageId: PAGE, pixelId: VC_PIXEL.id, cross: false });
+  assert.deepEqual(vc.vcCloneBinds(vc.vcRowEdit(s, rowOf(s, { event: "LEAD" })), s), { accountId: s.accountId, pageId: PAGE, pixelId: vc.VC_LEAD_PIXEL.id, cross: false });
+  assert.deepEqual(vc.vcCloneBinds(vc.vcRowEdit(s, rowOf(s, { accountId: "1203009999999999", pageId: "610000000000002", pixelId: "2200000000000001" })), s), {
+    accountId: "1203009999999999",
+    pageId: "610000000000002",
+    pixelId: "2200000000000001",
+    cross: true,
+  });
+  // an edit queued before 17.11: the source's cabinet named, the pixel and the event explicit
+  assert.deepEqual(vc.vcCloneBinds({ accountId: s.accountId, pixelId: vc.VC_LEAD_PIXEL.id, event: "LEAD" }, s), { accountId: s.accountId, pageId: PAGE, pixelId: vc.VC_LEAD_PIXEL.id, cross: false });
+  assert.equal(vc.vcCloneBinds({ accountId: "", pixelId: "", event: "LEAD" }, s).accountId, s.accountId);
+  const clicks = vc.vcCloneSourceOf(clickTree());
+  assert.equal(vc.vcCloneBinds(vc.vcRowEdit(clicks, rowOf(clicks, { pixelId: "2200000000000001" })), clicks).pixelId, "");
 });
 
 test("vcCloneCampaign + the launch builders: OUTCOME_LEADS CBO at the source's $7, bid_amount 50 on the ad set, LEAD on the S-1 pixel, the source's targeting, DSA from the binds", () => {
   const s = vc.vcCloneSourceOf(tree());
-  const e = vc.vcCloneEditOf(s, vc.VC_CLONE_DEFAULTS);
+  const e = vc.vcRowEdit(s, rowOf(s, LEAD));
   const c = vc.vcCloneCampaign(e, s);
   assert.equal(c.objective, "OUTCOME_LEADS");
   assert.equal(c.optimization, "conversions");
@@ -234,8 +346,9 @@ test("vcCloneCampaign + the launch builders: OUTCOME_LEADS CBO at the source's $
   assert.equal(camp.status, "ACTIVE");
   assert.deepEqual(camp.special_ad_categories, []);
 
-  const binds = { accountId: s.accountId, pageId: s.pageId, pageName: s.dsaBeneficiary, pixelId: e.pixelId };
-  const adset = adsetPayload(c, e.name, "CAMP1", binds, s.localeIds) as Record<string, any>;
+  const b = vc.vcCloneBinds(e, s);
+  const binds = { accountId: b.accountId, pageId: b.pageId, pageName: s.dsaBeneficiary, pixelId: b.pixelId };
+  const adset = adsetPayload(c, e.name, "CAMP1", binds, vc.vcCloneLocaleIds(e, s).ids) as Record<string, any>;
   assert.equal(adset.optimization_goal, "OFFSITE_CONVERSIONS");
   assert.equal(adset.bid_amount, 50);
   assert.equal(adset.bid_constraints, undefined);
@@ -257,7 +370,43 @@ test("vcCloneCampaign + the launch builders: OUTCOME_LEADS CBO at the source's $
   assert.deepEqual(ap.promoted_object, { pixel_id: VC_PIXEL.id, custom_event_type: "PURCHASE" });
 });
 
-test("the creative is rebuilt from the source ad as is — same page, same image, same copy, the tracking link untouched", () => {
+test("vcCloneCampaign: a row's own cabinet, page and targeting reach the ad set; a click source clones as link clicks with no promoted pixel", () => {
+  const s = vc.vcCloneSourceOf(tree());
+  const e = vc.vcRowEdit(
+    s,
+    rowOf(s, { accountId: "1203009999999999", pageId: "610000000000002", countries: ["BR", "MX"], locales: ["Portuguese (Brazil)", "Spanish (all)"], placement: "COMPLIANCE_HOMEM", ageMin: "25", userOs: "android" }),
+  );
+  const c = vc.vcCloneCampaign(e, s);
+  assert.equal(c.account, "1203009999999999");
+  assert.equal(c.page, "610000000000002");
+  assert.equal(c.objective, "OUTCOME_SALES"); // as the source
+  assert.equal(c.pixel, VC_PIXEL.id);
+  assert.deepEqual(c.countries, ["BR", "MX"]);
+  assert.deepEqual(vc.vcCloneLocaleIds(e, s), { ids: [16], unknown: [] }); // "(all)" = no restriction
+  const b = vc.vcCloneBinds(e, s);
+  const adset = adsetPayload(c, e.name, "CAMP1", { accountId: b.accountId, pageId: b.pageId, pageName: "E2E Fanpage Two", pixelId: b.pixelId }, vc.vcCloneLocaleIds(e, s).ids) as Record<string, any>;
+  assert.deepEqual(adset.targeting.geo_locations, { location_types: ["home", "recent"], countries: ["BR", "MX"] });
+  assert.deepEqual(adset.targeting.locales, [16]);
+  assert.equal(adset.targeting.age_min, 25);
+  assert.deepEqual(adset.targeting.genders, [1]);
+  assert.deepEqual(adset.targeting.user_os, ["Android"]);
+  assert.deepEqual(adset.promoted_object, { pixel_id: VC_PIXEL.id, custom_event_type: "PURCHASE" });
+  assert.equal(adset.dsa_beneficiary, "E2E Fanpage Two");
+
+  const clicks = vc.vcCloneSourceOf(clickTree());
+  const ce = vc.vcRowEdit(clicks, rowOf(clicks));
+  const cc = vc.vcCloneCampaign(ce, clicks);
+  assert.equal(cc.objective, "OUTCOME_TRAFFIC");
+  assert.equal(cc.optimization, "clicks");
+  assert.equal(cc.pixel, "");
+  const cb = vc.vcCloneBinds(ce, clicks);
+  const cad = adsetPayload(cc, ce.name, "C", { accountId: cb.accountId, pageId: cb.pageId, pageName: "", pixelId: cb.pixelId }, []) as Record<string, any>;
+  assert.equal(cad.optimization_goal, "LINK_CLICKS");
+  assert.equal(cad.promoted_object, undefined);
+  assert.equal(vc.vcCloneRefusal(ce, clicks), null);
+});
+
+test("the creative is rebuilt from the source ad as is — same image, same copy, the tracking link untouched; the page is the clone's", () => {
   const ad = tree().ads.data[0];
   const media = { kind: "image" as const, data: ad.creative.object_story_spec.link_data };
   const cr = cloneCreativePayload("clone · 1", PAGE, media, "", "", (l) => l) as Record<string, any>;
@@ -267,48 +416,84 @@ test("the creative is rebuilt from the source ad as is — same page, same image
   assert.equal(cr.object_story_spec.link_data.image_hash, "6b05");
   assert.equal(cr.object_story_spec.link_data.message, "Food choices…");
   assert.deepEqual(cr.object_story_spec.link_data.call_to_action, { type: "LEARN_MORE", value: { link: TRACK } });
+  const other = cloneCreativePayload("clone · 1", "610000000000002", media, "", "", (l) => l) as Record<string, any>;
+  assert.equal(other.object_story_spec.page_id, "610000000000002");
 });
 
-test("vcCloneRefusal: the owner's defaults pass; every bad edit is refused by name before any write", () => {
+test("vcCloneRefusal: a faithful copy and the Lead batch pass; every bad edit is refused by name before any write", () => {
   const s = vc.vcCloneSourceOf(tree());
-  const good = vc.vcCloneEditOf(s, vc.VC_CLONE_DEFAULTS);
+  assert.equal(vc.vcCloneRefusal(vc.vcRowEdit(s, rowOf(s)), s), null);
+  const good = vc.vcRowEdit(s, rowOf(s, LEAD));
   assert.equal(vc.vcCloneRefusal(good, s), null);
   assert.match(vc.vcCloneRefusal({ ...good, event: "VIEW" as never }, s) ?? "", /^event_invalid/);
-  assert.match(vc.vcCloneRefusal({ ...good, pixelId: "" }, s) ?? "", /^pixel_required/);
+  assert.equal(vc.vcCloneRefusal({ ...good, pixelId: "" }, s), null); // "" = the event's own dataset
   assert.match(vc.vcCloneRefusal({ ...good, pixelId: "abc" }, s) ?? "", /^pixel_required/);
   assert.match(vc.vcCloneRefusal({ ...good, name: "  " }, s) ?? "", /^name_required/);
+  assert.match(vc.vcCloneRefusal({ ...good, accountId: "nope" }, s) ?? "", /^account_invalid/);
+  assert.match(vc.vcCloneRefusal({ ...good, pageId: "nope" }, s) ?? "", /^fanpage_invalid/);
   assert.match(vc.vcCloneRefusal({ ...good, bidStrategy: "TARGET_COST" }, s) ?? "", /^bid_strategy_invalid/);
   assert.match(vc.vcCloneRefusal({ ...good, bidCap: "" }, s) ?? "", /^bid_required/);
   assert.match(vc.vcCloneRefusal({ ...good, bidCap: "0" }, s) ?? "", /^bid_required/);
   assert.match(vc.vcCloneRefusal({ ...good, bidStrategy: "LOWEST_COST_WITH_MIN_ROAS", bidCap: "0,3" }, s) ?? "", /^roas_needs_purchase/);
   assert.equal(vc.vcCloneRefusal({ ...good, event: "PURCHASE", bidStrategy: "LOWEST_COST_WITH_MIN_ROAS", bidCap: "0,3" }, s), null);
+  assert.equal(vc.vcCloneRefusal({ ...good, event: "SOURCE", bidStrategy: "LOWEST_COST_WITH_MIN_ROAS", bidCap: "0,3" }, s), null); // the source is Purchase
   assert.match(vc.vcCloneRefusal({ ...good, event: "PURCHASE", bidStrategy: "LOWEST_COST_WITH_MIN_ROAS", bidCap: "15" }, s) ?? "", /^roas_goal_ambiguous/);
   assert.match(vc.vcCloneRefusal({ ...good, event: "PURCHASE", bidStrategy: "LOWEST_COST_WITH_MIN_ROAS", bidCap: "500" }, s) ?? "", /^roas_goal_invalid/);
   assert.match(vc.vcCloneRefusal({ ...good, budget: "0,5" }, s) ?? "", /^budget_too_low/);
   assert.equal(vc.vcCloneRefusal({ ...good, bidStrategy: "LOWEST_COST_WITHOUT_CAP", bidCap: "" }, s), null);
+  assert.match(vc.vcCloneRefusal({ ...good, countries: [] }, s) ?? "", /^geo_required/);
+  assert.match(vc.vcCloneRefusal({ ...good, countries: ["Brazil"] }, s) ?? "", /^geo_invalid/);
+  assert.equal(vc.vcCloneRefusal({ ...good, countries: ["WW"] }, s), null);
+  assert.match(vc.vcCloneRefusal({ ...good, locales: ["Zulu"] }, s) ?? "", /^locale_unknown/);
   const noGeo = vc.vcCloneSourceOf(tree({ adsets: { data: [{ targeting: {} }] } }));
-  assert.match(vc.vcCloneRefusal(vc.vcCloneEditOf(noGeo, vc.VC_CLONE_DEFAULTS), noGeo) ?? "", /country/);
+  assert.match(vc.vcCloneRefusal(vc.vcRowEdit(noGeo, rowOf(noGeo, LEAD)), noGeo) ?? "", /country/);
   const noAds = vc.vcCloneSourceOf(tree({ ads: { data: [] } }));
-  assert.match(vc.vcCloneRefusal(vc.vcCloneEditOf(noAds, vc.VC_CLONE_DEFAULTS), noAds) ?? "", /page unknown|no reusable/);
+  assert.match(vc.vcCloneRefusal(vc.vcRowEdit(noAds, rowOf(noAds, LEAD)), noAds) ?? "", /page unknown/);
+  // a picked page rescues a source whose ads name none — then the missing reusable ad is what stops it
+  assert.match(vc.vcCloneRefusal(vc.vcRowEdit(noAds, rowOf(noAds, { ...LEAD, pageId: "610000000000002" })), noAds) ?? "", /no reusable/);
   const noMedia = vc.vcCloneSourceOf(tree({ ads: { data: [{ id: "1", creative: { object_story_spec: { page_id: PAGE, link_data: { link: TRACK } } } }] } }));
-  assert.match(vc.vcCloneRefusal(vc.vcCloneEditOf(noMedia, vc.VC_CLONE_DEFAULTS), noMedia) ?? "", /no reusable/);
+  assert.match(vc.vcCloneRefusal(vc.vcRowEdit(noMedia, rowOf(noMedia, LEAD)), noMedia) ?? "", /no reusable/);
 });
 
-test("isVcCloneEdit: the wire shape the clone route accepts (digits ids, strings, a known event)", () => {
+test("isVcCloneEdit: the wire shape the clone route accepts — today's edit, and the one queued before 17.11", () => {
   const s = vc.vcCloneSourceOf(tree());
-  const e = vc.vcCloneEditOf(s, vc.VC_CLONE_DEFAULTS);
+  const e = vc.vcRowEdit(s, rowOf(s, { accountId: "1203009999999999", countries: ["BR"], locales: ["Portuguese (Brazil)"], userOs: "android" }));
   assert.equal(vc.isVcCloneEdit(e), true);
   assert.equal(vc.isVcCloneEdit({ ...e, campaignId: "x" }), false);
   assert.equal(vc.isVcCloneEdit({ ...e, event: "nope" }), false);
   assert.equal(vc.isVcCloneEdit({ ...e, name: 5 }), false);
+  assert.equal(vc.isVcCloneEdit({ ...e, countries: "BR" }), false);
+  assert.equal(vc.isVcCloneEdit({ ...e, locales: [16] }), false);
+  assert.equal(vc.isVcCloneEdit({ ...e, userOs: "ios" }), false);
+  assert.equal(vc.isVcCloneEdit({ ...e, pageId: 610000000000002 }), false);
   assert.equal(vc.isVcCloneEdit(null), false);
   assert.equal(vc.isVcCloneEdit({ campaignId: "52564425188380", name: "n", event: "LEAD" }), true);
+  // the body of a job queued by the 05.11 board: no page, no targeting, the source's cabinet named
+  const old = {
+    campaignId: "52564425188380",
+    accountId: "1203001234567890",
+    name: "[26/10] (VC) - [EN] - AV - Tima - FOOD - Lead",
+    budget: "7",
+    bidStrategy: "LOWEST_COST_WITH_BID_CAP",
+    bidCap: "0,50",
+    pixelId: "2126539511577664",
+    event: "LEAD" as const,
+  };
+  assert.equal(vc.isVcCloneEdit(old), true);
+  assert.equal(vc.vcCloneRefusal(old, s), null);
+  const c = vc.vcCloneCampaign(old, s);
+  assert.equal(c.objective, "OUTCOME_LEADS");
+  assert.equal(c.account, s.accountId);
+  assert.equal(c.page, PAGE);
+  assert.equal(c.pixel, "2126539511577664");
+  assert.equal(vc.vcCloneBinds(old, s).cross, false);
 });
 
 test("VC clone through TOOL: the same Campaign maps to a CampaignRequest — OUTCOME_LEADS, conversion LEAD on the S-1 pixel, bid {amount: 0.5} USD, the tracking link on every creative", () => {
   const s = vc.vcCloneSourceOf(tree());
-  const e = vc.vcCloneEditOf(s, vc.VC_CLONE_DEFAULTS);
+  const e = vc.vcRowEdit(s, rowOf(s, LEAD));
   const c = vc.vcCloneCampaign(e, s);
+  const b = vc.vcCloneBinds(e, s);
   const kind = bidKind(c.bidStrategy);
   const raw = parseMoney(c.bidCap);
   const r = tl.buildToolCampaign({
@@ -319,10 +504,10 @@ test("VC clone through TOOL: the same Campaign maps to a CampaignRequest — OUT
     bid: kind === "roas" ? { kind: "roas", coefficient: normalizeRoasGoal(raw) ?? 0 } : kind === "cap" ? { kind: "cap", usd: raw } : { kind: "none" },
     optimization: c.optimization,
     conversionEvent: c.conversionEvent,
-    pixelId: e.pixelId,
-    pageId: s.pageId,
+    pixelId: b.pixelId,
+    pageId: b.pageId,
     countries: c.countries,
-    localeIds: s.localeIds,
+    localeIds: vc.vcCloneLocaleIds(e, s).ids,
     category: c.category,
     placement: c.placement,
     platforms: [],
@@ -344,4 +529,13 @@ test("VC clone through TOOL: the same Campaign maps to a CampaignRequest — OUT
   assert.equal(r.body.adsets[0].ads.length, 2);
   assert.ok(r.body.adsets[0].ads.every((a) => a.creative.url === TRACK));
   assert.equal(r.body.options?.allow_inferred, true);
+});
+
+test("a clone's name on the shared board carries (CLONE) and the (VC) tier; through TOOL the mark sits after that prefix", () => {
+  const { splitCloneName } = cloneLib;
+  assert.deepEqual(splitCloneName("[26/10] (VC) - [EN] - AV - Tima - FOOD", "17.11"), { prefix: "[17/11] (CLONE) - (VC) - ", name: "[EN] - AV - Tima - FOOD" });
+  // a clone of a clone, and of a TOOL-born source (the board drops the source's mark off the tail)
+  assert.deepEqual(splitCloneName("[10/11] (CLONE) - (VC) - GCL TOOL - Quiz - Tima", "17.11"), { prefix: "[17/11] (CLONE) - (VC) - ", name: "GCL TOOL - Quiz - Tima" });
+  assert.equal(tl.stripToolMark("GCL TOOL - Quiz - Tima"), "Quiz - Tima");
+  assert.equal(tl.toolEnsureMark("[17/11] (CLONE) - (VC) - Quiz - Tima"), "[17/11] (CLONE) - (VC) - GCL TOOL - Quiz - Tima");
 });

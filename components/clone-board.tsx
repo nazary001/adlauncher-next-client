@@ -6,9 +6,11 @@ import {
   type CloneRow,
   type CloneRowDest,
   type CloneSettings,
+  type CloneSource,
   type HighOfferConfig,
   MAX_CLONE_COPIES,
   SOURCE_ACCOUNT,
+  SOURCE_PAGE,
   defaultSettings,
   flattenPreview,
   fullCloneName,
@@ -32,11 +34,25 @@ import {
   parseMoney,
   todayPrefixDDMM,
 } from "@/lib/types";
-import { BID_STRATEGIES, OS_OPTIONS, countryName, geoSummary } from "@/lib/catalog";
+import { BID_STRATEGIES, LOCALES, OS_OPTIONS, countryName, geoSummary } from "@/lib/catalog";
 import { TOOL_MARK, stripToolMark, toolEnsureMark } from "@/lib/tool-launch";
 import { AIF_VALUE_PIXEL, type PartnerId, aifOfferablePixels, partnerConfig, pickAifPixel } from "@/lib/partners";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
 import { teamHas } from "@/lib/team";
+import { cloneAutofillRows, undoCloneAutofill } from "@/lib/clone-autofill";
+import { type HsAutofillPatch, autofillNote } from "@/lib/hs-autofill";
+import {
+  VC_CLONE_EVENTS,
+  type VcCloneEvent,
+  type VcCloneSource,
+  isVcCloneEvent,
+  vcBoardSource,
+  vcCloneBinds,
+  vcCloneDelivery,
+  vcCloneRefusal,
+  vcPixelName,
+  vcRowEdit,
+} from "@/lib/vc-clone";
 import { AutoTextarea, BidKindTag, Field, Select } from "./ui";
 import {
   AlertIcon,
@@ -50,16 +66,20 @@ import {
   PlusIcon,
   RetryIcon,
   SlidersIcon,
+  SparklesIcon,
   TargetIcon,
   TrashIcon,
   UndoIcon,
+  XIcon,
 } from "./icons";
 import { Header } from "./header";
-import { useAifTaskManager, useAvTaskManager, useTaskManager } from "./task-manager";
+import { useAifTaskManager, useAvTaskManager, useTaskManager, useVcTaskManager } from "./task-manager";
 import { UploadingNotice } from "./upload-guard";
 import { CloneTargetingModal } from "./clone-targeting-modal";
 import { CloneHighOfferModal } from "./clone-high-offer-modal";
 import { CloneDestinationModal } from "./clone-destination-modal";
+import { HsAutofillModal } from "./hs-autofill-modal";
+import { type VcSourceList, VcSourcePicker, fetchVcSources } from "./vc-source-picker";
 import { SearchSelect } from "./search-select";
 import { useSigners } from "./use-signers";
 import { SignerBadge } from "./signer-badge";
@@ -122,10 +142,24 @@ function snapAvRoasRow(row: CloneRow): CloneRow {
 /** Every AV source is TOOL-born ("… (AV) - GCL TOOL - <topic> | …"), so its tail would carry that mark into
  *  the clone's editable name — shown twice next to the locked prefix on TOOL, and kept on a clone the AV
  *  FB token builds. The clone gets the mark of ITS OWN channel at fire time (toolEnsureMark on TOOL, the
- *  server re-ensures it), so the seeded tail starts without it (09.11). AV only — MO/AIF untouched. */
+ *  server re-ensures it), so the seeded tail starts without it (09.11). AV and VC (a VC source may be
+ *  TOOL-born too, 17.11) — MO/AIF untouched. */
 function dropAvToolMark(row: CloneRow): CloneRow {
   const name = stripToolMark(row.name);
   return name === row.name ? row : { ...row, name };
+}
+
+/** VC's User OS pick (owner ask 17.11): a VC clone keeps its source's own devices unless the buyer says
+ *  otherwise — so the batch select gets a third, default choice the other partners' boards do not have. */
+type VcUserOs = "" | "all" | "android";
+const VC_OS_OPTIONS = [{ value: "", label: "As each source" }, ...OS_OPTIONS];
+const VC_EVENT_LS = "adlauncher.clone.vc.event";
+
+/** What a clone of `src` optimizes under the batch Optimization pick, in a word ("Lead", "Purchase", "Clicks"). */
+function vcEventWord(event: VcCloneEvent, src: VcCloneSource): string {
+  const d = vcCloneDelivery(event, src);
+  if (!d.conversionEvent) return "Clicks";
+  return d.conversionEvent.charAt(0) + d.conversionEvent.slice(1).toLowerCase();
 }
 
 /** Column heading with the underline rule + an optional right-aligned count chip. */
@@ -215,7 +249,8 @@ function CloneInner({
   const teamTm = useTaskManager();
   const aifTm = useAifTaskManager();
   const avTm = useAvTaskManager();
-  const cloneTm = partnerConfig(partnerId).avLaunch ? avTm : partnerConfig(partnerId).aifLaunch ? aifTm : teamTm;
+  const vcTm = useVcTaskManager();
+  const cloneTm = partnerConfig(partnerId).vcLaunch ? vcTm : partnerConfig(partnerId).avLaunch ? avTm : partnerConfig(partnerId).aifLaunch ? aifTm : teamTm;
   const { enqueueClone, setOpen } = cloneTm;
   const [settings, setSettings] = useState<CloneSettings>(() => defaultSettings());
   const [rows, setRows] = useState<CloneRow[]>([]);
@@ -237,6 +272,20 @@ function CloneInner({
     patchSettings({ copies: Math.max(1, Math.min(MAX_CLONE_COPIES, n)) });
     setCopiesDraft(null);
   };
+  // ---- VC only (owner ask 17.11) -------------------------------------------------------------------
+  // The batch Optimization: what every clone optimizes — as its source does (the default: a faithful
+  // copy), or Lead / Purchase forced on the whole batch (the 05.11 ask — Purchase campaigns re-born as
+  // Lead). Remembered per browser. The batch User OS: "" = each source's own devices.
+  const [vcEvent, setVcEvent] = useState<VcCloneEvent>("SOURCE");
+  const [vcUserOs, setVcUserOs] = useState<VcUserOs>("");
+  // The list of ACTIVE VC campaigns the rows are ticked out of (components/vc-source-picker) — null until
+  // it is read: at once on a board opened without ids, on demand on a deep link.
+  const [vcList, setVcList] = useState<VcSourceList | null>(null);
+  const [vcListLoading, setVcListLoading] = useState(false);
+  const [vcListError, setVcListError] = useState<string | null>(null);
+  // "Autofill all rows" (the HS board's form, lib/clone-autofill) + ONE Undo of the last one.
+  const [autofillOpen, setAutofillOpen] = useState(false);
+  const [autofillDone, setAutofillDone] = useState<{ before: CloneRow[]; note: string; changed: number } | null>(null);
   const nextRowId = useRef(1);
   const queuedTimer = useRef<number | null>(null);
   // The "N queued" toast timer must not fire into an unmounted board (partner switches navigate away).
@@ -253,16 +302,29 @@ function CloneInner({
   // none — Traffic / link clicks), no SOC marks, keys claimed server-side per clone. Every AV
   // branch guards on this so MO/AIF stay byte-identical.
   const avMode = Boolean(partner.avLaunch);
+  // VC clone board (partner "vc", owner ask 17.11: «сделай его нормальным так как у нас и на других
+  // партнерах со всем функционалом, чтобы можно было акк выбрать»): the same board, on VC's own token
+  // and catalogs, with what VC alone needs — the sources are LISTED here (no stats tool hands VC ids
+  // over; the ticked ones become the rows), "From each source" is the default for the account AND the
+  // fanpage (a VC clone is a faithful copy unless the buyer re-targets it), the pixel follows the batch
+  // Optimization (as each source / Lead / Purchase) unless one is picked, and the clone carries every
+  // reusable ad of its source. No marker pool, no SOC marks. Every VC branch guards on this so
+  // MO/AIF/AV stay byte-identical.
+  const vcMode = Boolean(partner.vcLaunch);
   // The clone signer is the OWNER'S pick on /tokens (mo.clone / aif.clone / av.clone; env default
   // while unassigned — AV has no env seed) — read-only here: the CATALOGS (fanpages/accounts;
   // AV carries no pixels), the source reads and the clone build all ride that bearer (the run
-  // route resolves the same slot server-side).
+  // route resolves the same slot server-side). VC: VC · Clones when the owner assigned one, else
+  // VC · Launches — one VC system user serves both (lib/vc-launch vcCloneRail, the same rule the
+  // catalogs and the run follow server-side).
   const signers = useSigners(true);
-  const railSigner = signers.slots?.[avMode ? "av.clone" : aifMode ? "aif.clone" : "mo.clone"] ?? null;
+  const railSigner = vcMode
+    ? ((signers.slots?.["vc.clone"]?.primary ? signers.slots["vc.clone"] : signers.slots?.["vc.launch"]) ?? null)
+    : (signers.slots?.[avMode ? "av.clone" : aifMode ? "aif.clone" : "mo.clone"] ?? null);
   /** A token exists for this rail — catalogs load, Duplicate may fire. */
   const signerReady = Boolean(railSigner?.primary);
-  /** SOC name marker rides personal-soc signers only (MO) — system users (AIF/AV) go unmarked. */
-  const moSocMarks = !aifMode && !avMode && Boolean(railSigner?.primary?.personal);
+  /** SOC name marker rides personal-soc signers only (MO) — system users (AIF/AV/VC) go unmarked. */
+  const moSocMarks = !aifMode && !avMode && !vcMode && Boolean(railSigner?.primary?.personal);
   const signerMissing = !signerReady;
 
   // ---- launch channel (owner ask 28.09): our FB Token (the default Graph rail) vs TOOL (the HS
@@ -312,7 +374,10 @@ function CloneInner({
   const fanpages = useFanpages(
     Boolean(partner.fanpagesFromToken) && signerReady,
     partner.pageAdLimit ?? 250,
-    avMode
+    vcMode
+      ? // VC's pages are the VC token's (no hs-tools scope → no fill badges).
+        { list: "/api/vc/fanpages?rail=clone", volume: null }
+      : avMode
       ? // hs-tools has no AV scope → no fill badges (volume null); the list alone is the picker.
         { list: "/api/av/fanpages?rail=clone", volume: null }
       : aifMode
@@ -326,7 +391,7 @@ function CloneInner({
   const adAccounts = useAdAccounts(
     Boolean(partner.accountsFromToken) && signerReady,
     partner.preferredPixel,
-    avMode ? "/api/av/adaccounts?rail=clone" : aifMode ? "/api/aif/adaccounts?rail=clone" : "/api/adaccounts?rail=clone",
+    vcMode ? "/api/vc/adaccounts?rail=clone" : avMode ? "/api/av/adaccounts?rail=clone" : aifMode ? "/api/aif/adaccounts?rail=clone" : "/api/adaccounts?rail=clone",
     // AV cabinets carry no pixel — the picker must not flag every one with the "no pixel" danger tag.
     avMode ? { noPixelTag: true } : undefined,
   );
@@ -337,9 +402,12 @@ function CloneInner({
   // as missing — the pick would fire a bind the new signer can't use. A mid-load list (null)
   // never flags a legit pick; the server's own catalog checks stay the final authority.
   const isTargetFor = (d: CloneRowDest): boolean => Boolean(d.accountId) && d.accountId !== SOURCE_ACCOUNT;
+  // VC's "From each source" fanpage pick is no page of the catalog — it never reads as stale (whether
+  // the token still holds each SOURCE's page is judged per row, vcIssueOf).
   const pageStaleFor = (d: CloneRowDest): boolean =>
     Boolean(partner.fanpagesFromToken) &&
     Boolean(d.pageId) &&
+    !(vcMode && d.pageId === SOURCE_PAGE) &&
     fanpages !== null &&
     !fanpages.some((o) => o.value === d.pageId);
   const fanpageMissingFor = (d: CloneRowDest): boolean =>
@@ -352,8 +420,10 @@ function CloneInner({
   /** On the TOOL rail the effective build account must be a concrete TOOL-visible cabinet — a
    *  non-TOOL account or the "From each source" sentinel can't build through TOOL (owner ask 28.09),
    *  so it reads as missing and blocks Duplicate with the message below. */
+  // VC knows each source's own cabinet, so "From each source" stays a valid pick on TOOL too — whether a
+  // live session sees THAT cabinet is judged per row (vcIssueOf).
   const accountToolMissingFor = (d: CloneRowDest): boolean =>
-    onTool && Boolean(d.accountId) && !toolAccountVisible(d.accountId);
+    onTool && Boolean(d.accountId) && !(vcMode && d.accountId === SOURCE_ACCOUNT) && !toolAccountVisible(d.accountId);
   const accountMissingFor = (d: CloneRowDest): boolean =>
     Boolean(partner.accountsFromToken) && (!d.accountId || accountStaleFor(d) || accountToolMissingFor(d));
   // AIF offers the cabinet's pixels minus the retired ones (owner call 09-02 pt3 — «GC for
@@ -369,7 +439,10 @@ function CloneInner({
     !targetPixelsFor(d.accountId).some((p) => p.id === d.pixelId);
   // AV's pixel is never picked (the route gives a Purchase clone AV_PIXEL, a click clone none), so a
   // pixel is never required and never blocks Duplicate; MO/AIF keep the concrete-account pixel requirement.
-  const pixelMissingFor = (d: CloneRowDest): boolean => !avMode && isTargetFor(d) && (!d.pixelId || pixelStaleFor(d));
+  // VC's pixel is OPTIONAL: empty = the batch Optimization's own dataset (the source's, the S-1 nik pixel
+  // for Lead, the VC pixel for Purchase) — only a pick the account no longer carries reads as missing.
+  const pixelMissingFor = (d: CloneRowDest): boolean =>
+    vcMode ? pixelStaleFor(d) : !avMode && isTargetFor(d) && (!d.pixelId || pixelStaleFor(d));
   const destMissingFor = (d: CloneRowDest): boolean =>
     fanpageMissingFor(d) || accountMissingFor(d) || pixelMissingFor(d);
 
@@ -410,48 +483,64 @@ function CloneInner({
   // on our 5/15-min timer are what an EMPTY Settings pick shows and fires; a real pick (incl.
   // "From each source") wins via state and the × clear returns to auto. The partner's preferred
   // account (BR-1500) is ranked first so it wins ties. Purely derived — live as the meters move.
-  const autoPageId = partner.fanpagesFromToken
-    ? leastFilledPage(
-        (fanpages ?? []).map((o) => ({ id: o.value, used: o.adCount, limit: o.adLimit, disabled: o.disabled })),
-        partner.pageAdLimit ?? 250,
-      )
-    : "";
+  // VC: the defaults are "From each source" for BOTH — a clone keeps its source's page and cabinet unless
+  // the buyer moves it (owner ask 17.11: the account became a pick, not a forced move).
+  const autoPageId = vcMode
+    ? SOURCE_PAGE
+    : partner.fanpagesFromToken
+      ? leastFilledPage(
+          (fanpages ?? []).map((o) => ({ id: o.value, used: o.adCount, limit: o.adLimit, disabled: o.disabled })),
+          partner.pageAdLimit ?? 250,
+        )
+      : "";
+  /** The fanpage picker's options (Settings + per-row pickers share it): VC leads with "From each source". */
+  const fanpageOptions = vcMode
+    ? [{ value: SOURCE_PAGE, label: "From each source", adCount: null, adLimit: null }, ...(fanpages ?? [])]
+    : (fanpages ?? []);
   const preferredAcct = partner.defaultAccount?.id ?? "";
   // On the TOOL rail only TOOL-visible cabinets are candidates for the auto default (so an empty
   // Settings pick resolves to an account the TOOL session can actually build in).
   const acctCandidates = (onTool ? (adAccounts ?? []).filter((a) => toolReady.accounts.has(bareId(a.value))) : (adAccounts ?? []))
     .slice()
     .sort((a, b) => (a.value === preferredAcct ? -1 : b.value === preferredAcct ? 1 : 0));
-  const autoAccountId = partner.accountsFromToken
-    ? leastLoadedAccount(
-        accountLoads(
-          acctCandidates.map((a) => ({ id: a.value, disabled: a.disabled })),
-          limits,
-        ),
-        limits.limit,
-      )
-    : "";
+  const autoAccountId = vcMode
+    ? SOURCE_ACCOUNT
+    : partner.accountsFromToken
+      ? leastLoadedAccount(
+          accountLoads(
+            acctCandidates.map((a) => ({ id: a.value, disabled: a.disabled })),
+            limits,
+          ),
+          limits.limit,
+        )
+      : "";
   /** The account picker's options for the current rail (Settings + per-row pickers share it): on
    *  TOOL only the TOOL-visible cabinets (no "From each source" — a TOOL clone must land in a
    *  concrete TOOL cabinet, and the client has no source-account id to prove SOURCE is visible);
    *  off it, the full token catalog with the "From each source" sentinel (owner ask 28.09). */
   const accountPickerOptions = onTool
-    ? decorateAccountOptions((adAccounts ?? []).filter((a) => toolReady.accounts.has(bareId(a.value))), limits)
+    ? [
+        // VC keeps the sentinel on TOOL: it knows each source's cabinet and checks it per row.
+        ...(vcMode ? [{ value: SOURCE_ACCOUNT, label: "From each source" }] : []),
+        ...decorateAccountOptions((adAccounts ?? []).filter((a) => toolReady.accounts.has(bareId(a.value))), limits),
+      ]
     : [{ value: SOURCE_ACCOUNT, label: "From each source" }, ...decorateAccountOptions(adAccounts ?? [], limits)];
   const settingsPageIsAuto = Boolean(partner.fanpagesFromToken) && !settings.pageId && Boolean(autoPageId);
   const settingsAccountIsAuto = Boolean(partner.accountsFromToken) && !settings.accountId && Boolean(autoAccountId);
   const effPageId = settings.pageId || autoPageId;
   const effAccountId = settings.accountId || autoAccountId;
   // An auto account brings its own default pixel (the same rule the manual pick applies) — never
-  // for AV, which has no pixel at all.
+  // for AV, which has no pixel at all, nor for VC, whose empty pixel means "the Optimization's own".
   const effPixelId = avMode
     ? ""
-    : settings.pixelId ||
-      (settingsAccountIsAuto && effAccountId !== SOURCE_ACCOUNT
-        ? aifMode
-          ? (pickAifPixel(pixelOptionsOf(adAccounts, effAccountId))?.id ?? "")
-          : defaultPixelFor(adAccounts, effAccountId, partner.preferredPixel)
-        : "");
+    : vcMode
+      ? settings.pixelId
+      : settings.pixelId ||
+        (settingsAccountIsAuto && effAccountId !== SOURCE_ACCOUNT
+          ? aifMode
+            ? (pickAifPixel(pixelOptionsOf(adAccounts, effAccountId))?.id ?? "")
+            : defaultPixelFor(adAccounts, effAccountId, partner.preferredPixel)
+          : "");
   // The batch Settings tuple (the wave defaults, auto picks resolved) — decorates the pickers
   // and is what every row without its own destination rides.
   const defaults: CloneRowDest = { pageId: effPageId, accountId: effAccountId, pixelId: effPixelId };
@@ -468,6 +557,64 @@ function CloneInner({
   // Per-row effective destination + copies (its own, else the batch settings).
   const destOf = (r: CloneRow): CloneRowDest => rowDestination(r, defaults);
   const copiesOf = (r: CloneRow): number => rowCopiesOf(r, settings);
+
+  // ---- VC: the edit a row ships and why it cannot ship (lib/vc-clone — the run judges the same) ----
+  /** A row's values in the VC edit's reading: its effective destination, the batch Optimization / OS. */
+  const vcPickOf = (r: CloneRow, d: CloneRowDest, name: string) => ({
+    name,
+    budget: r.budget,
+    bidStrategy: r.bidStrategy,
+    bid: r.roasGoal,
+    countries: r.countries,
+    locales: r.locales,
+    category: r.category,
+    placement: r.placement,
+    ageMin: r.ageMin,
+    accountId: d.accountId,
+    pageId: d.pageId,
+    pixelId: d.pixelId,
+    event: vcEvent,
+    userOs: vcUserOs,
+  });
+  /** Where a VC row's clone lands — the cabinet, the page, the pixel — resolved against its source
+   *  (null off VC). "From each source" resolves to the source's own here, so everything below (the
+   *  launch-limit meter, the TOOL check, the pixel check) works on real ids. */
+  const vcBindsOf = (r: CloneRow) => {
+    const src = r.source.vc;
+    return vcMode && src ? vcCloneBinds(vcRowEdit(src, vcPickOf(r, destOf(r), fullCloneName(r))), src) : null;
+  };
+  /** Why a VC row cannot be cloned as it stands (null = fine): the contract's own refusals (bid, budget,
+   *  geo, languages, a reusable ad, min-ROAS only on Purchase …), then what the catalogs say about where it
+   *  lands — a cabinet TOOL / the token does not see, a page the token no longer holds, a pixel not shared
+   *  to the cabinet. The same verdicts the run gives, shown BEFORE anything is queued. */
+  const vcIssueOf = (r: CloneRow): string | null => {
+    const src = r.source.vc;
+    if (!src) return "not a VC campaign — remove the row";
+    const edit = vcRowEdit(src, vcPickOf(r, destOf(r), fullCloneName(r)));
+    const refusal = vcCloneRefusal(edit, src);
+    if (refusal) return refusal;
+    const b = vcCloneBinds(edit, src);
+    const acct = adAccounts?.find((a) => bareId(a.value) === b.accountId);
+    const acctName = acct?.label || (!b.cross && src.accountName) || `act_${b.accountId}`;
+    if (onTool) {
+      if (!toolReady.accounts.has(b.accountId)) return `no live TOOL session sees ${acctName} — pick a TOOL account or switch to FB Token`;
+    } else {
+      if (adAccounts?.length && !acct) return `${acctName} is not among your VC cabinets on the token — pick another account`;
+      if (fanpages?.length && !fanpages.some((o) => o.value === b.pageId)) {
+        return `the VC token cannot advertise with ${b.pageId === src.pageId ? "the source's page" : "page"} ${b.pageId} — pick another fanpage`;
+      }
+    }
+    if (b.pixelId && acct && !acct.pixels.some((p) => p.id === b.pixelId)) {
+      return `${vcPixelName(b.pixelId)} is not shared to ${acctName} — share it in Business Manager, or pick another pixel / account`;
+    }
+    return null;
+  };
+  const vcIssues = new Map<string, string | null>(vcMode ? rows.map((r) => [r.id, vcIssueOf(r)] as const) : []);
+  const vcBlockedRows = rows.filter((r) => vcIssues.get(r.id));
+  const vcBlocked = vcBlockedRows.length > 0;
+  /** The dataset an EMPTY pixel pick means under the batch Optimization. */
+  const vcAutoPixelLabel = vcEvent === "SOURCE" ? "each source's own" : vcPixelName(vcCloneDelivery(vcEvent).pixel);
+
   const rowsMissing = rows.filter((r) => destMissingFor(destOf(r)));
   const destinationMissing = rows.length > 0 && rowsMissing.length > 0;
   /** TOOL rail only: rows whose effective build account isn't a TOOL-visible cabinet (a concrete
@@ -484,10 +631,12 @@ function CloneInner({
   // share (rows × copies bound to it). From-each-source rows aren't metered here — the sources'
   // accounts aren't exposed to the board, so the per-copy server claim refuses any overflow with
   // the countdown instead.
+  // VC meters EVERY row: it knows each source's own cabinet, so a "From each source" row counts against it.
   const acctDemand = new Map<string, number>();
   for (const r of rows) {
     const d = destOf(r);
-    if (isTargetFor(d)) acctDemand.set(d.accountId, (acctDemand.get(d.accountId) ?? 0) + copiesOf(r));
+    const acct = vcMode ? (vcBindsOf(r)?.accountId ?? "") : isTargetFor(d) ? d.accountId : "";
+    if (acct) acctDemand.set(acct, (acctDemand.get(acct) ?? 0) + copiesOf(r));
   }
   const acctShort = [...acctDemand.entries()]
     .map(([accountId, need]) => ({
@@ -505,7 +654,7 @@ function CloneInner({
   const pageDemand = new Map<string, number>();
   for (const r of rows) {
     const d = destOf(r);
-    if (d.pageId) pageDemand.set(d.pageId, (pageDemand.get(d.pageId) ?? 0) + copiesOf(r));
+    if (d.pageId && d.pageId !== SOURCE_PAGE) pageDemand.set(d.pageId, (pageDemand.get(d.pageId) ?? 0) + copiesOf(r));
   }
   const fankaStatsOf = (pageId: string) => {
     const o = pageId ? fanpages?.find((x) => x.value === pageId) : undefined;
@@ -530,7 +679,8 @@ function CloneInner({
   const me = user?.username ?? null;
 
   // Catalog display names for a destination tuple.
-  const fanpageLabel = (pageId: string): string => fanpages?.find((o) => o.value === pageId)?.label || pageId;
+  const fanpageLabel = (pageId: string): string =>
+    vcMode && pageId === SOURCE_PAGE ? "the source's page" : fanpages?.find((o) => o.value === pageId)?.label || pageId;
   const accountLabel = (accountId: string): string =>
     accountId === SOURCE_ACCOUNT ? "From each source" : adAccounts?.find((a) => a.value === accountId)?.label || accountId;
   const pixelLabel = (accountId: string, pixelId: string): string =>
@@ -547,7 +697,29 @@ function CloneInner({
   /** Snap a freshly seeded row for the active partner: AV min-ROAS sources drop to lowest cost
    *  (see snapAvRoasRow); MO/AIF rows pass through untouched. Stable (avMode is fixed for the
    *  board's life) so it doesn't churn the loadIds callback. */
-  const avSnap = useCallback((r: CloneRow): CloneRow => (avMode ? snapAvRoasRow(dropAvToolMark(r)) : r), [avMode]);
+  const avSnap = useCallback(
+    (r: CloneRow): CloneRow => (avMode ? snapAvRoasRow(dropAvToolMark(r)) : vcMode ? dropAvToolMark(r) : r),
+    [avMode, vcMode],
+  );
+
+  /** Read the sources of `ids` on this partner's rail: /api/clone/sources for MO / AIF / AV; VC reads its
+   *  own trees (GET /api/vc/sources?ids=) and hands them over in the board's row-source shape, the VC
+   *  facts along (lib/vc-clone vcBoardSource). Same contract either way: throws when NOT ONE id could be
+   *  read (the board shows the reasons + Retry), partial failures come back in `failed`. */
+  const readSources = useCallback(
+    async (ids: string[]): Promise<{ sources: CloneSource[]; failed: { id: string; error: string }[] }> => {
+      if (!vcMode) return loadCloneSources(ids, partnerId);
+      const res = await fetchVcSources(ids);
+      if (res.sources.length === 0 && res.failed.length > 0) {
+        throw new Error(
+          `Couldn't read ${res.failed.length === 1 ? "the campaign" : `${res.failed.length} campaigns`} with this signer: ` +
+            res.failed.map((f) => `#${f.id} — ${f.error}`).join(" · "),
+        );
+      }
+      return { sources: res.sources.map(vcBoardSource), failed: res.failed };
+    },
+    [vcMode, partnerId],
+  );
 
   /** (Re)load real sources for a set of ids from Facebook. Used by the Retry button — an event
    *  handler, so the synchronous loading/error flips are fine here. */
@@ -562,7 +734,7 @@ function CloneInner({
       setLoading(true);
       setError(null);
       const ddmm = todayDDMM();
-      loadCloneSources(ids, partnerId)
+      readSources(ids)
         .then(({ sources, failed }) => {
           setRows(sources.map((s) => avSnap(seedRow(s, ddmm, `r${nextRowId.current++}`, me))));
           setLoadWarn(partialWarn(failed));
@@ -574,7 +746,7 @@ function CloneInner({
         })
         .finally(() => setLoading(false));
     },
-    [partnerId, me, avSnap],
+    [readSources, me, avSnap],
   );
 
   /** Load local mock sources for the "Load sample" button — no Facebook call. */
@@ -612,7 +784,7 @@ function CloneInner({
     initialLoadRef.current = true;
     let alive = true;
     const ddmm = todayDDMM();
-    loadCloneSources(initialIds, partnerId)
+    readSources(initialIds)
       .then(({ sources, failed }) => {
         if (!alive) return;
         setRows(sources.map((s) => avSnap(seedRow(s, ddmm, `r${nextRowId.current++}`, me))));
@@ -633,6 +805,97 @@ function CloneInner({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signerReady, signers.loaded]);
 
+  // ---- VC: the list of ACTIVE campaigns the batch is ticked out of -----------------------------
+  /** (Re)read the list — an event handler (the picker's Reload), so the synchronous flips are fine. */
+  const loadVcList = useCallback(() => {
+    setVcListLoading(true);
+    setVcListError(null);
+    fetchVcSources()
+      .then((list) => setVcList(list))
+      .catch((e) => {
+        setVcList(null);
+        setVcListError(e instanceof Error ? e.message : "Failed to load VC campaigns");
+      })
+      .finally(() => setVcListLoading(false));
+  }, []);
+  // The first read: ONCE, as soon as the reading token is known, on a board opened WITHOUT ids (a deep
+  // link shows its own rows and reads the list on demand — one Graph read per cabinet is not free).
+  // Async-only, like the initial load above: every setState lives in a callback.
+  const vcListAutoRef = useRef(false);
+  useEffect(() => {
+    if (!vcMode || initialIds.length > 0 || vcListAutoRef.current) return;
+    if (!signerReady) {
+      if (signers.loaded) {
+        vcListAutoRef.current = true;
+        Promise.resolve().then(() =>
+          setVcListError(railSigner?.error || "no_token — no token is assigned to VC · Clones or VC · Launches; an owner assigns one under FB tokens"),
+        );
+      }
+      return;
+    }
+    vcListAutoRef.current = true;
+    Promise.resolve().then(loadVcList);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vcMode, signerReady, signers.loaded]);
+  // The remembered Optimization (per browser). Safe setState-in-effect: runs once on mount
+  // (localStorage is unreadable during SSR) — the same pattern as the channel pick above.
+  useEffect(() => {
+    if (!vcMode) return;
+    try {
+      const v = localStorage.getItem(VC_EVENT_LS);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      if (isVcCloneEvent(v)) setVcEvent(v);
+    } catch {
+      /* storage disabled — session-local pick only */
+    }
+  }, [vcMode]);
+  const changeVcEvent = (ev: VcCloneEvent) => {
+    setVcEvent(ev);
+    setPreviewed(false);
+    try {
+      localStorage.setItem(VC_EVENT_LS, ev);
+    } catch {
+      /* storage disabled */
+    }
+  };
+  /** Tick: the ticked campaigns become rows (a campaign already in the batch is left as the buyer has it). */
+  const addVcSources = (srcs: VcCloneSource[]) => {
+    const ddmm = todayDDMM();
+    const have = new Set(rows.map((r) => r.source.campaignId));
+    const fresh = srcs
+      .filter((s) => !have.has(s.campaignId))
+      .map((s) => avSnap(seedRow(vcBoardSource(s), ddmm, `r${nextRowId.current++}`, me)));
+    if (fresh.length === 0) return;
+    setRows((rs) => {
+      const now = new Set(rs.map((r) => r.source.campaignId));
+      return [...rs, ...fresh.filter((r) => !now.has(r.source.campaignId))];
+    });
+    setError(null);
+    setPreviewed(false);
+  };
+  /** Untick: the campaigns leave the batch. */
+  const removeVcSources = (ids: string[]) => {
+    const gone = new Set(ids);
+    setRows((rs) => rs.filter((r) => !gone.has(r.source.campaignId)));
+    setPreviewed(false);
+  };
+
+  // ---- Autofill (VC, owner ask 17.11 — the HS board's batch form on this board's rows) ---------
+  const applyAutofill = (patch: HsAutofillPatch) => {
+    const res = cloneAutofillRows(rows, patch, MAX_CLONE_COPIES);
+    setRows(res.rows);
+    setAutofillDone({ before: rows, note: autofillNote(patch), changed: res.changed });
+    setAutofillOpen(false);
+    setPreviewed(false); // the batch changed — re-preview before firing
+  };
+  const undoLastAutofill = () => {
+    if (!autofillDone) return;
+    const { before } = autofillDone;
+    setRows((rs) => undoCloneAutofill(rs, before));
+    setAutofillDone(null);
+    setPreviewed(false);
+  };
+
   const patchRow = (id: string, patch: Partial<CloneRow>) => {
     setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
     setPreviewed(false);
@@ -640,8 +903,8 @@ function CloneInner({
   /** The pixel a fresh account pick brings along (the Settings rule): the target's preferred
    *  pixel — AIF: the value pixel — when the cabinet carries it; none in source mode. */
   const autoPixelFor = (accountId: string): string =>
-    avMode
-      ? "" // AV binds no pixel — every account pick stays pixel-less
+    avMode || vcMode
+      ? "" // AV binds no pixel — every account pick stays pixel-less; VC's empty pixel = the Optimization's own
       : accountId && accountId !== SOURCE_ACCOUNT
         ? aifMode
           ? (pickAifPixel(pixelOptionsOf(adAccounts, accountId))?.id ?? "")
@@ -681,7 +944,7 @@ function CloneInner({
    *  (the source is reused by id), so the hand-off is instant and the tab can be closed right after.
    *  Each clone carries ITS row's destination (own or the batch defaults). */
   const duplicate = () => {
-    if (destinationMissing || acctBlocked || fankaOver || bidMissingCount > 0 || signerMissing || limits.reloadRequired || avKeysUnregistered)
+    if (destinationMissing || acctBlocked || fankaOver || bidMissingCount > 0 || signerMissing || limits.reloadRequired || avKeysUnregistered || vcBlocked)
       return; // the button is disabled too — belt and suspenders
     let queued = 0;
     for (const r of rows) {
@@ -690,6 +953,28 @@ function CloneInner({
       const stale = pixelStaleFor(d);
       const total = copiesOf(r);
       for (let k = 1; k <= total; k++) {
+        const vcSrc = r.source.vc;
+        if (vcMode) {
+          // VC: the row ships as a VC edit (lib/vc-clone vcRowEdit — only what the buyer changed rides as
+          // an override; the cabinet is always named, so the queue meters the launch limit by where the
+          // clone is really built). On TOOL the mark sits after the clone prefix, exactly as elsewhere.
+          if (!vcSrc) continue;
+          const vcBase = fullCloneName(r);
+          const vcFull = onTool ? toolEnsureMark(vcBase) : vcBase;
+          const vcName = total > 1 ? `${vcFull} (${k})` : vcFull;
+          const vcEdit = vcRowEdit(vcSrc, vcPickOf(r, d, vcName));
+          enqueueClone({
+            partnerId,
+            edit: vcEdit,
+            name: vcName,
+            geo: geoSummary(r.countries),
+            budget: r.budget,
+            bid: bidTag(vcEdit.bidStrategy, vcEdit.bidCap) || undefined,
+            ...(onTool ? { via: "tool" as const } : {}),
+          });
+          queued++;
+          continue;
+        }
         // Name marker: on TOOL the "GCL TOOL - " marker goes right after the clone prefix (owner
         // ask 28.09; toolEnsureMark, never a SOC mark — TOOL isn't our social signer). Off TOOL,
         // soc-class signers stamp the SOC marker (server re-ensures either way — this keeps the
@@ -813,12 +1098,14 @@ function CloneInner({
               </div>
               <p className="text-center text-[10px] leading-relaxed text-faint">
                 {onTool
-                  ? `Launches through TOOL · ${toolReady.accounts.size} account${toolReady.accounts.size === 1 ? "" : "s"} · marks names “${TOOL_MARK.trim()}”${avMode ? " · the AV token only reads the source" : ""}`
+                  ? `Launches through TOOL · ${toolReady.accounts.size} account${toolReady.accounts.size === 1 ? "" : "s"} · marks names “${TOOL_MARK.trim()}”${avMode ? " · the AV token only reads the source" : vcMode ? " · the VC token only reads the source" : ""}`
                   : channel === "tool" && !toolReady.ready
                     ? toolReady.message || "TOOL not ready — firing on FB Token"
                     : avMode
                       ? "Builds on the AV FB token"
-                      : "Builds on our FB token"}
+                      : vcMode
+                        ? "Builds on the VC token"
+                        : "Builds on our FB token"}
               </p>
             </div>
 
@@ -843,7 +1130,7 @@ function CloneInner({
                     <SearchSelect
                       value={effPageId}
                       onChange={(v) => patchSettings({ pageId: v })}
-                      options={fanpages ?? []}
+                      options={fanpageOptions}
                       placeholder={partner.pagePlaceholder}
                       emptyHint={fanpages ? "No fanpages on the token" : "Loading fanpages…"}
                       metaWhenClosed
@@ -867,6 +1154,12 @@ function CloneInner({
                         {fankaStats.used}/{fankaStats.limit} ads · {fankaStats.free} free
                         {defaultFankaDemand > 0 ? ` · batch adds ${defaultFankaDemand}` : ""}
                       </p>
+                    ) : vcMode ? (
+                      effPageId === SOURCE_PAGE ? (
+                        <p className="px-0.5 text-[10.5px] text-faint">
+                          {settingsPageIsAuto ? "default · " : ""}each clone advertises with its source&apos;s own page — pick a fanpage to move the batch onto it
+                        </p>
+                      ) : null
                     ) : settingsPageIsAuto ? (
                       <p className="px-0.5 text-[10.5px] text-faint">auto · least filled fanka — pick another to override</p>
                     ) : null}
@@ -903,14 +1196,46 @@ function CloneInner({
                         }
                         warn={accountMissing && defaultsUsed}
                       />
-                      {settingsAccountIsAuto ? (
+                      {vcMode ? (
+                        effAccountId === SOURCE_ACCOUNT ? (
+                          <p className="px-0.5 text-[10.5px] text-faint">
+                            {settingsAccountIsAuto ? "default · " : ""}each clone is built in its source&apos;s own cabinet — pick an account to build the batch there
+                          </p>
+                        ) : isTargetAccount ? (
+                          <p className="px-0.5 font-mono text-[10.5px] tabular-nums text-faint">
+                            {limits.countFor(effAccountId)}/{limits.limit} launches in its {windowMinutes(limits)}-min window
+                          </p>
+                        ) : null
+                      ) : settingsAccountIsAuto ? (
                         <p className="px-0.5 font-mono text-[10.5px] tabular-nums text-faint">
                           auto · least loaded · {limits.countFor(effAccountId)}/{limits.limit} launches in its {windowMinutes(limits)}-min window —
                           pick another (or “From each source”) to override
                         </p>
                       ) : null}
                     </div>
-                    {avMode ? (
+                    {vcMode ? (
+                      // VC: the pixel is the batch Optimization's own unless one is picked — and a pick is
+                      // offered only for a concrete account (a pixel belongs to its cabinet's list).
+                      isTargetAccount ? (
+                        <div className="flex flex-col gap-1 px-1.5 py-1">
+                          <span className={`text-[10px] font-medium uppercase tracking-[0.14em] ${pixelMissing && defaultsUsed ? "text-warn" : "text-faint"}`}>
+                            Pixel{pixelMissing && defaultsUsed ? " — re-pick (not on this account)" : ""}
+                          </span>
+                          <SearchSelect
+                            value={effPixelId}
+                            onChange={(v) => patchSettings({ pixelId: v })}
+                            options={targetPixels.map((p) => ({ value: p.id, label: p.name, meta: p.id }))}
+                            placeholder={`Auto · ${vcAutoPixelLabel}`}
+                            emptyHint={adAccounts ? "No pixels on this account" : "Loading pixels…"}
+                            metaWhenClosed
+                            warn={pixelMissing && defaultsUsed}
+                          />
+                          {!effPixelId ? <p className="px-0.5 text-[10.5px] text-faint">auto · {vcAutoPixelLabel} — pick a pixel to override</p> : null}
+                        </div>
+                      ) : (
+                        <LockedRow label="Pixel" value={vcAutoPixelLabel} />
+                      )
+                    ) : avMode ? (
                       // Nothing to pick: the clone follows its SOURCE (avDelivery, since 30.09) — a
                       // Purchase source clones as Purchase on the AV site pixel, a link-click source
                       // as link clicks with no pixel (the run route sets it, a row's pick is ignored).
@@ -950,7 +1275,11 @@ function CloneInner({
                 )}
               </div>
               <p className="px-0.5 text-[10.5px] leading-relaxed text-faint">
-                {avMode
+                {vcMode
+                  ? isTargetAccount
+                    ? "Rows on the defaults are re-built in the picked account: every video / image of the source is moved there first (adds a “Migrating media” step). The ad link stays the source’s. Any row can set its own Destination."
+                    : "Rows on the defaults are created in their source campaign’s own cabinet (its videos / images live there). Pick an account to build the batch elsewhere, a fanpage to change the page; any row can set its own Destination."
+                  : avMode
                   ? accountMissing
                     ? "Pick the destination explicitly: the fanpage and the account. “From each source” keeps every clone in its source campaign’s own account; a concrete account re-builds the whole batch there. AV clones follow their source: Purchase on the AV site pixel, or link clicks. Any row can override these with its own Destination."
                     : isTargetAccount
@@ -964,13 +1293,47 @@ function CloneInner({
               </p>
             </div>
 
-            <Field label="User OS">
-              <Select
-                value={settings.userOs}
-                onChange={(e) => patchSettings({ userOs: e.target.value as CloneSettings["userOs"] })}
-                options={OS_OPTIONS}
-              />
-            </Field>
+            {vcMode ? (
+              <>
+                {/* VC only: what every clone optimizes. "As each source" = a faithful copy (a Lead
+                    source stays Lead on its own pixel, a link-click source stays clicks); Lead / Purchase
+                    re-point the whole batch (the 05.11 ask — Purchase campaigns re-born as Lead). */}
+                <Field
+                  label="Optimization"
+                  hint={
+                    vcEvent === "SOURCE"
+                      ? "Each clone optimizes what its source does, on the source’s own pixel."
+                      : vcEvent === "LEAD"
+                        ? `Every clone becomes a Leads campaign optimizing LEAD on the ${vcPixelName(vcCloneDelivery("LEAD").pixel)}.`
+                        : `Every clone becomes a Sales campaign optimizing PURCHASE on the ${vcPixelName(vcCloneDelivery("PURCHASE").pixel)}.`
+                  }
+                >
+                  <Select
+                    value={vcEvent}
+                    onChange={(e) => changeVcEvent(isVcCloneEvent(e.target.value) ? e.target.value : "SOURCE")}
+                    options={VC_CLONE_EVENTS.map((o) => ({ value: o.value, label: o.label }))}
+                  />
+                </Field>
+                <Field label="User OS">
+                  <Select
+                    value={vcUserOs}
+                    onChange={(e) => {
+                      setVcUserOs(e.target.value === "all" || e.target.value === "android" ? e.target.value : "");
+                      setPreviewed(false);
+                    }}
+                    options={VC_OS_OPTIONS}
+                  />
+                </Field>
+              </>
+            ) : (
+              <Field label="User OS">
+                <Select
+                  value={settings.userOs}
+                  onChange={(e) => patchSettings({ userOs: e.target.value as CloneSettings["userOs"] })}
+                  options={OS_OPTIONS}
+                />
+              </Field>
+            )}
 
             <div className="flex flex-col gap-1.5">
               <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Copies per campaign</span>
@@ -1050,7 +1413,8 @@ function CloneInner({
                     bidMissingCount > 0 ||
                     signerMissing ||
                     limits.reloadRequired ||
-                    avKeysUnregistered
+                    avKeysUnregistered ||
+                    vcBlocked
                   }
                   className={
                     "animate-pop-in flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-launch/50 " +
@@ -1122,6 +1486,15 @@ function CloneInner({
                 </div>
               ) : null}
 
+              {/* VC: rows that cannot be cloned as they stand (the reason is on the row itself). */}
+              {previewed && rows.length > 0 && vcBlocked ? (
+                <div className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11.5px] leading-relaxed text-warn">
+                  Duplicate is locked — <span className="font-semibold">{vcBlockedRows.length}</span> row
+                  {vcBlockedRows.length === 1 ? " can’t" : "s can’t"} be cloned as {vcBlockedRows.length === 1 ? "it stands" : "they stand"} (the amber note on the row says why). Fix
+                  {vcBlockedRows.length === 1 ? " it" : " them"} or remove {vcBlockedRows.length === 1 ? "it" : "them"} from the batch.
+                </div>
+              ) : null}
+
               {previewed && rows.length > 0 && signerMissing ? (
                 <div className="animate-pop-in rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-center text-[11.5px] leading-relaxed text-warn">
                   Duplicate is locked — no clone token is assigned for this partner (an owner
@@ -1176,15 +1549,80 @@ function CloneInner({
 
           {/* ---- Selected campaigns (right) ---- */}
           <section className="flex min-w-0 flex-col gap-4">
+            {/* VC: the batch is ticked out of the live campaigns of the VC cabinets (no stats tool hands
+                VC ids over) — a tick adds a row below, an untick removes it. */}
+            {vcMode ? (
+              <VcSourcePicker
+                list={vcList}
+                loading={vcListLoading}
+                error={vcListError}
+                picked={new Set(rows.map((r) => r.source.campaignId))}
+                onToggle={(src, on) => (on ? addVcSources([src]) : removeVcSources([src.campaignId]))}
+                onAdd={addVcSources}
+                onRemove={removeVcSources}
+                onLoad={loadVcList}
+                owner={Boolean(user?.owner)}
+              />
+            ) : null}
             <SectionHeading
               right={
-                <span className="rounded-md border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[11px] text-dim">
-                  {rows.length}
+                <span className="flex items-center gap-2">
+                  {/* Autofill (VC, owner ask 17.11): one form sets targeting · strategy + bid · budget ·
+                      copies on every row at once — the HS board's batch tool on this board's rows. */}
+                  {vcMode ? (
+                    <button
+                      type="button"
+                      onClick={() => setAutofillOpen(true)}
+                      disabled={rows.length === 0}
+                      title={
+                        rows.length === 0
+                          ? "Tick campaigns first — the autofill sets geo · strategy + bid · budget · copies on every row at once"
+                          : "Set geo · strategy + bid · budget · copies on every row at once"
+                      }
+                      className="flex h-7 items-center gap-1.5 rounded-md border border-accent/40 bg-accent/10 px-2 text-[11.5px] font-semibold text-[#9db8ff] transition-colors hover:border-accent/60 hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    >
+                      <SparklesIcon className="h-3.5 w-3.5" />
+                      Autofill{rows.length > 0 ? ` ${rows.length} row${rows.length === 1 ? "" : "s"}` : ""}
+                    </button>
+                  ) : null}
+                  <span className="rounded-md border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[11px] text-dim">
+                    {rows.length}
+                  </span>
                 </span>
               }
             >
               Selected Campaigns
             </SectionHeading>
+            {vcMode && autofillDone ? (
+              <div
+                role="status"
+                className="animate-pop-in flex flex-wrap items-center gap-2 rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 text-[11.5px] leading-snug text-[#9db8ff]"
+              >
+                <SparklesIcon className="h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 flex-1">
+                  {autofillDone.changed > 0
+                    ? `Autofill set ${autofillDone.note} on ${autofillDone.changed} row${autofillDone.changed === 1 ? "" : "s"}.`
+                    : "Autofill changed nothing — every row already had these values."}
+                </span>
+                <button
+                  type="button"
+                  onClick={undoLastAutofill}
+                  disabled={autofillDone.changed === 0}
+                  className="inline-flex h-6 items-center gap-1 rounded-md border border-accent/40 bg-surface px-2 text-[11px] font-semibold text-[#9db8ff] transition-colors hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                >
+                  <UndoIcon className="h-3 w-3" />
+                  Undo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAutofillDone(null)}
+                  aria-label="Dismiss"
+                  className="inline-flex h-6 w-6 items-center justify-center rounded-md text-faint transition-colors hover:bg-raise hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                >
+                  <XIcon className="h-3 w-3" />
+                </button>
+              </div>
+            ) : null}
 
             {loadWarn && !loading && !error ? (
               <div className="rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-[11.5px] leading-relaxed text-warn">
@@ -1214,14 +1652,28 @@ function CloneInner({
                     <RetryIcon className="h-3.5 w-3.5" />
                     Retry
                   </button>
-                  <button
-                    type="button"
-                    onClick={loadSample}
-                    className="flex items-center gap-2 rounded-lg border border-line bg-surface px-3.5 py-2 text-[12.5px] font-medium text-dim transition-colors hover:border-line2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-                  >
-                    <PlusIcon className="h-3.5 w-3.5" />
-                    Load sample
-                  </button>
+                  {/* The sample rows are MO-shaped mocks — no use on VC, whose rows come off its own list. */}
+                  {vcMode ? null : (
+                    <button
+                      type="button"
+                      onClick={loadSample}
+                      className="flex items-center gap-2 rounded-lg border border-line bg-surface px-3.5 py-2 text-[12.5px] font-medium text-dim transition-colors hover:border-line2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    >
+                      <PlusIcon className="h-3.5 w-3.5" />
+                      Load sample
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : rows.length === 0 && vcMode ? (
+              <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-line2 px-6 py-12 text-center">
+                <TargetIcon className="h-7 w-7 text-faint" />
+                <div>
+                  <p className="text-[14px] font-medium text-ink">Nothing in the batch yet</p>
+                  <p className="mx-auto mt-1 max-w-[460px] text-[12px] text-dim">
+                    Tick campaigns in <span className="text-ink">Active VC campaigns</span> above — each one becomes a row here
+                    with its own destination, targeting, bid, budget and copies.
+                  </p>
                 </div>
               </div>
             ) : rows.length === 0 ? (
@@ -1288,9 +1740,14 @@ function CloneInner({
                         ? `${srcKind === "cap" ? "$" : ""}${r.source.originalRoas}`
                         : "—";
                   const kind = bidKind(r.bidStrategy);
+                  const vcIssue = vcIssues.get(r.id) ?? null;
+                  // VC: the dataset an empty pixel pick resolves to for THIS row (its source's own under
+                  // "as each source"; "" for a click clone, which promotes none).
+                  const vcAutoPixel = vcMode && r.source.vc ? vcCloneDelivery(vcEvent, r.source.vc).pixel : "";
                   return (
                     <div
                       key={r.id}
+                      data-campaign={r.source.campaignId}
                       className="clone-row border-b border-line transition-colors last:border-b-0 hover:bg-raise/25"
                     >
                       <div className="cr-num">
@@ -1322,8 +1779,32 @@ function CloneInner({
                             #{r.source.campaignId}
                           </span>
                           {/* Redirect config rides with the name: HIGH ADX opens the High Offer
-                              modal, the rest is a passive tag. */}
-                          {r.redirectType === "HIGH ADX" ? (
+                              modal, the rest is a passive tag. VC has no redirect — its tags are the
+                              source's own cabinet and what the clone will optimize (the batch
+                              Optimization against this source). */}
+                          {vcMode && r.source.vc ? (
+                            <>
+                              <span
+                                className="inline-flex max-w-full items-center truncate rounded border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[10px] text-faint"
+                                title={`The source's cabinet · act_${r.source.vc.accountId}`}
+                              >
+                                {r.source.vc.accountName || `act_${r.source.vc.accountId}`}
+                              </span>
+                              <span
+                                className={
+                                  "inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[10px] " +
+                                  (vcEvent === "SOURCE" ? "border-line bg-surface2 text-faint" : "border-accent/40 bg-accent/10 text-[#9db8ff]")
+                                }
+                                title={
+                                  vcEvent === "SOURCE"
+                                    ? "The clone optimizes what its source does (Optimization: as each source)"
+                                    : "The batch Optimization re-points this clone"
+                                }
+                              >
+                                {vcEventWord(vcEvent, r.source.vc)}
+                              </span>
+                            </>
+                          ) : r.redirectType === "HIGH ADX" ? (
                             <button
                               type="button"
                               onClick={() => setHighOfferRowId(r.id)}
@@ -1357,6 +1838,14 @@ function CloneInner({
                             <span>{srcBid}</span>
                           </span>
                         </div>
+                        {/* VC: why this row can't be cloned as it stands (the run would refuse it the same
+                            way) — shown on the row, before anything is queued. */}
+                        {vcIssue ? (
+                          <p className="mt-1.5 flex items-start gap-1 text-[11px] leading-snug text-warn" role="alert">
+                            <AlertIcon className="mt-0.5 h-3 w-3 shrink-0" />
+                            <span className="min-w-0 break-words">{vcIssue}</span>
+                          </p>
+                        ) : null}
                       </div>
 
                       {/* geo — the whole block opens the targeting editor (chips are clickable) */}
@@ -1434,7 +1923,7 @@ function CloneInner({
                               size="sm"
                               value={d.pageId}
                               onChange={(v) => patchRowDest(r, { pageId: v })}
-                              options={fanpages ?? []}
+                              options={fanpageOptions}
                               placeholder={partner.pagePlaceholder}
                               emptyHint={fanpages ? "No fanpages on the token" : "Loading fanpages…"}
                               warn={pageMissing}
@@ -1467,7 +1956,31 @@ function CloneInner({
                             </span>
                           )}
                           {partner.accountsFromToken ? (
-                            avMode ? (
+                            vcMode ? (
+                              // VC: a pixel pick only for a concrete account (a pixel belongs to its
+                              // cabinet's list); empty = the batch Optimization's own dataset for this row.
+                              target ? (
+                                <SearchSelect
+                                  size="sm"
+                                  value={d.pixelId}
+                                  onChange={(v) => patchRowDest(r, { pixelId: v })}
+                                  options={targetPixelsFor(d.accountId).map((p) => ({ value: p.id, label: p.name, meta: p.id }))}
+                                  placeholder={vcAutoPixel ? `Pixel · ${vcPixelName(vcAutoPixel)}` : "Pixel · none (clicks)"}
+                                  emptyHint={adAccounts ? "No pixels on this account" : "Loading pixels…"}
+                                  warn={pxMissing}
+                                  accent={Boolean(r.dest?.pixelId)}
+                                  ariaLabel={`Pixel for row ${i + 1}`}
+                                />
+                              ) : (
+                                <span
+                                  className="flex h-8 items-center gap-1.5 truncate rounded-md border border-dashed border-line px-2 font-mono text-[11px] text-faint"
+                                  title="The pixel follows the batch Optimization — pick a concrete account to choose another"
+                                >
+                                  <LockIcon className="h-3 w-3 shrink-0" />
+                                  {vcAutoPixel ? `Pixel · ${vcPixelName(vcAutoPixel)}` : "Pixel · none (clicks)"}
+                                </span>
+                              )
+                            ) : avMode ? (
                               // Nothing to pick per row: the clone follows its SOURCE (avDelivery) —
                               // Purchase on the AV site pixel, or link clicks with no pixel.
                               <span
@@ -1696,6 +2209,7 @@ function CloneInner({
                   {preview.map((p) => {
                     const r = rows.find((x) => x.id === p.rowId);
                     const d = r ? destOf(r) : null;
+                    const vb = r ? vcBindsOf(r) : null;
                     return (
                     <div
                       key={p.key}
@@ -1717,7 +2231,18 @@ function CloneInner({
                             : "bid auto"}
                       </span>
                       <span className="shrink-0 font-mono text-[11px] text-dim">${moneyLabel(p.budget)}/day</span>
-                      {d ? (
+                      {vb ? (
+                        // VC: the real landing place — the cabinet (the source's own or the picked one),
+                        // the page and the pixel the clone optimizes on.
+                        <span
+                          className={"shrink-0 truncate text-[11px] " + (r?.dest ? "text-[#9db8ff]" : "text-faint")}
+                          title={`${accountLabel(vb.accountId)}${vb.cross ? " (media is moved there)" : " (the source's own cabinet)"} · fanpage ${fanpageLabel(vb.pageId)}${vb.pixelId ? ` · pixel ${vcPixelName(vb.pixelId)}` : " · no pixel (clicks)"}`}
+                        >
+                          → {accountLabel(vb.accountId)} · {fanpageLabel(vb.pageId)}
+                          {vb.pixelId ? ` · ${vcPixelName(vb.pixelId)}` : ""}
+                          {r?.dest ? " (own)" : ""}
+                        </span>
+                      ) : d ? (
                         <span
                           className={"shrink-0 truncate text-[11px] " + (r?.dest ? "text-[#9db8ff]" : "text-faint")}
                           title={`${partner.fanpagesFromToken ? `fanpage ${fanpageLabel(d.pageId)} · ` : ""}${accountLabel(d.accountId)}${isTargetFor(d) && d.pixelId ? ` · pixel ${pixelLabel(d.accountId, d.pixelId)}` : ""}`}
@@ -1758,6 +2283,8 @@ function CloneInner({
           partner={partner}
           aifMode={aifMode}
           avMode={avMode}
+          vcMode={vcMode}
+          vcAutoPixelLabel={vcAutoPixelLabel}
           fanpages={fanpages}
           adAccounts={adAccounts}
           limits={limits}
@@ -1775,6 +2302,29 @@ function CloneInner({
             setPreviewed(false);
           }}
           onUseDefaults={() => patchRow(destRow.id, { dest: null, copies: null })}
+        />
+      ) : null}
+      {vcMode && autofillOpen ? (
+        <HsAutofillModal
+          rows={rows.map((r) => ({
+            id: r.id,
+            label: fullCloneName(r),
+            takes: true,
+            countries: r.countries,
+            locales: r.locales,
+            budget: r.budget,
+            bidStrategy: r.bidStrategy,
+            bid: r.roasGoal,
+            copies: r.copies != null ? String(r.copies) : "",
+          }))}
+          // This board's languages are the catalog's NAMES (the Targeting editor's own list).
+          localeOptions={LOCALES.map((l) => ({ value: l, label: l }))}
+          strategyOptions={bidStrategyOptions}
+          geoLocked={null}
+          maxCopies={MAX_CLONE_COPIES}
+          defaultCopies={settings.copies}
+          onClose={() => setAutofillOpen(false)}
+          onApply={applyAutofill}
         />
       ) : null}
     </>

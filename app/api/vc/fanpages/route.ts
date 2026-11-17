@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { FbError } from "@/lib/fb-graph";
-import { vcRail, vcRailEnabled } from "@/lib/vc-launch";
+import { vcCloneRail, vcRail, vcRailEnabled } from "@/lib/vc-launch";
 import { railParam } from "@/lib/mo-soc";
 import { sessionFromCookieHeader } from "@/lib/session";
 
@@ -11,7 +11,8 @@ export const runtime = "nodejs";
  *
  * Fanpages the VC token can advertise with (pages carrying the ADVERTISE task). One cached Graph
  * call, no volume data. The launch route validates the picked id against the same page list. Gated by
- * the proxy + the team. `rail` picks the owner's launch or clone token (/tokens).
+ * the proxy + the team. `rail` picks the owner's launch or clone token (/tokens); the clone rail is the
+ * cloner's own — VC · Clones when one is assigned, else VC · Launches (lib/vc-launch vcCloneRail).
  *
  * Degrades quietly (ok:false, 200) when no token is assigned so the picker just renders empty; real
  * API failures return their mapped status (429 rate-limited / 502 otherwise).
@@ -23,7 +24,8 @@ export async function GET(req: Request) {
   if (!vcRailEnabled()) {
     return NextResponse.json({ ok: false, error: "vc_rail_disabled" }, { status: 404 });
   }
-  const r = await vcRail(railParam(new URL(req.url).searchParams.get("rail")));
+  const which = railParam(new URL(req.url).searchParams.get("rail"));
+  const r = which === "clone" ? await vcCloneRail() : await vcRail(which);
   if (!r.ok) return NextResponse.json({ ok: false, reason: "no_token", error: r.error, pages: [] });
   try {
     const pages = await r.rail.advertisablePages();

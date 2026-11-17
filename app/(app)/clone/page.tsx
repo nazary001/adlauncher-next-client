@@ -5,7 +5,6 @@ import { SESSION_COOKIE, verifySession } from "@/lib/session";
 import { isOwnerSession } from "@/lib/roles";
 import { CloneBoard } from "@/components/clone-board";
 import { HsCloneBoard } from "@/components/hs-clone-board";
-import { VcCloneBoard } from "@/components/vc-clone-board";
 import { type PartnerId, partnerConfig, sanitizePartnerId } from "@/lib/partners";
 
 export const metadata: Metadata = {
@@ -57,11 +56,7 @@ export default async function ClonePage({
         />
       </div>
 
-      {partnerConfig(partner).vcLaunch ? (
-        // VC (05.11): its own board — lists every ACTIVE VC campaign itself (or the linked ids) and clones the
-        // selected ones onto a pixel / event / bid of the buyer's choice, on the VC token or through TOOL.
-        <VcCloneBoard user={{ username: session.username, role: session.role ?? null, owner: isOwnerSession(session) }} initialIds={ids} />
-      ) : partnerConfig(partner).lionLaunch ? (
+      {partnerConfig(partner).lionLaunch ? (
         // HS clones go through LION's duplicate weapon — a different rail entirely (no Graph
         // token, no gcm), so it gets its own board.
         <HsCloneBoard
@@ -71,10 +66,13 @@ export default async function ClonePage({
           initialMode={initialMode}
         />
       ) : (
-        // MO, AIF and AV share the Graph clone board — the partner prop picks the rail (token,
+        // MO, AIF, AV and VC share the Graph clone board — the partner prop picks the rail (token,
         // marker/key registry, pixel policy — AV binds none) end to end. AV only reaches here when
         // NEXT_PUBLIC_AV_ENABLED=1 (sanitizePartnerId drops in-development partners to the team's
-        // default partner otherwise).
+        // default partner otherwise). VC (owner ask 17.11: «сделай его нормальным так как у нас и на
+        // других партнерах со всем функционалом») rides the same board with one thing of its own: it
+        // lists the ACTIVE campaigns of the VC cabinets itself (no stats tool hands VC ids over), and the
+        // ticked ones become the rows; ids in the link arrive as rows straight away.
         <CloneBoard
           user={{ username: session.username, role: session.role ?? null, owner: isOwnerSession(session) }}
           initialIds={ids}

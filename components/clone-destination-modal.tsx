@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { type CloneRowDest, MAX_CLONE_COPIES, SOURCE_ACCOUNT } from "@/lib/clone";
+import { type CloneRowDest, MAX_CLONE_COPIES, SOURCE_ACCOUNT, SOURCE_PAGE } from "@/lib/clone";
 import { AIF_VALUE_PIXEL, type PartnerConfig, aifOfferablePixels, pickAifPixel } from "@/lib/partners";
 import { Field } from "./ui";
 import { SearchSelect } from "./search-select";
@@ -24,6 +24,8 @@ export function CloneDestinationModal({
   partner,
   aifMode,
   avMode,
+  vcMode = false,
+  vcAutoPixelLabel = "",
   fanpages,
   adAccounts,
   limits,
@@ -44,6 +46,11 @@ export function CloneDestinationModal({
   aifMode: boolean;
   /** AV clone board: no pixel anywhere (the AV page has none — Traffic / link clicks). */
   avMode: boolean;
+  /** VC clone board (owner ask 17.11): "From each source" is the default for the fanpage AND the account
+   *  (and stays offered on TOOL — the board knows each source's cabinet and checks it per row); the pixel
+   *  is optional — empty = the batch Optimization's own dataset, named by `vcAutoPixelLabel`. */
+  vcMode?: boolean;
+  vcAutoPixelLabel?: string;
   fanpages: FanpageOption[] | null;
   adAccounts: AdAccountOption[] | null;
   limits: AcctLimits;
@@ -87,25 +94,32 @@ export function CloneDestinationModal({
   // Default binds (owner rule 09-08), same as the batch Settings: an EMPTY fanpage/account pick
   // shows and applies the least-filled fanka / least-loaded account (preferred account first on
   // ties); a real pick — "From each source" included — wins.
-  const autoPageId = partner.fanpagesFromToken
-    ? leastFilledPage(
-        (fanpages ?? []).map((o) => ({ id: o.value, used: o.adCount, limit: o.adLimit, disabled: o.disabled })),
-        partner.pageAdLimit ?? 250,
-      )
-    : "";
+  const autoPageId = vcMode
+    ? SOURCE_PAGE
+    : partner.fanpagesFromToken
+      ? leastFilledPage(
+          (fanpages ?? []).map((o) => ({ id: o.value, used: o.adCount, limit: o.adLimit, disabled: o.disabled })),
+          partner.pageAdLimit ?? 250,
+        )
+      : "";
+  const fanpageOptions = vcMode
+    ? [{ value: SOURCE_PAGE, label: "From each source", adCount: null, adLimit: null }, ...(fanpages ?? [])]
+    : (fanpages ?? []);
   const preferredAcct = partner.defaultAccount?.id ?? "";
-  const autoAccountId = partner.accountsFromToken
-    ? leastLoadedAccount(
-        accountLoads(
-          railAccounts
-            .slice()
-            .sort((a, b) => (a.value === preferredAcct ? -1 : b.value === preferredAcct ? 1 : 0))
-            .map((a) => ({ id: a.value, disabled: a.disabled })),
-          limits,
-        ),
-        limits.limit,
-      )
-    : "";
+  const autoAccountId = vcMode
+    ? SOURCE_ACCOUNT
+    : partner.accountsFromToken
+      ? leastLoadedAccount(
+          accountLoads(
+            railAccounts
+              .slice()
+              .sort((a, b) => (a.value === preferredAcct ? -1 : b.value === preferredAcct ? 1 : 0))
+              .map((a) => ({ id: a.value, disabled: a.disabled })),
+            limits,
+          ),
+          limits.limit,
+        )
+      : "";
   const effPageId = draft.pageId || autoPageId;
   const effAccountId = draft.accountId || autoAccountId;
   const pageIsAuto = Boolean(partner.fanpagesFromToken) && !draft.pageId && Boolean(autoPageId);
@@ -114,19 +128,23 @@ export function CloneDestinationModal({
   // AV's pixel is never picked (the route sets AV_PIXEL for Purchase clones) — it stays empty here and never gates the modal.
   const effPixelId = avMode
     ? ""
-    : draft.pixelId ||
-      (accountIsAuto && isTarget
-        ? aifMode
-          ? (pickAifPixel(pixelOptionsOf(adAccounts, effAccountId))?.id ?? "")
-          : defaultPixelFor(adAccounts, effAccountId, partner.preferredPixel)
-        : "");
+    : vcMode
+      ? draft.pixelId // VC: empty = the batch Optimization's own dataset
+      : draft.pixelId ||
+        (accountIsAuto && isTarget
+          ? aifMode
+            ? (pickAifPixel(pixelOptionsOf(adAccounts, effAccountId))?.id ?? "")
+            : defaultPixelFor(adAccounts, effAccountId, partner.preferredPixel)
+          : "");
   const pixelsAll = isTarget ? pixelOptionsOf(adAccounts, effAccountId) : [];
   const pixels = aifMode ? aifOfferablePixels(pixelsAll) : pixelsAll;
   const fanpageOk = !partner.fanpagesFromToken || Boolean(effPageId);
-  // On the TOOL rail the account must be a concrete TOOL-visible cabinet (never SOURCE_ACCOUNT).
-  const accountOk = !partner.accountsFromToken || (onTool ? toolVisible(effAccountId) : Boolean(effAccountId));
-  // AV never needs a pixel (Traffic / link clicks) — a target account without one is complete.
-  const pixelOk = avMode || !isTarget || Boolean(effPixelId);
+  // On the TOOL rail the account must be a concrete TOOL-visible cabinet (never SOURCE_ACCOUNT) — except
+  // on VC, where "From each source" stays a pick (the board checks each source's cabinet per row).
+  const toolAccountOk = toolVisible(effAccountId) || (vcMode && effAccountId === SOURCE_ACCOUNT);
+  const accountOk = !partner.accountsFromToken || (onTool ? toolAccountOk : Boolean(effAccountId));
+  // AV never needs a pixel (Traffic / link clicks) — a target account without one is complete; VC's is optional.
+  const pixelOk = avMode || vcMode || !isTarget || Boolean(effPixelId);
   const complete = fanpageOk && accountOk && pixelOk;
   const copiesN = Number(copies);
   const copiesOk = copies === "" || (Number.isFinite(copiesN) && copiesN >= 1 && copiesN <= MAX_CLONE_COPIES);
@@ -181,17 +199,21 @@ export function CloneDestinationModal({
               label="Fanpage"
               error={!effPageId ? "required" : undefined}
               hint={
-                pageIsAuto
-                  ? `auto · least filled${fankaLine(effPageId) ? ` (${fankaLine(effPageId)})` : ""} — pick another to override`
-                  : effPageId
-                    ? fankaLine(effPageId) || undefined
+                vcMode
+                  ? effPageId === SOURCE_PAGE
+                    ? "the clone advertises with its source’s own page — pick a fanpage to change it"
                     : undefined
+                  : pageIsAuto
+                    ? `auto · least filled${fankaLine(effPageId) ? ` (${fankaLine(effPageId)})` : ""} — pick another to override`
+                    : effPageId
+                      ? fankaLine(effPageId) || undefined
+                      : undefined
               }
             >
               <SearchSelect
                 value={effPageId}
                 onChange={(v) => setDraft((d) => ({ ...d, pageId: v }))}
-                options={fanpages ?? []}
+                options={fanpageOptions}
                 placeholder={partner.pagePlaceholder}
                 emptyHint={fanpages ? "No fanpages on the token" : "Loading fanpages…"}
                 metaWhenClosed
@@ -205,9 +227,13 @@ export function CloneDestinationModal({
                 label="Account"
                 error={!effAccountId ? "required" : undefined}
                 hint={
-                  accountIsAuto
-                    ? `auto · least loaded (${limits.countFor(effAccountId)}/${limits.limit} launches in its ${windowMinutes(limits)}-min window) — pick another or “From each source” to override`
-                    : undefined
+                  vcMode
+                    ? effAccountId === SOURCE_ACCOUNT
+                      ? "the clone is built in its source’s own cabinet — pick an account to build it elsewhere (its media is moved there)"
+                      : undefined
+                    : accountIsAuto
+                      ? `auto · least loaded (${limits.countFor(effAccountId)}/${limits.limit} launches in its ${windowMinutes(limits)}-min window) — pick another or “From each source” to override`
+                      : undefined
                 }
               >
                 <SearchSelect
@@ -220,7 +246,7 @@ export function CloneDestinationModal({
                       // (AIF: the value pixel) when the account carries it; none in source mode.
                       // AV's pixel is never picked (set by the route).
                       pixelId:
-                        !avMode && v && v !== SOURCE_ACCOUNT
+                        !avMode && !vcMode && v && v !== SOURCE_ACCOUNT
                           ? aifMode
                             ? (pickAifPixel(pixelOptionsOf(adAccounts, v))?.id ?? "")
                             : defaultPixelFor(adAccounts, v, partner.preferredPixel)
@@ -229,7 +255,7 @@ export function CloneDestinationModal({
                   }
                   options={
                     onTool
-                      ? decorateAccountOptions(railAccounts, limits)
+                      ? [...(vcMode ? [{ value: SOURCE_ACCOUNT, label: "From each source" }] : []), ...decorateAccountOptions(railAccounts, limits)]
                       : [
                           { value: SOURCE_ACCOUNT, label: "From each source" },
                           ...decorateAccountOptions(adAccounts ?? [], limits),
@@ -243,10 +269,31 @@ export function CloneDestinationModal({
                         : "No accounts on the token"
                       : "Loading accounts…"
                   }
-                  warn={onTool ? !toolVisible(effAccountId) : !effAccountId}
+                  warn={onTool ? !toolAccountOk : !effAccountId}
                 />
               </Field>
-              {avMode ? (
+              {vcMode ? (
+                isTarget ? (
+                  <Field label="Pixel" hint={effPixelId ? undefined : `auto · ${vcAutoPixelLabel} — pick a pixel to override`}>
+                    <SearchSelect
+                      value={effPixelId}
+                      onChange={(v) => setDraft((d) => ({ ...d, pixelId: v }))}
+                      options={pixels.map((p) => ({ value: p.id, label: p.name, meta: p.id }))}
+                      placeholder={`Auto · ${vcAutoPixelLabel}`}
+                      emptyHint={adAccounts ? "No pixels on this account" : "Loading pixels…"}
+                      metaWhenClosed
+                    />
+                  </Field>
+                ) : (
+                  <div className="flex items-center justify-between gap-2 rounded-lg border border-line bg-surface2/40 px-3 py-2">
+                    <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Pixel</span>
+                    <span className="flex items-center gap-1.5 font-mono text-[11.5px] text-ink">
+                      {vcAutoPixelLabel}
+                      <LockIcon className="h-3 w-3 text-faint" />
+                    </span>
+                  </div>
+                )
+              ) : avMode ? (
                 // AV page carries no Meta pixel — the clone optimizes for link clicks.
                 <div className="flex items-center justify-between gap-2 rounded-lg border border-line bg-surface2/40 px-3 py-2">
                   <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-faint">Pixel</span>

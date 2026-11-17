@@ -7,6 +7,7 @@
 
 import { carriesOwnName } from "./own-name.ts";
 import type { PartnerId } from "./partners";
+import type { VcCloneSource } from "./vc-clone";
 
 /** Money/goal text in the board's cash-register spelling ("1,2" | "1.2" | 1.2 → "1,20"); empty or
  *  non-positive input stays "" (no goal). Kept import-free — this module is a leaf for node --test. */
@@ -44,6 +45,9 @@ export type CloneSource = {
   /** META ADX | HIGH ADX | #ADX — HIGH ADX reveals the High Offer config. */
   redirectType: string;
   creatives: CloneCreative[];
+  /** VC only (lib/vc-clone vcBoardSource): the source as the VC rail read it — its own cabinet, page,
+   *  pixel, event and ads. The VC clone is built from these; MO / AIF / AV sources carry none. */
+  vc?: VcCloneSource;
 };
 
 /** Placeholder shape for the High Offer config — finalized in phase 2. */
@@ -147,6 +151,11 @@ export type CloneEdit = {
  *  SENTINEL, not an id: the buyer must consciously pick it (or a concrete account) — an empty
  *  accountId means "not chosen yet" and blocks Duplicate. */
 export const SOURCE_ACCOUNT = "source";
+
+/** The fanpage picker's "advertise with each source's own page" choice — VC only (owner ask 17.11): a VC
+ *  clone keeps its source's page unless the buyer picks another, so there the sentinel is the default. A
+ *  SENTINEL like SOURCE_ACCOUNT, never a page id. */
+export const SOURCE_PAGE = "source";
 
 /** Global settings applied to every clone. The fanpage AND the account are EXPLICIT batch-wide
  *  picks — Duplicate stays locked until both are chosen. Account = SOURCE_ACCOUNT keeps every

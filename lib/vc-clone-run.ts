@@ -1,25 +1,49 @@
-// VC (ValueClick) clone RUN — the server half of the VC clone board (lib/vc-clone holds the pure contract;
+// VC (ValueClick) clone RUN — the server half of the VC cloner (lib/vc-clone holds the pure contract;
 // owner ask 05.11: "сделать клоны всех активных кампаний на этот новый пиксель … через TOOL в нашем
-// адлаунчере, но если уже не получится через него то через этот токен"). Entered through POST
-// /api/clone/run with partnerId "vc" — the queue's fb.clone kind, whose body's partnerId picks the rail —
-// so the VC drawer, the hand-off screen and the server pump are the shared ones.
+// адлаунчере, но если уже не получится через него то через этот токен"; owner ask 17.11: a full cloner like
+// the other partners' — "чтобы можно было акк выбрать"). Entered through POST /api/clone/run with partnerId
+// "vc" — the queue's fb.clone kind, whose body's partnerId picks the rail — so the VC drawer, the hand-off
+// screen and the server pump are the shared ones.
 //
 // Per edit: ONE Graph read of the source tree with the VC token (the clone rail — VC · Clones when assigned,
-// else VC · Launches), the refusals (a bad edit burns nothing: no claim, no write), the account launch slot,
-// then the recreate — campaign → ad set → one creative + ad PER source ad, on the VC token (Graph) or through
-// TOOL (one job on the source's own account-local media; `via:"tool"`). The ad link is the source's as is
-// (the DE Postback tracking link — Meta fills its macros with the clone's own ids). NDJSON per clone / per
-// stage, the shared task rows under partner "vc", exactly the clone route's contract (source / media /
-// campaign / adset / creative / ad; pending TOOL jobs keep the slot and name the job).
+// else VC · Launches), the refusals (a bad edit burns nothing: no claim, no write), the launch slot of the
+// cabinet the clone is BUILT in, then the recreate — campaign → ad set → one creative + ad PER source ad, on
+// the VC token (Graph) or through TOOL (one job; `via:"tool"`). The clone lands in the source's own cabinet,
+// or in another VC cabinet the buyer picked: then every video / image of the source is moved there first
+// (Graph: lib/clone-run migrateMediaToAccount; TOOL: registered from its public url) — BEFORE the campaign
+// exists, so a failed move leaves nothing behind. The page is the source's or the picked one, the targeting
+// the source's with the row's changes on top. The ad link is the source's as is (the DE Postback tracking
+// link — Meta fills its macros with the clone's own ids). NDJSON per clone / per stage, the shared task rows
+// under partner "vc", exactly the clone route's contract (source / media / campaign / adset / creative / ad;
+// pending TOOL jobs keep the slot and name the job).
 
 import { NextResponse } from "next/server";
 import type { Session } from "./session";
 import { bidTag } from "./types";
 import { FbError, withFbBudget, withParentRetry } from "./fb-graph";
 import { type LaunchBinds, adPayload, adsetPayload, campaignPayload } from "./fb-launch";
-import { type SourceMedia, cloneCreativePayload, extractAdMedia, toolCreativeFromSource, toolMediaRefFromSource, toolSourceMediaItem } from "./clone-run";
+import {
+  type SourceMedia,
+  cloneCreativePayload,
+  extractAdMedia,
+  migrateMediaToAccount,
+  toolCreativeFromSource,
+  toolMediaRefFromSource,
+  toolSourceMediaItem,
+} from "./clone-run";
 import { vcCloneRail, vcRailEnabled } from "./vc-launch";
-import { VC_SOURCE_FIELDS, type VcCloneAd, type VcCloneEdit, isVcCloneEdit, vcCloneCampaign, vcCloneRefusal, vcCloneSourceOf, vcPixelName } from "./vc-clone";
+import {
+  VC_SOURCE_FIELDS,
+  type VcCloneAd,
+  type VcCloneEdit,
+  isVcCloneEdit,
+  vcCloneBinds,
+  vcCloneCampaign,
+  vcCloneLocaleIds,
+  vcCloneRefusal,
+  vcCloneSourceOf,
+  vcPixelName,
+} from "./vc-clone";
 import { VC_TOOL_NO_SESSION, vcToolCatalog } from "./vc-tool";
 import { claimAcctSlot, releaseAcctSlot } from "./acct-limit";
 import { ACCOUNT_NOT_ASSIGNED_MSG, accountAllowedFor } from "./acct-assignments";
@@ -35,6 +59,13 @@ const edge = (v: unknown): Json[] => (Array.isArray(rec(v).data) ? (rec(v).data 
 const FB_BUDGET_MS = 240_000;
 const FB_BUDGET_RETRIES = 8;
 const TOOL_DEADLINE_MS = 265_000;
+
+/** One account-local asset of the source — the key two ads that show the same video / image share, so a
+ *  cross-account clone moves it once. "" = nothing account-local (a picture-url image travels as it is). */
+function mediaKey(m: SourceMedia): string {
+  if (m.kind === "video") return typeof m.data.video_id === "string" && m.data.video_id ? `v:${m.data.video_id}` : "";
+  return typeof m.data.image_hash === "string" && m.data.image_hash ? `i:${m.data.image_hash}` : "";
+}
 
 export type VcCloneRunInput = {
   /** The board's edits (lib/vc-clone VcCloneEdit) — one per clone, validated here. */
@@ -97,6 +128,8 @@ export async function runVcClone(session: Session, input: VcCloneRunInput): Prom
           const created: Json = {};
           let toolSubmittedJob: number | null = null;
           let toolDefiniteFail = false;
+          // The cabinet the clone is built in — known once the source is read; until then the edit's own.
+          let buildAccount = String(edit.accountId ?? "").replace(/^act_/, "");
           try {
             send({ idx, stage: "start", name: edit.name });
 
@@ -112,10 +145,22 @@ export async function runVcClone(session: Session, input: VcCloneRunInput): Prom
             if (!(await rail.isTokenAccount(src.accountId))) {
               throw new FbError(`source account act_${src.accountId} is not a VC cabinet of the VC token`, { campaignId: edit.campaignId });
             }
-            // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST.
+            // Fire-time belt over the picker filter: /accounts assignments hold even for a crafted POST —
+            // for the cabinet the source is read from, and (below) for the one the clone is built in.
             if (!(await accountAllowedFor(session, src.accountId))) throw new FbError(ACCOUNT_NOT_ASSIGNED_MSG, { campaignId: edit.campaignId }, 403);
             const refusal = vcCloneRefusal(edit, src);
             if (refusal) throw new FbError(refusal, { campaignId: edit.campaignId });
+
+            // ---- where it lands: the edit's cabinet / page / pixel, the source's own for what it leaves empty ----
+            const dest = vcCloneBinds(edit, src);
+            buildAccount = dest.accountId;
+            if (dest.cross && !(await accountAllowedFor(session, dest.accountId))) throw new FbError(ACCOUNT_NOT_ASSIGNED_MSG, { campaignId: edit.campaignId }, 403);
+            // The token holds every VC cabinet today; through TOOL a cabinet only TOOL sees is fine too (below).
+            const tokenHoldsDest = dest.cross ? await rail.isTokenAccount(dest.accountId) : true;
+            if (!tokenHoldsDest && !viaTool) {
+              throw new FbError(`account_not_allowed — act_${dest.accountId} is not a VC cabinet of the VC token`, { campaignId: edit.campaignId });
+            }
+
             // Every reusable ad of the source (video or static image), aligned with the facts by index.
             const rawAds = edge(tree.ads);
             const ads: { ad: VcCloneAd; media: SourceMedia }[] = [];
@@ -124,74 +169,95 @@ export async function runVcClone(session: Session, input: VcCloneRunInput): Prom
               if (media) ads.push({ ad: src.ads[i], media });
             }
             if (ads.length === 0) throw new FbError("source has no reusable video or image ad", { campaignId: edit.campaignId });
-            // The pixel the clone optimizes on must be shared to the cabinet, or Meta refuses the ad set only
-            // after the campaign exists (an orphan). Checked here, before any claim.
-            const pixels = await rail.accountPixels(src.accountId);
-            if (!pixels.some((p) => p.id === edit.pixelId)) {
+
+            // The pixel the clone optimizes on must be shared to the cabinet it is built in, or Meta refuses the
+            // ad set only after the campaign exists (an orphan). Checked here, before any claim. (A cabinet only
+            // TOOL sees has no pixel list on the token — TOOL checks it at publish.)
+            if (dest.pixelId && tokenHoldsDest) {
+              const pixels = await rail.accountPixels(dest.accountId);
+              if (!pixels.some((p) => p.id === dest.pixelId)) {
+                const where = (dest.cross ? await rail.accountName(dest.accountId).catch(() => "") : src.accountName) || "VC cabinet";
+                throw new FbError(
+                  `pixel_not_on_account — ${vcPixelName(dest.pixelId)} (${dest.pixelId}) is not shared to act_${dest.accountId} (${where}); share it in Business Manager first`,
+                  { campaignId: edit.campaignId },
+                );
+              }
+            }
+            // The page the clone advertises with (the source's own, or the picked one): the token must hold it —
+            // the creative names it. Through TOOL the session's profile is what holds the page, so a page the
+            // token lacks is left to TOOL's own check at publish (same rule as a VC launch through TOOL).
+            const tokenHoldsPage = await rail.isAdvertisablePage(dest.pageId);
+            if (!tokenHoldsPage && !viaTool) {
               throw new FbError(
-                `pixel_not_on_account — ${vcPixelName(edit.pixelId)} (${edit.pixelId}) is not shared to act_${src.accountId} (${src.accountName || "VC cabinet"}); share it in Business Manager first`,
+                `fanpage_not_allowed — the VC token cannot advertise with ${dest.pageId === src.pageId ? "the source's page" : "page"} ${dest.pageId}; pick another fanpage`,
                 { campaignId: edit.campaignId },
               );
             }
-            // The clone advertises with the source's own page — the token must hold it (the creative names it).
-            if (!(await rail.isAdvertisablePage(src.pageId))) {
-              throw new FbError(`fanpage_not_allowed — the VC token cannot advertise with the source's page ${src.pageId}`, { campaignId: edit.campaignId });
-            }
-            const pageName = await rail.advertisablePageName(src.pageId);
+            const pageName = tokenHoldsPage ? await rail.advertisablePageName(dest.pageId) : "";
             const campaign = vcCloneCampaign(edit, src);
+            const localeIds = vcCloneLocaleIds(edit, src).ids;
             const binds: LaunchBinds = {
-              accountId: src.accountId,
-              pageId: src.pageId,
-              // DSA beneficiary/payor: the source's own declaration, else the page's name (fb-launch adsetPayload).
-              pageName: src.dsaBeneficiary || pageName,
-              pixelId: edit.pixelId,
+              accountId: dest.accountId,
+              pageId: dest.pageId,
+              // DSA beneficiary/payor (fb-launch adsetPayload): on the source's own page its own declaration,
+              // else the page's name; on a picked page that page's name (the source's only when it is unknown).
+              pageName: dest.pageId === src.pageId ? src.dsaBeneficiary || pageName : pageName || src.dsaBeneficiary,
+              pixelId: dest.pixelId,
             };
             let toolAcctCurrency = "USD";
             let toolAcctName = "";
             if (viaTool) {
-              // TOOL must see the source's cabinet (one forced re-read on a miss — the 60 s cache may predate a
-              // session an owner just added), and the cabinet must be VC's in TOOL or the token's.
+              // TOOL must see the cabinet the clone is built in (one forced re-read on a miss — the 60 s cache may
+              // predate a session an owner just added), and the cabinet must be VC's in TOOL or the token's.
               let cat = await vcToolCatalog();
-              if (cat.ok && !cat.live.some((a) => a.account_id === src.accountId)) cat = await vcToolCatalog(true);
+              if (cat.ok && !cat.live.some((a) => a.account_id === dest.accountId)) cat = await vcToolCatalog(true);
               if (!cat.ok) throw new FbError(cat.message, { campaignId: edit.campaignId });
-              const live = cat.live.find((a) => a.account_id === src.accountId);
+              const live = cat.live.find((a) => a.account_id === dest.accountId);
               if (!live) {
-                throw new FbError(`tool_account_unavailable — no live TOOL session sees ad account ${src.accountId}; ${VC_TOOL_NO_SESSION}`, { campaignId: edit.campaignId });
+                throw new FbError(`tool_account_unavailable — no live TOOL session sees ad account ${dest.accountId}; ${VC_TOOL_NO_SESSION}`, { campaignId: edit.campaignId });
+              }
+              if (!tokenHoldsDest && !cat.vc.some((a) => a.account_id === dest.accountId)) {
+                throw new FbError(`account_not_vc — ad account ${dest.accountId} is not one of VC's cabinets`, { campaignId: edit.campaignId });
               }
               toolAcctCurrency = live.currency || "USD";
               toolAcctName = live.name;
             }
-            // The name is the server's: a TOOL-born clone carries `GCL TOOL - ` after the (VC) prefix.
+            // The name is the server's: a TOOL-born clone carries `GCL TOOL - ` after the clone prefix.
             const name = viaTool ? toolEnsureMark(edit.name.trim()) : edit.name.trim();
             const adName = (i: number): string => (ads.length > 1 ? `${name} · ${i + 1}` : name);
             /** The ad link stays the source's — the tracking link's macros are filled by Meta per clone. */
             const keep = (l: string): string => l;
 
-            // Account launch slot (5 campaigns / 15 min per cabinet, every channel) — released in the catch on
-            // any pre-campaign failure.
-            acctSlot = await claimAcctSlot(src.accountId, {
+            // Launch slot of the cabinet the clone is built in (5 campaigns / 15 min per cabinet, every channel)
+            // — released in the catch on any pre-campaign failure.
+            acctSlot = await claimAcctSlot(dest.accountId, {
               user: session.username,
               partner: "vc",
               channel: viaTool ? "vc-tool-clone" : "vc-clone",
               name,
-              accountName: toolAcctName || src.accountName || (await rail.accountName(src.accountId).catch(() => "")),
+              accountName: toolAcctName || (dest.cross ? "" : src.accountName) || (await rail.accountName(dest.accountId).catch(() => "")),
             });
 
             if (viaTool) {
-              // ---- TOOL recreate: the source's own account-local media (same account), one CampaignRequest ----
+              // ---- TOOL recreate: one CampaignRequest. Same cabinet = the source's own account-local media by
+              //      id; another cabinet (or a picture-url image) = registered there from its public url, each
+              //      distinct asset once.
               const deadlineAt = startedAt + TOOL_DEADLINE_MS;
               const idemKey = taskIds[idx] ?? `vc-clone-${edit.campaignId}-${startedAt.toString(36)}`;
+              const registered = new Map<string, ToolMediaRefOut>();
               const creatives: ToolCreativeInput[] = [];
               for (let i = 0; i < ads.length; i++) {
                 const { media } = ads[i];
-                let ref: ToolMediaRefOut | null = toolMediaRefFromSource(media);
+                const key = mediaKey(media);
+                let ref: ToolMediaRefOut | null = dest.cross ? null : toolMediaRefFromSource(media);
+                if (!ref && key) ref = registered.get(key) ?? null;
                 if (!ref) {
-                  // A picture-URL-only image: register its public url into the cabinet through TOOL.
                   progress("media");
                   const item = await toolSourceMediaItem(media, src.accountId, adName(i), rail.cat.token);
-                  const reg = await runToolMedia(toolDeps, src.accountId, [item], { deadlineAt, idempotencyKey: `${idemKey}:media:${i}`, onStage: () => progress("media") });
+                  const reg = await runToolMedia(toolDeps, dest.accountId, [item], { deadlineAt, idempotencyKey: `${idemKey}:media:${i}`, onStage: () => progress("media") });
                   if (!reg.ok) throw new FbError(reg.error, { campaignId: edit.campaignId });
                   ref = reg.refs[0];
+                  if (key) registered.set(key, ref);
                 }
                 const text = toolCreativeFromSource(media, keep);
                 creatives.push({
@@ -210,7 +276,7 @@ export async function runVcClone(session: Session, input: VcCloneRunInput): Prom
                   name,
                   pageId: binds.pageId,
                   pixelId: binds.pixelId,
-                  localeIds: src.localeIds,
+                  localeIds,
                   creatives,
                   status: "ACTIVE",
                   accountCurrency: toolAcctCurrency,
@@ -219,7 +285,7 @@ export async function runVcClone(session: Session, input: VcCloneRunInput): Prom
               if (!built.ok) throw new FbError(built.error, { campaignId: edit.campaignId });
 
               progress("campaign");
-              const run = await runToolPublish(toolDeps, src.accountId, built.body, {
+              const run = await runToolPublish(toolDeps, dest.accountId, built.body, {
                 idempotencyKey: idemKey,
                 deadlineAt,
                 onSubmitted: (jobId) => {
@@ -246,7 +312,7 @@ export async function runVcClone(session: Session, input: VcCloneRunInput): Prom
                     ...(created.campaign_id ? { campaign_id: created.campaign_id } : {}),
                     ...(run.jobId ? { link: String(run.jobId) } : {}),
                   });
-                  send({ idx, ok: false, stage: "ad", pending: true, via: "tool", tool_job_id: run.jobId ?? null, account: src.accountId, error: run.error, ...created });
+                  send({ idx, ok: false, stage: "ad", pending: true, via: "tool", tool_job_id: run.jobId ?? null, account: dest.accountId, error: run.error, ...created });
                   continue;
                 }
                 if (run.created?.campaignId) created.campaign_id = run.created.campaignId;
@@ -262,20 +328,51 @@ export async function runVcClone(session: Session, input: VcCloneRunInput): Prom
               created.tool_job_id = run.jobId;
             } else {
               // ---- Graph recreate on the VC token ----
+              // Another cabinet: the source's videos / images are account-local, so each distinct one is moved
+              // into the build cabinet first (video: its CDN source url → advideos file_url → its own thumbnail;
+              // image: adimages copy_from) — all at once (a video takes minutes to process), and BEFORE the
+              // campaign exists, so a failed move leaves no orphan and the row can simply be retried.
+              if (dest.cross) {
+                progress("media");
+                const moved = new Map<string, Promise<SourceMedia>>();
+                await Promise.all(
+                  ads.map(async (a, i) => {
+                    const key = mediaKey(a.media);
+                    if (!key) return; // a picture-url image is account-agnostic
+                    let job = moved.get(key);
+                    if (!job) {
+                      job = migrateMediaToAccount(a.media, src.accountId, dest.accountId, adName(i), rail.cat.token);
+                      moved.set(key, job);
+                    }
+                    const next = await job;
+                    // Two ads may share one asset but carry their own copy / link — only the asset ids move.
+                    const data: Json = { ...a.media.data };
+                    if (next.kind === "video") {
+                      data.video_id = next.data.video_id;
+                      data.image_url = next.data.image_url;
+                      delete data.image_hash;
+                    } else {
+                      data.image_hash = next.data.image_hash;
+                    }
+                    a.media = { kind: a.media.kind, data } as SourceMedia;
+                  }),
+                );
+              }
+
               progress("campaign");
-              const camp = await rail.fbPost(`act_${src.accountId}/campaigns`, campaignPayload(campaign, name));
+              const camp = await rail.fbPost(`act_${dest.accountId}/campaigns`, campaignPayload(campaign, name));
               created.campaign_id = String(camp.id);
 
               progress("adset");
               const adset = await withParentRetry(String(camp.id), () =>
-                rail.createAdset(`act_${src.accountId}/adsets`, adsetPayload(campaign, name, String(camp.id), binds, src.localeIds)),
+                rail.createAdset(`act_${dest.accountId}/adsets`, adsetPayload(campaign, name, String(camp.id), binds, localeIds)),
               );
               created.adset_id = String(adset.id);
 
               progress("creative");
               const creativeIds: string[] = [];
               for (let i = 0; i < ads.length; i++) {
-                const cr = await rail.fbPost(`act_${src.accountId}/adcreatives`, cloneCreativePayload(adName(i), binds.pageId, ads[i].media, "", "", keep));
+                const cr = await rail.fbPost(`act_${dest.accountId}/adcreatives`, cloneCreativePayload(adName(i), binds.pageId, ads[i].media, "", "", keep));
                 creativeIds.push(String(cr.id));
               }
               created.creative_id = creativeIds[0];
@@ -283,7 +380,7 @@ export async function runVcClone(session: Session, input: VcCloneRunInput): Prom
               progress("ad");
               const adIds: string[] = [];
               for (let i = 0; i < creativeIds.length; i++) {
-                const ad = await withParentRetry(String(adset.id), () => rail.fbPost(`act_${src.accountId}/ads`, adPayload(adName(i), String(adset.id), creativeIds[i])));
+                const ad = await withParentRetry(String(adset.id), () => rail.fbPost(`act_${dest.accountId}/ads`, adPayload(adName(i), String(adset.id), creativeIds[i])));
                 // Belt over the fbPost error-body guard: never record a phantom "undefined" ad id.
                 if (!ad.id) throw new FbError("ad create returned no id", ad);
                 adIds.push(String(ad.id));
@@ -307,7 +404,17 @@ export async function runVcClone(session: Session, input: VcCloneRunInput): Prom
               gcm: "",
               error: null,
             });
-            send({ idx, ok: true, stage: "done", gcm: "", link, source_campaign_id: edit.campaignId, page_id: binds.pageId, ...created, ...(viaTool ? { via: "tool" } : {}) });
+            send({
+              idx,
+              ok: true,
+              stage: "done",
+              gcm: "",
+              link,
+              source_campaign_id: edit.campaignId,
+              page_id: binds.pageId,
+              ...created,
+              ...(viaTool ? { via: "tool" } : {}),
+            });
           } catch (e) {
             const err = e as FbError;
             // TOOL belt: TOOL accepted the submit but no campaign id is known — the job may still be creating
@@ -317,7 +424,7 @@ export async function runVcClone(session: Session, input: VcCloneRunInput): Prom
               const note = `pending tool job #${toolSubmittedJob} — check Ads Manager sessions → Jobs`;
               settled = true;
               tw.write({ status: "error", stage: "ad", finished_at: Date.now(), error: note, link: String(toolSubmittedJob) });
-              send({ idx, ok: false, stage: "ad", pending: true, via: "tool", tool_job_id: toolSubmittedJob, account: edit.accountId, error: err.message ?? String(e), ...created });
+              send({ idx, ok: false, stage: "ad", pending: true, via: "tool", tool_job_id: toolSubmittedJob, account: buildAccount, error: err.message ?? String(e), ...created });
               continue;
             }
             failed++;

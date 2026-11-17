@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { FbError } from "@/lib/fb-graph";
-import { vcRail, vcRailEnabled } from "@/lib/vc-launch";
+import { vcCloneRail, vcRail, vcRailEnabled } from "@/lib/vc-launch";
 import { railParam } from "@/lib/mo-soc";
 import { filterAccountsFor } from "@/lib/acct-assignments";
 import { sessionFromCookieHeader } from "@/lib/session";
@@ -16,7 +16,9 @@ export const maxDuration = 60;
  * ACTIVE ad accounts the VC token can use, each with its pixel list — feeds the account picker on the
  * VC launcher board (the card warns when VC_PIXEL is not shared to the picked cabinet). The launch
  * route validates the picked account against the same server-cached data. Gated by the proxy + the
- * team. `rail` picks the owner's launch or clone token (/tokens).
+ * team. `rail` picks the owner's launch or clone token (/tokens); the clone rail is the cloner's own —
+ * VC · Clones when one is assigned, else VC · Launches (lib/vc-launch vcCloneRail), the bearer that
+ * reads the sources and builds the clones.
  *
  * Degrades quietly (ok:false, 200) when no token is assigned; real API failures return their mapped
  * status (429 rate-limited / 502 otherwise).
@@ -29,7 +31,8 @@ export async function GET(req: Request) {
   if (!vcRailEnabled()) {
     return NextResponse.json({ ok: false, error: "vc_rail_disabled" }, { status: 404 });
   }
-  const r = await vcRail(railParam(new URL(req.url).searchParams.get("rail")));
+  const which = railParam(new URL(req.url).searchParams.get("rail"));
+  const r = which === "clone" ? await vcCloneRail() : await vcRail(which);
   if (!r.ok) return NextResponse.json({ ok: false, reason: "no_token", error: r.error, accounts: [] });
   try {
     // Owner assignments: a non-owner sees only accounts assigned to them (unassigned = shared).
