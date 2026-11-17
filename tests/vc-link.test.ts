@@ -282,7 +282,7 @@ test("vcLinkSegments: base / quiz slug / the landingpage id tagged / tail", () =
 });
 
 test("VC_READY_LINKS: every ready landingpage is a valid Content Arb link whose id is its own", () => {
-  assert.equal(VC_READY_LINKS.length, 27);
+  assert.equal(VC_READY_LINKS.length, 30);
   const ids = new Set<string>();
   for (const l of VC_READY_LINKS) {
     const d = vcDestination(l.url);
@@ -352,6 +352,40 @@ test("VC_READY_LINKS: the 10.11 quizzes — five niches, each in EN / ES / PT, e
     assert.deepEqual(VC_READY_LINKS.filter((l) => l.niche === niche).map((l) => l.lang), ["EN", "ES", "PT"], niche);
   // every earlier ready landingpage is English
   assert.equal(VC_READY_LINKS.filter((l) => l.lang === "EN").length, 17);
+});
+
+test("VC_READY_LINKS: the 17.11 construction quizzes — three in Portuguese, one niche, each firing Lead, first in the list", () => {
+  const NICHE = "Construction / Roles";
+  // [the link as VC prints it, the quiz's public title]
+  const rows: [string, string][] = [
+    ["https://www.qualitydays.com/coa/se-sua-personalidade-construisse-uma-casa-qual-seria-seu-papel-h9hb0dimrw/", "Se sua personalidade construísse uma casa, qual seria seu papel?"],
+    ["https://www.qualitydays.com/coa/mestre-de-obras-ou-mente-criativa-qual-e-o-seu-perfil-mhe7wact18/", "Mestre de obras ou mente criativa: qual é o seu perfil?"],
+    ["https://www.qualitydays.com/coa/toda-obra-precisa-de-alguem-como-voce-qual-seria-sua-missao-zg4vg4kkzt/", "Toda obra precisa de alguém como você. Qual seria sua missão?"],
+  ];
+  const purchase = { ...makeCampaign("b1"), ...vcDelivery("conversions") };
+  const lead = { ...makeCampaign("b2"), ...vcDelivery("lead") };
+  for (const [url, title] of rows) {
+    const l = vcReadyLinkOf(url);
+    assert.ok(l, url);
+    assert.equal(l.url, url);
+    assert.equal(l.lang, "PT", url);
+    assert.equal(l.niche, NICHE, url);
+    assert.equal(l.title, title, url);
+    // their VC Tracking (read in VC 17.11): S-1 nik pixel + Lead — a Lead card agrees, a Purchase card is told
+    assert.equal(l.event, "LEAD", url);
+    assert.equal(vcReadyMode(l.event), "lead", url);
+    assert.equal(vcReadyEventMismatch({ ...lead, landing: url }), "", url);
+    assert.equal(vcReadyEventMismatch({ ...purchase, landing: url }), "LEAD", url);
+    // the campaign name carries the quiz's own title — its colon, full stop and accents as they are — and a
+    // tail that already holds the title is not doubled
+    assert.equal(vcArticleTitle(url), title);
+    assert.equal(vcServerName("[17/11] (VC) - ", "Tima", url), `[17/11] (VC) - ${title} - Tima`);
+    assert.equal(vcServerName("[17/11] (VC) - ", `${title} - Tima`, url), `[17/11] (VC) - ${title} - Tima`);
+  }
+  // one picker section of its own, Portuguese only, and the newest landingpages open the list
+  assert.deepEqual(VC_READY_LINKS.filter((l) => l.niche === NICHE).map((l) => l.url), rows.map((r) => r[0]));
+  assert.deepEqual(VC_READY_LINKS.slice(0, 3).map((l) => l.id), ["h9hb0dimrw", "mhe7wact18", "zg4vg4kkzt"]);
+  assert.equal(VC_READY_LINKS.filter((l) => l.lang === "PT").length, 8);
 });
 
 test("the shared FB payloads carry the VC pixel + Purchase on conversions and nothing on clicks", () => {

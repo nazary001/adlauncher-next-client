@@ -47,7 +47,8 @@ export const VC_HOSTS: readonly string[] = ["qualitydays.com"];
 // Black Friday landingpages the owner created on 05.11 (ask: «3 последние лендинга которые я создал по
 // black friday, добавь их в наш адлаунчер»), whose Tracking (read in VC 05.11) fires LEAD into the
 // S-1 nik pixel 2126539511577664 instead: `event` tells the two apart — plus the fifteen quizzes of 10.11
-// (five niches × EN / ES / PT, all Lead into the same S-1 nik pixel): `lang` tells those apart. A pick only
+// (five niches × EN / ES / PT, all Lead into the same S-1 nik pixel): `lang` tells those apart — plus the
+// three construction quizzes of 17.11 (Portuguese only, Lead into the same pixel). A pick only
 // fills the card's link field — any other VC Content Arb link can still be pasted. A new landingpage = one row.
 
 export type VcReadyLink = {
@@ -84,6 +85,12 @@ const ready = (
 });
 
 export const VC_READY_LINKS: readonly VcReadyLink[] = [
+  // 17.11 — three construction-team personality quizzes, Portuguese (pt-BR) only (owner: «Создай такие
+  // статьи», then «Добавь в лаунчер эти статьи»). VC Tracking of all three: pixel 2126539511577664
+  // "S-1 nik pixel" + Lead; each answered 200 with its quiz on 17.11.
+  ready("se-sua-personalidade-construisse-uma-casa-qual-seria-seu-papel", "h9hb0dimrw", "Construction / Roles", "Se sua personalidade construísse uma casa, qual seria seu papel?", "LEAD", "PT"),
+  ready("mestre-de-obras-ou-mente-criativa-qual-e-o-seu-perfil", "mhe7wact18", "Construction / Roles", "Mestre de obras ou mente criativa: qual é o seu perfil?", "LEAD", "PT"),
+  ready("toda-obra-precisa-de-alguem-como-voce-qual-seria-sua-missao", "zg4vg4kkzt", "Construction / Roles", "Toda obra precisa de alguém como você. Qual seria sua missão?", "LEAD", "PT"),
   // 10.11 — five personality quizzes, each in English, Spanish (es-US, neutral Latin American) and
   // Portuguese (pt-BR) (owner: «создай новые квизы под нашего партнера VC», then «сделай еще на испанском
   // вариант и на порту», then «добавь нам в лаунчер, чтобы можно было на них запускать»). VC Tracking of all

@@ -35,6 +35,12 @@ Lead mode, like the Black Friday ones), each answered 200 with its own quiz on 1
 public title, so the campaign name carries it in the quiz's language
 (`[10/11] (VC) - ¿Eres más fuego, tierra, aire o agua? - <tail>`).
 
+**17.11 — three more** (owner: «Создай такие статьи», «Добавь в лаунчер эти статьи»): construction-team personality
+quizzes in Brazilian Portuguese (pt-BR) only, niche "Construction / Roles", tagged "PT · Lead" — `h9hb0dimrw`
+*Se sua personalidade construísse uma casa, qual seria seu papel?*, `mhe7wact18` *Mestre de obras ou mente criativa:
+qual é o seu perfil?*, `zg4vg4kkzt` *Toda obra precisa de alguém como você. Qual seria sua missão?*. VC Tracking = S-1
+nik pixel 2126539511577664 + **Lead**, each answered 200 with its own quiz on 17.11. They open the list (30 rows).
+
 ## In the launcher (`lib/vc-link.ts`, `lib/vc-launch.ts`, `app/api/vc/*`)
 
 | | |
