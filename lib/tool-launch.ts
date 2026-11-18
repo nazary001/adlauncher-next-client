@@ -412,6 +412,11 @@ export type ToolBuildInput = {
   /** The TOOL session (FB profile) to build with — the AV card's Profile pick, parsed by
    *  toolSessionPick. Absent (Auto) = TOOL picks one that sees the account. */
   sessionId?: number;
+  /** City targeting (owner ask 18.11), already resolved by lib/city-targeting cityGeoLocations (via
+   *  tool-run.toolInputFromCampaign — this file stays import-free): the ISO-2 list TargetingSpec needs
+   *  + the geo_locations that ride in targeting.raw (they REPLACE the normalized geo, dry_run 18.11),
+   *  or the refusal. Absent = whole countries, as before. */
+  cityGeo?: { countries: string[]; geoLocations: Record<string, unknown> } | { error: string };
 };
 
 export type BuildResult ={ ok: true; body: CampaignRequest; inferred: string[] } | { ok: false; error: string };
@@ -452,6 +457,14 @@ function buildTargeting(input: ToolBuildInput, inferred: string[]): ToolTargetin
       excluded_geo_locations: { countries: ["TW", "SG"] },
     };
     inferred.push("WW");
+  }
+  if (input.cityGeo && "geoLocations" in input.cityGeo) {
+    // Cities (owner ask 18.11): TargetingSpec has no city field — they ride raw.geo_locations
+    // (INFERRED), which replaces the normalized geo whole; `countries` carries the whole countries
+    // (or the stub TOOL's schema requires). buildToolCampaign already refused WW + cities.
+    t.countries = [...input.cityGeo.countries];
+    t.raw = { geo_locations: { ...input.cityGeo.geoLocations } };
+    inferred.push("cities");
   }
 
   const ageMin = special ? 18 : parseInt(input.ageMin || "18", 10) || 18;
@@ -515,6 +528,12 @@ export function buildToolCampaign(input: ToolBuildInput): BuildResult {
   }
   if (input.bid.kind === "cap" && !(input.bid.usd > 0)) {
     return { ok: false, error: "bid_required — a bid/cost cap needs a positive USD amount" };
+  }
+  // City targeting resolved upstream (tool-run) — its refusal (WW + cities, a city outside the Geo, a
+  // garbled pick or radius) stops the launch here, before anything is sent.
+  if (input.cityGeo && "error" in input.cityGeo) return { ok: false, error: input.cityGeo.error };
+  if (input.cityGeo && input.countries.includes("WW")) {
+    return { ok: false, error: "cities_with_worldwide — a city launch names its countries; World cannot mix with cities" };
   }
 
   // CTA — each creative's must map onto TOOL's enum; refuse the first that does not, by its value.

@@ -10,6 +10,10 @@ export type FileItem = {
   cover?: { url: string; name: string };
 };
 
+/** One Meta city (Graph search type=adgeolocation, location_types city): `key` is Meta's stable id,
+ *  `country` its ISO-2, `name` / `region` what the picker shows. */
+export type CityPick = { key: string; name: string; region: string; country: string };
+
 export type Campaign = {
   id: string;
   collapsed: boolean;
@@ -54,6 +58,14 @@ export type Campaign = {
   /** AV cards: the TOOL session (FB profile) the launch runs on — its id as digits; "" / missing =
    *  Auto (TOOL picks a session that sees the account). Owner ask 30.09; only the AV route reads it. */
   toolSession?: string;
+  /** City targeting (owner ask 18.11: «запуски на конкретный город») — Meta cities picked from the
+   *  /api/geo/cities search, each inside one of `countries`. Launches through TOOL ONLY (TOOL takes
+   *  them in targeting.raw.geo_locations — lib/city-targeting); a country with a picked city is
+   *  targeted by its cities, the others stay whole. Missing / [] = whole countries (old drafts). */
+  cities?: CityPick[];
+  /** Radius around every picked city, km as digits ("0" = the city alone) — lib/city-targeting
+   *  CITY_RADII. Missing = DEFAULT_CITY_RADIUS. */
+  cityRadius?: string;
   ageMin: string;
   userOs: string;
   files: FileItem[];
@@ -90,6 +102,8 @@ export function makeCampaign(id: string, namePrefix = "", name = ""): Campaign {
     category: "",
     placement: "FULL",
     platforms: "facebook", // = publisher-platforms DEFAULT_PLATFORM_CHOICE (this file stays import-free)
+    cities: [],
+    cityRadius: "40", // = city-targeting DEFAULT_CITY_RADIUS
     ageMin: "18",
     userOs: "all",
     files: [],
@@ -338,6 +352,9 @@ type ReadyOpts = {
   /** A partner's own whole-card check (VC: the optimization agrees with the event the picked ready
    *  landingpage fires — lib/vc-link vcReadyEventMismatch); false = not ready. */
   fit?: (c: Campaign) => boolean;
+  /** The launch rides TOOL — the only rail that can target cities. Off (the default), a card carrying
+   *  cities is NOT ready: every other rail would silently widen it to the whole country. */
+  citiesAllowed?: boolean;
 };
 
 /** A usable ad destination — http(s) and no whitespace inside. */
@@ -360,9 +377,11 @@ export function isReady(c: Campaign, opts: ReadyOpts = {}): boolean {
     roasPixel = "",
     nameOptional = false,
     fit,
+    citiesAllowed = false,
   } = opts;
   if ((!nameOptional && !c.name.trim()) || c.countries.length === 0) return false;
   if (fit && !fit(c)) return false;
+  if (!citiesAllowed && (c.cities?.length ?? 0) > 0) return false;
   if (profile && !c.profile) return false;
   if (landing && !c.landing) return false;
   if (landing && landingValid && !landingValid(c.landing)) return false;

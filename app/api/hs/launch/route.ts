@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { Campaign } from "@/lib/types";
 import { hsCampaignError, hsCountryCodes, hsCreatePayload, todaySaoPauloDDMM } from "@/lib/hs-launch";
+import { CITIES_NEED_TOOL, hasCities } from "@/lib/city-targeting";
 import { hsPageRefusal, reportPagesUsed } from "@/lib/hs-pages";
 import { sessionFromCookieHeader } from "@/lib/session";
 import { stampHsTaskRow } from "@/lib/task-store";
@@ -46,6 +47,8 @@ export async function POST(req: Request): Promise<NextResponse> {
   const taskId = typeof body.taskId === "string" && /^[\w-]{6,64}$/.test(body.taskId) ? body.taskId : null;
   const c = body.campaign;
   if (!c || typeof c !== "object") return bad("campaign_required");
+  // City targeting rides TOOL only (owner ask 18.11) — this rail would widen the card to whole countries.
+  if (hasCities(c)) return bad(CITIES_NEED_TOOL);
   const creatives = Array.isArray(body.creatives)
     ? (body.creatives as unknown[]).filter((u): u is string => typeof u === "string")
     : [];

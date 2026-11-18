@@ -5,6 +5,7 @@ import { fullName, isLaunchable, moEnsureSocMark, moneyLabel, parseMoney } from 
 import { toolEnsureMark } from "@/lib/tool-launch";
 import { UploadingNotice } from "./upload-guard";
 import { CONVERSION_EVENTS, geoSummary } from "@/lib/catalog";
+import { cityGeoLabel } from "@/lib/city-targeting";
 import { hsFullName, todaySaoPauloDDMM } from "@/lib/hs-launch";
 import { type PartnerConfig, launchReadyOpts, markerPool } from "@/lib/partners";
 import { vcDestination } from "@/lib/vc-link";
@@ -42,6 +43,7 @@ export function LaunchRail({
   hsTokenReady = false,
   onHsChannel,
   tool,
+  citiesAllowed = false,
   graphChannel = "token",
   onGraphChannel,
   signer = null,
@@ -72,6 +74,9 @@ export function LaunchRail({
    *  the disabled-segment tooltip and `accounts.size` the "· N accounts" count (owner ask 28.09).
    *  Undefined = the caller isn't wiring TOOL (TOOL segment renders as not-ready). */
   tool?: ToolReadyState;
+  /** The effective launch rail is TOOL — the only one that targets cities (owner ask 18.11). Off, a
+   *  card carrying cities does not count as ready (the same predicate the card dot and the board use). */
+  citiesAllowed?: boolean;
   /** MO/AIF launch-rail pick: our FB token (direct Graph) vs the TOOL sessions service. Only read
    *  on the graphRail branch; HS uses hsChannel instead. */
   graphChannel?: "token" | "tool";
@@ -107,7 +112,7 @@ export function LaunchRail({
   launching?: boolean;
 }) {
   const total = campaigns.reduce((s, c) => s + parseMoney(c.budget), 0);
-  const opts = launchReadyOpts(partner);
+  const opts = { ...launchReadyOpts(partner), citiesAllowed };
   // Account launch limit (5/15min): a card bound to a full account is not launchable — the SAME
   // predicate the card dot uses, so the bay count, the dots and the launch filter always agree.
   const limits = useAcctLimits();
@@ -238,7 +243,7 @@ export function LaunchRail({
                           ? c.profile.replace("globecoders-", "")
                           : "no profile") +
                         " · " +
-                        geoSummary(c.countries) +
+                        cityGeoLabel(c.countries, c.cities, c.cityRadius, geoSummary(c.countries)) +
                         " · " +
                         eventLabel}
                     </span>

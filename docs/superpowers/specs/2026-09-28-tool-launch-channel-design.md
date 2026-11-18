@@ -198,3 +198,27 @@ or `{ok:false, stage:"error", error, created, tool_job_id?, pending?}`.
   own-Blob fence.
 - **Media** carries no Idempotency-Key on launches (TOOL content-addresses media); clone media uses
   `<taskId>:media`; every campaign create / duplicate carries the task / shot id.
+
+## 6. Addendum 18.11 — city targeting (GLO-01, owner ask «добавим функцию запусков на конкретный город»)
+
+TOOL (openapi v1.0, re-read 18.11) has no city field and no geo search: `TargetingSpec.countries` is
+ISO-2 only (required, minItems 1). Cities ride `targeting.raw.geo_locations` (INFERRED →
+`allow_inferred`). Live `dry_run` 18.11 on GC-HS-VD-C1-BR-447: raw.geo_locations REPLACES the
+normalized geo whole (countries ["BR"] + raw cities → only the cities in the plan; raw
+{countries:["MX"], cities:[Campinas +25 km]} → both), locales survive, `problems: []`.
+
+- **Card** (`components/campaign-card.tsx`, `components/city-picker.tsx`): on the TOOL rail the
+  Targeting block gets **Cities** (search inside the card's Geo) + **City radius** (City only /
+  +17…+80 km, default +40). A country with a picked city runs on its cities only; the card's other
+  countries stay whole; WW never mixes with cities; removing a country drops its cities. Off the TOOL
+  rail a card with cities is held (`isReady` `citiesAllowed`) and the field says "TOOL only".
+- **Rules** `lib/city-targeting.ts` (pure): `cityGeoLocations` builds the raw geo + the stub ISO-2
+  list, refusing WW / a city outside the Geo / a bad radius. `tool-run.toolInputFromCampaign`
+  resolves it into `ToolBuildInput.cityGeo`; `buildToolCampaign` puts it in `raw` (or refuses).
+- **Search** `GET /api/geo/cities?q=&cc=` → Graph `search?type=adgeolocation` (global endpoint, any
+  live token): signer chain AIF → HS → MO → VC → AV launch slots (18.11: the MO env token answers
+  #200 "API access blocked"), refused signers benched (30 min auth / 5 min rate), answers cached 24 h
+  per instance, the client debounces (400 ms, 2+ letters) and memoizes. One request per card country.
+- **Other rails refuse** a card with cities (`cities_need_tool`): LION, HS FB Token, MO / AIF / AV / VC
+  token paths. HS clones through TOOL use `/duplicates`, which takes no targeting — no cities there.
+- **Team flag** `cityTargeting` (`lib/team.ts`): GLO-01 on, GLO-02 off (route need `cities`).

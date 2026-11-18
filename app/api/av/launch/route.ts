@@ -46,6 +46,7 @@ import {
   type ToolNdjsonStage,
 } from "@/lib/tool-launch";
 import { toolDeps, toolInputFromCampaign, toolLaunchReady, toolSessionDirectory } from "@/lib/tool-run";
+import { CITIES_NEED_TOOL, hasCities } from "@/lib/city-targeting";
 import { resolveMoSigner } from "@/lib/mo-soc";
 
 export const runtime = "nodejs";
@@ -185,6 +186,11 @@ export async function POST(req: Request) {
     taskId = typeof j.taskId === "string" && /^[\w-]{6,64}$/.test(j.taskId) ? j.taskId : null;
   } catch (e) {
     return NextResponse.json({ ok: false, stage: "parse", error: String(e) }, { status: 400 });
+  }
+  // City targeting rides TOOL only (owner ask 18.11) — a token-rail launch would silently widen the
+  // card to its whole countries. The client holds such a card too (isReady citiesAllowed); this is the belt.
+  if (!viaTool && hasCities(campaign)) {
+    return NextResponse.json({ ok: false, stage: "config", error: CITIES_NEED_TOOL }, { status: 400 });
   }
   // The card's Platforms pick (owner ask 30.09: "выбирать соц, на который будет залив") — the Meta
   // platforms this launch runs on, on BOTH channels; no pick = Facebook only (the default, owner

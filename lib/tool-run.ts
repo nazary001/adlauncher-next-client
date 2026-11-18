@@ -24,6 +24,7 @@ import {
 } from "./tool-sessions";
 import { type ToolTeamAccount, hasScope, toSession, toTeamAccount } from "./tool-sessions-model";
 import { type Campaign, bidKind, normalizeRoasGoal, parseMoney } from "./types";
+import { cityGeoLocations, cityRadiusKm, cleanCities } from "./city-targeting";
 import { toolSessionsWhere } from "./team";
 import type { ToolBid, ToolBuildInput, ToolCreativeInput, ToolDeps } from "./tool-launch";
 
@@ -212,6 +213,16 @@ export function toolInputFromCampaign(c: Campaign, extras: ToolInputExtras): Too
   } else {
     bid = { kind: "none" };
   }
+  // City targeting (owner ask 18.11) — resolved HERE so lib/tool-launch stays import-free. A card
+  // without cities keeps the countries-only geo; a garbled pick is a refusal, never a silent drop.
+  let cityGeo: ToolBuildInput["cityGeo"];
+  const cities = cleanCities(c.cities);
+  if (cities === null) {
+    cityGeo = { error: "cities_invalid — re-pick the cities on the card" };
+  } else if (cities.length) {
+    const geo = cityGeoLocations(c.countries ?? [], cities, cityRadiusKm(c.cityRadius));
+    cityGeo = geo.ok ? { countries: geo.countries, geoLocations: geo.geoLocations } : { error: geo.error };
+  }
   return {
     name: extras.name,
     objective: c.objective,
@@ -234,5 +245,6 @@ export function toolInputFromCampaign(c: Campaign, extras: ToolInputExtras): Too
     status: extras.status,
     accountCurrency: extras.accountCurrency,
     ...(extras.sessionId ? { sessionId: extras.sessionId } : {}),
+    ...(cityGeo ? { cityGeo } : {}),
   };
 }

@@ -48,6 +48,8 @@ import { AvDestinationField } from "./av-destination-field";
 import type { AvDestinations } from "./use-av-destinations";
 import { type AvDestinationKind, avDestinationKind } from "@/lib/av-link";
 import { MultiSelect } from "./multi-select";
+import { CityPicker } from "./city-picker";
+import { CITY_RADII, DEFAULT_CITY_RADIUS, cityGeoLabel, orphanCities } from "@/lib/city-targeting";
 import { Dropzone } from "./dropzone";
 import {
   BookmarkPlusIcon,
@@ -112,7 +114,7 @@ const VC_READY_OPTIONS: RichOption[] = VC_READY_LINKS.map((l) => ({
 function missingRequirements(
   c: Campaign,
   partner: PartnerConfig,
-  opts: ReturnType<typeof launchReadyOpts>,
+  opts: ReturnType<typeof launchReadyOpts> & { citiesAllowed?: boolean },
   /** The limits when the card's account is at its cap, else null. */
   acctFull: Pick<AcctLimits, "limit" | "windowMs"> | null = null,
 ): string[] {
@@ -120,6 +122,7 @@ function missingRequirements(
   if (acctFull) m.push(`account at its ${acctFull.limit}/${windowMinutes(acctFull)}min launch limit — pick another or wait for the reset`);
   if (!opts.nameOptional && !c.name.trim()) m.push("name");
   if (c.countries.length === 0) m.push("geo");
+  if (!opts.citiesAllowed && (c.cities?.length ?? 0) > 0) m.push("the TOOL rail for the cities (or remove them)");
   if (opts.account && !c.account) m.push("account");
   if (opts.pixel && !c.pixel) m.push("pixel");
   if (opts.page && !c.page) m.push(partner.pageLabel.toLowerCase());
@@ -368,7 +371,17 @@ function CampaignCardBase({
   const pixels = pixelsFor(c.account);
   // Match the Launch bay + launch filter EXACTLY (isLaunchable = isReady + a video creative), so the
   // card dot can't show green "ready" while the rail refuses to launch it for want of a video.
-  const opts = launchReadyOpts(partner);
+  // City targeting launches through TOOL only (owner ask 18.11) — on any other rail a card carrying
+  // cities is held (isReady citiesAllowed), never widened to its whole countries.
+  const toolLaunch = TEAM.cityTargeting && Boolean(toolRail || moToolRail);
+  const opts = { ...launchReadyOpts(partner), citiesAllowed: toolLaunch };
+  // A city never outlives its country: removing BR from Geo (or picking World) drops BR's cities.
+  const cityOrphanKeys = orphanCities(c.cities, c.countries).map((o) => o.key).join(",");
+  useEffect(() => {
+    if (!cityOrphanKeys) return;
+    const drop = new Set(cityOrphanKeys.split(","));
+    onPatch(c.id, { cities: (c.cities ?? []).filter((x) => !drop.has(x.key)) });
+  }, [cityOrphanKeys, onPatch, c.id, c.cities]);
   // Account launch limit (5 campaigns / 15 min, all users & channels): a full account blocks the
   // card exactly like a missing field — dot, tooltip, rail and the launch filter all agree.
   const limits = useAcctLimits();
@@ -618,7 +631,7 @@ function CampaignCardBase({
   }
   // AV / VC click cards keep a stale event on the draft — the summary says what really runs.
   const eventLabel = (avMode || vcMode) && !conversions ? "link clicks" : (CONVERSION_EVENTS.find((e) => e.value === c.conversionEvent)?.label ?? "");
-  const geo = geoSummary(c.countries);
+  const geo = cityGeoLabel(c.countries, c.cities, c.cityRadius, geoSummary(c.countries));
   // AV destination kind (article / redirect path / chat) — for the link-preview caption. Read off
   // the destination's address (lib/av-link avDestinationKind): a chat by its shape alone, a
   // redirect path on a redirect domain or any other subdomain of an AV site, the rest an article.
@@ -1709,6 +1722,39 @@ function CampaignCardBase({
                     placeholder="Search language"
                   />
                 </Field>
+                {toolLaunch || (c.cities?.length ?? 0) > 0 ? (
+                  // City targeting (owner ask 18.11) — TOOL only. Shown on the TOOL rail, or on another
+                  // rail while the card still carries cities (so the buyer sees why it is held and can
+                  // clear them). A country with a picked city runs on its cities; the rest stay whole.
+                  <>
+                    <Field
+                      label="Cities"
+                      className="col-span-12 xl:col-span-9"
+                      hint={(c.cities?.length ?? 0) > 0 ? "their countries run on these cities only" : "TOOL · empty = whole countries"}
+                      error={!toolLaunch ? "TOOL only — switch the rail to TOOL or remove the cities" : undefined}
+                    >
+                      <CityPicker
+                        values={c.cities ?? []}
+                        onChange={(cities) => patch({ cities })}
+                        countries={c.countries}
+                        disabledReason={
+                          c.countries.length === 0
+                            ? "Pick a country in Geo first"
+                            : c.countries.includes("WW")
+                              ? "World can't mix with cities — pick countries"
+                              : null
+                        }
+                      />
+                    </Field>
+                    <Field label="City radius" className="col-span-12 xl:col-span-3">
+                      <Select
+                        value={c.cityRadius || DEFAULT_CITY_RADIUS}
+                        onChange={(e) => patch({ cityRadius: e.target.value })}
+                        options={CITY_RADII as { value: string; label: string }[]}
+                      />
+                    </Field>
+                  </>
+                ) : null}
                 <Field label="Category" className="col-span-6 xl:col-span-3">
                   <Select
                     value={c.category}

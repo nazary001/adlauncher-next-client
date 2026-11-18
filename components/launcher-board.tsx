@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Campaign, FileItem } from "@/lib/types";
 import { bidKind, firstMedia, fullName, isLaunchable, makeCampaign, moEnsureSocMark, todayPrefixDDMM, pinNamePrefix } from "@/lib/types";
 import { geoSummary } from "@/lib/catalog";
+import { cityGeoLabel } from "@/lib/city-targeting";
 import {
   GCM_POOL_MAX,
   type PartnerConfig,
@@ -648,7 +649,8 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
     // AV launches ONLY through TOOL (owner ask 28.09): with no live session ready there is nothing
     // to fire, and it must NEVER fall back to a token rail. Belt over the disabled Launch button.
     if (partner.avLaunch && !avOnTool) return;
-    const opts = launchReadyOpts(partner);
+    // Cities launch through TOOL only (owner ask 18.11): off the TOOL rail a card carrying cities is held.
+    const opts = { ...launchReadyOpts(partner), citiesAllowed: TEAM.cityTargeting && (hsToolActive || graphToolActive) };
     const launchable = campaigns.filter((c) => isLaunchable(c, opts));
     if (launchable.length === 0) return;
 
@@ -716,7 +718,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
           // must read like the campaign the server actually creates.
           name: hsFullName(c, hs.acr, ddmm, channel),
           profile: c.profile,
-          geo: geoSummary(c.countries),
+          geo: cityGeoLabel(c.countries, c.cities, c.cityRadius, geoSummary(c.countries)),
           budget: c.budget,
           channel,
         });
@@ -782,7 +784,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
         ...(graphToolActive || partner.avLaunch ? { via: "tool" as const } : {}),
         // VC has no marker — its drawer row shows the landingpage id instead (the server writes the same).
         gcm: partner.vcLaunch ? (() => { const d = vcDestination(c.landing); return d.ok ? d.lpId : ""; })() : c.gcm,
-        geo: geoSummary(c.countries),
+        geo: cityGeoLabel(c.countries, c.cities, c.cityRadius, geoSummary(c.countries)),
         budget: c.budget,
       });
       noteSent(c.account);
@@ -1261,6 +1263,7 @@ function LauncherInner({ user, initialPartner }: { user?: SessionUser; initialPa
             hsTokenReady={hs.tokenLaunch}
             onHsChannel={changeHsChannel}
             tool={toolReady}
+            citiesAllowed={TEAM.cityTargeting && (hsToolActive || graphToolActive)}
             graphChannel={graphChannel}
             onGraphChannel={changeGraphChannel}
             signer={railSigner}

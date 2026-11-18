@@ -80,6 +80,10 @@ export type TeamConfig = {
    *  persona's personal account and, on a shared key, another partner's cabinets — the name is what
    *  tells the team's HS business accounts apart (the card then intersects with the LION profile). */
   hsToolAccounts: RegExp;
+  /** City targeting on TOOL launches (owner ask 18.11, GLO-01: «добавим функцию запусков на
+   *  конкретный город»): the card's Cities + radius on the TOOL rail and the /api/geo/cities search.
+   *  false — the card offers countries only, as before. */
+  cityTargeting: boolean;
 };
 
 const TEAMS: Record<TeamId, TeamConfig> = {
@@ -108,6 +112,7 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     // every HS account of the first team is "GC-HS-…" (302/302 on glo-01, 28.09); a session carrying
     // ActiveView's GC-AV-LA-* cabinets (av-01, live 28.09) must not light the HS TOOL segment.
     hsToolAccounts: /^GC-HS-/i,
+    cityTargeting: true,
   },
   // The second team (08.10): only the HS partner, through LION — and since 09.11 TOOL — Facebook only. Its fanpages are
   // not in the hs-tools registry, so the fanka gate cannot judge them (probed 08.10: 0 of 10; 13.10,
@@ -139,6 +144,8 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     // TOOL team 3 on 09.11: 51 DRGC-VD-C1-BR-* (the same accounts LION's glo-02 profiles hold) + each
     // GLO-HS-02-n session's persona-named personal account, which this leaves out (personalAccounts).
     hsToolAccounts: /^DRGC-VD-C1-BR-/i,
+    // City targeting was asked for GLO-01 only (18.11).
+    cityTargeting: false,
   },
 };
 
@@ -171,7 +178,9 @@ export type Need =
   | "platform:any"
   | `tool:${OwnerTool}`
   /** The pre-S3 Vercel Blob upload broker — only tabs opened before the S3 release still call it. */
-  | "legacyBlob";
+  | "legacyBlob"
+  /** City targeting on TOOL launches (TeamConfig.cityTargeting, owner ask 18.11). */
+  | "cities";
 
 const GRAPH_PARTNERS: readonly TeamPartner[] = ["in", "us", "av", "vc"];
 
@@ -181,6 +190,7 @@ export function teamHas(need: Need, team: TeamConfig = TEAM): boolean {
   if (need === "fbTokens") return teamHas("graph", team) || team.hsChannels.includes("token");
   if (need === "platform:any") return team.platforms.length > 0;
   if (need === "legacyBlob") return team.id === DEFAULT_TEAM;
+  if (need === "cities") return team.cityTargeting && team.hsChannels.includes("tool");
   const [kind, value] = need.split(":") as [string, string];
   if (kind === "partner") return team.partners.includes(value as TeamPartner);
   // The token / TOOL rails are HS channels first; MO / AIF only ride them where HS has them.
@@ -206,6 +216,8 @@ const API_NEEDS: ReadonlyArray<readonly [string, Need]> = [
   ["/api/hs", "partner:br"],
   ["/api/hs-tasks", "partner:br"],
   ["/api/tool", "channel:tool"],
+  // The card's city search (owner ask 18.11) serves TOOL launches of a team with city targeting only.
+  ["/api/geo", "cities"],
   // The TOOL session console's API (create / update / delete sessions) follows its page /sessions —
   // an owner tool. Launching through TOOL does not need it (09.11: glo-02 got TOOL launches only).
   ["/api/tool-sessions", "tool:sessions"],

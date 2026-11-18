@@ -181,6 +181,9 @@ must be updated in the same commit.
   own (`/fb/api/v1/pages?team=glo-02`, `lib/team.ts` `teamPagesQuery`). Once that list holds the
   team's fanpages (13.10: none of GLO-02's 5): `pagesRegistry: true` and set `HS_PAGES_API_URL` /
   `HS_PAGES_API_KEY`. Not before — the gate hides every page the registry has no OK row for.
+- **City targeting on TOOL launches** (GLO-01 since 18.11) — `cityTargeting: true`; the search signs
+  with the team's own FB tokens (`lib/city-search.ts`), so the Vercel project needs at least one live
+  launch token. Contract: the TOOL channel spec §6.
 
 ## A third team
 

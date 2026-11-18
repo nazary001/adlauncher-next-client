@@ -8,6 +8,7 @@ import {
   hsFullName,
   todaySaoPauloDDMM,
 } from "@/lib/hs-launch";
+import { CITIES_NEED_TOOL, hasCities } from "@/lib/city-targeting";
 import {
   type LaunchBinds,
   adPayload,
@@ -93,6 +94,8 @@ export async function POST(req: Request): Promise<Response> {
   const taskId = typeof body.taskId === "string" && /^[\w-]{6,64}$/.test(body.taskId) ? body.taskId : null;
   const c = body.campaign;
   if (!c || typeof c !== "object") return bad("campaign_required");
+  // City targeting rides TOOL only (owner ask 18.11) — this rail would widen the card to whole countries.
+  if (hasCities(c)) return bad(CITIES_NEED_TOOL);
   const parsed = parseTokenCreatives(body.creatives);
   if ("error" in parsed) return bad(parsed.error);
   const creatives: HsTokenCreative[] = parsed.creatives;

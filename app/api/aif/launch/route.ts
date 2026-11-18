@@ -37,6 +37,7 @@ import {
   type ToolNdjsonStage,
 } from "@/lib/tool-launch";
 import { toolAccountVisible, toolDeps, toolInputFromCampaign, toolLaunchReady } from "@/lib/tool-run";
+import { CITIES_NEED_TOOL, hasCities } from "@/lib/city-targeting";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -162,6 +163,11 @@ export async function POST(req: Request) {
     taskId = typeof j.taskId === "string" && /^[\w-]{6,64}$/.test(j.taskId) ? j.taskId : null;
   } catch (e) {
     return NextResponse.json({ ok: false, stage: "parse", error: String(e) }, { status: 400 });
+  }
+  // City targeting rides TOOL only (owner ask 18.11) — a token-rail launch would silently widen the
+  // card to its whole countries. The client holds such a card too (isReady citiesAllowed); this is the belt.
+  if (!viaTool && hasCities(campaign)) {
+    return NextResponse.json({ ok: false, stage: "config", error: CITIES_NEED_TOOL }, { status: 400 });
   }
 
   const partner = partnerConfig("us" as PartnerId);
