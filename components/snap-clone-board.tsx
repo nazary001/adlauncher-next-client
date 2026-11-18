@@ -1,8 +1,9 @@
 "use client";
 
 // Snapchat CLONE board (/snap/clone?ids=<campaign ids>&keys=<partner keys>) — the Google / TikTok
-// cloner's shape: a sticky Settings column on the left (wave defaults: destination, copies, start
-// paused · summary · Preview → Launch) and the selected SOURCE campaigns on the right, one panel each.
+// cloner's shape: a sticky Settings column on the left (wave defaults: destination, geo — one
+// campaign per country on demand —, copies, start paused · summary · Preview → Launch) and the
+// selected SOURCE campaigns on the right, one panel each (its own countries, if the buyer sets them).
 // Unlike those rails Snapchat has no LION weapon: the board reads every source back from Snapchat
 // (POST /api/snap/sources — campaign, ad squad, ads with creative + media + moderation verdict),
 // drafts the clone from it (snapCloneDraft: same goal / bid / budget / countries / age / devices /
@@ -18,7 +19,7 @@ import { Header } from "./header";
 import { SnapNav } from "./snap-nav";
 import { useSnapCatalog, useSnapKeys, type SnapCatalogAccount } from "./use-snap";
 import { useSnapTaskManager } from "./snap-task-manager";
-import { snapCloneSend, snapCloneSettle, snapCloneTouch, snapCloneTouchRows } from "./snap-clone-core";
+import { snapCloneGeo, snapCloneGeoSets, snapCloneSend, snapCloneSettle, snapCloneShotGeos, snapCloneTouch, snapCloneTouchRows } from "./snap-clone-core";
 import { Select } from "./ui";
 import { SearchSelect } from "./search-select";
 import { MultiSelect } from "./multi-select";
@@ -55,6 +56,7 @@ import {
   snapGoalLabel,
   snapGoalNeedsPixel,
   snapLandingBase,
+  snapLandingGeoHint,
   snapLandingSegments,
   snapNicheFromLanding,
   snapObjectiveLabel,
@@ -95,7 +97,8 @@ const hid = (id: string) => `snc:${id}`;
 
 /** One source campaign: what Snapchat answered about it, the clone drafted from it, and the clone's
  *  editable fields. `card.adAccount` "" = the wave's destination (the source's own account by
- *  default); `card.copies` "" = the wave's copies. */
+ *  default); `card.copies` "" = the wave's copies; `card.geo` = the source's countries until the
+ *  buyer edits them on the row (`geoOwn`) — until then the wave's Geo, when set, replaces them. */
 type CloneRow = {
   id: string;
   /** What was asked: a Snapchat campaign id or a partner key. */
@@ -108,6 +111,8 @@ type CloneRow = {
   card: SnapCard;
   /** The buyer changed the row while its wave was still being accepted (snap-clone-core). */
   touched?: boolean;
+  /** The countries are the row's own pick (the wave's Geo no longer applies to it). */
+  geoOwn?: boolean;
   /** The full field set is open (objective, texts, targeting, landing). */
   more: boolean;
 };
@@ -158,9 +163,18 @@ type RowView = {
   ready: boolean;
   why: string;
   copies: number;
+  /** The countries of every campaign the row fires (copies × countries when split per country). */
+  shotGeos: string[][];
+  /** The campaigns ONE copy stands for (>1 = one campaign per country). */
+  geoSets: number;
+  /** = shotGeos.length: the campaigns (and keys) the row takes. */
+  campaigns: number;
   ads: number;
   keys: string[];
 };
+
+/** A country list for a one-line label — a long one is cut, never a wall of codes. */
+const geoText = (codes: readonly string[], sep = "+"): string => (codes.length > 6 ? `${codes.slice(0, 5).join(sep)} +${codes.length - 5}` : codes.join(sep));
 
 const fmtDay = (iso: string): string => {
   const d = new Date(iso);
@@ -184,6 +198,10 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
   /** Wave destination: "" = every source's OWN account. */
   const [dest, setDest] = useState("");
   const [copies, setCopies] = useState("1");
+  /** Wave Geo: [] = every source's OWN countries. */
+  const [waveGeo, setWaveGeo] = useState<string[]>([]);
+  /** One campaign per country (each with its own key) instead of one campaign for the whole list. */
+  const [perCountry, setPerCountry] = useState(false);
   const [startPaused, setStartPaused] = useState(false);
   const [draftRefs, setDraftRefs] = useState("");
   const [previewed, setPreviewed] = useState(false);
@@ -237,7 +255,7 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
               if (!s) return { ...r, loading: false, failed: "Snapchat answered without this source" };
               if (!s.source) return { ...r, loading: false, failed: undefined, result: s };
               const draft = snapCloneDraft(s.source);
-              return { ...r, loading: false, failed: undefined, result: s, draft, card: cardFromDraft(draft, brandRef.current) };
+              return { ...r, loading: false, failed: undefined, result: s, draft, geoOwn: false, card: cardFromDraft(draft, brandRef.current) };
             }),
           );
         } catch (e) {
@@ -268,6 +286,23 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
     setDest(v);
     setPreviewed(false);
     touchRows((r) => !r.card.adAccount);
+  };
+  /** Wave Geo: every row without its own countries now targets these ([] = back to the sources'). */
+  const changeWaveGeo = (codes: string[]) => {
+    setWaveGeo(codes);
+    setPreviewed(false);
+    touchRows((r) => !r.geoOwn);
+  };
+  /** One campaign per country: re-opens only the rows it changes — those with 2+ countries. */
+  const changePerCountry = (on: boolean) => {
+    setPerCountry(on);
+    setPreviewed(false);
+    touchRows((r) => snapCloneGeoSets(snapCloneGeo(r, waveGeo), true).length > 1);
+  };
+  /** A row's own countries; null = back to the wave's Geo (or the source's, when the wave has none). */
+  const setRowGeo = (id: string, codes: string[] | null) => {
+    setRows((rs) => rs.map((r) => (r.id === id ? snapCloneTouch({ ...r, geoOwn: codes !== null, card: { ...r.card, geo: codes ?? [...(r.draft?.fields.geo ?? r.card.geo)] } }) : r)));
+    setPreviewed(false);
   };
   const settleRows = (ids: Iterable<string>, outcome: (id: string) => { state: "ok" | "error"; msg: string }) => {
     const set = new Set(ids);
@@ -375,7 +410,10 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
     const noPixel = Boolean(needsPixel && account && pix.length === 0);
     const profileId = row.card.profileId || defaults?.profile || "";
     const n = Math.min(SNAP_MAX_COPIES, Math.max(1, Math.round(Number(row.card.copies || copies) || 1)));
-    const eff: SnapCard = { ...row.card, adAccount: acctId, pixel: effPixel, profileId, brandName: row.card.brandName || defaults?.brandName || "", startPaused, copies: String(n) };
+    const geo = snapCloneGeo(row, waveGeo);
+    const sets = snapCloneGeoSets(geo, perCountry);
+    const shotGeos = snapCloneShotGeos(sets, n);
+    const eff: SnapCard = { ...row.card, adAccount: acctId, pixel: effPixel, profileId, brandName: row.card.brandName || defaults?.brandName || "", startPaused, copies: String(n), geo };
     const refusal = src ? snapCardRefusal(eff, { pixelId: effPixel || undefined, profileId }) : null;
     // "unsure" = held: the row's wave got no answer and the server is being asked whether it took it.
     const queued = row.card.state === "ok" || row.card.state === "sending" || row.card.state === "unsure";
@@ -405,8 +443,8 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
                         : row.card.state === "ok"
                           ? "queued — change the destination or any setting to clone it again"
                           : "";
-    const rowKeys = ready ? freeKeys.slice(keyCursor, keyCursor + n) : [];
-    if (ready) keyCursor += n;
+    const rowKeys = ready ? freeKeys.slice(keyCursor, keyCursor + shotGeos.length) : [];
+    if (ready) keyCursor += shotGeos.length;
     views.push({
       row,
       eff,
@@ -421,17 +459,20 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
       ready,
       why,
       copies: n,
+      shotGeos,
+      geoSets: sets.length,
+      campaigns: shotGeos.length,
       ads: snapCardMediaCount(row.card),
       keys: rowKeys,
     });
   }
   const readyViews = views.filter((v) => v.ready);
-  const totalShots = readyViews.reduce((s, v) => s + v.copies, 0);
-  const totalAds = readyViews.reduce((s, v) => s + v.copies * v.ads, 0);
+  const totalShots = readyViews.reduce((s, v) => s + v.campaigns, 0);
+  const totalAds = readyViews.reduce((s, v) => s + v.campaigns * v.ads, 0);
   const overShotCap = totalShots > SNAP_MAX_SHOTS;
   const keysShort = keys !== null && freeKeys.length < totalShots;
   const totalsByCur = new Map<string, number>();
-  for (const v of readyViews) totalsByCur.set(v.currency || "USD", (totalsByCur.get(v.currency || "USD") ?? 0) + parseMoney(v.eff.budget) * v.copies);
+  for (const v of readyViews) totalsByCur.set(v.currency || "USD", (totalsByCur.get(v.currency || "USD") ?? 0) + parseMoney(v.eff.budget) * v.campaigns);
   const fireBlocked = firing || readyViews.length === 0 || catalogLoading || Boolean(catError) || overShotCap || keysShort || keys === null;
 
   const jumpTo = (id: string) => {
@@ -451,7 +492,7 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
     setFireNote(null);
     setFiring(true);
     const ready = views.filter((v) => v.ready);
-    const sig = JSON.stringify(ready.map((v) => [v.row.result?.campaignId, snapCardSignature(v.eff)]));
+    const sig = JSON.stringify(ready.map((v) => [v.row.result?.campaignId, snapCardSignature(v.eff), v.shotGeos]));
     if (!waveRef.current || waveRef.current.sig !== sig) {
       // The same content fired again after a reload re-uses the remembered id — the server's wave
       // claim then makes the re-POST a no-op instead of a second build.
@@ -464,10 +505,11 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
     for (const v of ready) {
       const src = v.row.result?.source;
       if (!src) continue;
-      for (let j = 0; j < v.copies; j++) {
-        shots.push(buildSnapShot(v.eff, { currency: v.currency, desiredKey: v.keys[j], accountName: v.account?.name, clone: { of: src.campaignId, key: v.row.draft?.key } }));
+      // One campaign per entry: each copy — and, split per country, each country — its own key.
+      v.shotGeos.forEach((geo, j) => {
+        shots.push(buildSnapShot({ ...v.eff, geo }, { currency: v.currency, desiredKey: v.keys[j], accountName: v.account?.name, clone: { of: src.campaignId, key: v.row.draft?.key } }));
         shotRow.push(v.row.id);
-      }
+      });
     }
     const sent = new Set(shotRow);
     const sentRows = [...sent];
@@ -482,7 +524,7 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
           id: hid(v.row.id),
           scope: "sn" as const,
           label: v.row.result?.source?.name || `clone of ${v.row.ref}`,
-          sub: `${v.copies} ${v.copies === 1 ? "copy" : "copies"} · ${v.account?.name ?? "—"}`,
+          sub: `${v.geoSets > 1 ? `${v.campaigns} campaigns (one per country)` : `${v.copies} ${v.copies === 1 ? "copy" : "copies"}`} · ${geoText(v.eff.geo)} · ${v.account?.name ?? "—"}`,
           sources: [],
           phase: "sending" as const,
         })),
@@ -584,6 +626,38 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
                     "Empty = each clone stays on its source's ad account and reuses its media as is."
                   )}
                 </p>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <span className={micro}>Geo</span>
+                <MultiSelect id="clgeo-wave" values={waveGeo} onChange={changeWaveGeo} options={COUNTRY_OPTIONS} placeholder="Each source's own countries" chipMode="code" />
+                <div className="flex flex-wrap gap-1">
+                  {SNAP_GEO_PRESETS.map((p) => {
+                    const on = p.codes.length === waveGeo.length && p.codes.every((c) => waveGeo.includes(c));
+                    return (
+                      <button key={p.label} type="button" onClick={() => changeWaveGeo(on ? [] : [...p.codes])} aria-pressed={on} className={"rounded-md border px-2 py-1 text-[11px] font-medium transition-all active:scale-95 " + (on ? "border-[#FFFC00]/50 bg-[#FFFC00]/10 text-[#f3f0a3]" : "border-line bg-surface2 text-dim hover:border-line2 hover:text-ink")}>
+                        {p.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-[10.5px] leading-snug text-faint">
+                  {waveGeo.length ? (
+                    <>
+                      Every clone targets <span className="text-ink">{geoText(waveGeo)}</span> instead of its source&apos;s countries — a panel can set its own.{" "}
+                      <button type="button" onClick={() => changeWaveGeo([])} className="font-semibold text-[#9db8ff] hover:underline">
+                        Use the sources&apos; own countries
+                      </button>
+                    </>
+                  ) : (
+                    "Empty = each clone targets its source's countries."
+                  )}
+                </p>
+                <label className="flex w-fit cursor-pointer items-center gap-2 text-[11.5px] text-dim">
+                  <input type="checkbox" checked={perCountry} onChange={(e) => changePerCountry(e.target.checked)} className="h-3.5 w-3.5 accent-[#FFFC00]" />
+                  One campaign per country
+                </label>
+                <p className="text-[10.5px] leading-snug text-faint">{perCountry ? "BR + MX + CO → three campaigns per copy, each on its own key — results per country." : "Off = all the countries in one campaign."}</p>
               </div>
 
               <div className="flex flex-col gap-1.5">
@@ -701,8 +775,8 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
                   <p className="pb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-faint">Preview</p>
                   {readyViews.map((v) => (
                     <button key={v.row.id} type="button" onClick={() => jumpTo(v.row.id)} className="text-left text-[11.5px] leading-snug text-dim hover:text-ink">
-                      <span className="text-[#f3f0a3]">{v.row.draft?.key || v.row.result?.campaignId.slice(0, 8)}</span> → <span className="text-ink">{v.account?.name}</span> · ×{v.copies} · {v.ads} ad{v.ads === 1 ? "" : "s"} · {snapCurrencySymbol(v.currency || "USD")}
-                      {moneyLabel(v.eff.budget)}/day · {v.eff.geo.join("+")}
+                      <span className="text-[#f3f0a3]">{v.row.draft?.key || v.row.result?.campaignId.slice(0, 8)}</span> → <span className="text-ink">{v.account?.name}</span> · ×{v.campaigns} · {v.ads} ad{v.ads === 1 ? "" : "s"} · {snapCurrencySymbol(v.currency || "USD")}
+                      {moneyLabel(v.eff.budget)}/day · {v.geoSets > 1 ? `${geoText(v.eff.geo, " · ")} — ${v.copies > 1 ? `${v.copies} campaigns` : "one campaign"} each` : geoText(v.eff.geo)}
                       {snapDeviceShort(v.eff.deviceOs) ? ` · ${snapDeviceShort(v.eff.deviceOs)}` : " · all devices"} · keys {v.keys.join(", ")}
                     </button>
                   ))}
@@ -757,7 +831,7 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
                     Paste Snapchat campaign ids or partner keys above — or press <span className="text-ink">Clone</span> on the Keys page or in the Snap tasks drawer.
                   </li>
                   <li>The board reads each source back from Snapchat: ad squad, every ad with its creative, landing and Snap&apos;s review verdict.</li>
-                  <li>Keep the source&apos;s account (its media are reused) or pick another one; set copies, budget, bid — anything else under “All settings”.</li>
+                  <li>Keep the source&apos;s account (its media are reused) or pick another one; change the countries (Geo — for every source at once, or on a panel), copies, budget, bid — anything else under “All settings”.</li>
                   <li>Preview, then Clone — every copy is a new campaign on a new partner key; the server builds them, the tab is safe to close.</li>
                 </ol>
                 <p className="text-faint">
@@ -772,11 +846,13 @@ export function SnapCloneBoard({ user, initialRefs = [] }: { user?: SessionUser;
                   index={i}
                   username={username}
                   dest={dest}
+                  waveGeo={waveGeo.length > 0}
                   accountOptions={accountOptions}
                   profileOptions={profileOptions}
                   catalogLoading={catalogLoading}
                   highlight={highlightId === v.row.id}
                   onPatch={patchCard}
+                  onGeo={setRowGeo}
                   onRow={patchRow}
                   onRemove={removeRow}
                   onRetry={retryRead}
@@ -800,11 +876,13 @@ function CloneRowPanel({
   index,
   username,
   dest,
+  waveGeo,
   accountOptions,
   profileOptions,
   catalogLoading,
   highlight,
   onPatch,
+  onGeo,
   onRow,
   onRemove,
   onRetry,
@@ -815,11 +893,15 @@ function CloneRowPanel({
   index: number;
   username: string;
   dest: string;
+  /** The wave has its own Geo (Settings). */
+  waveGeo: boolean;
   accountOptions: RichOption[];
   profileOptions: RichOption[];
   catalogLoading: boolean;
   highlight: boolean;
   onPatch: (id: string, p: Partial<SnapCard>) => void;
+  /** The row's own countries; null = back to the wave's / the source's. */
+  onGeo: (id: string, codes: string[] | null) => void;
   onRow: (id: string, p: Partial<CloneRow>) => void;
   onRemove: (id: string) => void;
   onRetry: (row: CloneRow) => void;
@@ -841,9 +923,12 @@ function CloneRowPanel({
   const firstKey = v.keys[0] ?? "";
   const segments = landingBase ? snapLandingSegments(landingBase, firstKey) : [];
   const niche = snapNicheFromLanding(card.landingUrl) || "Custom";
-  const namePreview = snapCampaignName({ ddmm: todaySaoPauloDotDDMM(), niche, geoLabel: card.geo.join("+"), key: firstKey || "glo-snp_???", user: username, tail: card.suffix, cloneOf: draft?.mark ?? "" });
-  const geoSet = new Set(card.geo);
-  const presetActive = (codes: string[]) => codes.length === card.geo.length && codes.every((c) => geoSet.has(c));
+  const namePreview = snapCampaignName({ ddmm: todaySaoPauloDotDDMM(), niche, geoLabel: (v.shotGeos[0] ?? eff.geo).join("+"), key: firstKey || "glo-snp_???", user: username, tail: card.suffix, cloneOf: draft?.mark ?? "" });
+  const geoSet = new Set(eff.geo);
+  const presetActive = (codes: string[]) => codes.length === eff.geo.length && codes.every((c) => geoSet.has(c));
+  const geoHint = snapLandingGeoHint(card.landingUrl, eff.geo);
+  const srcGeo = q?.countries ?? [];
+  const geoMoved = !(srcGeo.length === eff.geo.length && srcGeo.every((c) => geoSet.has(c)));
   const direct = snapDirectLanding(card.landingUrl);
   const stateTone = card.state === "error" ? "text-danger" : card.state === "unsure" ? "text-warn" : card.state === "ok" ? "text-launch2" : card.state === "sending" ? "text-[#9db8ff]" : "text-faint";
   const notes = draft?.notes ?? [];
@@ -880,7 +965,9 @@ function CloneRowPanel({
             )}
           </div>
         </div>
-        <span className="hidden shrink-0 rounded-md border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[10px] text-faint sm:inline">×{v.copies}</span>
+        <span className="hidden shrink-0 rounded-md border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[10px] text-faint sm:inline" title={v.geoSets > 1 ? `${v.copies} ${v.copies === 1 ? "copy" : "copies"} × ${v.geoSets} countries = ${v.campaigns} campaigns` : `${v.campaigns} ${v.campaigns === 1 ? "campaign" : "campaigns"}`}>
+          ×{v.campaigns}
+        </span>
         {src ? (
           <button type="button" onClick={() => onRow(row.id, { more: !row.more })} aria-expanded={row.more} title="All settings" className="flex h-8 items-center gap-1 rounded-lg px-2 text-[11px] font-medium text-faint transition-colors hover:bg-raise hover:text-ink">
             <ChevronsIcon className={"h-4 w-4 transition-transform " + (row.more ? "" : "rotate-180")} />
@@ -993,6 +1080,49 @@ function CloneRowPanel({
             </div>
           ) : null}
 
+          {/* ---- the clone's countries: the source's, the wave's Geo, or the row's own ---- */}
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className={micro}>Countries</span>
+              {row.geoOwn ? (
+                <button type="button" onClick={() => onGeo(row.id, null)} className="text-[10px] font-semibold text-[#9db8ff] hover:underline">
+                  {waveGeo ? "use wave's" : "back to source's"}
+                </button>
+              ) : (
+                <span className="text-[10px] text-faint">{waveGeo ? "wave default" : "source's own"}</span>
+              )}
+            </div>
+            <MultiSelect id={`clgeo-${row.id}`} values={eff.geo} onChange={(val) => onGeo(row.id, val)} options={COUNTRY_OPTIONS} placeholder="Countries — Snapchat has no worldwide targeting" chipMode="code" />
+            <div className="flex flex-wrap items-center gap-1">
+              {SNAP_GEO_PRESETS.map((p) => {
+                const on = presetActive(p.codes);
+                return (
+                  <button key={p.label} type="button" onClick={() => onGeo(row.id, [...p.codes])} aria-pressed={on} className={"rounded-md border px-2 py-1 text-[11px] font-medium transition-all active:scale-95 " + (on ? "border-[#FFFC00]/50 bg-[#FFFC00]/10 text-[#f3f0a3]" : "border-line bg-surface2 text-dim hover:border-line2 hover:text-ink")}>
+                    {p.label}
+                  </button>
+                );
+              })}
+              {geoMoved && srcGeo.length ? <span className="ml-1 text-[10px] text-faint">source ran {geoText(srcGeo)}</span> : null}
+            </div>
+            {v.geoSets > 1 ? (
+              <span className="text-[10px] leading-snug text-faint">
+                One campaign per country: {v.geoSets} countries × {v.copies} {v.copies === 1 ? "copy" : "copies"} = {v.campaigns} campaigns, each on its own key.
+              </span>
+            ) : null}
+            {geoHint ? (
+              <p className="text-[10.5px] leading-snug text-warn">
+                {geoHint.note} —{" "}
+                {geoHint.switchTo ? (
+                  <button type="button" onClick={() => patch({ landingUrl: geoHint.switchTo!.url })} className="font-semibold text-[#9db8ff] hover:underline">
+                    use {snapDirectLabel(geoHint.switchTo)}
+                  </button>
+                ) : (
+                  "check the landing under All settings."
+                )}
+              </p>
+            ) : null}
+          </div>
+
           {/* ---- creatives: the source's ads ---- */}
           <section className="flex flex-col gap-2 border-t border-line/60 pt-3">
             <div className="flex flex-wrap items-center gap-2">
@@ -1089,23 +1219,9 @@ function CloneRowPanel({
                 <Counted label="Headline" value={card.headline} onChange={(val) => patch({ headline: val })} max={SNAP_HEADLINE_MAX} placeholder="Drive it home today" />
                 <Counted label="Brand name" value={card.brandName} onChange={(val) => patch({ brandName: val })} max={SNAP_BRAND_MAX} placeholder="GC" />
               </div>
-              <div className="flex flex-col gap-1.5">
-                <span className={micro}>Countries</span>
-                <MultiSelect id={`clgeo-${row.id}`} values={card.geo} onChange={(val) => patch({ geo: val })} options={COUNTRY_OPTIONS} placeholder="Countries — Snapchat has no worldwide targeting" chipMode="code" />
-                <div className="flex flex-wrap gap-1">
-                  {SNAP_GEO_PRESETS.map((p) => {
-                    const on = presetActive(p.codes);
-                    return (
-                      <button key={p.label} type="button" onClick={() => patch({ geo: [...p.codes] })} aria-pressed={on} className={"rounded-md border px-2 py-1 text-[11px] font-medium transition-all active:scale-95 " + (on ? "border-[#FFFC00]/50 bg-[#FFFC00]/10 text-[#f3f0a3]" : "border-line bg-surface2 text-dim hover:border-line2 hover:text-ink")}>
-                        {p.label}
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="flex flex-wrap items-center gap-3 pt-2">
-                  <span className={micro}>Devices</span>
-                  <Seg options={DEVICE_OPTIONS} value={card.deviceOs} onChange={(k) => patch({ deviceOs: k })} />
-                </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <span className={micro}>Devices</span>
+                <Seg options={DEVICE_OPTIONS} value={card.deviceOs} onChange={(k) => patch({ deviceOs: k })} />
               </div>
               <div className="flex flex-col gap-1.5">
                 <span className={micro}>Landing</span>

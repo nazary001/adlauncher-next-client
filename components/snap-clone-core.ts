@@ -56,3 +56,30 @@ export function snapCloneSettle<R extends SnapCloneRowState>(row: R, outcome: { 
   if (outcome.state === "ok" && row.touched) return draft(row);
   return { ...row, touched: false, card: { ...row.card, state: outcome.state, msg: outcome.msg } };
 }
+
+// ---------- geo (owner 18.11: «при клонировании менять гео») ----------
+// A clone targets the source's countries unless the wave's Geo (Settings) or the row itself says
+// otherwise; "one campaign per country" turns each country into its own campaign and key.
+
+/** The countries a clone row targets: the row's own pick (`geoOwn` — the buyer edited them on the
+ *  row), else the wave's Geo, else the source's own (the row's card, drafted from the source). A
+ *  copy — editing it never edits the wave's list. */
+export function snapCloneGeo(row: { geoOwn?: boolean; card: { geo: string[] } }, waveGeo: readonly string[]): string[] {
+  return row.geoOwn || waveGeo.length === 0 ? [...row.card.geo] : [...waveGeo];
+}
+
+/** The campaigns ONE copy of a row stands for: the whole country list as one campaign, or — one
+ *  campaign per country — a campaign for each country (in order, deduped, upper-cased). A single
+ *  country or an empty list stays one set (an empty one is refused by the validator by name). */
+export function snapCloneGeoSets(geo: readonly string[], perCountry: boolean): string[][] {
+  if (!perCountry) return [[...geo]];
+  const codes = [...new Set(geo.map((c) => String(c ?? "").trim().toUpperCase()).filter(Boolean))];
+  return codes.length < 2 ? [[...geo]] : codes.map((c) => [c]);
+}
+
+/** The countries of every campaign a row fires, country by country: copies × sets, each its own
+ *  campaign and partner key (keys are handed out in this order). At least one copy. */
+export function snapCloneShotGeos(sets: readonly string[][], copies: number): string[][] {
+  const n = Math.max(1, Math.round(copies) || 1);
+  return sets.flatMap((s) => Array.from({ length: n }, () => [...s]));
+}

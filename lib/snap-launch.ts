@@ -94,6 +94,32 @@ export function snapDirectLanding(raw: string): SnapDirectLanding | null {
   return b ? (SNAP_DIRECT_LANDINGS.find((l) => l.url === b.base) ?? null) : null;
 }
 
+/** Countries whose people read Portuguese — the PT direct pages are written for them. */
+export const SNAP_PT_COUNTRIES: readonly string[] = ["BR", "PT", "AO", "MZ", "CV", "GW", "ST", "TL"];
+
+/**
+ * A soft word when a Direct page's language does not fit the countries — a clone moved to another
+ * geo keeps its source's landing (owner 18.11, geo in the cloner): the note, and the same niche's
+ * page in the fitting language when EVERY country wants it (null when some still read this one).
+ * Null = fine, no countries, or not a Direct page. Never blocks a launch.
+ */
+export function snapLandingGeoHint(landingUrl: string, geo: readonly string[]): { note: string; switchTo: SnapDirectLanding | null } | null {
+  const d = snapDirectLanding(landingUrl);
+  const codes = [...new Set(geo.map((c) => String(c ?? "").trim().toUpperCase()).filter(Boolean))];
+  if (!d || codes.length === 0) return null;
+  const isPt = (c: string) => SNAP_PT_COUNTRIES.includes(c);
+  const list = (cs: string[]) => (cs.length > 6 ? `${cs.slice(0, 5).join(", ")} +${cs.length - 5} more` : cs.join(", "));
+  const pair = (lang: SnapDirectLanding["lang"]) => SNAP_DIRECT_LANDINGS.find((l) => l.niche === d.niche && l.lang === lang) ?? null;
+  if (d.lang === "PT") {
+    const off = codes.filter((c) => !isPt(c));
+    if (off.length === 0) return null;
+    return { note: `${snapDirectLabel(d)} is a Portuguese page — ${list(off)} ${off.length === 1 ? "does" : "do"} not read Portuguese`, switchTo: off.length === codes.length ? pair("EN") : null };
+  }
+  const pt = codes.filter(isPt);
+  if (pt.length === 0) return null;
+  return { note: `${snapDirectLabel(d)} is an English page — ${list(pt)} read${pt.length === 1 ? "s" : ""} Portuguese`, switchTo: pt.length === codes.length ? pair("PT") : null };
+}
+
 /** Path segments that are the partner's gate/route words, not the niche: `ht`, `htai`, `htd` (the
  *  direct route), `v`, `r`, `captcha-1`, `age-gate`, `quiz…`, a language code (`en`, `pt-br`). */
 const LANDING_GATE_SEG = /^(?:[a-z]{1,2}|htai|htd|[a-z]{2}-[a-z]{2}|\d+|captcha(?:-\w+)?|age-gate|quiz(?:-\w+)?|gate(?:-\w+)?)$/i;

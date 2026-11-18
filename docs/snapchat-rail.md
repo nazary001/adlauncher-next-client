@@ -165,6 +165,29 @@ Storage на оригинал файла. Она отдаёт 200 без авт�
   Ключи раздаются по порядку строк из
   свободных; пока идут сборки, реестр перечитывается каждые 10 с.
 
+### 1.5 Гео клона (с 18.11)
+
+Владелец 18.11: «в наш клонер по snapchat добавим возможность при клонировании менять гео».
+
+- **Geo в Settings** (на всю волну): страны или пресет (US / Anglo / LATAM / Franco / EU). Пусто —
+  каждый клон идёт на страны своего источника. Заданное Geo заменяет страны источника у каждой
+  строки, где их не меняли руками.
+- **Countries в панели строки** (видно сразу, не под «All settings»): подпись «source's own» /
+  «wave default»; правка в строке делает страны своими (`geoOwn`), Geo волны на неё больше не
+  влияет; «use wave's» / «back to source's» возвращает. Рядом «source ran …», если страны клона
+  отличаются от источника.
+- **One campaign per country** (Settings): каждая страна — отдельная кампания на своём ключе, то
+  есть кампаний = копии × страны (BR + MX + CO при 1 копии → 3 кампании). Имя кампании получает
+  свою страну (`… - BR - glo-snp_…`), ad squad таргетит только её. Лимит волны тот же
+  (`SNAP_MAX_SHOTS`), ключи и бюджет «Total/day» считаются по кампаниям.
+- **Язык Direct-страницы** (`snapLandingGeoHint`, мягкая подсказка, запуск не блокирует): PT-страница
+  на странах, которые не читают по-португальски (`SNAP_PT_COUNTRIES`), или EN-страница на BR / PT.
+  Если вся гео хочет другой язык — кнопка «use <ниша> · PT/EN» меняет лендинг на пару той же ниши.
+- Правила строки (`snapCloneGeo`, `snapCloneGeoSets`, `snapCloneShotGeos`) —
+  `components/snap-clone-core.ts`, тест `tests/snap-clone-geo.test.ts`. Смена Geo волны открывает
+  заново только строки без своих стран; переключатель «по стране» — только строки с 2+ странами.
+  Сервер не менялся: гео и имя каждой кампании он берёт из её шота.
+
 ---
 
 ## 2. Бизнес-схема: кто что даёт
@@ -248,7 +271,7 @@ Storage на оригинал файла. Она отдаёт 200 без авт�
 | `components/use-snap.ts` | Хуки `useSnapCatalog()` (`GET /api/snap/accounts`) и `useSnapKeys()` (`GET /api/snap/keys`) поверх `useOneShot`. |
 | `components/snap-nav.tsx` | Под-навигация: **Launch** (`/snap`), **Clone** (`/snap/clone`) и **Keys · report** (`/snap/keys`). |
 | `app/(app)/snap/clone/page.tsx` | Страница клонера: гейты как у `/snap`, `ids` / `keys` из URL → `snapCloneRefs` → `SnapCloneBoard`. |
-| `components/snap-clone-board.tsx` | Доска клонера (§1): Settings (destination, copies, start paused, итоги, Preview → Clone) + панели источников (факты, заметки, поля клона, креативы-плитки с вердиктом модерации, одно превью-видео на доску). |
+| `components/snap-clone-board.tsx` | Доска клонера (§1): Settings (destination, geo + «кампания на страну», copies, start paused, итоги, Preview → Clone) + панели источников (факты, заметки, поля клона, страны, креативы-плитки с вердиктом модерации, одно превью-видео на доску). |
 | `components/snap-task-manager.tsx` | Провайдер, кнопка «Snap tasks» в шапке и дровер задач. Показывает строки `partner="sn"` из Strapi. |
 | `components/snap-keys-board.tsx` | Таблица ключей: реестр + доход LION + расход Snapchat, выбор дат, Release (только owner). |
 | `components/header.tsx`, `app/(app)/layout.tsx` | Вкладка Snapchat (жёлтая), заблокированный переключатель партнёра; `SnapTaskManagerProvider` смонтирован один раз в общем shell. |
