@@ -664,8 +664,19 @@ test("the shipped registry of redirect paths: the dating path of thecadrion.com,
     ["dating.thecadrion.com/dating-us-en-v1"],
   );
   assert.deepEqual(avKnownRedirects(["thecadrion.com"]), [
-    { host: "dating.thecadrion.com", path: "/dating-us-en-v1", name: "Dating chats · Morgan / Emily 50/50 (lp2)", extra: DATING_TAIL, base: DATING },
+    { host: "dating.thecadrion.com", path: "/dating-us-en-v1", name: "Dating chats · Morgan / Emily 50/50 (lp2)", extra: DATING_TAIL, isNew: true, base: DATING },
   ]);
+  // the NEW mark (owner 24.11: «Пометь его … что это типо - НОВОЕ») rides with the entry only when it is set
+  const marks = [
+    { host: "dating.thecadrion.com", path: "/a", name: "a", extra: "x=1", isNew: true },
+    { host: "dating.thecadrion.com", path: "/b", name: "b", extra: "x=1", isNew: false },
+    { host: "dating.thecadrion.com", path: "/c", name: "c", extra: "x=1" },
+  ];
+  assert.deepEqual(
+    avKnownRedirects(["thecadrion.com"], marks).map((r) => [r.name, "isNew" in r ? r.isNew : null]),
+    [["a", true], ["b", null], ["c", null]],
+  );
+  assert.equal(avLinkExtra("https://dating.thecadrion.com/a", marks), "&x=1", "the mark changes nothing in the link");
   assert.deepEqual(avKnownRedirects([]), []);
   assert.deepEqual(avKnownRedirects(["elsewhere.com"]), [], "a path of a site that is not ours is not offered");
   assert.deepEqual(avKnownRedirects(["dating.thecadrion.com"]), [], "a redirect domain is a subdomain of a site, never a site");

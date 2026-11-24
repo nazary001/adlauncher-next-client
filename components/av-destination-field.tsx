@@ -172,6 +172,19 @@ function useLatest<T>(value: T): React.RefObject<T> {
 const NO_ARTICLES: AvArticleOption[] = [];
 const NO_CHATS: AvChatHostOption[] = [];
 
+/** The mark of a destination just added (lib/av-link AvKnownRedirect.isNew) — on its pill, and on the
+ *  tab that holds it. Decorative: the control's own name and title say what it is. */
+function NewBadge() {
+  return (
+    <span
+      aria-hidden="true"
+      className="rounded-full bg-launch2/15 px-1.5 py-[2px] text-[8.5px] font-bold uppercase leading-none tracking-[0.12em] text-launch2 ring-1 ring-inset ring-launch2/40"
+    >
+      New
+    </span>
+  );
+}
+
 export function AvDestinationField({
   value,
   onChange,
@@ -236,6 +249,12 @@ export function AvDestinationField({
     return true;
   });
 
+  // A path of ours marked NEW (lib/av-link AV_KNOWN_REDIRECTS) that a live domain lists: the Redirect
+  // tab carries the mark too, so the pill behind it is found from any tab.
+  const newRedirect = cat
+    ? avKnownRedirects(cat.sites.map((s) => s.domain)).find((k) => k.isNew && cat.redirects.some((rd) => rd.live && rd.paths.some((p) => p.url === k.base)))
+    : undefined;
+
   if (!destinations) {
     return <Notice tone="warn">AV destinations are unavailable on this rail.</Notice>;
   }
@@ -245,7 +264,7 @@ export function AvDestinationField({
   return (
     <div className="flex flex-col gap-2">
       {/* segmented Article | Redirect path | AI chat */}
-      <div role="group" aria-label="Destination type" className="grid grid-cols-3 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
+      <div role="group" aria-label="Destination type" className="@container grid grid-cols-3 overflow-hidden rounded-xl border border-line bg-surface2/50 p-0.5">
         {(
           [
             { key: "article" as const, label: "Article" },
@@ -254,14 +273,16 @@ export function AvDestinationField({
           ]
         ).map((opt) => {
           const active = mode === opt.key;
+          const marked = opt.key === "redirect" && newRedirect ? newRedirect : null;
           return (
             <button
               key={opt.key}
               type="button"
               aria-pressed={active}
+              title={marked ? `New here: ${marked.name}` : undefined}
               onClick={() => setOpened({ forValue: value, mode: opt.key })}
               className={
-                "h-8 rounded-[10px] text-[12px] font-semibold transition-all duration-150 " +
+                "inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-[10px] text-[12px] font-semibold transition-all duration-150 " +
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
                 (active
                   ? "bg-accent/20 text-[#9db8ff] shadow-[inset_0_0_0_1px_rgba(122,150,255,0.35)]"
@@ -269,6 +290,16 @@ export function AvDestinationField({
               }
             >
               {opt.label}
+              {/* the NEW mark: the word where the tab has room for it (the row of tabs is the
+                  container — the card's column is narrow on mid-size windows too), a dot where not */}
+              {marked ? (
+                <>
+                  <span className="hidden @[420px]:inline-flex">
+                    <NewBadge />
+                  </span>
+                  <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-launch2 shadow-[0_0_8px_rgba(52,211,153,0.8)] @[420px]:hidden" />
+                </>
+              ) : null}
             </button>
           );
         })}
@@ -804,16 +835,17 @@ function RedirectPicker({
               <button
                 key={k.base}
                 type="button"
-                title={k.extra ? `${k.base} — its link also carries &${k.extra}` : k.base}
+                title={(k.isNew ? "New — " : "") + (k.extra ? `${k.base} — its link also carries &${k.extra}` : k.base)}
                 aria-pressed={on}
                 disabled={on}
                 onClick={() => onChange(k.base)}
                 className={
-                  "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11.5px] font-semibold transition-colors " +
+                  "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11.5px] font-semibold transition-colors " +
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
                   (on ? "cursor-default border-accent/50 bg-accent/20 text-[#9db8ff]" : "border-line2 bg-raise text-dim hover:border-accent/40 hover:text-ink")
                 }
               >
+                {k.isNew ? <NewBadge /> : null}
                 {on ? <CheckIcon className="h-3 w-3" /> : null}
                 {k.name}
               </button>

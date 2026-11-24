@@ -243,8 +243,10 @@ export function avKnownArticles(siteDomains: string[], known: readonly AvKnownAr
 
 /** A Redirect path of ours whose ad link carries more than the tracking params: its redirect domain
  *  (a subdomain of an AV site), its path, the name the card's pill shows, and the fixed tail
- *  ("a=1&b=2", no leading separator) the link ends in. */
-export type AvKnownRedirect = { host: string; path: string; name: string; extra: string };
+ *  ("a=1&b=2", no leading separator) the link ends in. `isNew` puts a NEW mark on its pill and on
+ *  the Redirect tab that holds it (owner 24.11: «Пометь его отдельно в лаунчере что это типо - НОВОЕ
+ *  это что мы добавили») — set and taken off by hand, a line in the registry. */
+export type AvKnownRedirect = { host: string; path: string; name: string; extra: string; isNew?: boolean };
 
 /**
  * The Redirect paths whose link ends in a fixed tail of their own, AFTER the tracking params (owner
@@ -266,6 +268,7 @@ export const AV_KNOWN_REDIRECTS: readonly AvKnownRedirect[] = [
     path: "/dating-us-en-v1",
     name: "Dating chats · Morgan / Emily 50/50 (lp2)",
     extra: "endpoint=ap&country=US&locale=en_US&keyword=chat+dating+secret+site:https://play.google.com/",
+    isNew: true,
   },
 ];
 
@@ -300,7 +303,7 @@ export function avKnownRedirects(siteDomains: string[], known: readonly AvKnownR
   const out: Array<AvKnownRedirect & { base: string }> = [];
   for (const r of known) {
     const own = knownRedirectOf(r);
-    if (own && siteOfChatHost(own.host, roots)) out.push({ host: own.host, path: own.path, name: r.name, extra: own.extra, base: own.base });
+    if (own && siteOfChatHost(own.host, roots)) out.push({ host: own.host, path: own.path, name: r.name, extra: own.extra, ...(r.isNew === true ? { isNew: true } : {}), base: own.base });
   }
   return out;
 }
