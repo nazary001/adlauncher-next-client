@@ -407,8 +407,12 @@ test("the shared FB payloads carry the VC pixel + Purchase on conversions and no
   assert.equal(cr.object_story_spec.video_data.call_to_action.value.link, link);
 });
 
-test("vcToolAccounts: VC's cabinets in TOOL = named GC-for-VC-* or seen by a session of the VC project", async () => {
-  const { vcToolAccounts, isPageId } = await import("../lib/vc-link.ts");
+test("VC's cabinets in TOOL (lib/tool-partner): seen by a session of the VC project, or — seen by no partner's session — named GC-for-VC-*", async () => {
+  const { isPageId, VC_ACCOUNT_NAME_RE, VC_TOOL_PROJECT } = await import("../lib/vc-link.ts");
+  const { TOOL_PARTNER_NAME, TOOL_PARTNER_PROJECT, toolPartnerAccounts } = await import("../lib/tool-partner.ts");
+  assert.equal(TOOL_PARTNER_NAME.vc.source, VC_ACCOUNT_NAME_RE.source, "one name for VC's cabinets in both modules");
+  assert.equal(TOOL_PARTNER_NAME.vc.flags, VC_ACCOUNT_NAME_RE.flags);
+  assert.equal(TOOL_PARTNER_PROJECT.vc, VC_TOOL_PROJECT);
   const rows = [
     { account_id: "1", name: "GC-for-VC-BR-742", sessions: [{ id: 1 }] },
     { account_id: "2", name: "gc-for-vc-br-762", sessions: [] },
@@ -417,9 +421,14 @@ test("vcToolAccounts: VC's cabinets in TOOL = named GC-for-VC-* or seen by a ses
     { account_id: "4", name: "Willie Dumond", sessions: [{ id: 3 }] },
     { account_id: "5", name: "GC-AV-LA-565", sessions: [{ id: 4 }] },
   ];
-  const projects: Record<number, string | null> = { 1: "HS", 2: "HS", 3: "vc", 4: "AV" };
-  assert.deepEqual(vcToolAccounts(rows, (id) => projects[id]).map((a) => a.account_id), ["1", "2", "4"]);
-  assert.deepEqual(vcToolAccounts(rows, () => null).map((a) => a.account_id), ["1", "2"]);
+  const dir = new Map([
+    [1, { project: "HS", profile: "p1", status: "active" }],
+    [2, { project: "HS", profile: "p2", status: "active" }],
+    [3, { project: "vc", profile: "Persona Three", status: "active" }],
+    [4, { project: "AV", profile: "p4", status: "active" }],
+  ]);
+  assert.deepEqual(toolPartnerAccounts("vc", rows, dir).map((a) => a.account_id), ["1", "2", "4"]);
+  assert.deepEqual(toolPartnerAccounts("vc", rows, null).map((a) => a.account_id), ["1", "2"], "no session list → the name alone");
   assert.ok(isPageId("610000000000001") && !isPageId("61x") && !isPageId("1234"));
   const { isVcAccountName } = await import("../lib/vc-link.ts");
   assert.ok(isVcAccountName("GC-for-VC-BR-749") && isVcAccountName(" gc-for-vc-br-762 "));

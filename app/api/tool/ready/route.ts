@@ -7,7 +7,8 @@ import { vcCloneRail, vcRail } from "@/lib/vc-launch";
 import { VC_TOOL_NO_SESSION, vcToolCatalog } from "@/lib/vc-tool";
 import { tokenAdAccounts } from "@/lib/fb-graph";
 import { filterAccountsFor } from "@/lib/acct-assignments";
-import { toolLaunchReady, toolSessionDirectory } from "@/lib/tool-run";
+import { toolLaunchReady, toolPartnerCatalog, toolSessionDirectory } from "@/lib/tool-run";
+import { toolPartnerCabinetHint } from "@/lib/tool-partner";
 import { type ToolSessionChoice, toolSessionChoices } from "@/lib/tool-launch";
 import { teamHsToolAccount, toolSessionsWhere } from "@/lib/team";
 
@@ -27,7 +28,10 @@ export const maxDuration = 60;
  *
  *   MO (in):  TOOL accounts ∩ the rail signer's token accounts ∩ filterAccountsFor(session).
  *   AIF (us): TOOL accounts ∩ the rail token's accounts ∩ filterAccountsFor(session).
- *   VC (vc):  VC's cabinets in TOOL (named GC-for-VC-* or seen by a session of TOOL's "VC" project)
+ *   AV (av):  AV's cabinets in TOOL — seen by a live session of TOOL's "AV" project (the session's word
+ *             wins over the name), or, when no partner's session sees them, named GC-AV-* (lib/tool-partner)
+ *             ∩ filterAccountsFor(session).
+ *   VC (vc):  VC's cabinets in TOOL (the same rule: a live session of TOOL's "VC" project, else the name GC-for-VC-*)
  *             ∪ (TOOL ∩ the VC token's accounts, when a token is assigned) ∩ filterAccountsFor(session) —
  *             a TOOL session alone is enough (owner ask 23.10: VC through TOOL without a token).
  *   HS (br):  TOOL accounts named like the team's HS accounts (lib/team hsToolAccounts: GC-HS-* on
@@ -63,13 +67,16 @@ export async function GET(req: Request) {
   // filter. The clone rail asks the same question (owner ask 09.11: «сделай чтобы работал через Tool»):
   // the AV token READS the source campaign (TOOL cannot), TOOL builds the clone in a GC-AV cabinet a
   // live session sees — so rail=clone answers exactly like rail=launch.
+  // WHICH cabinets are AV's (owner ask 24.11: «не привязываться к неймингу … по сесии определяло какой
+  // это партнер»): the ones a live session filed under TOOL's "AV" project sees — whatever their name —
+  // and, of the cabinets no partner's session sees, the ones named GC-AV-… (lib/tool-partner).
   if (partner === "av") {
-    const readyAv = await toolLaunchReady();
+    const readyAv = await toolPartnerCatalog("av");
     if (!readyAv.ok) {
       return NextResponse.json({ ok: true, ready: false, reason: readyAv.reason, message: readyAv.message, accounts: [], rows: [], live: 0 }, noStore);
     }
-    const liveAv = readyAv.accounts.length;
-    const avAccounts = readyAv.accounts.filter((a) => /^GC-AV-/i.test(String(a.name ?? "").trim()));
+    const liveAv = readyAv.live.length;
+    const avAccounts = readyAv.own;
     const avFiltered = await filterAccountsFor(session, avAccounts.map((a) => a.account_id), (id) => id);
     if (avFiltered.length === 0) {
       if (avAccounts.length === 0) {
@@ -79,7 +86,7 @@ export async function GET(req: Request) {
             ok: true,
             ready: false,
             reason: "no_live_session",
-            message: `TOOL sees ${liveAv} live account${liveAv === 1 ? "" : "s"} but none of AV's (GC-AV-…) — an owner adds a TOOL session that sees AV's cabinets on Ads Manager sessions`,
+            message: `TOOL sees ${liveAv} live account${liveAv === 1 ? "" : "s"} but none of AV's (${toolPartnerCabinetHint("av")}) — an owner adds a TOOL session that sees AV's cabinets on Ads Manager sessions and files it under the "AV" project`,
             accounts: [],
             rows: [],
             live: liveAv,

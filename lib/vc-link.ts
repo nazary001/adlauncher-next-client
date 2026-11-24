@@ -137,25 +137,16 @@ export function vcReadyLinkOf(raw: string): VcReadyLink | null {
 // A VC campaign can launch on a TOOL session alone: the cabinet comes from TOOL, the page id is typed
 // (or picked from the VC token when one is assigned), TOOL itself checks page + pixel at publish.
 
-/** The TOOL project VC's sessions are filed under (TOOL → Sessions → project). */
+/** The TOOL project VC's sessions are filed under (TOOL → Sessions → project). WHICH of TOOL's
+ *  cabinets are VC's is lib/tool-partner's rule, shared with AV (owner ask 24.11): the session's
+ *  project first, the name only for a cabinet no partner's session sees. */
 export const VC_TOOL_PROJECT = "VC";
 /** VC's cabinets by name — the ones VC's system user holds (GC-for-VC-BR-742 … -762, BM VD-C1, 23.10). */
 export const VC_ACCOUNT_NAME_RE = /^GC-for-VC-/i;
-/** A cabinet name that is one of VC's. The VC token's account list is narrowed by it too: the system
- *  user also holds a stray cabinet of its own ("rr", 23.10) a card's least-loaded default must never pick. */
+/** A cabinet name that is one of VC's. The VC TOKEN's account list is narrowed by it (a token has no
+ *  sessions to ask): the system user also holds a stray cabinet of its own ("rr", 23.10) a card's
+ *  least-loaded default must never pick. */
 export const isVcAccountName = (name: string): boolean => VC_ACCOUNT_NAME_RE.test(String(name ?? "").trim());
-
-/** A TOOL account row as GET /api/v1/accounts lists it (lib/tool-sessions-model ToolTeamAccount). */
-export type VcToolAccount = { account_id: string; name: string; sessions: readonly { id: number }[] };
-
-/**
- * VC's cabinets among TOOL's live accounts: named like VC's (VC_ACCOUNT_NAME_RE) or seen by a session
- * filed under the VC project. `projectOf` answers a session id's project (null = unknown / none).
- */
-export function vcToolAccounts<T extends VcToolAccount>(accounts: readonly T[], projectOf: (sessionId: number) => string | null | undefined): T[] {
-  const isVcProject = (id: number): boolean => String(projectOf(id) ?? "").trim().toUpperCase() === VC_TOOL_PROJECT;
-  return accounts.filter((a) => isVcAccountName(a.name) || (a.sessions ?? []).some((s) => isVcProject(s.id)));
-}
 
 /** A typed fanpage id (the TOOL path without a VC token): digits only. */
 export const isPageId = (v: string): boolean => /^\d{5,30}$/.test(String(v ?? "").trim());

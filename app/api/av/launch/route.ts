@@ -45,7 +45,8 @@ import {
   type ToolCreativeInput,
   type ToolNdjsonStage,
 } from "@/lib/tool-launch";
-import { toolDeps, toolInputFromCampaign, toolLaunchReady, toolSessionDirectory } from "@/lib/tool-run";
+import { type ToolPartnerCatalog, toolDeps, toolInputFromCampaign, toolPartnerCatalog, toolSessionDirectory } from "@/lib/tool-run";
+import { toolPartnerCabinetHint } from "@/lib/tool-partner";
 import { CITIES_NEED_TOOL, hasCities } from "@/lib/city-targeting";
 import { resolveMoSigner } from "@/lib/mo-soc";
 
@@ -448,7 +449,7 @@ export async function POST(req: Request) {
   // TOOL channel gate (owner ask 28.09) — pre-stream, session-gated exactly like the Graph path.
   // Everything above (destination re-resolve, the AV-token fanpage validation, media/bid/geo/budget
   // validation, image prefetch) ran identically; here we add the TOOL pieces: the account must be a
-  // live GC-AV cabinet a TOOL session sees (no AV-token account check — the AV token is page-only on
+  // live AV cabinet a TOOL session sees (no AV-token account check — the AV token is page-only on
   // this path), and its TOOL-side currency (the buildToolCampaign USD guard's backstop) + name are
   // read. If the card carries languages we resolve a Graph token that can hit adlocale search WITHOUT
   // account access (the MO signer — adlocale is a global endpoint; NEVER the AV token); with none,
@@ -461,22 +462,24 @@ export async function POST(req: Request) {
   let toolSessionId: number | undefined;
   let toolSessionLabel = "";
   if (viaTool) {
-    const ready = await toolLaunchReady();
+    const ready = await toolPartnerCatalog("av");
     if (!ready.ok) {
       return NextResponse.json({ ok: false, stage: "config", error: ready.message }, { status: 400 });
     }
-    const findAv = (r: Awaited<ReturnType<typeof toolLaunchReady>>) =>
-      r.ok ? r.accounts.find((a) => a.account_id === pickedAccount && /^GC-AV-/i.test(String(a.name ?? "").trim())) : undefined;
-    // Fire-time visibility (force-refreshes the 60 s roster once on a miss) — a stale pick whose GC-AV
-    // account no live session sees is refused here, not mid-stream.
+    // WHICH cabinet is AV's is the picker's own rule (lib/tool-partner, owner ask 24.11): one a live
+    // session of TOOL's "AV" project sees — whatever its name — or, seen by no partner's session, one
+    // named GC-AV-….
+    const findAv = (r: ToolPartnerCatalog) => (r.ok ? r.own.find((a) => a.account_id === pickedAccount) : undefined);
+    // Fire-time visibility (force-refreshes the 60 s roster once on a miss) — a stale pick whose
+    // cabinet no live AV session sees is refused here, not mid-stream.
     let row = findAv(ready);
-    if (!row) row = findAv(await toolLaunchReady(true));
+    if (!row) row = findAv(await toolPartnerCatalog("av", true));
     if (!row) {
       return NextResponse.json(
         {
           ok: false,
           stage: "config",
-          error: `tool_account_unavailable — no live TOOL session sees a GC-AV cabinet ${pickedAccount}; an owner refreshes/adds one on Ads Manager sessions`,
+          error: `tool_account_unavailable — no live TOOL session sees ${pickedAccount} as an AV cabinet (${toolPartnerCabinetHint("av")}); an owner refreshes/adds one on Ads Manager sessions`,
         },
         { status: 400 },
       );
@@ -491,7 +494,7 @@ export async function POST(req: Request) {
       const seen = (r: typeof row) => r?.sessions.find((s) => s.id === pickId);
       let hit = seen(row);
       if (!hit) {
-        const fresh = findAv(await toolLaunchReady(true));
+        const fresh = findAv(await toolPartnerCatalog("av", true));
         if (fresh) row = fresh;
         hit = seen(row);
       }

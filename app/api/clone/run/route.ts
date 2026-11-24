@@ -52,7 +52,8 @@ import {
 // TOOL channel (owner ask 28.09): the same clone RECREATE, but built through the HS Ads Manager
 // sessions service instead of direct Graph — USD money + ROAS coefficient, everything PAUSED.
 import { buildToolCampaign, runToolMedia, runToolPublish, toolEnsureMark, type ToolMediaRefOut } from "@/lib/tool-launch";
-import { toolAccountVisible, toolDeps, toolInputFromCampaign, toolLaunchReady } from "@/lib/tool-run";
+import { type ToolPartnerCatalog, toolAccountVisible, toolDeps, toolInputFromCampaign, toolLaunchReady, toolPartnerCatalog } from "@/lib/tool-run";
+import { toolPartnerCabinetHint } from "@/lib/tool-partner";
 // VC (05.11): the VC clone board's run — the VC token reads the source, the recreate rides the VC token or TOOL.
 import { runVcClone } from "@/lib/vc-clone-run";
 
@@ -173,14 +174,17 @@ export async function POST(req: Request) {
   // source (TOOL cannot), TOOL BUILDS the clone in a GC-AV cabinet a live TOOL session sees — the same
   // split as AV launches (owner 28.09: «через сам токен только фанку тянуть»; the AV token also lists the
   // fanpage). Everything AV-specific stays: the source's destination re-resolved, a fresh AV key in a
-  // rebuilt link, Purchase on AV_PIXEL or link clicks (avDelivery). A cabinet a live TOOL session
-  // sees, named GC-AV-… — found in the TOOL roster (one forced refresh on a miss), as /api/av/launch does.
+  // rebuilt link, Purchase on AV_PIXEL or link clicks (avDelivery). WHICH cabinet is AV's is the
+  // picker's own rule (lib/tool-partner, owner ask 24.11): one a live session of TOOL's "AV" project
+  // sees — whatever its name — or, seen by no partner's session, one named GC-AV-…; found in the TOOL
+  // roster (one forced refresh on a miss), as /api/av/launch does.
   const avTool = av && via === "tool";
   const avToolCabinet = async (accountId: string): Promise<{ currency: string; name: string } | null> => {
-    const find = (r: Awaited<ReturnType<typeof toolLaunchReady>>) =>
-      r.ok ? r.accounts.find((a) => a.account_id === accountId && /^GC-AV-/i.test(String(a.name ?? "").trim())) : undefined;
-    const row = find(await toolLaunchReady()) ?? find(await toolLaunchReady(true));
-    return row ? { currency: row.currency || "USD", name: String(row.name ?? "") } : null;
+    const find = (r: ToolPartnerCatalog) => (r.ok ? r.own.find((a) => a.account_id === accountId) : undefined);
+    let row = find(await toolPartnerCatalog("av"));
+    if (!row) row = find(await toolPartnerCatalog("av", true));
+    if (!row) return null;
+    return { currency: row.currency || "USD", name: String(row.name ?? "") };
   };
   if (avTool) {
     const ready = await toolLaunchReady();
@@ -280,7 +284,7 @@ export async function POST(req: Request) {
       if (avTool) {
         if (!(await avToolCabinet(acct))) {
           return NextResponse.json(
-            { ok: false, error: `tool_account_unavailable — no live TOOL session sees a GC-AV cabinet ${acct}; an owner refreshes/adds one on Ads Manager sessions` },
+            { ok: false, error: `tool_account_unavailable — no live TOOL session sees ${acct} as an AV cabinet (${toolPartnerCabinetHint("av")}); an owner refreshes/adds one on Ads Manager sessions` },
             { status: 400 },
           );
         }
@@ -579,11 +583,11 @@ export async function POST(req: Request) {
           // fire time (force-refreshes once on a miss) BEFORE any slot/marker claim, so a not-ready
           // rail burns nothing. Live 28.09 only HS accounts exist on TOOL, so MO/AIF cabinets stay
           // not-visible until a session that sees them is added on Ads Manager sessions.
-          // AV: the cabinet must be a GC-AV one a live session sees (its roster row also names it + its currency).
+          // AV: the cabinet must be an AV one a live session sees (its roster row also names it + its currency).
           const avCab = avTool ? await avToolCabinet(binds.accountId) : null;
           if (avTool && !avCab) {
             throw new FbError(
-              `tool_account_unavailable — no live TOOL session sees a GC-AV cabinet act_${binds.accountId}; an owner refreshes/adds one on Ads Manager sessions`,
+              `tool_account_unavailable — no live TOOL session sees act_${binds.accountId} as an AV cabinet (${toolPartnerCabinetHint("av")}); an owner refreshes/adds one on Ads Manager sessions`,
               { campaignId: edit.campaignId },
             );
           }

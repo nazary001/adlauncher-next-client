@@ -186,7 +186,7 @@ export async function POST(req: Request) {
       }
       if (!tokenAccount && !cat.vc.some((a) => a.account_id === pickedAccount)) {
         return NextResponse.json(
-          { ok: false, stage: "config", error: `account_not_vc — act_${pickedAccount} (${live.name}) is not a VC cabinet in TOOL (GC-for-VC-… or a session of the "VC" project) and no VC token holds it` },
+          { ok: false, stage: "config", error: `account_not_vc — act_${pickedAccount} (${live.name}) is not a VC cabinet in TOOL (seen by a session of the "VC" project, or — seen by no partner's session — named GC-for-VC-…) and no VC token holds it` },
           { status: 400 },
         );
       }

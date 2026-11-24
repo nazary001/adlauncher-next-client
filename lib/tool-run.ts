@@ -25,8 +25,9 @@ import {
 import { type ToolTeamAccount, hasScope, toSession, toTeamAccount } from "./tool-sessions-model";
 import { type Campaign, bidKind, normalizeRoasGoal, parseMoney } from "./types";
 import { cityGeoLocations, cityRadiusKm, cleanCities } from "./city-targeting";
-import { toolSessionsWhere } from "./team";
+import { teamHsToolAccount, toolSessionsWhere } from "./team";
 import type { ToolBid, ToolBuildInput, ToolCreativeInput, ToolDeps } from "./tool-launch";
+import { type ToolPartnerId, toolPartnerAccounts } from "./tool-partner";
 
 // ---- the injected dependency object (real transport + real clock) ------------------------------
 // Direct bindings, not wrapper closures: the transport fns already carry the timeouts, the
@@ -157,6 +158,29 @@ export async function toolSessionDirectory(force = false): Promise<ReadonlyMap<n
     }
   })();
   return dirInflight;
+}
+
+// ---- a partner's cabinets (owner ask 24.11: by the session's TOOL project, not by the name) -------
+
+export type ToolPartnerCatalog =
+  | { ok: true; live: ToolTeamAccount[]; own: ToolTeamAccount[] }
+  | { ok: false; reason: ToolReadyReason; message: string };
+
+/**
+ * TOOL's live accounts (`live`, for the "TOOL sees N" line) and the partner's own among them (`own`,
+ * lib/tool-partner): the cabinets a live session filed under the partner's TOOL project sees — the
+ * session's word wins over the cabinet's name — and, of the cabinets no partner's session sees, the
+ * ones named like the partner's. A team HS name is never a partner's by its sessions alone. ONE
+ * answer for the picker (/api/tool/ready) and every fire-time check (AV and VC launch + clone).
+ * `force` re-reads both TOOL lists (fire time — the 60 s cache may predate a session an owner just
+ * added or re-filed).
+ */
+export async function toolPartnerCatalog(partner: ToolPartnerId, force = false): Promise<ToolPartnerCatalog> {
+  const ready = await toolLaunchReady(force);
+  if (!ready.ok) return { ok: false, reason: ready.reason, message: ready.message };
+  const dir = await toolSessionDirectory(force);
+  const own = toolPartnerAccounts(partner, ready.accounts, dir, { otherRail: (name) => teamHsToolAccount(name) });
+  return { ok: true, live: ready.accounts, own };
 }
 
 /** Fire-time check: is this account among the live TOOL-visible ones? Forces ONE refresh on a miss
