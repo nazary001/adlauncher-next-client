@@ -15,6 +15,8 @@
 // `utm_campaign_medium` combo (<key>_<campaign id>) tie back to the FB campaign even before the key
 // earns revenue. The destination is an article of an AV site OR a Redirect path
 // (redirect.<site>/<path>) — AV merges the link's params into whichever target the path picks.
+// A Redirect path listed in AV_KNOWN_REDIRECTS carries a fixed tail of its OWN after those params
+// (avLinkExtra) — the launch, the clone and the card's preview get it from the one builder below.
 import type { LinkSegment } from "./partners";
 
 /** Highest key the codec knows: av001 … av999 (3 digits). The LAUNCHABLE range is smaller — only the
@@ -239,6 +241,70 @@ export function avKnownArticles(siteDomains: string[], known: readonly AvKnownAr
   return out;
 }
 
+/** A Redirect path of ours whose ad link carries more than the tracking params: its redirect domain
+ *  (a subdomain of an AV site), its path, the name the card's pill shows, and the fixed tail
+ *  ("a=1&b=2", no leading separator) the link ends in. */
+export type AvKnownRedirect = { host: string; path: string; name: string; extra: string };
+
+/**
+ * The Redirect paths whose link ends in a fixed tail of their own, AFTER the tracking params (owner
+ * 24.11: «dating.thecadrion.com/dating-us-en-v1?utm_source=facebook&…&utm_content={{ad.id}}&endpoint=ap
+ * &country=US&locale=en_US&keyword=chat+dating+secret+site:https://play.google.com/ … добавь правильно
+ * это в лаунчер мне чтобы я мог запускать, коды ав подставлялись»). The path itself is made in
+ * ActiveView's dashboard and is listed on the card's Redirect tab like every other one: it splits its
+ * visitors 50/50 between the two lp2 chats "Morgan" and "Emily" (20.11 — our copy of the reference
+ * funnel lp.minegiftcraft.com/cb/ap-us-2, whose own link ends in this very tail), AV merges every
+ * param of the ad link into the chat it picks, and the chat hands them all on to the app-review page.
+ * The tail is spelled as the owner gave it — the "+" and the bare "site:https://…/" are the
+ * reference's; AV's redirect percent-encodes the value on the way (read live 24.11). A destination
+ * that is not listed here gets the tracking params alone. Listing a path never vouches for it: a pick
+ * is the same destination the tab's own list sets, re-checked on every launch.
+ */
+export const AV_KNOWN_REDIRECTS: readonly AvKnownRedirect[] = [
+  {
+    host: "dating.thecadrion.com",
+    path: "/dating-us-en-v1",
+    name: "Dating chats · Morgan / Emily 50/50 (lp2)",
+    extra: "endpoint=ap&country=US&locale=en_US&keyword=chat+dating+secret+site:https://play.google.com/",
+  },
+];
+
+/** A known redirect's bare destination (avDestinationBase) and its tail without a leading separator;
+ *  null when the entry does not name a path of a host. */
+function knownRedirectOf(r: AvKnownRedirect): { base: string; host: string; path: string; extra: string } | null {
+  const b = avDestinationBase(`https://${normChatHost(r.host)}${String(r.path ?? "").trim()}`);
+  if (!b.ok || b.path === "/") return null;
+  return { base: b.base, host: b.host, path: b.path, extra: String(r.extra ?? "").trim().replace(/^[?&]+/, "") };
+}
+
+/**
+ * The fixed tail a destination's link ends in, after the tracking params: "&a=1&b=2" for a path of
+ * AV_KNOWN_REDIRECTS that has one, "" for every other destination. Read off the BARE destination
+ * (avDestinationBase), so an address pasted with a query, a trailing slash or an upper-case host
+ * finds its entry; the path itself is matched exactly.
+ */
+export function avLinkExtra(destination: string, known: readonly AvKnownRedirect[] = AV_KNOWN_REDIRECTS): string {
+  const b = avDestinationBase(destination);
+  if (!b.ok) return "";
+  for (const r of known) {
+    const own = knownRedirectOf(r);
+    if (own && own.base === b.base) return own.extra ? `&${own.extra}` : "";
+  }
+  return "";
+}
+
+/** The known redirect paths under our ROOT sites (never a site itself), each with its bare
+ *  destination; a path of a site that is not ours, or an entry that names no path, is left out. */
+export function avKnownRedirects(siteDomains: string[], known: readonly AvKnownRedirect[] = AV_KNOWN_REDIRECTS): Array<AvKnownRedirect & { base: string }> {
+  const roots = rootSites(siteDomains);
+  const out: Array<AvKnownRedirect & { base: string }> = [];
+  for (const r of known) {
+    const own = knownRedirectOf(r);
+    if (own && siteOfChatHost(own.host, roots)) out.push({ host: own.host, path: own.path, name: r.name, extra: own.extra, base: own.base });
+  }
+  return out;
+}
+
 export type AvDestinationKind = "article" | "redirect" | "chat";
 
 /**
@@ -347,7 +413,9 @@ export function avMappingLabel(m: { url: string; percentage: number | null }): s
 
 /**
  * The AV link as ORDERED, role-tagged segments (the card colors each role; avLink joins them). The key
- * rides the shared `gcm` role (every partner's revenue marker is colored the same). Empty base → [].
+ * rides the shared `gcm` role (every partner's revenue marker is colored the same). A destination with
+ * a fixed tail of its own (avLinkExtra — a path of AV_KNOWN_REDIRECTS) ends in it, as one more
+ * `params` segment after the tracking params. Empty base → [].
  */
 export function avLinkSegments(base: string, key: string): LinkSegment[] {
   const b = String(base ?? "").trim();
@@ -356,7 +424,8 @@ export function avLinkSegments(base: string, key: string): LinkSegment[] {
   // cut before it (the id has no slash, but the split must not depend on that).
   const query = b.indexOf("?");
   const cut = (query < 0 ? b : b.slice(0, query)).lastIndexOf("/");
-  return [
+  const extra = avLinkExtra(b);
+  const segs: LinkSegment[] = [
     { text: b.slice(0, cut + 1), role: "base" },
     { text: b.slice(cut + 1), role: "slug" },
     { text: query < 0 ? AV_UTM_HEAD : `&${AV_UTM_HEAD.slice(1)}`, role: "params" },
@@ -364,6 +433,8 @@ export function avLinkSegments(base: string, key: string): LinkSegment[] {
     { text: key, role: "gcm" },
     { text: AV_UTM_TAIL, role: "params" },
   ];
+  if (extra) segs.push({ text: extra, role: "params" });
+  return segs;
 }
 
 /** The joined link (what the ad actually points at). Empty when there is no base. */
@@ -429,7 +500,8 @@ function isCode(code: string, type: "region" | "language"): boolean {
  * launcher (owner 30.09: "гео ж должны ставится такие как мы выбираем в лаунчере"), up to three joined
  * by "+" and the rest counted ("US+CA+GB+2"), none picked → no GEO yet. Our articles end in
  * "-<geo>-<lang>" (forklift-certification-mobile-app-us-es): the slug gives the LANGUAGE ("es") and the
- * pair is cut from the topic — its geo never overrides the launcher's. The topic is the rest of the slug
+ * pair is cut from the topic — its geo never overrides the launcher's; a version after the pair (a
+ * redirect path of ours, dating-us-en-v1) stays with the topic ("dating v1"). The topic is the rest of the slug
  * in lower-case words (AV's template prefix and variant id stripped, avArticleTitle); a slug without the
  * pair names no language; an AI-chat destination (no path) reads "ai chat". "" = not a URL.
  */
@@ -444,10 +516,12 @@ export function avAutoName(destination: string, countries: readonly string[] = [
   const slug = u.pathname.replace(/^\/+|\/+$/g, "").split("/").pop() ?? "";
   let topicSlug = slug;
   let lang = "";
-  const pair = /-([a-z]{2})-([a-z]{2})$/i.exec(slug);
+  // "-<geo>-<lang>", optionally followed by a version ("-v1" — a redirect path of ours,
+  // dating-us-en-v1): the version stays with the topic, the pair is still read and cut.
+  const pair = /-([a-z]{2})-([a-z]{2})(-v\d{1,3})?$/i.exec(slug);
   if (pair && isCode(pair[1], "region") && isCode(pair[2], "language")) {
     lang = pair[2].toLowerCase();
-    topicSlug = slug.slice(0, pair.index);
+    topicSlug = slug.slice(0, pair.index) + (pair[3] ?? "");
   }
   const codes = countries.map((c) => String(c).trim().toUpperCase()).filter(Boolean);
   const geo = codes.length > 3 ? `${codes.slice(0, 3).join("+")}+${codes.length - 3}` : codes.join("+");

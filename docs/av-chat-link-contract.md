@@ -131,6 +131,33 @@ rewarded-карточкой «Continue reading» на следующую — з�
 `/work-from-home-jobs-no-experience`. Монетизация страниц описана в
 `GC-coding/activeview/articles/money/README.md`. Новая статья = строка в `AV_KNOWN_ARTICLES`.
 
+## Redirect-пути со своим хвостом (кнопки во вкладке Redirect path)
+
+Обычная AV-ссылка несёт только трекинг (`utm_*` с ключом `avNNN`). Redirect-путь, которому нужен
+ещё и собственный постоянный хвост, перечислен в коде: `AV_KNOWN_REDIRECTS` в `lib/av-link.ts`
+(host, path, имя, `extra`). Хвост дописывается ПОСЛЕ трекинга одним сборщиком (`avLinkSegments` /
+`avLinkExtra`), поэтому он одинаков в запуске, в клоне (ссылка клона пересобирается на новом ключе)
+и в предпросмотре ссылки на карточке. Ключ `avNNN` выдаётся как всегда — один на кампанию.
+
+Вкладка **Redirect path** показывает такие пути кнопками «Our redirects: …» над списком доменов —
+только пока путь есть в живом списке ActiveView; клик ставит тот же адрес, что и выбор из списка.
+Сам путь и его цели создаются в дашборде ActiveView, реестр их не создаёт и за них не ручается:
+запуск проверяет путь и чаты-цели заново.
+
+Сейчас в реестре один путь (24.11):
+
+```
+https://dating.thecadrion.com/dating-us-en-v1?utm_source=facebook&utm_medium={{campaign.id}}&utm_campaign=<avNNN>&utm_term={{adset.id}}&utm_content={{ad.id}}&endpoint=ap&country=US&locale=en_US&keyword=chat+dating+secret+site:https://play.google.com/
+```
+
+Путь делит посетителей 50/50 между двумя чатами `lp2.thecadrion.com` — Morgan
+(`6adb379628c79affe8125ce8`) и Emily (`6b00389463e1a29ce05b1fe9`); ActiveView переносит все
+параметры ссылки в выбранный чат, чат — на страницу-обзор приложения
+(`GC-coding/activeview/articles/chat-lp2/README.md`). Хвост `endpoint…keyword` — как у референса
+этой воронки; в Chat Builder он ничего не включает, просто доезжает до страниц. Имя кампании для
+такого пути: `dating v1 | <ГЕО> | en | <хвост>` (версия после пары гео-язык остаётся в теме).
+Новый путь с хвостом = строка в `AV_KNOWN_REDIRECTS`.
+
 ## Вопросы к ActiveView, от которых зависит отчётность
 
 - Ключи **UTM Campaign Values** (`av001…`) привязаны к сайту и автоматически отключаются, если по

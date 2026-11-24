@@ -6,6 +6,7 @@ import {
   AV_KEY_POOL_MAX,
   AV_KNOWN_ARTICLES,
   AV_KNOWN_CHATS,
+  AV_KNOWN_REDIRECTS,
   avArticleTitle,
   avAutoName,
   avServerName,
@@ -23,8 +24,10 @@ import {
   avKeysUploadFiles,
   avKnownArticles,
   avKnownChats,
+  avKnownRedirects,
   avLaunchableCount,
   avLink,
+  avLinkExtra,
   avLinkSegments,
   avMappingLabel,
   avPinAfterPick,
@@ -585,6 +588,108 @@ test("the shipped registry names only the two '51 Ways' pages of thecadrion.com 
     avLink("https://thecadrion.com/51-ways-to-make-money-online", "av601"),
     "https://thecadrion.com/51-ways-to-make-money-online?utm_source=facebook&utm_medium={{campaign.id}}&utm_campaign=av601&utm_term={{adset.id}}&utm_content={{ad.id}}",
   );
+});
+
+const DATING = "https://dating.thecadrion.com/dating-us-en-v1";
+const DATING_TAIL = "endpoint=ap&country=US&locale=en_US&keyword=chat+dating+secret+site:https://play.google.com/";
+
+test("the dating redirect path's link is the owner's link of 24.11, letter for letter, with the campaign's key in place of avXXX", () => {
+  const OWNER =
+    "dating.thecadrion.com/dating-us-en-v1?utm_source=facebook&utm_medium={{campaign.id}}&utm_campaign=avXXX&utm_term={{adset.id}}&utm_content={{ad.id}}&endpoint=ap&country=US&locale=en_US&keyword=chat+dating+secret+site:https://play.google.com/";
+  assert.equal(avLink(DATING, "av321"), `https://${OWNER.replace("avXXX", "av321")}`);
+  const segs = avLinkSegments(DATING, "av321");
+  assert.deepEqual(
+    segs.map((s) => s.role),
+    ["base", "slug", "params", "gcmKey", "gcm", "params", "params"],
+    "its own tail is one more params segment, after the tracking params",
+  );
+  assert.equal(segs.at(-1)?.text, `&${DATING_TAIL}`);
+  assert.equal(segs[1].text, "dating-us-en-v1");
+  assert.equal(segs.map((s) => s.text).join(""), avLink(DATING, "av321"));
+  // the card's preview before a key is claimed
+  assert.ok(avLink(DATING, "…").endsWith(`&utm_campaign=…&utm_term={{adset.id}}&utm_content={{ad.id}}&${DATING_TAIL}`));
+});
+
+test("a destination's own tail is read off its bare address — and no other destination gets one", () => {
+  assert.equal(avLinkExtra(DATING), `&${DATING_TAIL}`);
+  assert.equal(avLinkExtra("dating.thecadrion.com/dating-us-en-v1"), `&${DATING_TAIL}`, "no scheme");
+  assert.equal(avLinkExtra("https://DATING.thecadrion.com/dating-us-en-v1/?utm_source=x#top"), `&${DATING_TAIL}`, "upper-case host, trailing slash, query, hash");
+  assert.equal(avLinkExtra(avLink(DATING, "av001")), `&${DATING_TAIL}`, "a launched link reads back to the same tail");
+  for (const other of [
+    "https://dating.thecadrion.com/dating-us-en-v2",
+    "https://dating.thecadrion.com/Dating-us-en-v1",
+    "https://dating.thecadrion.com/dating-us-en-v1/more",
+    "https://redirect.thecadrion.com/dating-us-en-v1",
+    "https://thecadrion.com/dating-us-en-v1",
+    "https://lp2.thecadrion.com/?asst=6adb379628c79affe8125ce8",
+    ART,
+    "",
+    "not a url",
+  ]) {
+    assert.equal(avLinkExtra(other), "", other);
+  }
+  // every other destination's link is what it was
+  assert.equal(avLink("https://dating.thecadrion.com/other", "av002"), "https://dating.thecadrion.com/other?utm_source=facebook&utm_medium={{campaign.id}}&utm_campaign=av002&utm_term={{adset.id}}&utm_content={{ad.id}}");
+  assert.equal(avLinkSegments(ART, "av042").length, 6);
+  // a registry of one's own: the tail may be written with a leading separator, an empty one is none
+  const known = [
+    { host: "Redirect.thecadrion.com.", path: "/jobs/", name: "jobs", extra: "&a=1&b=2" },
+    { host: "redirect.thecadrion.com", path: "/plain", name: "plain", extra: "  " },
+    { host: "redirect.thecadrion.com", path: "/", name: "the root is no path", extra: "x=1" },
+  ];
+  assert.equal(avLinkExtra("https://redirect.thecadrion.com/jobs", known), "&a=1&b=2");
+  assert.equal(avLinkExtra("https://redirect.thecadrion.com/plain", known), "");
+  assert.equal(avLinkExtra("https://redirect.thecadrion.com/", known), "");
+  assert.equal(avLinkExtra(DATING, known), "", "only the registry asked");
+});
+
+test("a clone of the dating path keeps its tail: the link is rebuilt on a fresh key, and the old one reads back", () => {
+  const src = avLink(DATING, "av100");
+  assert.equal(swapUtmCampaign(src, "av101"), avLink(DATING, "av101"));
+  assert.equal(avKeyOfLink(src), "av100");
+  assert.deepEqual(avDestinationBase(src), { ok: true, base: DATING, host: "dating.thecadrion.com", path: "/dating-us-en-v1" }, "a launched link reads back as its bare destination");
+  // what AV's redirect makes of it (read live 24.11: the value percent-encoded, every param kept)
+  const sent = new URL(src.replace("{{campaign.id}}", "1").replace("{{adset.id}}", "2").replace("{{ad.id}}", "3"));
+  assert.deepEqual(
+    [...sent.searchParams.keys()],
+    ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "endpoint", "country", "locale", "keyword"],
+  );
+  assert.equal(sent.searchParams.get("keyword"), "chat dating secret site:https://play.google.com/");
+  assert.equal(sent.searchParams.get("utm_campaign"), "av100");
+});
+
+test("the shipped registry of redirect paths: the dating path of thecadrion.com, a tail that cannot disturb the tracking params", () => {
+  assert.deepEqual(
+    AV_KNOWN_REDIRECTS.map((r) => `${r.host}${r.path}`),
+    ["dating.thecadrion.com/dating-us-en-v1"],
+  );
+  assert.deepEqual(avKnownRedirects(["thecadrion.com"]), [
+    { host: "dating.thecadrion.com", path: "/dating-us-en-v1", name: "Dating chats · Morgan / Emily 50/50 (lp2)", extra: DATING_TAIL, base: DATING },
+  ]);
+  assert.deepEqual(avKnownRedirects([]), []);
+  assert.deepEqual(avKnownRedirects(["elsewhere.com"]), [], "a path of a site that is not ours is not offered");
+  assert.deepEqual(avKnownRedirects(["dating.thecadrion.com"]), [], "a redirect domain is a subdomain of a site, never a site");
+  assert.equal(new Set(AV_KNOWN_REDIRECTS.map((r) => `${r.host}${r.path}`)).size, AV_KNOWN_REDIRECTS.length, "no path is listed twice");
+  assert.equal(new Set(AV_KNOWN_REDIRECTS.map((r) => r.name)).size, AV_KNOWN_REDIRECTS.length, "every path has its own name, so the pills tell them apart");
+  for (const r of AV_KNOWN_REDIRECTS) {
+    assert.ok(r.extra, `${r.path}: a path is listed here for its tail`);
+    assert.doesNotMatch(r.extra, /^[?&]|[&?]$|[\s#]|\{\{|&&/, `${r.path}: no leading / trailing separator, space, hash or macro`);
+    const keys = r.extra.split("&").map((kv) => kv.split("=")[0]);
+    assert.ok(keys.every((k) => /^[a-z][a-z0-9_]*$/.test(k)), `${r.path}: plain param names`);
+    assert.equal(new Set(keys).size, keys.length, `${r.path}: no param twice`);
+    assert.ok(!keys.some((k) => /^utm_|^asst$|^fbclid$|^play$/.test(k)), `${r.path}: never a param the tracking, the chat or the review page owns`);
+  }
+  assert.equal(avDestinationKind(DATING, { sites: ["thecadrion.com"], redirectDomains: ["dating.thecadrion.com"] }), "redirect");
+  assert.equal(avDestinationKind(DATING, { sites: ["thecadrion.com"], redirectDomains: [] }), "redirect", "before the redirect list has loaded, too");
+});
+
+test("avAutoName: a version after the -geo-lang pair stays with the topic — the dating path reads 'dating v1 | <GEO> | en | '", () => {
+  assert.equal(avAutoName(DATING, ["US"]), "dating v1 | US | en | ");
+  assert.equal(avAutoName(DATING), "dating v1 | en | ");
+  assert.equal(avAutoName("https://dating.thecadrion.com/dating-br-pt-v12", ["BR"]), "dating v12 | BR | pt | ");
+  assert.equal(avAutoName("https://dating.thecadrion.com/dating-xx-zz-v1", ["US"]), "dating xx zz v1 | US | ", "no region/language → all of it is the topic");
+  assert.equal(avAutoName("https://thecadrion.com/guide-v2", ["US"]), "guide v2 | US | ", "a version with no pair before it changes nothing");
+  assert.equal(avServerName("[24/11] (AV) - ", "Nazar", DATING, ["US"]), "[24/11] (AV) - dating v1 | US | en | Nazar");
 });
 
 test("avAutoName: '<topic> | <GEO> | <lang> | ' — the GEO is the launcher's countries, the slug gives topic + language (owner 30.09)", () => {

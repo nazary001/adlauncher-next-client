@@ -18,6 +18,7 @@ import {
   avFieldTab,
   avKnownArticles,
   avKnownChats,
+  avKnownRedirects,
   avMappingLabel,
   avPinAfterPick,
   avRefusalOfHost,
@@ -786,10 +787,40 @@ function RedirectPicker({
     );
   }
 
+  // Our own named paths in one click (lib/av-link AV_KNOWN_REDIRECTS) — offered only while a LIVE
+  // domain lists the path, so a pill never sets what the list below would not.
+  const ours = avKnownRedirects((cat?.sites ?? []).map((s) => s.domain)).filter((k) => redirects.some((rd) => rd.live && rd.paths.some((p) => p.url === k.base)));
+
   return (
     <div className="flex flex-col gap-3">
       {unlisted}
       {unavailable}
+      {ours.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] text-faint">Our redirects:</span>
+          {ours.map((k) => {
+            const on = value === k.base;
+            return (
+              <button
+                key={k.base}
+                type="button"
+                title={k.extra ? `${k.base} — its link also carries &${k.extra}` : k.base}
+                aria-pressed={on}
+                disabled={on}
+                onClick={() => onChange(k.base)}
+                className={
+                  "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11.5px] font-semibold transition-colors " +
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 " +
+                  (on ? "cursor-default border-accent/50 bg-accent/20 text-[#9db8ff]" : "border-line2 bg-raise text-dim hover:border-accent/40 hover:text-ink")
+                }
+              >
+                {on ? <CheckIcon className="h-3 w-3" /> : null}
+                {k.name}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
       {redirects.map((rd) => (
         <RedirectDomainBlock key={rd.domainId} rd={rd} value={value} onChange={onChange} live={live} articleOptions={articleOptions} destinations={destinations} />
       ))}
