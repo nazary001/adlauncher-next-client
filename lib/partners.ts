@@ -464,9 +464,10 @@ export const PARTNERS: PartnerConfig[] = [
   },
 ];
 
-// AV delivery modes (owner ask 30.09) — Purchase on the AV site pixel (default) or Traffic / link
-// clicks with no pixel; pure module (lib/av-delivery) so node --test covers it.
-export { AV_OBJECTIVE, AV_PIXEL, AV_SALES_OBJECTIVE, type AvDelivery, avAdText, avDelivery, avLockPatch } from "./av-delivery";
+// AV delivery modes (owner ask 30.09) — Purchase on the card's AV pixel (one of AV_PIXELS, owner ask
+// 24.11; the AV site pixel by default) or Traffic / link clicks with no pixel; pure module
+// (lib/av-delivery) so node --test covers it.
+export { AV_OBJECTIVE, AV_PIXEL, AV_PIXELS, AV_SALES_OBJECTIVE, type AvDelivery, avAdText, avDelivery, avLockPatch, avPixel, avPixelName } from "./av-delivery";
 // VC (ValueClick) link / pixel / delivery contract — pure module, node --test covers it.
 export { VC_LEAD_PIXEL, VC_PIXEL, VC_READY_LINKS, pinVcNamePrefix, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcLockPatch, vcModeOf, vcReadyEventMismatch, vcReadyLinkOf, vcReadyMode } from "./vc-link";
 
@@ -515,8 +516,8 @@ export function launchReadyOpts(p: PartnerConfig): {
     // AIF's pixel is a pick with a server-side auto-derive fallback (empty pick → the
     // cabinet's own pixel), and click cards legitimately carry none — requiring it here would
     // dead-lock them, so readiness never gates on it for AIF.
-    // AV's pixel is never a pick: Purchase binds AV_PIXEL, link clicks bind none (avDelivery, pinned
-    // by the locks) — nothing for readiness to gate on.
+    // AV's pixel is a pick among AV_PIXELS (24.11) that is never empty on a Purchase card — the
+    // locks pin the default (avDelivery) — and link clicks bind none: nothing for readiness to gate on.
     // VC's pixel is never a pick either: Purchase / min-ROAS bind VC_PIXEL, Lead binds VC_LEAD_PIXEL
     // (05.11), clicks none (vcDelivery of the card's mode).
     pixel: (Boolean(p.accountsFromToken) && !p.aifLaunch && !p.avLaunch && !p.vcLaunch) || Boolean(p.lionLaunch),

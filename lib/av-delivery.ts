@@ -8,9 +8,31 @@ import { bidKind } from "./types";
  *  with no value while AV's telemetry is off, so min-ROAS still has nothing to optimize. */
 export const AV_PIXEL = { id: "1830814271425766", name: "AV site pixel" } as const;
 
+/**
+ * The pixels an AV Purchase campaign may optimize on — the card's Pixel pick, each shown by its name
+ * and id (owner ask 24.11: «По AV партнеру сделай возможность выбора пикселя … в списке чтобы название
+ * его и айди отображалось» · «S-1 nik pixel 2126539511577664 например вот этот пиксель должен быть
+ * там»). The FIRST is the default (a fresh card, a pick that is none of these). S-1 nik pixel is the
+ * dataset every cabinet that came from VC carries (lib/vc-link VC_LEAD_PIXEL) — the nine cabinets moved
+ * to AV on 24.11 have it and not the AV site pixel. A list in code, not the cabinet's own: AV launches
+ * build through TOOL, which lists no pixels, and the AV token does not see TOOL's cabinets.
+ * NOTE (read live 24.11, scr.actview.net): the AV site script fires the AV site pixel ONLY, and the
+ * lp2 chat host fires no Meta pixel at all — a pixel picked here gets Purchase events only once
+ * ActiveView adds it to the site's Manage conversion. A new pixel = a line here.
+ */
+export const AV_PIXELS: readonly { id: string; name: string }[] = [AV_PIXEL, { id: "2126539511577664", name: "S-1 nik pixel" }];
+
+/** The AV pixel an id names, null for any other value (an empty pick, a foreign pixel, junk). */
+export function avPixel(id: unknown): { id: string; name: string } | null {
+  const v = String(id ?? "").trim();
+  return AV_PIXELS.find((p) => p.id === v) ?? null;
+}
+/** An AV pixel's name; an id that is none of ours reads as itself. */
+export const avPixelName = (id: unknown): string => avPixel(id)?.name ?? String(id ?? "").trim();
+
 /** The pixel-less AV mode: Traffic / link clicks (LINK_CLICKS, no promoted_object). */
 export const AV_OBJECTIVE = "OUTCOME_TRAFFIC";
-/** The default AV mode: Sales, optimizing Purchase on AV_PIXEL. */
+/** The default AV mode: Sales, optimizing Purchase on the card's pixel (AV_PIXEL unless picked). */
 export const AV_SALES_OBJECTIVE = "OUTCOME_SALES";
 
 export type AvDelivery = { objective: string; optimization: Campaign["optimization"]; pixel: string; conversionEvent?: string };
@@ -18,24 +40,26 @@ export type AvDelivery = { objective: string; optimization: Campaign["optimizati
 /**
  * What a card's optimization pick means on the AV rail (owner ask 30.09: "переключи запуски AV на
  * Purchase с этим пикселем, но сделай чтобы можно было выбирать или так или так"): conversions =
- * Sales optimizing Purchase on AV_PIXEL (a fresh card's default), clicks = Traffic / link clicks with
- * no pixel. Anything but "clicks" reads as conversions. The ONE mapping the card, the locks, the
- * launch route and AV clones all use.
+ * Sales optimizing Purchase on the card's PIXEL — one of AV_PIXELS (owner ask 24.11); a pick that is
+ * none of them, or no pick, is the default AV_PIXEL — clicks = Traffic / link clicks with no pixel.
+ * Anything but "clicks" reads as conversions. The ONE mapping the card, the locks, the launch route
+ * and AV clones all use.
  */
-export function avDelivery(optimization: string): AvDelivery {
+export function avDelivery(optimization: string, pixel?: unknown): AvDelivery {
   return optimization === "clicks"
     ? { objective: AV_OBJECTIVE, optimization: "clicks", pixel: "" }
-    : { objective: AV_SALES_OBJECTIVE, optimization: "conversions", pixel: AV_PIXEL.id, conversionEvent: "PURCHASE" };
+    : { objective: AV_SALES_OBJECTIVE, optimization: "conversions", pixel: (avPixel(pixel) ?? AV_PIXEL).id, conversionEvent: "PURCHASE" };
 }
 
 /**
  * The AV lock for one card (applyPartnerLocks): objective, pixel and event converge to the card's
- * optimization pick (avDelivery), and min-ROAS — which needs purchase VALUE AV's Purchase events do
- * not carry — snaps to lowest cost in either mode. Empty patch = the card already conforms.
+ * optimization pick (avDelivery) — a Purchase card keeps the AV pixel it picked, any other value
+ * becomes the default — and min-ROAS, which needs purchase VALUE AV's Purchase events do not carry,
+ * snaps to lowest cost in either mode. Empty patch = the card already conforms.
  */
 export function avLockPatch(r: Campaign): Partial<Campaign> {
   const patch: Partial<Campaign> = {};
-  const d = avDelivery(r.optimization);
+  const d = avDelivery(r.optimization, r.pixel);
   if (r.objective !== d.objective) patch.objective = d.objective;
   if (r.optimization !== d.optimization) patch.optimization = d.optimization;
   if (r.pixel !== d.pixel) patch.pixel = d.pixel;

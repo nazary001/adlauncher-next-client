@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sessionFromCookieHeader } from "@/lib/session";
-import { AIF_VALUE_PIXEL, AV_PIXEL, ROAS_PIXEL, aifOfferablePixels, avDelivery, partnerConfig, pickAifPixel, type PartnerId } from "@/lib/partners";
+import { AIF_VALUE_PIXEL, ROAS_PIXEL, aifOfferablePixels, avDelivery, avPixelName, partnerConfig, pickAifPixel, type PartnerId } from "@/lib/partners";
 import { resolveMoSigner } from "@/lib/mo-soc";
 import { bidAmountMissing, bidKind, moEnsureSocMark, normalizeRoasGoal, parseMoney } from "@/lib/types";
 import { SUPPORTED_BID_STRATEGIES, money } from "@/lib/fb-launch";
@@ -431,7 +431,7 @@ export async function POST(req: Request) {
           }
           const binds = resolveCloneBinds(edit, src);
           // AV never carries the SOURCE's pixel through (resolveCloneBinds would, for a same-account
-          // clone): its pixel is AV_PIXEL or none, set from the clone's delivery below (avDelivery).
+          // clone): its pixel is one of the AV pixels or none, set from the clone's delivery below (avDelivery).
           if (av) binds.pixelId = "";
           // The clone's EFFECTIVE strategy (per-row switch wins, else the source's) — resolved
           // once here so the pixel derivations below and cloneToCampaign can never disagree.
@@ -516,10 +516,11 @@ export async function POST(req: Request) {
           const campaign = cloneToCampaign(edit, src);
           if (av) {
             // AV delivery follows the SOURCE (owner ask 30.09 — both AV modes): a Purchase source
-            // clones as Sales / Purchase on AV_PIXEL, a link-click source as Traffic / link clicks
-            // with no pixel (avDelivery). AV's own site script fires the pixel, so the build account
-            // must carry it — checked here, before any claim.
-            const d = avDelivery(campaign.optimization);
+            // clones as Sales / Purchase on the SOURCE's own pixel when that is one of the AV pixels
+            // the launcher knows (24.11: a source on S-1 nik pixel stays on it), else on the default
+            // AV site pixel; a link-click source clones as Traffic / link clicks with no pixel
+            // (avDelivery). The build account must carry the pixel — checked here, before any claim.
+            const d = avDelivery(campaign.optimization, src.pixelId);
             campaign.objective = d.objective;
             campaign.optimization = d.optimization;
             if (d.conversionEvent) campaign.conversionEvent = d.conversionEvent;
@@ -529,7 +530,7 @@ export async function POST(req: Request) {
             // answers for the pixel there (as on /api/av/launch's TOOL path).
             if (!avTool && d.pixel && !(await pixelsOf(binds.accountId)).some((p) => p.id === d.pixel)) {
               throw new FbError(
-                `pixel_not_on_account — Purchase clones run on ${AV_PIXEL.name} (${AV_PIXEL.id}); share it to act_${binds.accountId} in Business Manager first`,
+                `pixel_not_on_account — this Purchase clone runs on ${avPixelName(d.pixel)} (${d.pixel}); share it to act_${binds.accountId} in Business Manager first`,
                 { campaignId: edit.campaignId },
               );
             }

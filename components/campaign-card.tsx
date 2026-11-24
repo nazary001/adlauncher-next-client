@@ -34,7 +34,7 @@ import { TEAM, toolSessionsWhere } from "@/lib/team";
 import { TOOL_MARK, toolEnsureMark } from "@/lib/tool-launch";
 import { DEFAULT_PLATFORM_CHOICE, PLATFORM_CHOICES } from "@/lib/publisher-platforms";
 import { accountLoads, leastFilledPage, leastLoadedAccount } from "@/lib/pick-defaults";
-import { AIF_VALUE_PIXEL, AV_PIXEL, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifOfferablePixels, avDelivery, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
+import { AIF_VALUE_PIXEL, AV_PIXEL, AV_PIXELS, type LinkRole, type PartnerConfig, ROAS_PIXEL, aifOfferablePixels, avDelivery, avPixelName, fullLandingUrl, landingUrlSegments, launchReadyOpts, pickAifPixel } from "@/lib/partners";
 import { VC_LEAD_PIXEL, VC_PIXEL, VC_READY_LINKS, isPageId, vcDelivery, vcDestination, vcLink, vcLinkSegments, vcModeOf, vcPixelName, vcReadyEventMismatch, vcReadyLinkOf, vcReadyMode } from "@/lib/vc-link";
 import { aifFlowOf } from "@/lib/aif-link";
 import type { FanpageOption } from "./use-fanpages";
@@ -855,12 +855,12 @@ function CampaignCardBase({
                       onChange={(v) =>
                         patch({
                           account: v,
-                          // AV's pixel follows its mode, never the account (AV_PIXEL for Purchase, none
-                          // for link clicks). A roas card keeps its pinned value pixel across account
+                          // AV's pixel follows its mode and its own pick, never the account (the picked
+                          // AV pixel for Purchase, none for link clicks). A roas card keeps its pinned value pixel across account
                           // switches — defaultPixelFor would swap it back to the FARM-1 preference.
                           // AIF pixels are derived from the optimization (normalize re-pins) — never refilled.
                           pixel: avMode
-                            ? avDelivery(c.optimization).pixel
+                            ? avDelivery(c.optimization, c.pixel).pixel
                             : vcMode
                               ? vcDelivery(c.optimization, c.bidStrategy).pixel
                             : aifMode
@@ -996,7 +996,9 @@ function CampaignCardBase({
                   hint={
                     avMode
                       ? conversions
-                        ? "fired by the AV site script"
+                        ? c.pixel && c.pixel !== AV_PIXEL.id
+                          ? "the AV site must fire it (Manage conversion)"
+                          : "fired by the AV site script"
                         : "clicks need no pixel"
                       : vcMode
                         ? conversions
@@ -1046,11 +1048,20 @@ function CampaignCardBase({
                   }
                 >
                   {avMode ? (
-                    // AV's pixel is never a pick: Purchase runs on the AV site pixel (ActiveView's own
-                    // site script fires it), link clicks bind none — the Optimization select decides,
-                    // the locks and the route pin it (avDelivery).
+                    // AV's pixel is a PICK among the pixels the launcher knows for AV (owner ask 24.11,
+                    // lib/av-delivery AV_PIXELS — each by its name and id; the AV site pixel is the
+                    // default): Purchase optimizes on it, link clicks bind none. The list is the
+                    // code's, not the cabinet's — TOOL lists no pixels. The locks keep a valid pick
+                    // and the route re-reads it (avDelivery).
                     conversions ? (
-                      <LockedField value={`${AV_PIXEL.name} · ${AV_PIXEL.id}`} hint="Purchase" mono />
+                      <SearchSelect
+                        value={c.pixel}
+                        onChange={(v) => patch({ pixel: v || AV_PIXEL.id })}
+                        options={AV_PIXELS.map((p) => ({ value: p.id, label: p.name, meta: p.id }))}
+                        placeholder="Search pixel"
+                        emptyHint="No matches"
+                        metaWhenClosed
+                      />
                     ) : (
                       <LockedField value="No pixel — link clicks" hint="auto" />
                     )
@@ -1172,10 +1183,10 @@ function CampaignCardBase({
                     between its two modes here (owner ask 30.09): Purchase on the AV site pixel (the
                     default) or link clicks with no pixel. */}
                 {avMode ? (
-                  <Field label="Optimization" className="col-span-6 md:col-span-4" hint={conversions ? "Purchase on the AV site pixel" : "Traffic — no pixel"}>
+                  <Field label="Optimization" className="col-span-6 md:col-span-4" hint={conversions ? `Purchase on ${avPixelName(c.pixel || AV_PIXEL.id)}` : "Traffic — no pixel"}>
                     <Select
                       value={conversions ? "conversions" : "clicks"}
-                      onChange={(e) => patch({ ...avDelivery(e.target.value) })}
+                      onChange={(e) => patch({ ...avDelivery(e.target.value, c.pixel) })}
                       options={AV_OPTIMIZATIONS}
                     />
                   </Field>

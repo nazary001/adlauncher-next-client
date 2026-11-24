@@ -1237,9 +1237,9 @@ function CloneInner({
                       )
                     ) : avMode ? (
                       // Nothing to pick: the clone follows its SOURCE (avDelivery, since 30.09) — a
-                      // Purchase source clones as Purchase on the AV site pixel, a link-click source
+                      // Purchase source clones as Purchase on its own AV pixel (lib/av-delivery AV_PIXELS), a link-click source
                       // as link clicks with no pixel (the run route sets it, a row's pick is ignored).
-                      <LockedRow label="Pixel" value="AV site pixel · as the source" />
+                      <LockedRow label="Pixel" value="AV pixel · as the source" />
                     ) : isTargetAccount ? (
                       <div className="flex flex-col gap-1 px-1.5 py-1">
                         <span
@@ -1281,10 +1281,10 @@ function CloneInner({
                     : "Rows on the defaults are created in their source campaign’s own cabinet (its videos / images live there). Pick an account to build the batch elsewhere, a fanpage to change the page; any row can set its own Destination."
                   : avMode
                   ? accountMissing
-                    ? "Pick the destination explicitly: the fanpage and the account. “From each source” keeps every clone in its source campaign’s own account; a concrete account re-builds the whole batch there. AV clones follow their source: Purchase on the AV site pixel, or link clicks. Any row can override these with its own Destination."
+                    ? "Pick the destination explicitly: the fanpage and the account. “From each source” keeps every clone in its source campaign’s own account; a concrete account re-builds the whole batch there. AV clones follow their source: Purchase on the source’s own AV pixel, or link clicks. Any row can override these with its own Destination."
                     : isTargetAccount
-                      ? "Rows on the defaults are re-built in the picked account: the source video/image is re-uploaded there (adds a “Migrating media” step). AV clones follow their source: Purchase on the AV site pixel, or link clicks."
-                      : "Rows on the defaults are created in their source campaign’s own ad account (its video/image lives there). AV clones follow their source: Purchase on the AV site pixel, or link clicks. Only the fanpage applies to them."
+                      ? "Rows on the defaults are re-built in the picked account: the source video/image is re-uploaded there (adds a “Migrating media” step). AV clones follow their source: Purchase on the source’s own AV pixel, or link clicks."
+                      : "Rows on the defaults are created in their source campaign’s own ad account (its video/image lives there). AV clones follow their source: Purchase on the source’s own AV pixel, or link clicks. Only the fanpage applies to them."
                   : accountMissing
                     ? "Pick the destination explicitly: the fanpage and the account. “From each source” keeps every clone in its source campaign’s own account; a concrete account re-builds the whole batch there. Any row can override these with its own Destination."
                     : isTargetAccount
@@ -1982,10 +1982,10 @@ function CloneInner({
                               )
                             ) : avMode ? (
                               // Nothing to pick per row: the clone follows its SOURCE (avDelivery) —
-                              // Purchase on the AV site pixel, or link clicks with no pixel.
+                              // Purchase on the source’s own AV pixel, or link clicks with no pixel.
                               <span
                                 className="flex h-8 items-center gap-1.5 rounded-md border border-dashed border-line px-2 font-mono text-[11px] text-faint"
-                                title="AV clones follow their source: Purchase on the AV site pixel (1830814271425766), or link clicks with no pixel"
+                                title="AV clones follow their source: Purchase on the source’s own AV pixel (the AV site pixel when the source ran on another), or link clicks with no pixel"
                               >
                                 <LockIcon className="h-3 w-3 shrink-0" />
                                 AV pixel · as the source

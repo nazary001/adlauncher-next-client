@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { type Campaign, bidAmountMissing, bidKind, bidTag, withPartnerMark } from "@/lib/types";
-import { AV_PIXEL, type PartnerId, avAdText, avDelivery, fullLandingUrl, partnerConfig } from "@/lib/partners";
+import { AV_PIXELS, type PartnerId, avAdText, avDelivery, avPixel, avPixelName, fullLandingUrl, partnerConfig } from "@/lib/partners";
 import {
   type LaunchBinds,
   SUPPORTED_BID_STRATEGIES,
@@ -257,9 +257,23 @@ export async function POST(req: Request) {
 
   const partner = partnerConfig("av" as PartnerId);
   // The account and fanka are the buyer's PICKS, validated against the AV token's own data below.
-  // The delivery is the card's optimization pick, mapped server-side (the client's objective / pixel
-  // are never trusted): Purchase binds AV_PIXEL, link clicks bind none.
-  const delivery = avDelivery(String(campaign.optimization ?? ""));
+  // The delivery is the card's optimization pick, mapped server-side (the client's objective is never
+  // trusted). The PIXEL of a Purchase card is the buyer's pick among the AV pixels the launcher knows
+  // (owner ask 24.11, lib/av-delivery AV_PIXELS): none sent = the default AV site pixel (a tab from
+  // before the pick always sends that one), a pixel that is none of them is refused — never swapped
+  // for another silently. Link clicks bind none.
+  const pickedPixel = String(campaign.pixel ?? "").trim();
+  if (String(campaign.optimization ?? "") !== "clicks" && pickedPixel && !avPixel(pickedPixel)) {
+    return NextResponse.json(
+      {
+        ok: false,
+        stage: "config",
+        error: `pixel_not_allowed — an AV Purchase campaign optimizes on one of: ${AV_PIXELS.map((p) => `${p.name} (${p.id})`).join(", ")}; pick one on the card (or switch it to Link clicks)`,
+      },
+      { status: 400 },
+    );
+  }
+  const delivery = avDelivery(String(campaign.optimization ?? ""), pickedPixel);
   const pickedAccount = String(campaign.account ?? "").trim().replace(/^act_/, "");
   const pickedPage = String(campaign.page ?? "").trim();
   const binds: LaunchBinds = {
@@ -307,15 +321,15 @@ export async function POST(req: Request) {
           { status: 400 },
         );
       }
-      // Purchase optimizes on AV_PIXEL — the cabinet must carry it, or Meta would only reject the ad
-      // set once the campaign already exists (orphan + burnt key). On TOOL the cabinet is not on the
-      // AV token, so TOOL's own validation answers there.
+      // Purchase optimizes on the card's AV pixel — the cabinet must carry it, or Meta would only
+      // reject the ad set once the campaign already exists (orphan + burnt key). On TOOL the cabinet
+      // is not on the AV token, so TOOL's own validation answers there.
       if (binds.pixelId && !(await accountPixels(pickedAccount, rail.cat)).some((p) => p.id === binds.pixelId)) {
         return NextResponse.json(
           {
             ok: false,
             stage: "config",
-            error: `pixel_not_on_account — Purchase runs on ${AV_PIXEL.name} (${AV_PIXEL.id}); share it to act_${pickedAccount} in Business Manager first, or switch the card to Link clicks`,
+            error: `pixel_not_on_account — Purchase runs on ${avPixelName(binds.pixelId)} (${binds.pixelId}); share it to act_${pickedAccount} in Business Manager first, pick another pixel, or switch the card to Link clicks`,
           },
           { status: 400 },
         );
@@ -527,7 +541,7 @@ export async function POST(req: Request) {
   }
 
   // Server-pinned invariants (the UI pins them too, but a stale/edited draft is the client's word,
-  // not the truth): the delivery the optimization pick maps to — Sales / Purchase on AV_PIXEL, or
+  // not the truth): the delivery the optimization pick maps to — Sales / Purchase on the card's AV pixel, or
   // Traffic / link clicks with no pixel (avDelivery).
   const serverCampaign: Campaign = { ...campaign, ...delivery };
   // AV's ad text is SWAPPED (owner ask 30.09, avAdText): the card's Title feeds the ad's headline and

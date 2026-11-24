@@ -65,10 +65,10 @@ export const OPTIMIZATIONS: Option[] = [
   { value: "clicks", label: "Clicks" },
 ];
 
-/** AV's two modes (owner ask 30.09, lib/partners avDelivery): Purchase on the AV site pixel (default)
- *  or Traffic / link clicks with no pixel. */
+/** AV's two modes (owner ask 30.09, lib/partners avDelivery): Purchase on the card's AV pixel (the AV
+ *  site pixel unless another is picked, 24.11) or Traffic / link clicks with no pixel. */
 export const AV_OPTIMIZATIONS: Option[] = [
-  { value: "conversions", label: "Purchase (AV pixel)" },
+  { value: "conversions", label: "Purchase (pixel)" },
   { value: "clicks", label: "Link clicks" },
 ];
 
