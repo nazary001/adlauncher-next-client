@@ -1,7 +1,7 @@
 // Node's built-in runner (v24 strips types natively): `node --test tests/hs-ready-links.test.ts`.
 // Excluded from the app's tsconfig — the explicit .ts import below is a Node requirement.
 // The HS card's ready landings (lib/hs-ready-links.ts): the partner pages LION's Campaign URL
-// Builder hands a buyer, as read off the builder on 13.10 under the GLO-02 login.
+// Builder hands a buyer, as read off the builder on 13.10 under the GLO-02 login (Clothes on 25.11).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { HS_READY_LINKS, hsReadyLinkOf, hsReadyLinksFor } from "../lib/hs-ready-links.ts";
@@ -10,9 +10,9 @@ import { teamConfig } from "../lib/team.ts";
 const LANGS = ["EN", "ES", "FR", "PT"];
 const row = (l: { niche: string; lang: string; kind: string; url: string }) => [l.niche, l.lang, l.kind, l.url];
 
-test("HIGH ADX: Cars and MKD in four languages — the direct article and every captcha template, as the builder prints them", () => {
+test("HIGH ADX: Cars, MKD and Clothes in four languages — the direct article and every captcha template, as the builder prints them", () => {
   const high = hsReadyLinksFor("HIGH ADX");
-  assert.equal(high.length, 2 * 4 * 12);
+  assert.equal(high.length, 3 * 4 * 12);
   const url = (niche: string, lang: string, kind: string) => high.find((l) => l.niche === niche && l.lang === lang && l.kind === kind)?.url;
   assert.equal(url("Cars", "EN", "Direct article"), "https://fast-flow.org/htd/cars/en/");
   assert.equal(url("Digital Marketing", "PT", "Direct article"), "https://fast-flow.org/htd/digital-marketing/pt/");
@@ -20,9 +20,14 @@ test("HIGH ADX: Cars and MKD in four languages — the direct article and every 
   assert.equal(url("Cars", "ES", "Captcha 3"), "https://fast-flow.org/ht/captcha-3/cars/es/");
   assert.equal(url("Digital Marketing", "FR", "Captcha 10"), "https://fast-flow.org/ht/captcha-10/digital-marketing/fr/");
   assert.equal(url("Cars", "PT", "Captcha (legacy)"), "https://fast-flow.org/ht/captcha/cars/pt/");
+  assert.equal(url("Clothes", "EN", "Direct article"), "https://fast-flow.org/htd/clothes/en/");
+  assert.equal(url("Clothes", "PT", "Direct article"), "https://fast-flow.org/htd/clothes/pt/");
+  assert.equal(url("Clothes", "ES", "Captcha 1"), "https://fast-flow.org/ht/captcha-1/clothes/es/");
+  assert.equal(url("Clothes", "FR", "Captcha 10"), "https://fast-flow.org/ht/captcha-10/clothes/fr/");
+  assert.equal(url("Clothes", "PT", "Captcha (legacy)"), "https://fast-flow.org/ht/captcha/clothes/pt/");
   // every niche × language carries the same twelve picks, the article first
   const kinds = ["Direct article", ...Array.from({ length: 10 }, (_, i) => `Captcha ${i + 1}`), "Captcha (legacy)"];
-  for (const niche of ["Cars", "Digital Marketing"]) {
+  for (const niche of ["Cars", "Digital Marketing", "Clothes"]) {
     for (const lang of LANGS) {
       assert.deepEqual(high.filter((l) => l.niche === niche && l.lang === lang).map((l) => l.kind), kinds, `${niche} ${lang}`);
     }
@@ -48,6 +53,15 @@ test("META ADX: the builder's own map — one direct article and one captcha per
     ["Digital Marketing", "FR", "Captcha", "https://routerix.tech/captcha/mkt/fr/"],
     ["Digital Marketing", "PT", "Direct article", "https://routerix.tech/direct/marketing-digital-br/"],
     ["Digital Marketing", "PT", "Captcha", "https://routerix.tech/captcha/mkt/pt/"],
+    // Clothes spells its Brazilian article "-pt" (Cars and MKD say "-br")
+    ["Clothes", "EN", "Direct article", "https://routerix.tech/direct/roupas-en/"],
+    ["Clothes", "EN", "Captcha", "https://routerix.tech/captcha/clothes/en/"],
+    ["Clothes", "ES", "Direct article", "https://routerix.tech/direct/roupas-es/"],
+    ["Clothes", "ES", "Captcha", "https://routerix.tech/captcha/clothes/es/"],
+    ["Clothes", "FR", "Direct article", "https://routerix.tech/direct/roupas-fr/"],
+    ["Clothes", "FR", "Captcha", "https://routerix.tech/captcha/clothes/fr/"],
+    ["Clothes", "PT", "Direct article", "https://routerix.tech/direct/roupas-pt/"],
+    ["Clothes", "PT", "Captcha", "https://routerix.tech/captcha/clothes/pt/"],
   ]);
 });
 
@@ -78,13 +92,13 @@ test("picker order: a niche is one unbroken run (the picker prints its header on
   for (const type of ["HIGH ADX", "META ADX"]) {
     const list = hsReadyLinksFor(type);
     const niches = list.map((l) => l.niche).filter((n, i, a) => i === 0 || a[i - 1] !== n);
-    assert.deepEqual(niches, ["Cars", "Digital Marketing"], type);
+    assert.deepEqual(niches, ["Cars", "Digital Marketing", "Clothes"], type);
     for (const niche of niches) {
       const langs = list.filter((l) => l.niche === niche).map((l) => l.lang).filter((n, i, a) => i === 0 || a[i - 1] !== n);
       assert.deepEqual(langs, LANGS, `${type} ${niche}`);
     }
     // a row names its niche the way the team does, so the closed field reads "MKD · Captcha 3"
-    assert.deepEqual([...new Set(list.map((l) => `${l.niche}=${l.short}`))], ["Cars=Cars", "Digital Marketing=MKD"], type);
+    assert.deepEqual([...new Set(list.map((l) => `${l.niche}=${l.short}`))], ["Cars=Cars", "Digital Marketing=MKD", "Clothes=Clothes"], type);
   }
 });
 
@@ -92,7 +106,12 @@ test("hsReadyLinkOf: the link field holds a ready landing only when it is exactl
   assert.equal(hsReadyLinkOf("https://fast-flow.org/ht/captcha-3/cars/es/")?.kind, "Captcha 3");
   assert.equal(hsReadyLinkOf("  https://fast-flow.org/htd/digital-marketing/fr/ \n")?.short, "MKD");
   assert.equal(hsReadyLinkOf("https://routerix.tech/captcha/mkt/pt/")?.redirectType, "META ADX");
+  assert.equal(hsReadyLinkOf("https://fast-flow.org/ht/captcha-7/clothes/fr/")?.short, "Clothes");
+  assert.equal(hsReadyLinkOf("https://routerix.tech/direct/roupas-pt/")?.niche, "Clothes");
   for (const pasted of [
+    "https://routerix.tech/direct/roupas-br/",
+    "https://routerix.tech/clothes/pt/",
+    "https://fast-flow.org/htd/benefits/en/",
     "",
     "https://fast-flow.org/ht/captcha-3/cars/es",
     "https://fast-flow.org/ht/captcha-3/cars/es/?utm_source=facebook",

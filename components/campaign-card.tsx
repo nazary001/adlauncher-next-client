@@ -1601,7 +1601,7 @@ function CampaignCardBase({
                               value={readyLink && !readyMismatch ? readyLink.url : ""}
                               onChange={(v) => patch({ link: v })}
                               options={readyOptions}
-                              placeholder="Pick a ready landing — Cars / MKD"
+                              placeholder="Ready landing — Cars / MKD / Clothes"
                               emptyHint="No ready landings match"
                               ariaLabel="Ready landing"
                               facets

@@ -13,9 +13,17 @@
 //   #ADX [META] — routerix.tech, every path spelled out in the builder's own map (CAMPAIGN_URL_MAP)
 // Each link below answered 200 in its own language that day.
 //
+// Clothes joined on 25.11 (owner: "добавь так же им в лаунчер еще нишу clothes по тому же принципу"),
+// read off the same two tabs: the same four markets and the same templates as the first two niches.
+// All 48 HIGH links answered 200 in their own language. META's four captchas did too; its direct
+// articles are a rotation on the partner's side (each request lands on another article site), and
+// that day about one request in six to the EN / ES / PT ones ended on a site that answered 404 —
+// the builder's link is right, the dead pages sit in the partner's pool (Digital Marketing EN hit
+// one in twelve the same hour).
+//
 // Not listed, one line each when asked for: the builder's other HIGH templates (prize, cube,
-// v2-prize, gift, slot, age-gate, ai-comp-1…4), META's Quiz type (/worldcars/, /videomkt/) and the
-// other niches (Clothes, Benefits, Loans, …).
+// v2-prize, gift, slot, age-gate, ai-comp-1…4), META's Quiz type (/worldcars/, /videomkt/,
+// /clothes/) and the other niches (Benefits, Loans, …).
 //
 // Import-free and pure: loaded by the card and by `node --test`.
 
@@ -29,7 +37,8 @@ export type HsReadyLink = {
   redirectType: HsReadyRedirect;
   /** The builder's niche — the picker's section. */
   niche: string;
-  /** The niche as the team says it — heads the row: "Cars · Captcha 3", "MKD · Direct article". */
+  /** The niche as the team says it — heads the row: "Cars · Captcha 3", "MKD · Direct article",
+   *  "Clothes · Captcha 1". */
   short: string;
   lang: HsReadyLang;
   /** "Direct article" · "Captcha 1" … "Captcha 10" · "Captcha (legacy)" (HIGH) · "Captcha" (META). */
@@ -43,6 +52,7 @@ const HIGH_BASE = "https://fast-flow.org";
 const HIGH_NICHES = [
   { slug: "cars", niche: "Cars", short: "Cars" },
   { slug: "digital-marketing", niche: "Digital Marketing", short: "MKD" },
+  { slug: "clothes", niche: "Clothes", short: "Clothes" },
 ] as const;
 /** The builder's captcha templates in its own order: the ten numbered ones, then the original. */
 const HIGH_CAPTCHAS: ReadonlyArray<readonly [slug: string, kind: string]> = [
@@ -51,7 +61,8 @@ const HIGH_CAPTCHAS: ReadonlyArray<readonly [slug: string, kind: string]> = [
 ];
 
 const META_BASE = "https://routerix.tech";
-/** META's direct articles are named per market (the Brazilian one is "-br", not "-pt"). */
+/** META's direct articles are named per market, each niche its own way: the Brazilian one is "-br"
+ *  for Cars and Digital Marketing and "-pt" for Clothes ("roupas-…" in every language). */
 const META_NICHES = [
   {
     niche: "Cars",
@@ -64,6 +75,12 @@ const META_NICHES = [
     short: "MKD",
     captcha: "mkt",
     direct: { EN: "marketing-digital-en", ES: "marketing-digital-es", FR: "marketing-digital-fr", PT: "marketing-digital-br" },
+  },
+  {
+    niche: "Clothes",
+    short: "Clothes",
+    captcha: "clothes",
+    direct: { EN: "roupas-en", ES: "roupas-es", FR: "roupas-fr", PT: "roupas-pt" },
   },
 ] as const;
 

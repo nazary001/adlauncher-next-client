@@ -130,7 +130,8 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     platforms: [],
     ownerTools: ["accounts", "users"],
     pagesRegistry: false,
-    // Owner ask 13.10: the team picks the partner's Cars / MKD landings from a list on the card.
+    // Owner ask 13.10: the team picks the partner's Cars / MKD landings from a list on the card
+    // (Clothes joined them 25.11).
     hsReadyLinks: true,
     // Owner ask 13.10: "one ad per creative (LION) вот эту надпись убери с лаунчера для команды гло 2".
     hsCreativesNote: false,

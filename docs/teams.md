@@ -19,7 +19,7 @@ the server of that build). Unset = `glo-01` = the launcher as it always was.
 | LION key / acronym | GLO-01 | GLO-02 |
 | LION profiles it works on | `glo-01-*`, `globecoders-RENT-*` | `glo-02-*` |
 | hs-tools pages registry (fanka gate) | on | off — its pages are not tracked there |
-| Ready landings on the HS card | no — the link is pasted | a pick above the link field (Cars / MKD) |
+| Ready landings on the HS card | no — the link is pasted | a pick above the link field (Cars / MKD / Clothes) |
 | A profile's personal ad account | listed, as LION lists it | left out — business accounts only |
 | S3 creative bucket | `gc-adlauncher-creatives` | the same bucket, own key namespace |
 
@@ -136,12 +136,12 @@ in about a minute); its every-minute queue sweep moves to the new build by itsel
 ## Ready landings on the HS card (GLO-02)
 
 Above the link field the card offers the partner's landings that LION's Campaign URL Builder hands
-out — Cars and Digital Marketing (MKD) in EN / ES / FR / PT: the direct article and the captcha
+out — Cars, Digital Marketing (MKD) and Clothes in EN / ES / FR / PT: the direct article and the captcha
 templates. The list follows the card's redirect type (HIGH ADX → `fast-flow.org`, META ADX →
 `routerix.tech`; plain ADX has none). A pick only fills the link field, which stays free text: a
 pasted landing launches exactly as before, and the tracking tail is appended either way.
 
-The list is `lib/hs-ready-links.ts` (read off the builder 13.10, pinned by
+The list is `lib/hs-ready-links.ts` (read off the builder 13.10, Clothes 25.11; pinned by
 `tests/hs-ready-links.test.ts`) — another template, niche or language is one more row there. To offer
 it to GLO-01 as well, set `hsReadyLinks: true` in its entry in `lib/team.ts`.
 
