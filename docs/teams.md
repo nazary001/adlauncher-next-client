@@ -4,24 +4,25 @@ Since 08.10.2026 the launcher serves more than one team. The code is the same; a
 exactly one team, chosen by `NEXT_PUBLIC_ADL_TEAM` (inlined at build time into the client bundle and
 the server of that build). Unset = `glo-01` = the launcher as it always was.
 
-| | GLO-01 | GLO-02 |
-|---|---|---|
-| Launcher | https://adlauncher.gcamazingtool.xyz | https://glo-02adlauncher.gcamazingtool.xyz |
-| GitHub repo | `nazary001/adlauncher-next-client` | `nazary001/glo-02adLauncher-next-client` |
-| Vercel project (team GlobeCoders) | `adlauncher-next-client` | `glo-02adlauncher-next-client` |
-| Local folder | `GC-coding/adlauncher-mongo` | `GC-coding/adLauncher_glo-2` |
-| Partners | HS, MO, AIF, AV, VC | HS only |
-| HS launch channels | LION, FB token, TOOL | LION only |
-| Platform tabs | Facebook, TikTok, Google, Snapchat | Facebook only |
-| Owner tools | all | Account access, Team logins |
-| Logins | the shared tools directory (`gc.up_users`) | its own list (`gc_glo02.up_users`) |
-| Mongo database (same cluster) | `gc` | `gc_glo02` |
-| LION key / acronym | GLO-01 | GLO-02 |
-| LION profiles it works on | `glo-01-*`, `globecoders-RENT-*` | `glo-02-*` |
-| hs-tools pages registry (fanka gate) | on | off — its pages are not tracked there |
-| Ready landings on the HS card | no — the link is pasted | a pick above the link field (Cars / MKD / Clothes) |
-| A profile's personal ad account | listed, as LION lists it | left out — business accounts only |
-| S3 creative bucket | `gc-adlauncher-creatives` | the same bucket, own key namespace |
+| | GLO-01 | GLO-02 | GLO-04 (since 26.11) |
+|---|---|---|---|
+| Launcher | https://adlauncher.gcamazingtool.xyz | https://glo-02adlauncher.gcamazingtool.xyz | https://glo-04adlauncher.gcamazingtool.xyz |
+| GitHub repo | `nazary001/adlauncher-next-client` | `nazary001/glo-02adLauncher-next-client` | `nazary001/glo-04adLauncher-next-client` |
+| Vercel project (team GlobeCoders) | `adlauncher-next-client` | `glo-02adlauncher-next-client` | `glo-04adlauncher-next-client` |
+| Local folder | `GC-coding/adlauncher-mongo` | `GC-coding/adLauncher_glo-2` | `GC-coding/adLauncher_glo-4` |
+| Partners | HS, MO, AIF, AV, VC | HS only | HS only |
+| HS launch channels | LION, FB token, TOOL | LION, TOOL (since 09.11) | LION only (no TOOL key yet) |
+| Platform tabs | Facebook, TikTok, Google, Snapchat | Facebook only | Facebook only |
+| Owner tools | all | Account access, Team logins | Account access, Team logins |
+| Logins | the shared tools directory (`gc.up_users`) | its own list (`gc_glo02.up_users`) | its own list (`gc_glo04.up_users`) |
+| Mongo database (same cluster) | `gc` | `gc_glo02` | `gc_glo04` |
+| LION key / acronym | GLO-01 | GLO-02 | GLO-04 |
+| LION profiles it works on | `glo-01-*`, `globecoders-RENT-*` | `glo-02-*` | `glo-04-*` (none in LION yet on 26.11) |
+| hs-tools pages registry (fanka gate) | on | off — its pages are not tracked there | off — no list for the team there |
+| Ready landings on the HS card | no — the link is pasted | a pick above the link field (Cars / MKD / Clothes) | the same pick |
+| A profile's personal ad account | listed, as LION lists it | left out — business accounts only | left out — business accounts only |
+| S3 creative bucket | `gc-adlauncher-creatives` | the same bucket, own key namespace | the same bucket, own key namespace |
+| Team mark | cyan GLO-01 | amber GLO-02 | pink GLO-04 |
 
 Everything a team has is declared in **`lib/team.ts`** and nowhere else. The UI hides the rest; the
 server refuses it (`proxy.ts` by route path, the launch queue by job kind, `lib/lion.ts` by profile
@@ -33,19 +34,23 @@ LION itself separates nothing: every team's API key lists **all** profiles of th
 of them, reads any campaign and duplicates any campaign (probed 08.10). The launcher keeps each team
 on its own:
 
-- **Profiles** — by the slug's prefix (`glo-02-3` is GLO-02's). The list is filtered and every read
-  and campaign-creating write refuses a foreign slug before a request leaves.
+- **Profiles** — by the slug's prefix (`glo-02-3` is GLO-02's, `glo-04-1` GLO-04's; `glo-03-*` are
+  GLO-03's own tool's and no launcher's). The list is filtered and every read and campaign-creating
+  write refuses a foreign slug before a request leaves. A team LION lists no profile for yet (GLO-04 on
+  26.11) gets "LION lists no GLO-04 profiles" on the board until HS adds them — nothing else changes.
 - **Clone / JURO sources** — not separated (owner 13.10): any campaign LION shows can be cloned,
   whichever team launched it. The copy is born on the team's own profile and ad account; a JURO copy
   re-uses the source's page posts, so the picked profile must carry their fanpage.
 - **Campaigns the team changes** (an activation that arrives by id) — by the acronym LION stamps at
-  the head of every name it builds (`[06/10] (GLO-01) API - …`), else by the ad account. GLO-02
-  activates only a campaign that is provably its own; GLO-01 everything except a GLO-02 campaign.
+  the head of every name it builds (`[06/10] (GLO-01) API - …`), else by the ad account. GLO-02 and
+  GLO-04 activate only a campaign that is provably their own; GLO-01 everything except another
+  launcher team's campaign (a build knows the teams of its own `lib/team.ts` — a launcher built before
+  GLO-04 existed does not know `(GLO-04)` yet).
 - **Stored state** — users, the launch queue, the task registry, per-account launch limits,
   account assignments and campaign templates live in the team's own database. A build refuses to run
   on another team's.
 - **Sessions** — own `AUTH_SECRET` per team, and the cookie carries the team as well.
-- A LION key whose acronym names the other team is refused outright (`lion_team_mismatch`).
+- A LION key whose acronym names another team is refused outright (`lion_team_mismatch`).
 
 ## Environment of a team other than GLO-01
 
@@ -105,9 +110,10 @@ move with it; names of campaigns already launched are not rewritten. The buyer c
 under the old name (and lands under the new one), and an open tab switches by itself within minutes.
 Refused while the login has launches in the queue.
 
-## Shipping an update to both launchers
+## Shipping an update to every launcher
 
-The second launcher's repo is the first one's history plus nothing of its own — keep it that way.
+The second (and the fourth) launcher's repo is the first one's history plus nothing of its own — keep
+it that way.
 
 ```bash
 # 1. the first launcher, as always
@@ -117,9 +123,15 @@ git -C GC-coding/adlauncher-mongo push origin feat/s3-server-queue:main
 cd GC-coding/adLauncher_glo-2
 git pull --ff-only upstream main          # or: git pull --ff-only main-launcher-local <branch> for commits not on GitHub yet
 git push origin main
+
+# 3. GLO-04 — the same two lines in its own folder
+cd GC-coding/adLauncher_glo-4
+git pull --ff-only upstream main
+git push origin main
 ```
 
-`upstream` (the first launcher's GitHub repo) is fetch-only in that folder on purpose.
+`upstream` (the first launcher's GitHub repo) and `main-launcher-local` are fetch-only in those
+folders on purpose.
 
 **A commit that is already in the second repo keeps its id.** A branch that holds such commits is
 brought up to date with `git merge origin/main` — never `git rebase` / `git pull --rebase`: a rebase
@@ -131,9 +143,10 @@ came up on day one: the first launcher's `main` gained a Snapchat fix while this
 the second repo's history — hence the merge commit `a8090bb`.)
 
 A push to the second repo's `main` is a production deploy of the GLO-02 launcher (Vercel builds it
-in about a minute); its every-minute queue sweep moves to the new build by itself.
+in about a minute); its every-minute queue sweep moves to the new build by itself. The same goes for
+GLO-04's repo and launcher.
 
-## Ready landings on the HS card (GLO-02)
+## Ready landings on the HS card (GLO-02, GLO-04)
 
 Above the link field the card offers the partner's landings that LION's Campaign URL Builder hands
 out — Cars, Digital Marketing (MKD) and Clothes in EN / ES / FR / PT: the direct article and the captcha
@@ -145,10 +158,10 @@ The list is `lib/hs-ready-links.ts` (read off the builder 13.10, Clothes 25.11; 
 `tests/hs-ready-links.test.ts`) — another template, niche or language is one more row there. To offer
 it to GLO-01 as well, set `hsReadyLinks: true` in its entry in `lib/team.ts`.
 
-The Creatives field of the GLO-02 card carries no "one ad per creative (LION)" note
+The Creatives field of the GLO-02 and GLO-04 cards carries no "one ad per creative (LION)" note
 (`hsCreativesNote: false`, owner ask 13.10); GLO-01 keeps it.
 
-## Business accounts only (GLO-02)
+## Business accounts only (GLO-02, GLO-04)
 
 LION lists, next to the team's business ad accounts, the personal ad account of each profile's
 persona — under the persona's own name (`Адель Иванова` in the profile of persona `Адель Иванова`),
@@ -168,10 +181,14 @@ owner-role login edits or deletes one — everyone else gets "Copy to mine". `li
 the rules, `lib/template-store.ts` the store, `/api/templates` the routes (need `always`);
 `npm run ensure-indexes` creates the collection's indexes on a database that has none yet.
 
-## Giving GLO-02 more
+## Giving GLO-02 (or GLO-04) more
 
 Edit its entry in `lib/team.ts` — the tests in `tests/team.test.ts` pin what each team reaches and
 must be updated in the same commit.
+
+- **TOOL for GLO-04** (GLO-02 got it 09.11) — once the team has its own TOOL team and key: `"tool"` in
+  its `hsChannels`, `hsToolAccounts` = the name pattern of its HS cabinets as TOOL lists them, and
+  `TOOL_SESSIONS_API_KEY` in its Vercel project.
 
 - **Another partner / the FB-token or TOOL rail / a platform tab** — add it to `partners` /
   `hsChannels` / `platforms`, give the Vercel project that rail's own credentials, redeploy. Google
@@ -185,8 +202,13 @@ must be updated in the same commit.
   with the team's own FB tokens (`lib/city-search.ts`), so the Vercel project needs at least one live
   launch token. Contract: the TOOL channel spec §6.
 
-## A third team
+## Another team (GLO-04 was added this way on 26.11)
 
-Add it to `TEAMS` in `lib/team.ts` (its LION slugs must start with its id, e.g. `glo-03-`), create
-its database (`npm run ensure-indexes` with `MONGODB_DB=gc_glo03`), its own secrets and LION key, a
-Vercel project, and add its origin to the bucket CORS list in `scripts/creatives-bucket-setup.mjs`.
+Add it to `TEAMS` in `lib/team.ts` and its colour to `components/team-badge.tsx` (its LION slugs must
+start with its id, e.g. `glo-04-`), create its database (`npm run ensure-indexes` with
+`MONGODB_DB=gc_glo04`), its own secrets and LION key, its folder (a clone of this repo with
+fetch-only `upstream` / `main-launcher-local` remotes), a GitHub repo and a Vercel project
+(framework = Next.js — `vercel project add` creates "Other", which answers 404 everywhere), the
+subdomain (CNAME → `cname.vercel-dns.com`, DNS only, in Cloudflare), and add its origin to the bucket
+CORS list in `scripts/creatives-bucket-setup.mjs` — on the live bucket append just that one origin to
+the PUT rule (read it first: other tools may have added origins this script does not list).

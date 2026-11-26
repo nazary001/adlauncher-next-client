@@ -15,7 +15,7 @@
 //
 // Import-free and pure on purpose: loaded by proxy.ts, by client components and by `node --test`.
 
-export type TeamId = "glo-01" | "glo-02";
+export type TeamId = "glo-01" | "glo-02" | "glo-04";
 export const DEFAULT_TEAM: TeamId = "glo-01";
 
 /** FB-board partner ids (= lib/partners PartnerId; repeated here so this file imports nothing). */
@@ -146,6 +146,37 @@ const TEAMS: Record<TeamId, TeamConfig> = {
     // GLO-HS-02-n session's persona-named personal account, which this leaves out (personalAccounts).
     hsToolAccounts: /^DRGC-VD-C1-BR-/i,
     // City targeting was asked for GLO-01 only (18.11).
+    cityTargeting: false,
+  },
+  // The fourth team (owner ask 26.11: «сделать лаунчер новый так же как мы под гло 2 сделали только под
+  // гло 4 новую команду»): GLO-02's launcher as it started — only the HS partner, only through LION,
+  // Facebook only, its own logins and database. Its LION key came with no TOOL key, so there is no
+  // TOOL rail (it is one word here — "tool" in hsChannels — plus TOOL_SESSIONS_API_KEY in the Vercel
+  // project, once the team has its own TOOL team). On 26.11 LION listed no glo-04-* profile yet (21
+  // profiles: glo-01 ×9, glo-02 ×5, glo-03 ×4, RENT ×3) — the board says "LION lists no GLO-04
+  // profiles" until HS adds them; they show up by themselves, by the slug prefix.
+  "glo-04": {
+    id: "glo-04",
+    label: "GLO-04",
+    partners: ["br"],
+    defaultPartner: "br",
+    hsChannels: ["lion"],
+    platforms: [],
+    ownerTools: ["accounts", "users"],
+    // The hs-tools registry keeps lists for glo-01 / glo-02 only (an unknown team answers 400).
+    pagesRegistry: false,
+    // As on GLO-02: the partner's Cars / MKD / Clothes landings as a pick on the card, no
+    // "one ad per creative (LION)" note, business ad accounts only.
+    hsReadyLinks: true,
+    hsCreativesNote: false,
+    personalAccounts: false,
+    sharedPools: false,
+    toolsDirectory: false,
+    openApi: false,
+    strictCampaigns: true,
+    avKeysRegistered: 0,
+    // No TOOL rail, so no TOOL-listed account is ever the team's HS one: a pattern that matches nothing.
+    hsToolAccounts: /(?!)/,
     cityTargeting: false,
   },
 };
@@ -348,8 +379,9 @@ export function teamAllowsJob(scope: string, kind: string, team: TeamConfig = TE
 // ---- the fanpage registry -------------------------------------------------------------------------
 
 /** The hs-tools pages registry keeps one HS fanpage list per launcher team (its update of 13.10:
- *  `/fb/api/v1/pages?team=glo-01 | glo-02`, `team=*` = every team's, an unknown team = 400). The
- *  filter this team's reads carry — a launcher never reads the un-filtered list. */
+ *  `/fb/api/v1/pages?team=glo-01 | glo-02`, `team=*` = every team's, an unknown team = 400 — glo-04
+ *  has no list there yet and does not ask, pagesRegistry). The filter this team's reads carry — a
+ *  launcher never reads the un-filtered list. */
 export const teamPagesQuery = (team: TeamConfig = TEAM): string => `?team=${team.id}`;
 
 // ---- LION profiles -----------------------------------------------------------------------------
@@ -459,8 +491,8 @@ export const teamMayUseCampaign = (verdict: CampaignTeam, team: TeamConfig = TEA
 const DB_TEAM_TAG = /glo[-_]?(\d+)/i;
 
 /** May this team run on this Mongo database? Every team but the first lives in a database named
- *  after it (gc_glo02, gc_glo02_test); the first one keeps `gc` / `gc_test` and must never be pointed
- *  at another team's. A wrong pairing would mix users, the launch queue and the task registry. */
+ *  after it (gc_glo02, gc_glo02_test, gc_glo04); the first one keeps `gc` / `gc_test` and must never be
+ *  pointed at another team's. A wrong pairing would mix users, the launch queue and the task registry. */
 export function teamAllowsDb(dbName: string, team: TeamConfig = TEAM): boolean {
   const m = DB_TEAM_TAG.exec(String(dbName ?? ""));
   const tagged = m ? `glo-${m[1].padStart(2, "0")}` : null;

@@ -128,5 +128,6 @@ test("hsReadyLinkOf: the link field holds a ready landing only when it is exactl
 
 test("only a team that has them is offered ready landings — the first team's card stays a pasted link", () => {
   assert.equal(teamConfig("glo-02").hsReadyLinks, true);
+  assert.equal(teamConfig("glo-04").hsReadyLinks, true); // GLO-04 got GLO-02's card (26.11)
   assert.equal(teamConfig("glo-01").hsReadyLinks, false);
 });

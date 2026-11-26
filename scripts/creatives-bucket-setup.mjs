@@ -51,8 +51,9 @@ const expireDays = Math.max(1, Number(values["expire-days"] || 14));
 // The browser origins allowed to PUT. Reads stay open to everyone (the objects are public anyway).
 const putOrigins = [
   "https://adlauncher.gcamazingtool.xyz",
-  // the second team's launcher (lib/team.ts glo-02) uploads to the same bucket from its own origin
+  // the other teams' launchers (lib/team.ts glo-02, glo-04) upload to the same bucket from their own origins
   "https://glo-02adlauncher.gcamazingtool.xyz",
+  "https://glo-04adlauncher.gcamazingtool.xyz",
   "https://*.vercel.app",
   "http://localhost:*",
   "http://127.0.0.1:*",

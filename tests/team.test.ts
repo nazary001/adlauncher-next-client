@@ -429,6 +429,176 @@ test("the first team's store namespace is empty — its S3 keys stay what they w
   assert.equal(teamNamespace(GLO2), "glo-02");
 });
 
+// ---- GLO-04 (owner ask 26.11: «сделать лаунчер новый так же как мы под гло 2 сделали только под гло 4») ----
+
+const GLO4 = teamConfig("glo-04");
+
+test("glo-04 is a team of its own: named exactly, no near-miss becomes it", () => {
+  assert.equal(teamConfig("glo-04").id, "glo-04");
+  assert.equal(teamConfig(" GLO-04 ").id, "glo-04");
+  assert.equal(GLO4.label, "GLO-04");
+  assert.throws(() => teamConfig("glo-4"), /names no team/);
+  assert.throws(() => teamConfig("glo04"), /names no team/);
+});
+
+test("glo-04 is GLO-02 as it started: HS through LION only, Facebook only, its own logins — no TOOL, no FB token", () => {
+  assert.deepEqual([...GLO4.partners], ["br"]);
+  assert.equal(GLO4.defaultPartner, "br");
+  assert.deepEqual([...GLO4.hsChannels], ["lion"]);
+  assert.deepEqual([...GLO4.platforms], []);
+  assert.deepEqual([...GLO4.ownerTools], ["accounts", "users"]);
+  assert.equal(GLO4.pagesRegistry, false);
+  assert.equal(GLO4.toolsDirectory, false);
+  assert.equal(GLO4.sharedPools, false);
+  assert.equal(GLO4.openApi, false);
+  assert.equal(GLO4.strictCampaigns, true);
+  // what GLO-02's card has, GLO-04's has: the ready landings, no LION creatives note, business accounts only
+  assert.equal(GLO4.hsReadyLinks, true);
+  assert.equal(GLO4.hsCreativesNote, false);
+  assert.equal(GLO4.personalAccounts, false);
+  assert.equal(GLO4.avKeysRegistered, 0);
+  assert.equal(GLO4.cityTargeting, false);
+  for (const need of ["channel:tool", "channel:token", "graph", "fbTokens", "platform:any", "legacyBlob", "tool:sessions", "tool:tokens", "cities"] as const) {
+    assert.equal(teamHas(need, GLO4), false, need);
+  }
+  for (const need of ["partner:br", "tool:accounts", "tool:users", "always"] as const) assert.equal(teamHas(need, GLO4), true, need);
+  assert.equal(toolSessionsWhere(GLO4), "TOOL (tool.gctracking.xyz)");
+  assert.equal(hsGeoRails(GLO4), "LION API");
+});
+
+test("glo-04 has no TOOL rail — no TOOL-listed account is ever its HS one", () => {
+  for (const name of ["DRGC-VD-C1-BR-583", "GC-HS-VD-C1-BR-1", "GLO-HS-04-1", "anything", "", null]) {
+    assert.equal(teamHsToolAccount(name, GLO4), false, String(name));
+  }
+});
+
+test("glo-04 reaches exactly the HS surface through LION — GLO-02's routes minus TOOL's", () => {
+  const allowed = ROUTES.filter((r) => teamAllowsPath(r, GLO4));
+  const tool = ["/api/hs/tool-duplicate", "/api/hs/tool-launch", "/api/tool/ready"];
+  assert.deepEqual(allowed, ROUTES.filter((r) => teamAllowsPath(r, GLO2) && !tool.includes(r)));
+  assert.ok(allowed.includes("/api/hs/launch") && allowed.includes("/api/hs/duplicate") && allowed.includes("/api/hs/jurar"));
+  assert.ok(allowed.includes("/users") && allowed.includes("/accounts") && allowed.includes("/clone"));
+  for (const p of [
+    ...tool,
+    "/api/tool-sessions",
+    "/api/hs/token-launch",
+    "/api/hs/token-cron",
+    "/api/fb-tokens/signers",
+    "/api/launch",
+    "/api/clone/run",
+    "/api/aif/launch",
+    "/api/av/launch",
+    "/api/vc/launch",
+    "/api/google/launch",
+    "/api/tiktok/launch",
+    "/api/snap/launch",
+    "/api/geo/cities",
+    "/api/blob-upload",
+    "/api/some-route-added-later",
+    "/tokens",
+    "/sessions",
+    "/auto-landings",
+    "/av/keys",
+    "/google",
+    "/tiktok",
+    "/snap",
+  ]) {
+    assert.equal(teamAllowsPath(p, GLO4), false, p);
+  }
+});
+
+test("launch queue on glo-04: the LION submits and their follow-ups only — never TOOL, a token rail, another partner or a platform", () => {
+  for (const kind of ["hs.lion", "hs.dup", "hs.jurar", "hs.dup.follow", "hs.jurar.follow"]) {
+    assert.equal(teamAllowsJob("hs", kind, GLO4), true, `glo-04 hs/${kind}`);
+  }
+  for (const [scope, kind] of [
+    ["hs", "hs.tool"],
+    ["hs", "hs.tooldup"],
+    ["hs", "tool.follow"],
+    ["hs", "hs.token"],
+    ["hs", "hs.tokendup"],
+    ["hs", "hs.tokenjurar"],
+    ["hs", "nonsense"],
+    ["mo", "mo.launch"],
+    ["aif", "aif.launch"],
+    ["av", "av.launch"],
+    ["vc", "vc.launch"],
+    ["sn", "sn.launch"],
+    ["gg", "gg.launch"],
+    ["tt", "tt.launch"],
+    ["xx", "hs.lion"],
+  ] as const) {
+    assert.equal(teamAllowsJob(scope, kind, GLO4), false, `glo-04 ${scope}/${kind}`);
+  }
+});
+
+test("LION profiles with GLO-04 in the list: each of the three teams owns its own prefix, glo-03's belong to no launcher", () => {
+  // the company-wide list of 26.11 (21 rows, no glo-04-* yet) plus the profiles HS will add for GLO-04
+  const live = [
+    "glo-01-88", "glo-01-89", "glo-01-90", "globecoders-RENT-5", "globecoders-RENT-6", "globecoders-RENT-T4Y-7",
+    "glo-02-1", "glo-02-2", "glo-02-3",
+    "glo-04-1", "glo-04-2", "glo-04-10",
+  ];
+  assert.deepEqual(live.filter((s) => teamOwnsProfile(s, GLO4)), ["glo-04-1", "glo-04-2", "glo-04-10"]);
+  assert.ok(!live.filter((s) => teamOwnsProfile(s, GLO1)).some((s) => s.startsWith("glo-04-")));
+  assert.ok(!live.filter((s) => teamOwnsProfile(s, GLO2)).some((s) => s.startsWith("glo-04-")));
+  for (const s of live) {
+    assert.equal(Number(teamOwnsProfile(s, GLO1)) + Number(teamOwnsProfile(s, GLO2)) + Number(teamOwnsProfile(s, GLO4)), 1, s);
+  }
+  for (const t of [GLO1, GLO2, GLO4]) assert.equal(teamOwnsProfile("glo-03-1", t), false, t.id);
+  assert.equal(teamOwnsProfile("GLO-04-3", GLO4), true);
+  assert.equal(teamOwnsProfile(" glo-04-3 ", GLO4), true);
+  assert.equal(teamOwnsProfile("glo-040-1", GLO4), false);
+  assert.equal(teamOwnsProfile("globecoders-RENT-5", GLO4), false);
+  assert.equal(teamOwnsProfile("", GLO4), false);
+});
+
+test("campaigns with GLO-04 in the company: a GLO-04 campaign is foreign to GLO-01 and GLO-02, theirs to GLO-04", () => {
+  const G1 = "[06/10] (GLO-01) API - (#ADX [HIGH]) - [US] - a";
+  const G2 = "[06/10] (GLO-02) API - (#ADX [HIGH]) - [US] - b";
+  const G4 = "[26/11] (GLO-04) API - (#ADX [HIGH]) - [BR] - d";
+  const THIRD = "[06/10] (GLO-03) API - c";
+  const HAND = "made by hand in Ads Manager";
+  // glo-04 — strict, like glo-02
+  assert.equal(judgeCampaign(G4, "GLO-04", null, GLO4), "own");
+  assert.equal(judgeCampaign(G1, "GLO-04", true, GLO4), "foreign"); // the name speaks first
+  assert.equal(judgeCampaign(G2, "GLO-04", true, GLO4), "foreign");
+  assert.equal(judgeCampaign(HAND, "GLO-04", true, GLO4), "own");
+  assert.equal(judgeCampaign(HAND, "GLO-04", false, GLO4), "foreign");
+  assert.equal(judgeCampaign(HAND, "GLO-04", null, GLO4), "unknown");
+  assert.equal(judgeCampaign(THIRD, "GLO-04", false, GLO4), "foreign");
+  // the other launchers lose GLO-04's campaigns too
+  assert.equal(judgeCampaign(G4, "GLO-01", null, GLO1), "foreign");
+  assert.equal(judgeCampaign(G4, "GLO-02", true, GLO2), "foreign");
+  assert.deepEqual((["own", "foreign", "unknown"] as const).map((v) => teamMayUseCampaign(v, GLO4)), [true, false, false]);
+  // a TOOL clone source of another launcher team is named as such on every team
+  assert.equal(foreignTeamAcr(G4, GLO1), "GLO-04");
+  assert.equal(foreignTeamAcr(G4, GLO2), "GLO-04");
+  assert.equal(foreignTeamAcr(G2, GLO4), "GLO-02");
+  assert.equal(foreignTeamAcr(G1, GLO4), "GLO-01");
+  assert.equal(foreignTeamAcr(G4, GLO4), null);
+  assert.equal(foreignTeamAcr(THIRD, GLO4), null); // GLO-03 is not a launcher team
+});
+
+test("glo-04's LION key is GLO-04's: another team's key is refused on its build, its key on theirs", () => {
+  assert.equal(teamAcrProblem("GLO-04", GLO4), null);
+  assert.equal(teamAcrProblem("glo-04", GLO4), null);
+  assert.match(String(teamAcrProblem("GLO-02", GLO4)), /lion_team_mismatch — this launcher is built for GLO-04 but LION_ACR is GLO-02/);
+  assert.match(String(teamAcrProblem("GLO-01", GLO4)), /lion_team_mismatch/);
+  assert.match(String(teamAcrProblem("GLO-04", GLO1)), /lion_team_mismatch/);
+  assert.match(String(teamAcrProblem("GLO-04", GLO2)), /lion_team_mismatch/);
+});
+
+test("glo-04 runs on gc_glo04 (gc_glo04_test on the bench) and nothing else; no other team runs on it", () => {
+  for (const db of ["gc_glo04", "gc_glo04_test", "GC_GLO04"]) {
+    assert.equal(teamAllowsDb(db, GLO4), true, db);
+    assert.equal(teamAllowsDb(db, GLO1), false, db);
+    assert.equal(teamAllowsDb(db, GLO2), false, db);
+  }
+  for (const db of ["gc", "gc_test", "gc_glo02", "gc_glo02_test", "gc_glo03", ""]) assert.equal(teamAllowsDb(db, GLO4), false, db);
+  assert.equal(teamNamespace(GLO4), "glo-04");
+});
+
 test("VC (ValueClick, 23.10 / clones 05.11): glo-01 only; its scope queues its launch (token or TOOL), its clones (fb.clone) and a TOOL follow-up — no other rail's kind", () => {
   assert.equal(routeNeed("/api/vc/launch"), "partner:vc");
   assert.equal(routeNeed("/api/vc"), "partner:vc");

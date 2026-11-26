@@ -12,18 +12,20 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const at = (rel: string): string => JSON.stringify(pathToFileURL(`${ROOT}${rel}`).href);
 
-// The company-wide list both keys returned on 08.10.
+// The company-wide list both keys returned on 08.10 — plus GLO-04's profiles as HS will add them (on
+// 26.11 the GLO-04 key listed none yet) and a glo-03 one (GLO-03's own tool, no launcher of ours).
 const LIVE = [
   "glo-01-67", "globecoders-RENT-5", "globecoders-RENT-6", "globecoders-RENT-T4Y-8", "globecoders-RENT-T4Y-7",
   "glo-01-39", "glo-01-41", "glo-01-42", "glo-01-43", "glo-01-46", "glo-01-48", "glo-01-49", "glo-01-50", "glo-01-51",
   "glo-01-52", "glo-01-57", "glo-01-58", "glo-01-59", "glo-01-60", "glo-01-66",
   "glo-02-1", "glo-02-2", "glo-02-3", "glo-02-4", "glo-02-5", "glo-01-68",
+  "glo-04-2", "glo-04-1", "glo-03-7",
 ];
 
 const SCRIPT = `
   await import(${at("tests/_resolve-hook.ts")});
   const calls = [];
-  const LIVE = ${JSON.stringify(LIVE)};
+  const LIVE = process.env.T_LIVE ? JSON.parse(process.env.T_LIVE) : ${JSON.stringify(LIVE)};
   globalThis.fetch = async (u, init) => {
     const p = new URL(String(u));
     calls.push((init?.method ?? "GET") + " " + p.pathname + p.search);
@@ -109,12 +111,12 @@ test("glo-02: the un-prefixed RENT pools are the first team's — refused too", 
   assert.equal(o.foreignCreate.calls, 0);
 });
 
-test("glo-01: everything it had, minus the other team's profiles", () => {
+test("glo-01: everything it had, minus the other teams' profiles", () => {
   const o = under(null, { LION_ACR: "GLO-01", T_OWN: "globecoders-RENT-5", T_FOREIGN: "glo-02-1" });
   const slugs = o.profiles.value as string[];
   assert.equal(slugs.length, 21);
   assert.ok(slugs.includes("glo-01-39") && slugs.includes("globecoders-RENT-T4Y-8"));
-  assert.ok(!slugs.some((s) => s.startsWith("glo-02-")));
+  assert.ok(!slugs.some((s) => s.startsWith("glo-02-") || s.startsWith("glo-04-") || s.startsWith("glo-03-")));
   assert.equal(o.ownData.ok, true);
   assert.equal(o.ownCreate.value, "t1");
   for (const k of ["foreignData", "foreignPixels", "foreignCreate", "foreignDuplicate", "foreignJurar"]) {
@@ -134,6 +136,59 @@ test("a LION key of the other team sends nothing at all", () => {
   const first = under(null, { LION_ACR: "GLO-02", T_OWN: "glo-01-39", T_FOREIGN: "glo-02-1" });
   assert.match(String(first.profiles.error), /lion_team_mismatch/);
   assert.equal(first.ownCreate.calls, 0);
+});
+
+test("glo-04: only its own profiles, business accounts only; a glo-02, glo-01 or RENT profile is refused before any request leaves", () => {
+  for (const foreign of ["glo-02-1", "glo-01-39", "globecoders-RENT-5", "glo-03-7"]) {
+    const o = under("glo-04", { LION_ACR: "GLO-04", T_OWN: "glo-04-2", T_FOREIGN: foreign });
+    assert.deepEqual(o.profiles.value, ["glo-04-1", "glo-04-2"], foreign);
+    assert.deepEqual(o.ownAccounts.value, ["A"]); // the persona's personal account is left out, as on glo-02
+    assert.equal(o.personalAccountCampaign.value, "own");
+    assert.equal(o.ownPixels.ok, true);
+    assert.equal(o.ownCreate.value, "t1");
+    for (const k of ["foreignData", "foreignPixels", "foreignCreate", "foreignDuplicate", "foreignJurar"]) {
+      assert.equal(o[k].ok, false, `${foreign} ${k}`);
+      assert.match(String(o[k].error), new RegExp(`profile "${foreign}" is not a GLO-04 profile`), `${foreign} ${k}`);
+      assert.equal(o[k].status, 403, `${foreign} ${k}`);
+      assert.equal(o[k].calls, 0, `${foreign} ${k}: nothing may be sent for a foreign profile`);
+    }
+  }
+  // …and GLO-02 does not see GLO-04's profiles either
+  const second = under("glo-02", { LION_ACR: "GLO-02", T_OWN: "glo-02-1", T_FOREIGN: "glo-04-1" });
+  assert.deepEqual(second.profiles.value, ["glo-02-1", "glo-02-2", "glo-02-3", "glo-02-4", "glo-02-5"]);
+  assert.match(String(second.foreignCreate.error), /profile "glo-04-1" is not a GLO-02 profile/);
+  assert.equal(second.foreignCreate.calls, 0);
+});
+
+test("glo-04 before HS adds its profiles (26.11: LION lists none): the board is told so, nothing else is offered", () => {
+  const today = LIVE.filter((s) => !s.startsWith("glo-04-"));
+  const o = under("glo-04", { LION_ACR: "GLO-04", T_OWN: "glo-04-1", T_FOREIGN: "glo-02-1", T_LIVE: JSON.stringify(today) });
+  assert.equal(o.profiles.ok, false);
+  assert.match(String(o.profiles.error), /LION lists no GLO-04 profiles/);
+  assert.equal(o.foreignCreate.calls, 0);
+});
+
+test("a LION key bound to another team sends nothing from a glo-04 build — and glo-04's key nothing from another team's", () => {
+  for (const acr of ["GLO-02", "GLO-01"]) {
+    const o = under("glo-04", { LION_ACR: acr, T_OWN: "glo-04-1", T_FOREIGN: "glo-02-1" });
+    for (const k of ["profiles", "ownData", "ownPixels", "ownCreate"]) {
+      assert.match(String(o[k].error), /lion_team_mismatch/, `${acr} ${k}`);
+      assert.equal(o[k].calls, 0, `${acr} ${k}`);
+    }
+  }
+  for (const team of ["glo-02", null]) {
+    const o = under(team, { LION_ACR: "GLO-04", T_OWN: team ? "glo-02-1" : "glo-01-39", T_FOREIGN: "glo-04-1" });
+    assert.match(String(o.profiles.error), /lion_team_mismatch/, String(team));
+    assert.equal(o.ownCreate.calls, 0, String(team));
+  }
+});
+
+test("the fanka gate on glo-04: no registry list to ask — nothing is read or reported, nothing is gated", () => {
+  const o = under("glo-04", { LION_ACR: "GLO-04", T_OWN: "glo-04-1", T_FOREIGN: "glo-02-1", HS_PAGES_API_KEY: "some-key" });
+  assert.equal(o.registryConfigured.value, false);
+  assert.equal(o.fankaRefusal.value, null);
+  assert.equal(o.fankaRefusal.calls, 0);
+  assert.deepEqual(o.fankaOffer.value, { offered: 2, hidden: 0, unavailable: null });
 });
 
 test("the fanka gate: glo-01 still fails closed without the registry, glo-02 has none to ask", () => {

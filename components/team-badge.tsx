@@ -2,10 +2,12 @@ import { TEAM, type TeamId } from "@/lib/team";
 
 // The mark of the team this launcher belongs to (owner ask 08.10: the first launcher says GLO-01,
 // the second GLO-02). One colour per team, deliberately OFF the blue→violet brand gradient, so the
-// two launchers cannot be mistaken for each other at a glance: cyan for the first, amber for the second.
+// launchers cannot be mistaken for each other at a glance: cyan for the first, amber for the second,
+// pink for GLO-04 (26.11) — clear of emerald (Launch only) and red (destructive) as well.
 const TONE: Record<TeamId, { line: string; ink: string; wash: string }> = {
   "glo-01": { line: "border-[#22d3ee]/50", ink: "text-[#7fe7f0]", wash: "bg-[#22d3ee]/10" },
   "glo-02": { line: "border-[#fbbf24]/55", ink: "text-[#f6cf6b]", wash: "bg-[#fbbf24]/10" },
+  "glo-04": { line: "border-[#f472b6]/55", ink: "text-[#f9a8d4]", wash: "bg-[#f472b6]/10" },
 };
 
 /**

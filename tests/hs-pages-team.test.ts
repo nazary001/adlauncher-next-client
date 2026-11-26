@@ -75,6 +75,16 @@ test("glo-01 reads its own team's fanpages from the registry — the HS list onl
   assert.deepEqual(o.calls.filter((c) => c.startsWith("POST")), ["POST /fb/api/v1/pages/used"]);
 });
 
+test("glo-04 (26.11): the registry keeps no list for it — it is not asked and gates nothing, like glo-02", () => {
+  const o = under("glo-04");
+  assert.equal(o.configured, false);
+  assert.equal(o.refusal, null);
+  assert.deepEqual(o.offered, ["100001", "100002"]);
+  assert.equal(o.hidden, 0);
+  assert.equal(o.marked, 1); // the HS team's own "(Not Eligible)" mark in a page name still hides it
+  assert.deepEqual(o.calls, []);
+});
+
 test("glo-02: the registry lists none of its fanpages yet — it is not asked and gates nothing", () => {
   const o = under("glo-02");
   assert.equal(o.configured, false);

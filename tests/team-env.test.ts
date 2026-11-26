@@ -105,6 +105,27 @@ test("the store: glo-02 refuses the first team's database, glo-01 refuses glo-02
   // (the right pairings are tests/team.test.ts teamAllowsDb — past the guard a call would dial out)
 });
 
+test("glo-04's cookie is its own: refused by glo-01 and glo-02, theirs (and a pre-team one) refused by it", () => {
+  const fourth = under("glo-04", SIGN) as { token: string; payload: { team: string } };
+  assert.equal(fourth.payload.team, "glo-04");
+  assert.deepEqual(under("glo-04", VERIFY(fourth.token)), { username: "nazar", team: "glo-04" });
+  assert.equal(under(null, VERIFY(fourth.token)), null);
+  assert.equal(under("glo-02", VERIFY(fourth.token)), null);
+  const first = (under(null, SIGN) as { token: string }).token;
+  const second = (under("glo-02", SIGN) as { token: string }).token;
+  assert.equal(under("glo-04", VERIFY(first)), null);
+  assert.equal(under("glo-04", VERIFY(second)), null);
+  assert.equal(under("glo-04", VERIFY(cookie({ sub: 7, username: "tima", role: null, iat: exp - 7200, exp }))), null);
+});
+
+test("the store: glo-04 refuses every other team's database, and the others refuse gc_glo04", () => {
+  for (const db of ["gc", "gc_test", "gc_glo02", "gc_glo02_test"]) {
+    assert.match(String(under("glo-04", GET_DB, { ...NO_DIAL, MONGODB_DB: db })), /is not the GLO-04 launcher's database/, db);
+  }
+  assert.match(String(under(null, GET_DB, { ...NO_DIAL, MONGODB_DB: "gc_glo04" })), /is not the GLO-01 launcher's database/);
+  assert.match(String(under("glo-02", GET_DB, { ...NO_DIAL, MONGODB_DB: "gc_glo04" })), /is not the GLO-02 launcher's database/);
+});
+
 test("the creative store: glo-01's owner tag is the pre-team one, glo-02's is its own", () => {
   const TAG = `
     const c = await import(${lib("creative-store.ts")});
@@ -112,7 +133,12 @@ test("the creative store: glo-01's owner tag is the pre-team one, glo-02's is it
   `;
   const first = under(null, TAG);
   const second = under("glo-02", TAG);
+  const fourth = under("glo-04", TAG);
   assert.equal(first, "c13e915dbcdb"); // sha256("creative-owner:alice").slice(0, 12) — the key every glo-01 object already carries
   assert.match(String(second), /^[0-9a-f]{12}$/);
   assert.notEqual(second, first);
+  // glo-04's "alice" is not glo-01's or glo-02's "alice" in the shared bucket
+  assert.match(String(fourth), /^[0-9a-f]{12}$/);
+  assert.notEqual(fourth, first);
+  assert.notEqual(fourth, second);
 });
