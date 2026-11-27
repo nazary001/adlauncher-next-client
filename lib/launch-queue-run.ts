@@ -236,7 +236,13 @@ export async function runJob(job: QueueJob, opts: { deadlineAt: number }): Promi
   const now = Date.now();
   const deadlineAt = Math.min(opts.deadlineAt, now + worstCaseMs(job.kind, job.body));
   try {
-    return await runner(job, { deadlineAt, now: () => Date.now(), log: (msg) => log(`${job.kind} ${job.job_id}: ${msg}`) });
+    return await runner(job, {
+      deadlineAt,
+      now: () => Date.now(),
+      log: (msg) => log(`${job.kind} ${job.job_id}: ${msg}`),
+      // A queued job of this lane that is due now is someone else waiting (this job is running).
+      othersDue: () => peekQueued(job.lane, 1, Date.now()).then((q) => q.length > 0),
+    });
   } catch (e) {
     return crashedOutcome(job, e, Date.now());
   }

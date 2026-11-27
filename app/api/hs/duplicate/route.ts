@@ -1,6 +1,6 @@
 import { NextResponse, after } from "next/server";
 import { bidKind, bidTag, parseMoney } from "@/lib/types";
-import { LION_NAME_SUFFIX_MAX } from "@/lib/hs-clone-name";
+import { lionWireSuffix } from "@/lib/hs-clone-name";
 import { SUPPORTED_BID_STRATEGIES } from "@/lib/fb-launch";
 import { hsWireBid } from "@/lib/hs-launch";
 import { hsPageRefusal, reportPagesUsed } from "@/lib/hs-pages";
@@ -210,7 +210,9 @@ export async function POST(req: Request): Promise<NextResponse> {
         bidLabel: String(raw?.bidLabel ?? "").trim().slice(0, 40),
         currency: "",
         name: String(raw?.name ?? "").trim().slice(0, 200),
-        suffix: String(raw?.suffix ?? "").trim().slice(0, LION_NAME_SUFFIX_MAX),
+        // LION's family dropped (it writes its own in front), the buyer's login ensured at the end
+        // and kept through the cap — the name is LION's own on a team without our FB token.
+        suffix: lionWireSuffix(String(raw?.suffix ?? ""), session.username),
         geo: String(raw?.geo ?? "").slice(0, 40) || "inherited",
         label: String(raw?.label ?? "").trim().slice(0, 200),
         override,
@@ -327,7 +329,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   if (!pixel) return bad("pixel_required");
   const campaignId = String(body.campaignId ?? "").trim();
   const copies = Number(body.copies ?? 1);
-  const nameSuffix = String(body.nameSuffix ?? "").trim().slice(0, 80);
+  const nameSuffix = lionWireSuffix(String(body.nameSuffix ?? ""), session.username);
   const name = String(body.name ?? "").trim().slice(0, 200);
 
   // LION campaign ids are the REAL FB ids — digits only.

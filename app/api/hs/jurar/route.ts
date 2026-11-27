@@ -7,6 +7,7 @@ import { readAppCache, writeAppCache } from "@/lib/app-cache";
 import { ACCT_LIMIT, acctLimitMessage, acctLimitSnapshot } from "@/lib/acct-limit";
 import { LionError, lionAccountPixels, lionConfigured, lionProfileData } from "@/lib/lion";
 import { parseGeoOverride } from "@/lib/targeting-override";
+import { lionWireSuffix } from "@/lib/hs-clone-name";
 import { acctLimitRefusal, bindsKey, demandByAccount, distinctBy, resolveShotBinds } from "@/lib/hs-shot-binds";
 import type { HsJuroShot } from "@/lib/hs-jurar-shot";
 import { LION_FOLLOW_MAX_MS } from "@/lib/launch-queue-types";
@@ -160,7 +161,8 @@ export async function POST(req: Request): Promise<NextResponse> {
       bid,
       bidStrategyOverride: strategyOverride,
       bidLabel: String(raw?.bidLabel ?? "").trim().slice(0, 40),
-      suffix: String(raw?.suffix ?? "").trim().slice(0, 80),
+      // LION builds the JURO name with its own family in front — the buyer's login ends the suffix.
+      suffix: lionWireSuffix(String(raw?.suffix ?? ""), session.username),
       name: String(raw?.name ?? "").trim().slice(0, 200),
       geo: String(raw?.geo ?? "").slice(0, 40) || "inherited",
       label: String(raw?.label ?? "").trim().slice(0, 200),

@@ -103,7 +103,14 @@ export type JobResult = {
 
 /** What a runner (lib/launch-queue-runners.ts) gets besides the job: the moment by which its
  *  work must be over (the smaller of the invocation's budget and the kind's worst case). */
-export type RunnerCtx = { deadlineAt: number; now: () => number; log: (msg: string) => void };
+export type RunnerCtx = {
+  deadlineAt: number;
+  now: () => number;
+  log: (msg: string) => void;
+  /** Do other jobs of this job's lane wait, due now? A follow-up ends its slice early when they do
+   *  (absent = never asked — the slice runs its full length). */
+  othersDue?: () => Promise<boolean>;
+};
 export type JobRunner = (job: QueueJob, ctx: RunnerCtx) => Promise<JobOutcome | Defer>;
 
 /** One stored job (collection `launch_jobs`). `job_id` IS the task row's `task_id`. */

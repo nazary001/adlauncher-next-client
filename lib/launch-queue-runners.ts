@@ -219,6 +219,7 @@ const hsFollow =
         stage: row.stage || null,
         activatingSince: row.stage === ACTIVATE_STAGE && row.campaign_id ? (body.activating?.[j.job_id] ?? ctx.now()) : null,
         adCount: Number(row.ad_id) || null,
+        rowName: row.name ?? "",
       });
     }
     const res = await runHsFollowSlice(
@@ -241,7 +242,9 @@ const hsFollow =
         sleep,
         log: ctx.log,
       },
-      { sliceEndAt: sliceEnd(ctx), mode },
+      // Other waves of this buyer waiting → one tick, then the lane's next (round robin with the
+      // back-of-the-lane defer — lib/launch-queue-store deferJob).
+      { sliceEndAt: sliceEnd(ctx), mode, ...(ctx.othersDue ? { yieldIf: ctx.othersDue } : {}) },
     );
     for (const id of res.renamed) renamed.add(id);
     const stillSubmitting = submits.some((j) => j.status === "queued" || j.status === "running");

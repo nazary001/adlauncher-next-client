@@ -9,7 +9,7 @@ import { useHsTaskManager } from "./hs-task-manager";
 import { UploadingNotice } from "./upload-guard";
 import { decorateAccountOptions, fmtCountdown, useAcctLimits, windowMinutes } from "./use-acct-limit";
 import { CLONE_DEFAULT_BUDGET, bidKind, bidTag, budgetOnStrategyChange, limitMoneyCents, moneyCentsLabel, moneyLabel, parseMoney } from "@/lib/types";
-import { lionWireSuffix, withOwnAcr } from "@/lib/hs-clone-name";
+import { cleanSourceTail, lionWireSuffix, withOwnAcr } from "@/lib/hs-clone-name";
 import { carriesOwnName } from "@/lib/own-name";
 import { BID_STRATEGIES, geoSummary } from "@/lib/catalog";
 import { HS_TOKEN_MARK, splitHsGrammar, stripTokenMark, todaySaoPauloDDMM } from "@/lib/hs-launch";
@@ -159,7 +159,9 @@ function splitLionName(sourceName: string, ddmm: string): { prefix: string; tail
   let prefix = m.prefix.replace(/^\[\d{2}\/\d{2}\]/, `[${ddmm}]`);
   if (!/\(CLONE\)/.test(prefix)) prefix = prefix.replace(/API/, "API (CLONE)");
   // The clone is this team's, whoever launched the source (lib/hs-clone-name withOwnAcr).
-  return { prefix: withOwnAcr(prefix, TEAM.label), tail: stripToolMark(stripTokenMark(m.tail.trim())) };
+  // A LION-born source's tail opens with LION's landing family and ends with its random tag —
+  // LION's own words, which it writes afresh on the clone (lib/hs-clone-name cleanSourceTail).
+  return { prefix: withOwnAcr(prefix, TEAM.label), tail: cleanSourceTail(stripToolMark(stripTokenMark(m.tail.trim()))) };
 }
 
 /** Default tail = the source's old tail + " - <owner>" (the buyer duplicating it), matching the
@@ -1098,7 +1100,7 @@ export function HsCloneBoard({
                   // The WHOLE edited tail rides (owner report 09-09: the addition-only wire
                   // dropped every source-tail tag from LION's name); the exact board `name`
                   // lands on the campaign through the pump's Graph rename right after birth.
-                  suffix: lionWireSuffix(r.suffix),
+                  suffix: lionWireSuffix(r.suffix, user?.username ?? ""),
                   ...(r.info?.name ? { name: `${prefix}${r.suffix.trim()}`.trim() } : {}),
                 }),
         // Targeting override — JURO sends it natively in the jurar wire; the other rails patch
@@ -2457,7 +2459,7 @@ export function HsCloneBoard({
                                   ? `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}${TOOL_MARK}${r.suffix.trim()}`
                                   : effDupChannel === "token"
                                     ? `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}${HS_TOKEN_MARK}${r.suffix.trim()}`
-                                    : `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}… ${lionWireSuffix(r.suffix)}`
+                                    : `${relabelNameGeo(splitLionName(r.info.name, todaySaoPauloDDMM()).prefix, r.countries)}… ${lionWireSuffix(r.suffix, user?.username ?? "")}`
                             ).slice(0, 110)
                           : `#${r.campaignId}`}
                       </span>{" "}

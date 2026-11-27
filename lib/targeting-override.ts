@@ -90,6 +90,21 @@ export function lionDuplicateTargeting(
   return out;
 }
 
+/**
+ * The countries a LION duplicate rides when its row sets no country override: the SOURCE's real
+ * ones (targeting/). Omitted, LION's duplicate/ does not inherit the source's targeting as its docs
+ * say — it PARSES the source NAME's [..] label: live 27.11 (GLO-04) 61 clones of
+ * "[BR, US] - [PT] - …" sources, whose ad sets target US + BR, were born on Portugal (the language
+ * group read as the country). An empty real list is a worldwide source when its name says
+ * [WORLD] (targeting/ answers no countries for those — same rule as the JURO wire); any other empty
+ * list is left to LION (null = send nothing, as before).
+ */
+export function dupWireCountries(realCountries: readonly string[], sourceName = ""): string[] | null {
+  const codes = realCountries.map((c) => String(c ?? "").trim()).filter(Boolean);
+  if (codes.length > 0) return codes;
+  return /\[WORLD\]/i.test(sourceName) ? ["WORLD"] : null;
+}
+
 /** Swap the `[CODES]` group of a LION-grammar name for the override's geo — the first bracket
  *  group after a `) - ` (the redirect label's close), which is exactly the COUNTRY slot:
  *  `[20/08] (GLO-01) API (CLONE) - (#ADX [HIGH]) - [MX] - …` → `… - [CA] - …`. Names their

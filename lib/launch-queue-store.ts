@@ -212,13 +212,17 @@ export async function claimNextJob(lane: string, runner: string, now: number): P
  * from `notBefore`, lease and runner cleared, `began` reset (nothing a re-run could double), attempts
  * KEPT (the sweep's re-queue cap counts every slice), and the body replaced when the follow-up
  * recorded progress. Only while still ours. True = handed back.
+ * The job goes to the BACK of its lane (a fresh `seq` from `notBefore`): the claim takes the lowest
+ * `seq` first, so a follow-up that kept its seq came back ahead of everyone after each 20 s pause —
+ * 27.11 (GLO-04) the two oldest waves of a buyer took every slice in turn while 30 younger waves'
+ * follow-ups never ran once and their clones read "Queued on LION" for hours.
  */
 export async function deferJob(jobId: string, runner: string, notBefore: number, body?: Record<string, unknown>): Promise<boolean> {
   const c = await coll(LAUNCH_JOBS);
   const r = await bounded(
     c.updateOne(
       { job_id: jobId, runner, status: "running" },
-      { $set: { status: "queued", runner: null, lease_until: null, started_at: null, began: false, not_before: notBefore, updatedAt: new Date(), ...(body ? { body } : {}) } },
+      { $set: { status: "queued", runner: null, lease_until: null, started_at: null, began: false, not_before: notBefore, seq: notBefore * 1000, updatedAt: new Date(), ...(body ? { body } : {}) } },
     ),
     "launch-jobs defer",
   );

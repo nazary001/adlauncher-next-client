@@ -13,10 +13,10 @@
 import { normalizeRoasGoal } from "@/lib/types";
 import { reportPagesUsed } from "@/lib/hs-pages";
 import { AcctLimitedError, acctKey, claimAcctSlot, releaseAcctSlot } from "@/lib/acct-limit";
-import { LionError, lionCampaignAds, lionDuplicate, lionSourceBidFacts, type LionLocale } from "@/lib/lion";
+import { LionError, lionCampaignAds, lionCampaignCountries, lionDuplicate, lionSourceBidFacts, type LionLocale } from "@/lib/lion";
 import { dupBidPlan, dupBiddingMismatch } from "@/lib/lion-dup-bid";
 import { explainDupRefusal } from "@/lib/hs-dup-refusal";
-import { lionDuplicateTargeting, type GeoOverride } from "@/lib/targeting-override";
+import { dupWireCountries, lionDuplicateTargeting, type GeoOverride } from "@/lib/targeting-override";
 import type { ShotBinds } from "@/lib/hs-shot-binds";
 
 /** One validated shot of a duplicate wave, as the route resolved it (JSON — it is stored in the job). */
@@ -73,6 +73,7 @@ export type HsDupShotDeps = {
 const CACHE_TTL_MS = 10 * 60_000;
 const factsCache = new Map<string, { at: number; v: { bidStrategy: string; currency: string; bid: number | null } }>();
 const adsCountCache = new Map<string, { at: number; v: number }>();
+const countriesCache = new Map<string, { at: number; v: string[] }>();
 
 async function cached<T>(map: Map<string, { at: number; v: T }>, key: string, now: number, read: () => Promise<T>): Promise<T> {
   const hit = map.get(key);
@@ -138,8 +139,29 @@ export async function runHsDupShot(s: HsDupShot, deps: HsDupShotDeps): Promise<H
     }
     // Targeting override → LION's own wire (22.09): the ISO codes (or WORLD) and the { name, id }
     // locales of the picked profile. A locale id the profile does not list settles the row here.
-    const targeting = s.override ? lionDuplicateTargeting(s.override, s.profileLocales) : {};
-    if ("refusal" in targeting) return refuse(targeting.refusal);
+    const picked = s.override ? lionDuplicateTargeting(s.override, s.profileLocales) : {};
+    if ("refusal" in picked) return refuse(picked.refusal);
+    // No country override → the SOURCE's real countries ride explicitly: left out, LION reads the
+    // geo off the source's NAME label, not its targeting (27.11: "[BR, US] - [PT]" sources cloned
+    // onto Portugal — lib/targeting-override dupWireCountries). Unreadable → nothing is sent.
+    let targeting = picked;
+    if (!picked.country_codes) {
+      let real: string[];
+      try {
+        real = await cached(countriesCache, s.campaignId, now, async () => {
+          const map = await lionCampaignCountries([s.campaignId]);
+          if (!(s.campaignId in map)) throw new Error("targeting/ answered nothing for it");
+          return map[s.campaignId];
+        });
+      } catch (e) {
+        return refuse(
+          `The source's geo could not be read on LION right now (${String((e as Error).message ?? e).slice(0, 120)}) — nothing was sent: without it LION takes the geo from the source's NAME. Retry, or set the row's Targeting.`,
+          { retryable: true },
+        );
+      }
+      const codes = dupWireCountries(real, s.label || s.name);
+      if (codes) targeting = { ...picked, country_codes: codes };
+    }
 
     // Account launch slot (5 campaigns / 15 min per ad account) — claimed right before the submit;
     // released on a clean preflight rejection below, KEPT on ambiguous outcomes (the clone may

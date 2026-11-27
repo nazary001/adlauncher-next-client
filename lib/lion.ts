@@ -957,6 +957,22 @@ export async function lionCreationStatus(taskIds: string[]): Promise<LionTaskSta
   return Array.isArray(body?.tasks) ? (body!.tasks as LionTaskStatus[]) : [];
 }
 
+/** The REAL countries of campaigns as their ad sets target them (targeting/ — one GET, uncached).
+ *  An id targeting/ does not answer is absent from the map; a worldwide campaign answers []. */
+export async function lionCampaignCountries(campaignIds: string[]): Promise<Record<string, string[]>> {
+  const out: Record<string, string[]> = {};
+  if (campaignIds.length === 0) return out;
+  const body = (await lionGet(
+    `/api/facebook/campaigns/targeting/?campaign_ids=${encodeURIComponent(JSON.stringify(campaignIds))}`,
+  )) as Record<string, unknown> | null;
+  const rows = Array.isArray(body?.campaignsData) ? (body!.campaignsData as Array<{ campaign_id?: unknown; countries_code?: unknown }>) : [];
+  for (const r of rows) {
+    const id = str(r.campaign_id);
+    if (id) out[id] = Array.isArray(r.countries_code) ? r.countries_code.map(String).filter(Boolean) : [];
+  }
+  return out;
+}
+
 export type LionCampaignReality = { status: string; adsCount: number };
 
 /** Reality check behind the task manager's poll: does the campaign itself exist and carry ads?

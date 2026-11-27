@@ -4,7 +4,7 @@
 // parses it, and (22.09) as LION's duplicate/ takes it: `country_codes` / `locales` per campaign.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lionDuplicateTargeting, parseGeoOverride, relabelNameGeo, type GeoOverride } from "../lib/targeting-override.ts";
+import { dupWireCountries, lionDuplicateTargeting, parseGeoOverride, relabelNameGeo, type GeoOverride } from "../lib/targeting-override.ts";
 
 const PROFILE_LOCALES = [
   { id: 6, name: "English (US)" },
@@ -55,4 +55,14 @@ test("relabelNameGeo swaps the [CODES] group after the redirect label, WORLD for
   assert.equal(relabelNameGeo("[20/08] (GLO-01) API (CLONE) - (#ADX [HIGH]) - [MX] - x", ["CA", "US"]), "[20/08] (GLO-01) API (CLONE) - (#ADX [HIGH]) - [CA, US] - x");
   assert.equal(relabelNameGeo("[20/08] (GLO-01) API (CLONE) - (#ADX [HIGH]) - [MX] - x", ["WW"]), "[20/08] (GLO-01) API (CLONE) - (#ADX [HIGH]) - [WORLD] - x");
   assert.equal(relabelNameGeo("name", []), "name");
+});
+
+// GLO-04 27.11: LION's duplicate/ "inherits" a source's geo by PARSING its NAME — 61 clones of
+// "[BR, US] - [PT]" sources (real targeting US + BR) were born on Portugal. A row without a country
+// override now rides the source's REAL countries.
+test("dupWireCountries: the source's real countries ride; an empty list is WORLD only for a [WORLD] source, else LION's", () => {
+  assert.deepEqual(dupWireCountries(["US", "BR"], "[26/11] (GLO-01) API - (#ADX [HIGH]) - [BR, US] - [PT] - CARS"), ["US", "BR"]);
+  assert.deepEqual(dupWireCountries([], "[26/11] (GLO-04) API (CLONE) - (#ADX [HIGH]) - [WORLD] - CAPTCHA-6 - Cars es"), ["WORLD"]);
+  assert.equal(dupWireCountries([], "[26/11] (GLO-01) API - (#ADX [HIGH]) - [BR, US] - [PT] - CARS"), null);
+  assert.deepEqual(dupWireCountries(["", "MX"], ""), ["MX"]);
 });

@@ -308,3 +308,90 @@ test("a lagging earlier creation status never moves the stage backwards", async 
   assert.deepEqual(w.rows.t1.filter((f) => "stage" in f).map((f) => f.stage), ["ads"]);
   assert.equal(res.pending[0].stage, "ads");
 });
+
+// ---- 27.11 (GLO-04): LION's structured errors, the walls it never gets past, the lane's other
+// waves, LION's real name on a team without our FB token ----
+
+const lionRoas = { message: "Minimum ROAS bidding is not available on this account", title: "Minimum ROAS Isn't Available", code: 100, subcode: 2446671, is_transient: false };
+const noPayment = { message: "The ad account has no payment method", fix: "Add a payment method to the ad account in Billing.", title: "No Payment Method", code: 100, subcode: 1359188, is_transient: false };
+const adsetRefused = { message: "Facebook refused to publish this ad set", title: "This ad set can’t be published", code: 100, subcode: 3858196, is_transient: false };
+const euAdvertiser = { message: "Facebook needs an advertiser name for this ad set", title: "No advertiser indicated", code: 100, subcode: 3858081, is_transient: false };
+
+test("dup: the min-ROAS wall in LION's structured error (subcode / Meta's title outside `message`) settles the shot", async () => {
+  const w = world({ tasks: () => [{ task_id: "lion-t1", status: "CREATING_CAMPAIGN", error: lionRoas }] });
+  const res = await runHsFollowSlice([shot("t1")], w.deps, { sliceEndAt: w.clock() + 60_000, mode: "dup" });
+  assert.deepEqual(res.settled, ["t1"]);
+  assert.equal(w.rows.t1.at(-1)!.status, "error");
+  assert.match(String(w.rows.t1.at(-1)!.error), /min ROAS/);
+});
+
+test("dup: an account wall (no payment method) settles every pending shot of that account — not the shots bound elsewhere", async () => {
+  const w = world({
+    tasks: () => [
+      { task_id: "lion-t1", status: "CREATING_ADS", campaign_id: "c1", error: noPayment },
+      { task_id: "lion-t2", status: "CREATING_CAMPAIGN" },
+      { task_id: "lion-t3", status: "CREATING_CAMPAIGN" },
+    ],
+  });
+  const res = await runHsFollowSlice([shot("t1"), shot("t2"), shot("t3", { account: "acct-2" })], w.deps, { sliceEndAt: w.clock() + 15_000, mode: "dup" });
+  assert.deepEqual(res.settled.sort(), ["t1", "t2"]);
+  assert.deepEqual(res.pending.map((p) => p.taskId), ["t3"]);
+  for (const t of ["t1", "t2"]) {
+    assert.equal(w.rows[t].at(-1)!.status, "error");
+    assert.match(String(w.rows[t].at(-1)!.error), /no payment method — Add a payment method/);
+  }
+  assert.deepEqual(w.of("pause"), [["pause", "c1"]], "the born shell is paused");
+});
+
+test("dup: an ad set Facebook refused settles that one shot; the EU advertiser wall (LION works through it) keeps waiting", async () => {
+  const w = world({
+    tasks: () => [
+      { task_id: "lion-t1", status: "CREATING_ADSET", campaign_id: "c1", error: adsetRefused },
+      { task_id: "lion-t2", status: "CREATING_ADSET", error: euAdvertiser },
+    ],
+  });
+  const res = await runHsFollowSlice([shot("t1"), shot("t2")], w.deps, { sliceEndAt: w.clock() + 15_000, mode: "dup" });
+  assert.deepEqual(res.settled, ["t1"]);
+  assert.deepEqual(res.pending.map((p) => p.taskId), ["t2"]);
+  assert.match(String(w.rows.t1.at(-1)!.error), /refused to publish this ad set/);
+});
+
+test("jurar: the final walls hold there too", async () => {
+  const w = world({ tasks: () => [{ task_id: "lion-t1", status: "CREATING_ADSET", campaign_id: "c1", error: adsetRefused }] });
+  const res = await runHsFollowSlice([shot("t1")], w.deps, { sliceEndAt: w.clock() + 15_000, mode: "jurar" });
+  assert.deepEqual(res.settled, ["t1"]);
+  assert.equal(w.rows.t1.at(-1)!.status, "error");
+});
+
+test("a slice ends after one tick when other follow-ups wait in the lane — and runs on when nobody does", async () => {
+  const pendingTask = () => [{ task_id: "lion-t1", status: "CREATING_CAMPAIGN" }];
+  const w = world({ tasks: pendingTask });
+  const res = await runHsFollowSlice([shot("t1")], w.deps, { sliceEndAt: w.clock() + 240_000, mode: "dup", yieldIf: async () => true });
+  assert.deepEqual(res.pending.map((p) => p.taskId), ["t1"]);
+  assert.equal(w.of("status").length, 1, "one tick, then the lane's next");
+  assert.equal(w.of("sleep").length, 0);
+  const alone = world({ tasks: pendingTask });
+  await runHsFollowSlice([shot("t1")], alone.deps, { sliceEndAt: alone.clock() + 60_000, mode: "dup", yieldIf: async () => false });
+  assert.ok(alone.of("status").length >= 5, "nobody waiting — the slice polls its full length");
+  const blip = world({ tasks: pendingTask });
+  await runHsFollowSlice([shot("t1")], blip.deps, { sliceEndAt: blip.clock() + 60_000, mode: "dup", yieldIf: async () => { throw new Error("store blip"); } });
+  assert.ok(blip.of("status").length >= 5, "a failed ask is 'nobody waits'");
+});
+
+test("no rename (team without our FB token): LION's real name goes onto the row once; with a rename it never does", async () => {
+  const lionName = "[27/11] (GLO-04) API (CLONE) - (#ADX [HIGH]) - [US,BR] - CAPTCHA-6 - Cars pt CARS - Katya - Anna";
+  const tasks = () => [{ task_id: "lion-t1", status: "CREATING_ADSET", campaign_name: lionName }];
+  const w = world({ tasks, rename: false });
+  await runHsFollowSlice([shot("t1", { rowName: "[27/11] (GLO-04) API (CLONE) - (#ADX [HIGH]) - [BR, US] - [PT] - CARS - Katya - Anna" })], w.deps, { sliceEndAt: w.clock() + 30_000, mode: "dup" });
+  const named = w.rows.t1.filter((f) => "name" in f);
+  assert.deepEqual(named, [{ name: lionName }], "written once, not on every tick");
+  const same = world({ tasks, rename: false });
+  await runHsFollowSlice([shot("t1", { rowName: lionName })], same.deps, { sliceEndAt: same.clock() + 30_000, mode: "dup" });
+  assert.equal((same.rows.t1 ?? []).filter((f) => "name" in f).length, 0, "already the row's name");
+  const legacy = world({ tasks, rename: false });
+  await runHsFollowSlice([shot("t1")], legacy.deps, { sliceEndAt: legacy.clock() + 30_000, mode: "dup" });
+  assert.equal((legacy.rows.t1 ?? []).filter((f) => "name" in f).length, 0, "a caller that does not pass the row's name never writes one");
+  const token = world({ tasks: () => [{ task_id: "lion-t1", status: "CREATING_ADSET", campaign_id: "c1", campaign_name: lionName }] });
+  await runHsFollowSlice([shot("t1", { rowName: "board name", name: "board name" })], token.deps, { sliceEndAt: token.clock() + 30_000, mode: "dup" });
+  assert.equal((token.rows.t1 ?? []).filter((f) => "name" in f).length, 0, "the Graph rename owns the name there");
+});

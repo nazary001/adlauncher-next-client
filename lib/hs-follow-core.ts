@@ -22,6 +22,7 @@
 // the reality check reads campaign_status), or a give-up window closes it with the note.
 
 import { ACTIVATE_STAGE, LION_STATUS_STAGE } from "./hs-wait-label.ts";
+import { lionErrorText, lionFinalWall, type LionTaskError } from "./lion-task-error.ts";
 
 export type FollowMode = "dup" | "jurar";
 
@@ -52,9 +53,13 @@ export type FollowShot = {
   activatingSince?: number | null;
   /** The clone's ad count once known (the row's ad_id) — what a later slice closes the row with. */
   adCount?: number | null;
+  /** The name on the row now — a team without our FB token (no rename) gets LION's real name
+   *  written over the board's preview once LION says it (27.11: GLO-04 rows showed names that
+   *  existed nowhere). Absent on legacy callers = never written. */
+  rowName?: string | null;
 };
 
-export type LionTaskRead = { task_id: string; campaign_id?: string | null; ad_ids?: string[]; status: string; error?: { message?: string } | null };
+export type LionTaskRead = { task_id: string; campaign_id?: string | null; ad_ids?: string[]; campaign_name?: string | null; status: string; error?: LionTaskError };
 
 export type FollowDeps = {
   creationStatus(taskIds: string[]): Promise<LionTaskRead[]>;
@@ -91,6 +96,10 @@ export type FollowSliceOpts = {
   realityEveryMs?: number;
   /** How long a parked "activate" shot keeps asking before the note closes it. */
   activateGiveUpMs?: number;
+  /** Asked after every tick: true = other follow-ups wait in this lane — the slice ends here and the
+   *  job goes to the back of the lane (27.11: one lane per buyer, the two oldest waves took every
+   *  slice in turn and 30 younger ones never got one — their clones read "Queued on LION" for hours). */
+  yieldIf?: () => Promise<boolean>;
 };
 
 export type FollowSliceResult = {
@@ -243,8 +252,14 @@ export async function runHsFollowSlice(shots: FollowShot[], deps: FollowDeps, op
             }
           }
         }
+        // No rename (a team without our FB token): LION's own name stays on the campaign — the row
+        // shows it, not the board's preview.
+        if (!deps.rename && r.campaign_name && s.rowName !== undefined && s.rowName !== r.campaign_name) {
+          if (await deps.writeOpen(s.taskId, { name: String(r.campaign_name) }).catch(() => false)) s.rowName = String(r.campaign_name);
+        }
         await noteStage(s, r.status);
-        const errText = r.error?.message;
+        // LION's error is structured now (message + Meta's title / subcode …) — the matchers read it all.
+        const errText = lionErrorText(r.error);
         if (opts.mode === "dup") {
           // Meta's min-ROAS eligibility rejection: LION retries the requested strategy forever —
           // settle now with the reason; a born shell stays PAUSED. (A COMPLETED task may still
@@ -276,6 +291,17 @@ export async function runHsFollowSlice(shots: FollowShot[], deps: FollowDeps, op
             // A parked sibling is already CREATED on Meta — a wall its source's other copies hit
             // is not its story (review 15.10: the sweep used to pause and error it).
             else for (const sib of [...pending.values()].filter((x) => x.campaignId === s.campaignId && x.activatingSince == null)) await settleWall(sib, wall.reason);
+          }
+        }
+        // A Facebook wall LION's task loop never gets past (no payment method, a restricted account,
+        // an ad set Facebook refused, a missing permission): settle now with LION's reason instead of
+        // waiting out the 3 h window. An account wall settles every pending shot bound to it.
+        if (pending.has(s.taskId) && r.status !== "COMPLETED") {
+          const fw = lionFinalWall(r.error);
+          if (fw) {
+            await settleWall(s, fw.reason);
+            if (fw.scope === "account") accountWall = { reason: fw.reason, account: deps.acctKey(s.account) };
+            continue;
           }
         }
         // NOT_FOUND / CREATING_*: the reality check below settles them (task records wedge and
@@ -310,6 +336,7 @@ export async function runHsFollowSlice(shots: FollowShot[], deps: FollowDeps, op
       deps.log?.(`follow tick failed: ${(e as Error).message ?? String(e)}`); // transient LION/store blip — next tick retries
     }
     if (pending.size === 0 || now() >= opts.sliceEndAt) break;
+    if (opts.yieldIf && (await opts.yieldIf().catch(() => false))) break;
     await deps.sleep(Math.min(pollMs, Math.max(0, opts.sliceEndAt - now())));
   }
   return { settled, pending: [...pending.values()], renamed };

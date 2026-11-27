@@ -526,3 +526,24 @@ after(async () => {
   if (HAVE_DB) await wipeAll();
   await closeDb();
 });
+
+// 27.11 (GLO-04): a buyer's follow lane held 30+ waves; the claim takes the lowest seq first and a
+// deferred follow-up kept its seq, so the two OLDEST waves came back ahead of everyone after each
+// 20 s pause and took every slice in turn — the younger waves' follow-ups never ran once.
+test("deferJob sends a follow-up to the BACK of its lane: three waves take their slices in turn", live, async () => {
+  const L = lane("fair");
+  const now = Date.now();
+  for (const [i, n] of ["f1", "f2", "f3"].entries()) {
+    await S.insertJob(newJob({ job_id: jid(n), lane: L, seq: i + 1, kind: "hs.dup.follow", idempotent: true, body: { waveId: n } }));
+  }
+  const order: string[] = [];
+  let t = now;
+  for (let k = 0; k < 6; k++) {
+    const j = await S.claimNextJob(L, "A", t);
+    assert.ok(j, `slice ${k} found a job`);
+    order.push(j!.job_id.replace(`job-${RUN}-`, ""));
+    assert.equal(await S.deferJob(j!.job_id, "A", t + 1_000), true);
+    t += 2_000; // the next claim comes after this one's pause is over
+  }
+  assert.deepEqual(order, ["f1", "f2", "f3", "f1", "f2", "f3"]);
+});
